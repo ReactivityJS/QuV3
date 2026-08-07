@@ -333,37 +333,62 @@ existing mechanisms.
 
 ### 3.3 ACL enforcement on synced writes — V3 milestone #1
 
-**Weakness, confirmed and precisely located**: `AccessEngine`
-(`packages/engines/src/access-engine.js`) registers as `{segment: null, order: 0}` and
-correctly gates every **locally-originated** `QuStore.put()`. But `SyncEngine`'s
-`#handleSync` persists an incoming, already-signed QuBit via `QuStore.putSealed()`
-(`store.js:283-326`), which — by design, for the good reason documented right there
-(never re-sign data this device didn't write) — **skips the entire TRANSFORM step**,
-meaning `AccessEngine` never runs on it. `AccessEngine`'s own doc comment
-(`access-engine.js:42-47`) names this exact limitation as accepted-but-unfixed. A
-malicious or compromised peer can today write to any protected resource by sending a
-synced QuBit directly, bypassing the writer-list check the local path enforces.
+**Weakness, confirmed and precisely located** (originally, in QuV2's code): `AccessEngine`
+registered as `{segment: null, order: 0}` and correctly gated every **locally-originated**
+`QuStore.put()`. But `SyncEngine`'s `#handleSync` persisted an incoming, already-signed
+QuBit via `QuStore.putSealed()`, which — by design, for the good reason documented right
+there (never re-sign data this device didn't write) — **skips the entire TRANSFORM
+step**, meaning `AccessEngine` never ran on it. `AccessEngine`'s own doc comment named
+this exact limitation as accepted-but-unfixed. A malicious or compromised peer could
+write to any protected resource by sending a synced QuBit directly, bypassing the
+writer-list check the local path enforced.
 
-**Solution**: extract `AccessEngine`'s pure decision logic (`resolveResource()` +
-`writerAllowed()`, `access-engine.js:51-76`) into a small exported function with no
-QuStore dependency:
+**Implemented** (`packages/engines/src/access-engine.js`): `AccessEngine`'s pure decision
+logic is extracted into an exported `assertWriteAuthorized(qu, path, writerPub)` —
+**refined from this document's earlier sketch** in one way: it *throws* a descriptive
+error on an unauthorized write rather than returning a boolean. This isn't just a style
+choice — it's what lets `AccessEngine` itself keep using the exact original, specific
+error messages (`"not authorized to change access for docs \"1\""` vs. `"writer not
+authorized to write to threads \"1\""`) by simply awaiting the shared function and
+letting the throw propagate, with **zero** duplicated resource-kind-lookup logic in the
+Engine's own wrapper. A boolean return would have forced a choice between losing that
+message detail or re-deriving the resource kind a second time just to phrase an error:
 
 ```js
-// @qu/engines: export, not just internal to AccessEngine
-export async function isWriteAuthorized(qu, path, quBit) {
-  const resource = resolveResource(path);
-  if (!resource) return true; // not a protectable path
-  const acl = await resolveAclFor(qu, resource); // same ACL/legacy-meta-fallback lookup AccessEngine already does
-  return writerAllowed(acl, { writerPub: quBit.pub ? QuCrypto.fromBase64(quBit.pub) : null });
+// @qu/engines/access-engine.js — real signature, not a sketch:
+export async function assertWriteAuthorized(qu, path, writerPub) {
+  // writerPub: Uint8Array|null — raw bytes. AccessEngine already has raw bytes
+  // (ctx.options.writerPub, read before sealing); @qu/sync's SyncEngine (not yet
+  // built) will have a verified QuBit's `pub` as a base64 STRING and must
+  // QuCrypto.fromBase64() it first before calling this.
+  /* ...throws a descriptive Error when not authorized, returns otherwise... */
+}
+
+export class AccessEngine {
+  async #handlePut(ctx) {
+    const writerPub = ctx.options.writerPub ? QuCrypto.toBytes(ctx.options.writerPub, 'writerPub') : null;
+    await assertWriteAuthorized(this.qu, ctx.path, writerPub); // let it throw
+  }
 }
 ```
 
-`SyncEngine#handleSync` calls this **after** `isAuthentic(quBit)` (signature
-verification — already happens, `sync-engine.js` around the `#onPeerIdentified` call)
-and **before** `#persistDirectly` — reject and drop (don't persist, don't ack, don't
-re-broadcast) a synced write that fails it. This closes the gap with the *same*
-authorization decision the local path already makes, not a second, divergent ACL
-system — zero duplicated logic, one function used from two call sites.
+`SyncEngine#handleSync` (§3's later milestone) will call this **after** `isAuthentic
+(quBit)` (signature verification) and **before** `#persistDirectly`, wrapped in its own
+`try/catch` — reject and drop (don't persist, don't ack, don't re-broadcast) a synced
+write that fails it, silently rather than throwing further. This closes the gap with the
+*same* authorization decision the local path already makes, not a second, divergent ACL
+system — zero duplicated logic, one function used from two call sites, each choosing its
+own throw-vs-catch handling on top of it.
+
+**Also simplified versus the QuV2 prototype**: `ThreadEngine` no longer carries its own,
+separate writer-list check. In QuV2, that check existed as a "redundant safety net"
+specifically to keep already-deployed threads (whose writers/readers lived only in their
+own `meta` document, predating the uniform `acl/<kind>/<id>` convention) working during a
+migration window — a concern that doesn't exist for a fresh build with no deployed data
+to migrate. `AccessEngine` gates Thread writes through the exact same sibling-document
+convention as every other entity kind from day one; `ThreadEngine` itself now only stamps
+`_id`/`createdAt` on messages, the same shape as `DocumentEngine`. One check, one place —
+principle 5 ("one primitive per problem") applied concretely, not just stated.
 
 ### 3.4 Presence & push suppression — kept
 
@@ -657,7 +682,7 @@ QuBit fields instead of bolted onto a server-authoritative core after the fact.
 
 | # | Weakness (verified) | V3 Solution | Section |
 |---|---|---|---|
-| 1 | ACL bypass on synced writes (`AccessEngine` only guards local `put()`) | Shared `isWriteAuthorized()`, called from `SyncEngine#handleSync` before persist | §3.3 |
+| 1 | ACL bypass on synced writes (`AccessEngine` only guards local `put()`) | Shared, throwing `assertWriteAuthorized()`, called from `SyncEngine#handleSync` before persist | §3.3 |
 | 2 | List RMW race, duplicated 2x, one copy (`StarredService`) has **no** mitigation at all | Unified `ListService`: derived (no RMW) for colocated items, one hardened curated path for the rest | §4.2 |
 | 3 | `FsAdapter`/`IndexedDBAdapter` `getAll()` unsorted, unpaginated; ts-only pagination would have tie-break bugs | New `getChildren()` contract method: one-level-deep, `(ts,rel)`-ordered, opaque-cursor-paginated, mandatory-correct/optional-efficient | §1.2 |
 | 4 | `relay.js`/`shell/main.js` composition-root god objects | `RuntimeContainer` + one-concern-per-module discipline | §2.1 |

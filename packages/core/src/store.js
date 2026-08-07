@@ -387,7 +387,7 @@ export class QuStore {
       throw new Error('QuStore.put: writerPub is required when signWith is set (see #seal doc comment above).');
     }
     if (options.writerPub) {
-      quBit.pub = QuCrypto.toBase64(toBytes(options.writerPub, 'writerPub'));
+      quBit.pub = QuCrypto.toBase64(QuCrypto.toBytes(options.writerPub, 'writerPub'));
     }
 
     let finalVal = quBit.val;
@@ -399,8 +399,8 @@ export class QuStore {
       const plaintext = new TextEncoder().encode(JSON.stringify(quBit.val));
       const encrypted = await QuCrypto.encrypt(
         plaintext,
-        recipients.map((r) => toBytes(r, 'encryptWith')),
-        toBytes(options.senderXPrivateKey, 'senderXPrivateKey')
+        recipients.map((r) => QuCrypto.toBytes(r, 'encryptWith')),
+        QuCrypto.toBytes(options.senderXPrivateKey, 'senderXPrivateKey')
       );
       finalVal = {
         iv: QuCrypto.toBase64(encrypted.iv),
@@ -415,7 +415,7 @@ export class QuStore {
 
     if (options.signWith) {
       const payload = JSON.stringify({ path: quBit.path, val: quBit.val, ts: quBit.ts, pub: quBit.pub });
-      const sigBytes = await QuCrypto.sign(new TextEncoder().encode(payload), toBytes(options.signWith, 'signWith'));
+      const sigBytes = await QuCrypto.sign(new TextEncoder().encode(payload), QuCrypto.toBytes(options.signWith, 'signWith'));
       quBit.sig = QuCrypto.toBase64(sigBytes);
     }
 
@@ -448,11 +448,4 @@ export class QuStore {
   onStorageChange(handler) {
     return this.#notify.on('storage:put', handler);
   }
-}
-
-/** Accepts Uint8Array or a plain {0:.., 1:..} object (e.g. after JSON round-trip) and normalises to Uint8Array. */
-function toBytes(value, label) {
-  if (value instanceof Uint8Array) return value;
-  if (value && typeof value === 'object') return new Uint8Array(Object.values(value));
-  throw new Error(`QuStore: "${label}" must be a Uint8Array or byte-indexed object`);
 }

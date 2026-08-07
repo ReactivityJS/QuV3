@@ -104,6 +104,23 @@ test('toHex()/fromHex() round-trip, and fromHex() rejects invalid input', () => 
   assert.deepEqual(QuCrypto.fromHex(''), new Uint8Array(0));
 });
 
+test('toBytes() passes a Uint8Array through unchanged', () => {
+  const bytes = new Uint8Array([1, 2, 3]);
+  assert.equal(QuCrypto.toBytes(bytes, 'x'), bytes);
+});
+
+test('toBytes() normalizes a byte-indexed plain object (post-JSON-round-trip shape)', () => {
+  const result = QuCrypto.toBytes({ 0: 10, 1: 20, 2: 30 }, 'x');
+  assert.ok(result instanceof Uint8Array);
+  assert.deepEqual(result, new Uint8Array([10, 20, 30]));
+});
+
+test('toBytes() throws a descriptive error (including the label) for an unusable value', () => {
+  assert.throws(() => QuCrypto.toBytes(null, 'writerPub'), /"writerPub"/);
+  assert.throws(() => QuCrypto.toBytes(undefined, 'writerPub'), /"writerPub"/);
+  assert.throws(() => QuCrypto.toBytes('a string', 'writerPub'), /"writerPub"/);
+});
+
 function arraysEqual(a, b) {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;

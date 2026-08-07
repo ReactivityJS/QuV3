@@ -42,7 +42,17 @@ own tests, built bottom-up per the dependency order in
       these — not reimplemented three times. A conformance test suite runs
       the identical scenarios against all three adapters and asserts they
       agree.
-- [ ] `@qu/engines` — Document/Collection/Thread/Access/Asset engines
+- [x] `@qu/engines` — Document/Collection/Thread/Asset/Access engines.
+      `AccessEngine`'s pure decision logic is exported as
+      `assertWriteAuthorized()` (throws, doesn't return a boolean — see
+      `access-engine.js`'s doc comment) so `@qu/sync` can apply the
+      *identical* check to synced writes later — V3's fix for the
+      confirmed ACL-bypass-on-sync gap. `ThreadEngine` no longer carries
+      its own writer check at all (that was QuV2's migration-era
+      "redundant safety net" for pre-uniform-convention data — doesn't
+      apply to a fresh build); it now only stamps `_id`/`createdAt`, same
+      shape as `DocumentEngine`. A conformance-style end-to-end smoke test
+      wires all five engines together on one `QuStore`.
 - [ ] `@qu/services` — `ListService` and friends
 - [ ] `@qu/sync` — outbox, reconnect catch-up, ACL-on-sync fix
 - [ ] Runtime bootstrap, Relay, Apps

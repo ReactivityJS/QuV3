@@ -226,4 +226,21 @@ export class QuCrypto {
     for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
     return bytes;
   }
+
+  /**
+   * Accepts a Uint8Array or a plain byte-indexed object (e.g. `{0: 1, 1: 2}`,
+   * as a Uint8Array becomes after a JSON round-trip) and normalises to
+   * Uint8Array. Used everywhere a key/signature is accepted from a caller
+   * that might have passed it through a layer that lost its typed-array-ness
+   * (store.js's `#seal()`, and `@qu/engines`' AccessEngine, which reads the
+   * same `options.writerPub` shape before sealing happens).
+   * @param {Uint8Array|Record<number, number>} value
+   * @param {string} label - Used only in the thrown error message.
+   * @returns {Uint8Array}
+   */
+  static toBytes(value, label) {
+    if (value instanceof Uint8Array) return value;
+    if (value && typeof value === 'object') return new Uint8Array(Object.values(value));
+    throw new Error(`QuCrypto.toBytes: "${label}" must be a Uint8Array or byte-indexed object`);
+  }
 }
