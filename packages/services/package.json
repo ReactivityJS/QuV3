@@ -1,7 +1,7 @@
 {
   "name": "@qu/services",
   "version": "0.1.0",
-  "description": "The Entity API - the layer apps actually call. Hides Qu paths and QuBit envelopes behind plain async methods returning plain values. paths/unwrap/sync-freshness/ListService (docs/v3-technical-concept.md §4.2's derived/curated list primitive), private-storage/StarredService (self-encrypted personal lists), FlagService (the universal Drupal-Flag-style mark/like/bookmark mechanism, private mode over StarredService + public mode over ListService) and its FavoritesService/ContactsService facades.",
+  "description": "The Entity API - the layer apps actually call. Hides Qu paths and QuBit envelopes behind plain async methods returning plain values. paths/unwrap/sync-freshness/ListService (docs/v3-technical-concept.md §4.2's derived/curated list primitive), private-storage/StarredService (self-encrypted personal lists), FlagService (the universal Drupal-Flag-style mark/like/bookmark mechanism, private mode over StarredService + public mode over ListService) and its FavoritesService/ContactsService facades, AccessService (the generic writer/reader ACL Entity API), and the ThreadService decomposition (§4.3): MessageService/ReactionService/PinService/PresenceService.",
   "type": "module",
   "main": "src/index.js",
   "exports": {
@@ -14,7 +14,15 @@
     "./starred-service": "./src/starred-service.js",
     "./flag-service": "./src/flag-service.js",
     "./favorites-service": "./src/favorites-service.js",
-    "./contacts-service": "./src/contacts-service.js"
+    "./contacts-service": "./src/contacts-service.js",
+    "./access-service": "./src/access-service.js",
+    "./crypto-envelope": "./src/crypto-envelope.js",
+    "./thread-formatting": "./src/thread-formatting.js",
+    "./link-detect": "./src/link-detect.js",
+    "./message-service": "./src/message-service.js",
+    "./reaction-service": "./src/reaction-service.js",
+    "./pin-service": "./src/pin-service.js",
+    "./presence-service": "./src/presence-service.js"
   },
   "dependencies": {
     "@qu/core": "^0.1.0"

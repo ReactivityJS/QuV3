@@ -518,6 +518,21 @@ at the Service layer into `MessageService`, `ReactionService`, `PinService`,
 config factory) stays a single shared concept — it configures `MessageService`'s ACL
 shape, not a reason to keep the other four concerns bundled with it.
 
+**Implementation note (built)**: the five concerns split into four services by pairing
+PUBLIC read receipts with presence rather than with messages — `publishReadReceipt()`/
+`getReadReceipts()` share `PresenceService`'s exact technical shape (one signed QuBit per
+already-known member, read by a caller-supplied `memberPubs` list, no `ListService`
+enumeration), while `MessageService` keeps only the PRIVATE per-identity `markRead()`/
+`getLastReadAt()` marker, which is about *this* identity's own read position, not a
+signal published for others. One capability did **not** carry over: QuV2's
+`clearMessages()` reset a thread's messages/pins index back to empty. A **derived** list
+(this section's own §4.2 migration, adopted here) has no index to reset — there is
+nothing to overwrite, and `QuStore` has no `delete()` — so re-introducing an index
+document just to support one reset operation would undo the point of moving messages to
+a derived shape. Not ported; a caller wanting a clean history starts a new `threadId`
+instead, the same trade-off `THREAD_PRESETS.group`'s own doc comment already accepts for
+"can't re-key existing history."
+
 ### 4.4 `FlagService` — kept as-is, now built on `ListService`
 
 Already a complete, correct implementation of the concept's "universal Flags module"

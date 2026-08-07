@@ -117,7 +117,36 @@ own tests, built bottom-up per the dependency order in
       `limit` no longer defaults to 50 — a like-counter silently capped at
       50 would just be wrong, so that default now belongs to whichever
       caller actually wants pagination, not to the generic primitive.
-      `ThreadService`'s decomposition (§4.3) is still pending.
+- [x] `@qu/services` (third slice) — the `ThreadService` decomposition
+      (§4.3): QuV2's 778-line, five-concern `thread-service.js` split into
+      **`MessageService`** (+ `THREAD_PRESETS`), **`ReactionService`**,
+      **`PinService`**, **`PresenceService`**, plus the supporting
+      `AccessService` (generic writer/reader ACL Entity API),
+      `crypto-envelope` (reader-list encrypt/decrypt, shared by
+      `MessageService` and `AccessService`), and `thread-formatting`/
+      `link-detect` (the markdown/mentions subset). Messages, reactions and
+      pins all moved to the **derived**-list shape §4.2's migration table
+      specifies: `postMessage()`/`setReaction()`/`setPinned()` are each a
+      single `qu.put()`, no index write, enumerated via
+      `ListService.listDerived()` - `MessageService.listMessages()` no
+      longer needs its own `syncFetch` backfill for the enumeration itself
+      (sync's reconnect catch-up, §3.2, covers that), and gets real
+      `{limit, cursor}` pagination "for free" as a result (returns
+      `{messages, nextCursor}` - a return-shape change from QuV2's plain
+      array). Two design calls made while building this, both recorded in
+      §4.3 itself: PUBLIC read receipts moved into `PresenceService`
+      (identical one-signed-QuBit-per-known-member shape as presence, kept
+      apart from `MessageService`'s PRIVATE `markRead()`/`getLastReadAt()`,
+      which is about *this* identity's own read position, not a signal for
+      others) - and QuV2's `clearMessages()` was **not** ported, since a
+      derived list has no index to reset (`QuStore` has no `delete()`
+      either); a caller wanting a clean history starts a new `threadId`
+      instead. One found-and-documented subtlety: two messages posted in
+      the same millisecond tie-break on their (random) storage path, not
+      posting order - `QuStore.getChildren()`'s own `(ts,rel)` contract, an
+      inherent local-first limitation (no central sequencer), not a bug -
+      see `message-service.js`'s own doc comment and its test suite's
+      `tick()` helper for how tests account for it.
 - [ ] `@qu/sync` — outbox, reconnect catch-up, ACL-on-sync fix
 - [ ] Runtime bootstrap, Relay, Apps
 

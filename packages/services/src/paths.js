@@ -118,3 +118,86 @@ export function flagPath(spaceId, flagType, entityKind, entityRef, actorPub) {
 export function flagParentPath(spaceId, flagType, entityKind, entityRef) {
   return `/store/${spaceId}/flags/${flagType}/${entityKind}/${entityRef}`;
 }
+
+/**
+ * One actor's PRIVATE (self-encrypted) "read up to" marker for a thread -
+ * `MessageService.markRead()`/`getLastReadAt()`. Lives under the actor's own
+ * `private/` prefix, same convention `starredPath()` uses - see
+ * private-storage.js. Not visible to (or enumerable by) anyone else, which
+ * is the whole point: how far YOU'VE read is nobody else's business. Compare
+ * `threadReadReceiptPath()` below - a deliberately DIFFERENT, PUBLIC
+ * mechanism for the opposite case (telling others you've read something).
+ * @param {string|number} spaceId @param {string} threadId @param {string} actorPub @returns {string}
+ */
+export function threadReadMarkerPath(spaceId, threadId, actorPub) {
+  return `/store/actors/~${actorPub}/private/thread-read/${spaceId}/${threadId}`;
+}
+
+/**
+ * One actor's own signed slot for a PUBLIC "reaction" (one emoji at a time)
+ * on one message - `ReactionService`, same "one QuBit per actor under a
+ * shared parent, enumerated via `ListService.listDerived()`" shape as
+ * `flagPath()`/`flagParentPath()` above, just scoped to a message instead of
+ * an arbitrary entity.
+ * @param {string|number} spaceId @param {string} threadId @param {string} messageId
+ * @param {string} actorPub @returns {string}
+ */
+export function threadReactionPath(spaceId, threadId, messageId, actorPub) {
+  return `/store/${spaceId}/threads/${threadId}/reactions/${messageId}/${actorPub}`;
+}
+
+/**
+ * The PARENT path `ListService.listDerived()` enumerates to find every
+ * actor's reaction on one message - one level above `threadReactionPath()`.
+ * @param {string|number} spaceId @param {string} threadId @param {string} messageId @returns {string}
+ */
+export function threadReactionsParentPath(spaceId, threadId, messageId) {
+  return `/store/${spaceId}/threads/${threadId}/reactions/${messageId}`;
+}
+
+/**
+ * One message's own pin marker - `PinService`. Unlike reactions/flags this
+ * is NOT per-actor (any current writer of the thread may pin or unpin any
+ * message, same rule QuV2's own pins carried - see PinService's doc
+ * comment), so there is exactly one QuBit per PINNED message, not one per
+ * (message, actor) pair. Still a DERIVED list, enumerated the same way -
+ * `null` clears a pin (a tombstone, same convention `FlagService.setPublic()`
+ * uses), since `QuStore` has no `delete()`.
+ * @param {string|number} spaceId @param {string} threadId @param {string} messageId @returns {string}
+ */
+export function threadPinPath(spaceId, threadId, messageId) {
+  return `/store/${spaceId}/threads/${threadId}/pins/${messageId}`;
+}
+
+/**
+ * The PARENT path `ListService.listDerived()` enumerates to find every
+ * currently-pinned message in a thread - one level above `threadPinPath()`.
+ * @param {string|number} spaceId @param {string} threadId @returns {string}
+ */
+export function threadPinsParentPath(spaceId, threadId) {
+  return `/store/${spaceId}/threads/${threadId}/pins`;
+}
+
+/**
+ * One actor's current presence slot in a thread - `PresenceService`. Not a
+ * `ListService` shape at all (neither derived nor curated): a thread already
+ * has a fixed, externally-known member list (see `THREAD_PRESETS.chat`), so
+ * "who's online" only ever means reading ONE already-known path per member,
+ * never discovering who exists - see `PresenceService.getPresence()`.
+ * @param {string|number} spaceId @param {string} threadId @param {string} actorPub @returns {string}
+ */
+export function threadPresencePath(spaceId, threadId, actorPub) {
+  return `/store/${spaceId}/threads/${threadId}/presence/${actorPub}`;
+}
+
+/**
+ * One actor's PUBLIC read receipt for a thread ("I've read up to timestamp
+ * X") - VISIBLE TO OTHER MEMBERS, unlike `threadReadMarkerPath()` above.
+ * Same fixed-member-list reasoning as `threadPresencePath()` - no derived-list
+ * enumeration needed, `PresenceService.getReadReceipts()` just reads one
+ * path per already-known member.
+ * @param {string|number} spaceId @param {string} threadId @param {string} actorPub @returns {string}
+ */
+export function threadReadReceiptPath(spaceId, threadId, actorPub) {
+  return `/store/${spaceId}/threads/${threadId}/reads/${actorPub}`;
+}
