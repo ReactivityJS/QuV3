@@ -28,6 +28,13 @@ that weren't in the previous review and materially change the design:
   is not a hidden bug, it's a **documented, accepted limitation that was never closed**.
   §3.3 gives it a concrete fix design, not just a flag.
 
+> **Revision note**: this pass refines §1.2/§4.2's storage-query design (the earlier
+> `getAll({sort, limit, before})` sketch had a real pagination-correctness gap and
+> conflated two operations that should stay separate — see §1.2) and adds §7, a
+> code-verified audit of cross-package coupling (one phantom dependency, one real
+> leaky-abstraction coupling, one confirmed-clean result, one duplicated bootstrap).
+> Everything else is unchanged from the previous version.
+
 ## 0. Principles (unchanged from the review, now binding design constraints)
 
 1. **Local-first, offline-first.** Every write lands durably on the local device before
@@ -80,29 +87,120 @@ represent a genuine backend/lifetime distinction:
 | `temp` (new) | pure RAM | Dies with the process | No |
 
 **Weakness found**: `FsAdapter.getAll(prefix)` (`packages/relay/src/adapters/fs-adapter.js:176-188`)
-returns entries in raw directory-walk order — no `ts` ordering, no pagination. Every
-future feature that wants "recent N children of a path, in order" (see §4.2) needs this
-and today would have to sort client-side after loading everything, which doesn't scale.
+returns entries in raw directory-walk order — no `ts` ordering, no pagination — and
+`IndexedDBAdapter.getAll(relPrefix)` (`packages/runtime/src/indexeddb.js:69-88`), while
+it *does* use an efficient native `IDBKeyRange` prefix scan, still orders results by
+path-key, not `ts`, for the same reason. Both are correct for their one current use
+(sync's full-prefix catch-up/outbox replay, which never needed order), but §4.2's
+`ListService.listDerived()` needs "recent N children of one path, in true chronological
+order, paginated" — a different, narrower operation than either was built for.
 
-**Solution — extend, don't replace, the adapter contract**:
+**Refined solution — a second, purpose-built adapter method, not an overloaded `getAll`**:
+rather than bolting sort/limit options onto `getAll()` (this document's earlier draft),
+V3 adds `getChildren()` as its own contract method, kept deliberately narrower than a
+general "sorted prefix query":
 
 ```js
+/**
+ * @typedef {object} ChildQueryOptions
+ * @property {'ts'} [sort='ts']         // the only supported sort key in V1 - no generic
+ *                                       // sort-by-arbitrary-field (principle 4: simple over general)
+ * @property {'asc'|'desc'} [order='desc']
+ * @property {number} [limit]
+ * @property {string} [cursor]          // opaque - MUST come from a previous ChildEntry's own
+ *                                       // `cursor` field, never constructed by the caller
+ */
+
+/**
+ * @typedef {object} ChildEntry
+ * @property {string} rel
+ * @property {object} quBit
+ * @property {string} cursor            // opaque "resume after this entry" token, same order/sort
+ */
+
 /**
  * @typedef {object} QuAdapter
  * @property {(rel: string, quBit: object) => Promise<object>} put
  * @property {(rel: string) => Promise<object|null>} get
- * @property {(relPrefix: string, opts?: {sort?: 'ts', order?: 'asc'|'desc', limit?: number, before?: number}) => Promise<Array<{rel, quBit}>>} getAll
+ * @property {(relPrefix: string) => Promise<Array<{rel, quBit}>>} getAll
+ *   // UNCHANGED - arbitrary-depth recursive, unsorted. Sync's outbox replay/
+ *   // reciprocal catch-up keep using exactly this, untouched by anything below.
+ * @property {(parentRel: string, opts?: ChildQueryOptions) => Promise<ChildEntry[]>} getChildren
+ *   // NEW - direct (one level deep) children of parentRel only, in the
+ *   // requested order, paginated. MANDATORY correctness, OPTIONAL efficiency
+ *   // (see below) - a caller must always get the right answer; adapters may
+ *   // differ only in how cheaply they compute it.
  */
 ```
 
-`sort`/`order`/`limit`/`before` are **optional** — an adapter that ignores them still
-behaves exactly as today (full unsorted scan), so this is additive, not breaking.
-`FsAdapter`'s reference implementation satisfies the contract simply (load matching
-files, sort/slice in memory) — correct but O(n) per call, matching its own documented
-positioning ("swap for a real database adapter if you outgrow it,"
-`fs-adapter.js:29-34`). `IndexedDBAdapter` gets the real payoff: an actual `ts`-indexed
-cursor range query, `O(limit)` instead of `O(n)`. This one contract change is what makes
-§4.2's redesign possible without inventing a second storage mechanism.
+Why *narrower* than "sorted prefix, any depth": every real use case identified in §4.2
+(thread messages, reactions, public flags, per-message pins) is structurally "direct
+children of one parent path" — `paths.js`'s own conventions never nest an item further
+under its own id (`threadMessagePath`, `flagPath` are both exactly one segment below
+their collection root). Scoping the new capability to that shape, instead of a general
+recursive sorted-prefix query, is both *sufficient* for every identified need and *much*
+more implementable — a general recursive sorted query edges toward the "unindexed glob"
+YAGNI risk the broader critical review already warns about (GunDB's `.map()` graph
+traversal, see `v3-architecture-spec.md`'s pattern-matching critique); "direct children,
+sorted" is a bounded, indexable operation in a way "everything under this prefix at any
+depth, sorted" is not.
+
+**"Mandatory correctness, optional efficiency"** is the operative rule, and it matters
+more than it sounds: an adapter is *never* allowed to silently ignore `sort`/`limit`/
+`cursor` and return something else — a caller asking for "the last 50 messages" that got
+an arbitrary 50 back would be a correctness bug, not a missed optimization. What's
+allowed to vary is only *how* an adapter gets there:
+
+- **`FsAdapter`**: `getChildren()` becomes a **non-recursive** `readdir()` of exactly
+  `basePath/parentRel` (cheaper than today's recursive `getAll()` walk, since a
+  "children" query is one level by construction) — load each child file, sort in memory
+  by `(ts, rel)` (a tuple, not `ts` alone — see below), slice by `cursor`/`limit`. Still
+  O(children of this one parent), not O(everything), and that count is bounded by "how
+  many messages does this one thread have," not total store size.
+- **`IndexedDBAdapter`**: V1 ships the same brute-force-but-correct approach — an
+  `IDBKeyRange` prefix-bound cursor scan over `parentRel + '/'` (the mechanism `getAll()`
+  already has), sorted/sliced in memory. This is already a real improvement (native
+  prefix range instead of a full-store scan) even before any further optimization. A
+  genuine `O(limit)` version — a second object store indexed by `[parentPath, ts]`,
+  maintained transactionally alongside the main `put()` — is named here as a **valid,
+  natural upgrade path** for any specific collection that proves hot enough to justify
+  it, explicitly **not** required for V3 launch (principle 4 again: don't build the
+  indexed version before a real collection needs it).
+
+**Cursor design — `(ts, rel)`, not `ts` alone**: the earlier draft's `before: <ts number>`
+had a real correctness gap — QuBits can genuinely share the same `ts` (bulk import, or
+two actors posting within the same logical-clock tick), and an offset defined by `ts`
+alone would then non-deterministically include or skip tied entries across pages. Each
+adapter instead encodes an **opaque** token (e.g. `base64url(ts + '\0' + rel)`) that
+captures the full `(ts, rel)` tie-broken order; callers never construct or parse a
+cursor, only pass back the last one they received. A cursor is only ever meaningful to
+the adapter (and typically the specific `parentRel`) that issued it — never persisted
+across sessions or compared across adapters.
+
+`QuStore` gets one new method mirroring `getAllUnderMount()`'s existing shape, additive,
+TRANSFORM-bypassing exactly like it (documented explicitly, not accidentally):
+
+```js
+/**
+ * Like getAllUnderMount(), but for ONE level of children under `parentPath`,
+ * sorted/paginated per ChildQueryOptions - see QuAdapter.getChildren(). Also
+ * bypasses the Engine TRANSFORM step (raw QuBits back) - callers (ListService,
+ * and Services built on it) are responsible for their own unwrap/decrypt,
+ * exactly as getAllUnderMount()'s callers already are today.
+ */
+async getChildren(parentPath, options = {}) {
+  const { adapter, rel, mountName } = this.#mount.resolve(parentPath);
+  if (!adapter.getChildren) throw new Error(`QuStore.getChildren: mount "${mountName}" has no getChildren()`);
+  const entries = await adapter.getChildren(rel, options);
+  return entries.map((e) => ({ path: `/${mountName}${e.rel}`, quBit: e.quBit, cursor: e.cursor }));
+}
+```
+
+**Explicitly not in this contract**: a generic filter/`WHERE` predicate pushed down to
+the adapter. Anything needing more than "children of X, ordered by time, paginated"
+becomes a purpose-built derived prefix (write a small marker QuBit under its own path,
+`getChildren()` that prefix) rather than a general query language — the same discipline
+this section already argues for, now made concrete.
 
 ### 1.3 Store pipeline — unchanged, validated as already correct
 
@@ -190,7 +288,7 @@ kind of drift this document is meant to prevent.
 for transforms) / `notify()` (parallel, fire-and-forget, for side effects), with
 **separate instances per trust boundary** (server `Registry.hooks` vs. each client app's
 `ctx.hooks`, never shared) is kept unchanged. This is architecturally the same shape as
-ProcessWire's `addHookBefore`/`addHookAfter` method-hooking system — see §7 — but scoped
+ProcessWire's `addHookBefore`/`addHookAfter` method-hooking system — see §8 — but scoped
 correctly for a system where "client" and "server" are different trust domains, which
 ProcessWire (single server process) never had to solve.
 
@@ -291,7 +389,7 @@ No WebRTC/P2P in V3 launch scope. Client-relay star stays the shipped transport.
 "Universal Peer" survives only as the constraint that Core/Services/Engines never assume
 they're running inside a relay process (already true — verified, nothing in those
 packages imports relay-specific code) — not as a shipped peer-symmetry capability. This
-is deliberately the opposite of GunDB's model; see §7.
+is deliberately the opposite of GunDB's model; see §8.
 
 ---
 
@@ -334,14 +432,16 @@ chosen by shape, not by caller:
 class ListService {
   /**
    * DERIVED list: no index document at all. Every item already lives at its
-   * own path under `prefix` (e.g. a thread's messages, an entity's public
-   * flags, a thread's pins-as-per-message-markers). list() is a sorted
-   * adapter prefix scan (see §1.2's getAll({sort, limit, before})) -
-   * addItem() is just qu.put() to the item's own path. No read-modify-write,
-   * no lock, no retry, because there is nothing shared to race on: two
-   * actors adding two different items write two different paths.
+   * own path under `parentPath` (e.g. a thread's messages, an entity's public
+   * flags, a thread's pins-as-per-message-markers). list() is qu.getChildren()
+   * (see §1.2's refined adapter contract - ONE level deep, (ts,rel)-ordered,
+   * cursor-paginated) - addItem() is just qu.put() to the item's own path. No
+   * read-modify-write, no lock, no retry, because there is nothing shared to
+   * race on: two actors adding two different items write two different paths.
    */
-  async listDerived(prefix, { limit = 50, before = null } = {}) { /* adapter.getAll(prefix, {sort:'ts', order:'desc', limit, before}) */ }
+  async listDerived(parentPath, { limit = 50, order = 'desc', cursor = null } = {}) {
+    return this.qu.getChildren(parentPath, { sort: 'ts', order, limit, cursor });
+  }
 
   /**
    * CURATED list: an explicit, user-ordered/user-curated index document -
@@ -362,19 +462,19 @@ current list becomes one or the other, not a hypothetical third category):
 
 | Today | Storage today | V3 |
 |---|---|---|
-| Thread messages (`threadMessagesCollectionId`) | Curated `$list` index, RMW per message | **Derived** — messages already live at their own path (`threadMessagePath`); list = sorted prefix scan of `.../msgs/` |
-| Reactions (`threadReactionsCollectionId`) | Curated `$list` index | **Derived** — each reaction already a per-actor QuBit; same prefix-scan pattern as public Flags |
+| Thread messages (`threadMessagesCollectionId`) | Curated `$list` index, RMW per message | **Derived** — messages already live at their own path (`threadMessagePath`); list = `qu.getChildren()` over `.../msgs/` |
+| Reactions (`threadReactionsCollectionId`) | Curated `$list` index | **Derived** — each reaction already a per-actor QuBit; same `getChildren()` pattern as public Flags |
 | Public Flags (`flagCollectionId`) | Curated `$list` index | **Derived** — identical shape to reactions, same fix |
-| Pins (`threadPinsCollectionId`) | Curated `$list` index | **Derived** — store a pin as a per-message marker QuBit under `.../pins/<messageId>` instead of a central list; list = prefix scan |
+| Pins (`threadPinsCollectionId`) | Curated `$list` index | **Derived** — store a pin as a per-message marker QuBit under `.../pins/<messageId>` instead of a central list; list = `getChildren()` |
 | Favorites / Contacts / generic Starred namespaces | `StarredService` RMW, **no lock** | **Curated**, but now via the *hardened* shared implementation (lock + retry) instead of `StarredService`'s own weaker one |
 
 This directly removes the read-modify-write race and its O(list-size) write cost from
 the four highest-traffic use cases (messages, reactions, flags, pins — exactly what V3
 wants to build *more* of), while making the remaining genuinely-curated lists
 (Favorites/Contacts-shaped) strictly *safer* than they are today, not just left alone.
-Pagination (`{limit, before}`) falls out of the same change for free via §1.2's adapter
-contract, closing the old "Phase 8" concern as a side effect of a correctness fix rather
-than a separate later effort.
+Cursor-based pagination (`{limit, cursor}`) falls out of the same change for free via
+§1.2's refined adapter contract, closing the old "Phase 8" concern as a side effect of a
+correctness fix rather than a separate later effort.
 
 ### 4.3 `ThreadService` decomposition
 
@@ -458,7 +558,81 @@ Restated from §4.4: this concept-chapter's goal is already fully met by
 
 ---
 
-## 7. Positioning: Qu V3 vs. GunDB, Drupal, ProcessWire
+## 7. Cross-cutting Dependency Audit
+
+Checked directly, not assumed: every `package.json` "dependencies" field under
+`packages/*`, and every `@qu/*`/relative import statement across `packages/**/src` and
+`apps/**`. Findings below are what actually turned up — some are real, fixable coupling;
+one is a verified-clean result worth recording precisely because it's the kind of thing
+that tends to creep in unnoticed.
+
+**Declared package graph is a clean DAG** — `core` (0 deps) → `engines`/`foundation`/
+`identity`/`reactive`/`runtime`/`sync` (→ `core`) → `services` (→ `core`, `engines`,
+`identity`) → `loader` (→ `core`, `foundation`) / `ui` (→ `core`, `reactive`) →
+`thread-ui` (→ `reactive`, `services`, `ui`) → `relay` (→ everything). No circular
+declared dependency, no package importing "upward" against this order. A genuinely
+healthy baseline — the findings below are about avoidable coupling *within* that legal
+graph, plus one dead declaration.
+
+**Finding 1 — phantom dependency**: `packages/foundation/package.json` declares
+`"@qu/core": "^2.0.0"`, but grepping all 6 of its source files (`registry.js`,
+`hooks.js`, `actions.js`, `manifest.js`, `dependency-resolver.js`, `index.js`) for any
+`@qu/core` import returns **zero matches**. Foundation needs nothing from Core today.
+**Fix**: remove the dependency. A declared-but-unused package dependency is exactly the
+kind of accidental coupling that makes a later "can we extract this package standalone"
+question harder to answer honestly than it should be.
+
+**Finding 2 — a presentation package reaching into a business-logic package for a path
+string**: `packages/thread-ui/src/index.js:290` calls
+`paths.collectionPath(spaceId, paths.threadMessagesCollectionId(threadId))` — a
+`@qu/services` import — for exactly one purpose: building the path to `watch()` for
+live re-render on new messages. `thread-ui` is meant to be a reusable rendering layer;
+needing to know `@qu/services`' internal storage-path convention to do its own job is a
+leak, even though it's declared (package.json allows it) and narrow (one call site).
+**Fix**: `mountThreadView({..., watchPath})` takes the path to watch as a parameter the
+caller supplies (the caller already has `@qu/services` and computes it the same way
+`MessageService` itself would), instead of `thread-ui` importing path-building logic
+itself. This also directly serves §4.2/§4.3: once messages become a **derived** list,
+the exact path to watch is `MessageService`'s own concern to hand over, not something
+`thread-ui` should independently reconstruct from a path-convention it has no business
+knowing.
+
+**Finding 3 — verified NOT a violation, recorded as a deliberate contrast**:
+`apps/shell/src/load-client-module.js` imports `QuCrypto` from `@qu/core` directly, to
+hash/verify a fetched remote-app module's bytes before executing it — integrity plus
+optional publisher-signature check, the client-side counterpart to `@qu/loader`'s
+server-side `RemoteLoader`. This is exactly the right place for direct `@qu/core` use:
+it *is* trust-boundary code, not business logic reaching past its layer. Worth stating
+next to its now-fixed sibling: `apps/chat/client.js` used to call `QuCrypto.sha256()`
+directly for ordinary room-id derivation (a Phase 0 finding) — verified fixed, current
+`chat/client.js` imports contain no `@qu/core` at all; that logic now lives behind
+`@qu/services`. Same package, two call sites, one legitimate and one that needed fixing
+— the distinction is *what kind of code* is doing the importing, not the import itself.
+
+**Finding 4 — apps are cleanly isolated**: grepped every `apps/*/client.js` and
+`apps/*/src/*.js` for any relative import crossing into a sibling app's directory, and
+every `packages/**` file for any string reference into `apps/`. **Zero matches either
+direction.** No app depends on another app's internals, and no package quietly assumes
+a specific app exists. Recorded as a verified-clean result, not a finding needing a fix
+— explicitly worth stating since this is exactly the kind of coupling that otherwise
+creeps in silently over time.
+
+**Finding 5 — duplicated bootstrap, not a layering violation but the same root cause
+§2.1 already targets**: `apps/shell/src/main.js` and `apps/demo/src/main.js` each
+hand-assemble a full client runtime independently (`QuRuntime`, every Engine,
+`QuIdentityEngine`, `SyncEngine` + transport, `createServices`, `HookBus`, `@qu/reactive`,
+`@qu/ui`) — the same roughly 15-import boot sequence written out twice. Both are
+legitimate composition roots, so this isn't a forbidden dependency direction, but it is
+exactly the duplication `RuntimeContainer` (§2.1) should collapse: a single
+`bootClientRuntime(config)` helper that both call, instead of each re-deriving the same
+wiring order by hand. Concretely costly today, not just theoretically: `demo`'s Engine
+list is missing `ThreadEngine` (present in `shell`'s) — which may be an intentional
+"minimal demo" choice or may simply be stale, and the duplication makes it impossible to
+tell which from the code alone.
+
+---
+
+## 8. Positioning: Qu V3 vs. GunDB, Drupal, ProcessWire
 
 | Aspect | GunDB | Drupal | ProcessWire | **Qu V3** |
 |---|---|---|---|---|
@@ -479,13 +653,13 @@ QuBit fields instead of bolted onto a server-authoritative core after the fact.
 
 ---
 
-## 8. Weakness → Solution — consolidated
+## 9. Weakness → Solution — consolidated
 
 | # | Weakness (verified) | V3 Solution | Section |
 |---|---|---|---|
 | 1 | ACL bypass on synced writes (`AccessEngine` only guards local `put()`) | Shared `isWriteAuthorized()`, called from `SyncEngine#handleSync` before persist | §3.3 |
 | 2 | List RMW race, duplicated 2x, one copy (`StarredService`) has **no** mitigation at all | Unified `ListService`: derived (no RMW) for colocated items, one hardened curated path for the rest | §4.2 |
-| 3 | `FsAdapter.getAll()` unsorted, unpaginated | Adapter contract gains optional `{sort, limit, before}` | §1.2 |
+| 3 | `FsAdapter`/`IndexedDBAdapter` `getAll()` unsorted, unpaginated; ts-only pagination would have tie-break bugs | New `getChildren()` contract method: one-level-deep, `(ts,rel)`-ordered, opaque-cursor-paginated, mandatory-correct/optional-efficient | §1.2 |
 | 4 | `relay.js`/`shell/main.js` composition-root god objects | `RuntimeContainer` + one-concern-per-module discipline | §2.1 |
 | 5 | Sequential push delivery | `Promise.allSettled` + concurrency cap | §3.5 |
 | 6 | Push routing hardcoded per-app in `relay.js` | Declarative manifest lookup table (not a template DSL) | §6.2 |
@@ -495,26 +669,33 @@ QuBit fields instead of bolted onto a server-authoritative core after the fact.
 | 10 | Concept's flat-QuBit-per-field example | Explicit entity-grained-by-default rule | §1.4 |
 | 11 | Concept's 5-mount proposal | 3 justified new mounts (`session`/`local`/`temp`), reject `users`/`spaces` as mounts | §1.2 |
 | 12 | Concept's separate inbox queue, reciprocal wire-protocol feature, WebRTC mesh | All already-solved or deliberately deferred — no new machinery | §3.1, §3.2, §3.6 |
+| 13 | `packages/foundation` declares an unused `@qu/core` dependency | Remove the declaration | §7 |
+| 14 | `thread-ui` (presentation) imports `@qu/services`' path helpers directly | `mountThreadView()` takes a `watchPath` parameter instead | §7 |
+| 15 | `shell`/`demo` each hand-assemble the client runtime independently, already drifted (`demo` missing `ThreadEngine`) | Shared `bootClientRuntime()` helper, one wiring order | §7 |
 
 ---
 
-## 9. Explicitly out of V3 launch scope
+## 10. Explicitly out of V3 launch scope
 
 CRDT/Yjs collaborative editing (later optional Engine); incognito alias vault (open
 question, default no); WebRTC/P2P mesh (principle only, not shipped); a generic
 unindexed glob (`**`) query layer; a binding declarative-UI mandate (pending the §5
-spike); a general push-routing template DSL (§6.2, only if real need appears).
+spike); a general push-routing template DSL (§6.2, only if real need appears); a
+generic filter/`WHERE` predicate on `getChildren()` (§1.2).
 
-## 10. Suggested build order (not a full phased plan — that's the next round)
+## 11. Suggested build order (not a full phased plan — that's the next round)
 
-1. §3.3 (ACL fix) + §1.2 (adapter contract) — foundation, security, and the prerequisite
-   for everything in §4.2.
+1. §3.3 (ACL fix) + §1.2 (`getChildren()` adapter contract) — foundation, security, and
+   the prerequisite for everything in §4.2.
 2. §4.2 (`ListService`) — the highest-leverage change; unblocks scaling for messages,
    reactions, flags, pins simultaneously.
 3. §2.1 (`RuntimeContainer`) — do this while decomposing `relay.js`/`shell.js` for
-   §3.5/§6.2 anyway, not as a separate pass.
-4. §3.5, §6.2, §4.3 — independent, parallelizable once 1-3 land.
-5. §5 (UI spike) — can run in parallel with anything above; informs, doesn't block.
+   §3.5/§6.2 anyway, and fold in §7's Finding 5 (`bootClientRuntime()`) at the same time,
+   not as separate passes.
+4. §7's Findings 1-2 (remove the phantom `foundation`→`core` dependency, `thread-ui`'s
+   `watchPath` parameter) — small, independent, no reason to wait.
+5. §3.5, §6.2, §4.3 — independent, parallelizable once 1-3 land.
+6. §5 (UI spike) — can run in parallel with anything above; informs, doesn't block.
 
 Turning this into an actual phased implementation plan (file-by-file, in the style of
 the earlier QuV2 planning rounds) is a good next step once these design decisions are
