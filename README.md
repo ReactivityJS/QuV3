@@ -147,7 +147,38 @@ own tests, built bottom-up per the dependency order in
       inherent local-first limitation (no central sequencer), not a bug -
       see `message-service.js`'s own doc comment and its test suite's
       `tick()` helper for how tests account for it.
-- [ ] `@qu/sync` — outbox, reconnect catch-up, ACL-on-sync fix
+- [x] `@qu/sync` — `SyncEngine` (path-based pub/sub replication: local
+      writes broadcast to subscribers, incoming synced QuBits authenticity-
+      checked then persisted straight to the adapter via `putSealed()`),
+      `Transport` contract + `WebSocketClientTransport` (queues writes
+      before the socket opens, exponential-backoff auto-reconnect),
+      `MemoryOutboxStore` (+ `@qu/runtime`'s new `IndexedDBOutboxStore`,
+      `./indexeddb-outbox`) for the persistent sync-out queue that survives
+      a reload while offline, and `fetchPrefix()` reciprocal catch-up on
+      every (re)connect. Ported essentially unchanged (docs/
+      v3-technical-concept.md §3.1/§3.2 both verified already-correct in
+      QuV2) **except the one confirmed gap this milestone exists to close**
+      (§3.3, V3 milestone #1): `#handleSync` now calls `@qu/engines`'
+      `assertWriteAuthorized()` on every incoming synced write - the same
+      authorization decision `AccessEngine` already makes for a
+      locally-originated `put()`, previously never applied to a synced one
+      at all (`putSealed()` deliberately bypasses the TRANSFORM step that
+      would otherwise run it, to avoid re-signing data this device didn't
+      write - see `#persistDirectly()`'s own doc comment). A write that
+      fails the check is rejected silently: not persisted, not acked, not
+      re-broadcast - indistinguishable from never having arrived. Verified
+      with a regression test reproducing the exact exploit (a peer with no
+      `AccessEngine` of its own signs and sends a forged write for a
+      writer-restricted resource; the relay's `SyncEngine` rejects it) and
+      a companion test confirming a properly-authorized synced write still
+      goes through normally. Since there was no existing per-package unit
+      test suite for `@qu/sync` to extend (QuV2 only had one big end-to-end
+      smoke test with a real relay process), this round built an in-memory
+      `Transport` test harness (`RelayTransport`/`ClientTransport` over a
+      shared `TestNetwork`) modeling the real client-relay star topology
+      closely enough for deterministic coverage of subscribe/fetch/
+      fetchPrefix/reconnect/outbox-replay/hub-re-broadcast, with no real
+      network or timers beyond a small polling helper for async delivery.
 - [ ] Runtime bootstrap, Relay, Apps
 
 ## Development

@@ -1,11 +1,12 @@
 {
   "name": "@qu/runtime",
   "version": "0.1.0",
-  "description": "Platform-specific QuStore adapters implementing @qu/core's QuAdapter contract (put/get/getAll/getChildren) for a real Node filesystem (FsAdapter) or a browser's IndexedDB (IndexedDBAdapter). Deliberately no shared '.' entry point - see this file's own note below.",
+  "description": "Platform-specific QuStore adapters implementing @qu/core's QuAdapter contract (put/get/getAll/getChildren) for a real Node filesystem (FsAdapter) or a browser's IndexedDB (IndexedDBAdapter), plus IndexedDBOutboxStore (the persistent half of @qu/sync's OutboxStore contract for browsers). Deliberately no shared '.' entry point - see this file's own note below.",
   "type": "module",
   "exports": {
     "./fs": "./src/fs-adapter.js",
-    "./indexeddb": "./src/indexeddb-adapter.js"
+    "./indexeddb": "./src/indexeddb-adapter.js",
+    "./indexeddb-outbox": "./src/indexeddb-outbox.js"
   },
   "dependencies": {
     "@qu/core": "^0.1.0"

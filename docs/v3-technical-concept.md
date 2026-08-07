@@ -372,13 +372,19 @@ export class AccessEngine {
 }
 ```
 
-`SyncEngine#handleSync` (§3's later milestone) will call this **after** `isAuthentic
-(quBit)` (signature verification) and **before** `#persistDirectly`, wrapped in its own
-`try/catch` — reject and drop (don't persist, don't ack, don't re-broadcast) a synced
-write that fails it, silently rather than throwing further. This closes the gap with the
-*same* authorization decision the local path already makes, not a second, divergent ACL
-system — zero duplicated logic, one function used from two call sites, each choosing its
-own throw-vs-catch handling on top of it.
+**Also implemented** (`packages/sync/src/sync-engine.js`): `SyncEngine#handleSync` calls
+this **after** `isAuthentic(quBit)` (signature verification) and **before**
+`#persistDirectly`, wrapped in its own `try/catch` — reject and drop (don't persist,
+don't ack, don't re-broadcast) a synced write that fails it, silently rather than
+throwing further. This closes the gap with the *same* authorization decision the local
+path already makes, not a second, divergent ACL system — zero duplicated logic, one
+function used from two call sites, each choosing its own throw-vs-catch handling on top
+of it. Verified with a regression test that reproduces the exact confirmed exploit: an
+attacker's own store (deliberately with no `AccessEngine` registered, modeling a
+malicious/compromised peer) signs and locally writes a forged QuBit for a
+writer-restricted resource, sends it directly over the wire as a `'sync'` message, and
+the relay's `SyncEngine` — running `AccessEngine` — rejects it; a bystander subscribed to
+the same prefix never receives it either.
 
 **Also simplified versus the QuV2 prototype**: `ThreadEngine` no longer carries its own,
 separate writer-list check. In QuV2, that check existed as a "redundant safety net"
