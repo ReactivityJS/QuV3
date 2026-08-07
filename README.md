@@ -26,7 +26,12 @@ own tests, built bottom-up per the dependency order in
 
 - [x] `@qu/core` — QuBit, QuCrypto, QuEvents, QuMount, QuStore, adapters
       (`VolatileAdapter`, `MemoryStoreAdapter`)
-- [ ] `@qu/foundation` — Registry, HookBus, manifest/actions
+- [x] `@qu/foundation` — Registry (Engine/Service lookup), HookBus,
+      DependencyResolver, manifest schema, Actions/Slots (`mount` renamed to
+      `slot` throughout — see `actions.js`, it collided with `QuMount`/DOM
+      `mount()`). `registerCapability`/`capabilities` deliberately **not**
+      ported yet — dead API in QuV2, comes back paired with its first real
+      caller (see `registry.js`'s doc comment).
 - [ ] Storage adapters (`FsAdapter`, `IndexedDBAdapter`) implementing
       `getChildren()`
 - [ ] `@qu/engines` — Document/Collection/Thread/Access/Asset engines
@@ -38,5 +43,5 @@ own tests, built bottom-up per the dependency order in
 
 ```sh
 npm install
-npm test   # node --test packages/*/test
+npm test   # node --test (recursive auto-discovery of packages/*/test/*.test.js)
 ```

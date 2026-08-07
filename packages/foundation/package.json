@@ -1,0 +1,16 @@
+{
+  "name": "@qu/foundation",
+  "version": "0.1.0",
+  "description": "Reusable technical building blocks shared by every Engine/Service/App: a Registry (engine/service lookup + a HookBus), a dependency resolver, and the manifest schema. Not domain logic - see @qu/engines and @qu/services for that.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./registry": "./src/registry.js",
+    "./hooks": "./src/hooks.js",
+    "./dependency-resolver": "./src/dependency-resolver.js",
+    "./manifest": "./src/manifest.js",
+    "./actions": "./src/actions.js"
+  },
+  "license": "MIT"
+}
