@@ -31,7 +31,19 @@ own tests, built bottom-up per the dependency order in
       `slot` throughout — see `actions.js`, it collided with `QuMount`/DOM
       `mount()`). `registerCapability`/`capabilities` deliberately **not**
       ported yet — dead API in QuV2, comes back paired with its first real
-      caller (see `registry.js`'s doc comment).
+      caller (see `registry.js`'s doc comment). **Added later**:
+      `RuntimeContainer` (docs/v3-technical-concept.md §2.1) — a lazy-singleton
+      module registry (`register(name, factory)`/`resolve(name)`), the fix
+      for QuV2's `relay.js`/`shell.js` "god object" composition roots.
+      Factories run at most once, on first `resolve()`; a circular
+      dependency (A resolves B resolves A) is reported as the exact cycle
+      instead of overflowing the stack, same failure mode
+      `DependencyResolver` already uses for a circular manifest `requires`
+      chain. §7 Finding 5's `bootClientRuntime()` helper deliberately **not**
+      built alongside it — it only pays for itself once there are two real
+      `apps/` composition roots to de-duplicate, and V3 has none yet; same
+      "comes back with its first real caller" reasoning as
+      `registerCapability` above.
 - [x] `@qu/runtime` — `FsAdapter` (Node) and `IndexedDBAdapter` (browser),
       each implementing the full `QuAdapter` contract including
       `getChildren()`. Deliberately no shared `.` entry point — only

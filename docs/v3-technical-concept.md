@@ -271,6 +271,28 @@ start it. This is a discipline, not just a container class — the concrete rule
 is: **no file wires more than one cross-cutting concern's worth of behavior directly**;
 if it needs a second one, it becomes a registered module instead of a method.
 
+**Implemented** (`packages/foundation/src/runtime-container.js`): matches the sketch
+above, plus what a real lazy-singleton container needs to be trustworthy rather than
+merely convenient — a factory runs **at most once** (never speculatively, never per-call),
+`register()` rejects a duplicate name (same "no silent collisions" invariant `Registry`
+already enforces), `resolve()` of an unknown name reports what *is* registered (same
+diagnostic shape as `Registry.getEngine()`), and — the one real correctness risk a lazy
+container introduces that the concept sketch didn't call out — a **circular** dependency
+(module A's factory resolves B, whose factory resolves A, directly or transitively) is
+reported as the exact cycle instead of overflowing the stack, the same failure-mode
+choice `DependencyResolver.resolve()` already makes for a circular manifest `requires`
+chain. A factory that throws is not cached as "resolved" — a later `resolve()` call
+retries it, so a transient construction failure doesn't permanently poison that name.
+
+**Deliberately NOT built this round**: §7 Finding 5's `bootClientRuntime(config)` helper.
+That helper's entire justification is de-duplicating what `apps/shell/src/main.js` and
+`apps/demo/src/main.js` would otherwise each hand-assemble independently — but V3 has
+zero `apps/` yet, so there is no second caller to de-duplicate from and no real wiring
+order to validate it against. Building it now would be exactly the "speculative API
+surface" this document's own principles warn against (the same reasoning `registry.js`
+already states for why `registerCapability()` isn't ported until it has a real caller).
+It returns once `@qu/relay` or a first `apps/shell` exists to actually need it.
+
 ### 2.2 Registry — kept, `registerCapability` gets a real caller or gets cut
 
 `packages/foundation/src/registry.js` (engine/service lookup + capability registration +
