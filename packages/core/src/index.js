@@ -5,3 +5,4 @@ export { QuMount } from './mount.js';
 export { QuStore } from './store.js';
 export { VolatileAdapter } from './adapters/volatile.js';
 export { MemoryStoreAdapter } from './adapters/memory.js';
+export { encodeChildCursor, sortAndPaginateChildren } from './adapters/cursor.js';

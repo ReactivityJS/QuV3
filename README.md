@@ -32,8 +32,16 @@ own tests, built bottom-up per the dependency order in
       `mount()`). `registerCapability`/`capabilities` deliberately **not**
       ported yet — dead API in QuV2, comes back paired with its first real
       caller (see `registry.js`'s doc comment).
-- [ ] Storage adapters (`FsAdapter`, `IndexedDBAdapter`) implementing
-      `getChildren()`
+- [x] `@qu/runtime` — `FsAdapter` (Node) and `IndexedDBAdapter` (browser),
+      each implementing the full `QuAdapter` contract including
+      `getChildren()`. Deliberately no shared `.` entry point — only
+      `@qu/runtime/fs` and `@qu/runtime/indexeddb` — so a bundle for one
+      platform can never accidentally pull in the other's code. The
+      `(ts,rel)` sort/cursor logic itself lives once, in `@qu/core`'s new
+      `adapters/cursor.js`, reused by `MemoryStoreAdapter` and both of
+      these — not reimplemented three times. A conformance test suite runs
+      the identical scenarios against all three adapters and asserts they
+      agree.
 - [ ] `@qu/engines` — Document/Collection/Thread/Access/Asset engines
 - [ ] `@qu/services` — `ListService` and friends
 - [ ] `@qu/sync` — outbox, reconnect catch-up, ACL-on-sync fix

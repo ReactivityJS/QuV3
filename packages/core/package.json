@@ -12,7 +12,8 @@
     "./store": "./src/store.js",
     "./events": "./src/events.js",
     "./adapters/volatile": "./src/adapters/volatile.js",
-    "./adapters/memory": "./src/adapters/memory.js"
+    "./adapters/memory": "./src/adapters/memory.js",
+    "./adapters/cursor": "./src/adapters/cursor.js"
   },
   "license": "MIT"
 }
