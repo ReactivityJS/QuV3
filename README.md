@@ -53,7 +53,28 @@ own tests, built bottom-up per the dependency order in
       apply to a fresh build); it now only stamps `_id`/`createdAt`, same
       shape as `DocumentEngine`. A conformance-style end-to-end smoke test
       wires all five engines together on one `QuStore`.
-- [ ] `@qu/services` — `ListService` and friends
+- [x] `@qu/services` (first slice) — `paths`, `unwrap`, `sync-freshness`,
+      and **`ListService`**, docs/v3-technical-concept.md §4.2's centerpiece
+      redesign: ONE list primitive with two strategies (`listDerived()` —
+      no index document, just `QuStore.getChildren()`, for items already
+      colocated under a shared parent; `listCurated()`/`addCurated()`/
+      `removeCurated()` — a hardened, lock+retry `{$list}` index, replacing
+      QuV2's `CollectionService` *and* `StarredService`'s independently
+      weaker copy of the same read-modify-write pattern). Regression tests
+      reproduce both adversarial races the design doc cites (10 concurrent
+      same-process adds; two independent `ListService` instances racing on
+      one list) and a synthetic "permanently loses the race" case proving
+      the retry gives up gracefully instead of hanging. Deliberately no
+      `@qu/core`/`@qu/engines` runtime dependency yet — this slice's source
+      only touches the `QuStore` interface it's handed, both are
+      devDependencies for tests only. **Deferred to the next round**:
+      `StarredService`/`FlagService` (need `@qu/identity` for "my own
+      signing key", not yet built) and the `ThreadService` decomposition
+      (§4.3) built on top of `ListService`.
+- [ ] `@qu/identity` — BIP-39 seed, per-space keys, attestation (a
+      prerequisite the original build order under-specified — needed next,
+      before `StarredService`/`FlagService`/`ThreadService` can sign/encrypt
+      as a real identity rather than a hand-rolled test keypair)
 - [ ] `@qu/sync` — outbox, reconnect catch-up, ACL-on-sync fix
 - [ ] Runtime bootstrap, Relay, Apps
 

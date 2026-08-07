@@ -1,0 +1,19 @@
+{
+  "name": "@qu/services",
+  "version": "0.1.0",
+  "description": "The Entity API - the layer apps actually call. Hides Qu paths and QuBit envelopes behind plain async methods returning plain values. This slice: paths, unwrap, sync-freshness, and ListService (docs/v3-technical-concept.md §4.2's derived/curated list primitive). No @qu/core dependency yet - none of this slice's source imports it (see @qu/foundation's phantom-dependency finding for why that distinction is kept honest); @qu/core is a devDependency here, for tests only.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./paths": "./src/paths.js",
+    "./unwrap": "./src/unwrap.js",
+    "./sync-freshness": "./src/sync-freshness.js",
+    "./list-service": "./src/list-service.js"
+  },
+  "devDependencies": {
+    "@qu/core": "^0.1.0",
+    "@qu/engines": "^0.1.0"
+  },
+  "license": "MIT"
+}
