@@ -81,12 +81,20 @@ export class ListService {
   // ===== derived lists =======================================================
 
   /**
+   * No default `limit` - omitting it returns EVERY direct child, same as
+   * `QuStore.getChildren()` itself. This matters for correctness, not just
+   * convenience: a caller enumerating "every actor who flagged this" (see
+   * `FlagService.getPublicFlags()`) would silently undercount past whatever
+   * default cap this method picked on their behalf. A UI that wants a
+   * bounded page (a chat's "last 50 messages") passes `limit` itself - that
+   * default belongs to the caller that actually knows it wants pagination,
+   * not to this generic primitive.
    * @param {string} parentPath - e.g. `paths.threadMessagesParentPath(spaceId, threadId)`.
    * @param {{limit?: number, order?: 'asc'|'desc', cursor?: string}} [options]
    * @returns {Promise<Array<{path: string, quBit: object, cursor: string}>>}
    *   Raw entries (NOT unwrapped) - see class doc comment for why.
    */
-  async listDerived(parentPath, { limit = 50, order = 'desc', cursor = null } = {}) {
+  async listDerived(parentPath, { limit, order = 'desc', cursor = null } = {}) {
     return this.qu.getChildren(parentPath, { sort: 'ts', order, limit, cursor });
   }
 

@@ -83,3 +83,38 @@ export function threadMessagePath(spaceId, threadId, messageId) {
 export function threadMessagesParentPath(spaceId, threadId) {
   return `/store/${spaceId}/threads/${threadId}/msgs`;
 }
+
+/**
+ * A PRIVATE, self-encrypted "list of things I've marked" - `StarredService`'s
+ * one storage location per (identity, namespace). Not a `ListService` shape
+ * at all (neither derived nor curated-via-references): the whole namespace's
+ * items live INLINE in this one document, self-encrypted, because they're
+ * small records that only exist as entries in this list (there is no
+ * separate QuBit elsewhere to reference) - see `starred-service.js`'s own
+ * doc comment.
+ * @param {string} actorPub @param {string} namespace @returns {string}
+ */
+export function starredPath(actorPub, namespace) {
+  return `/store/actors/~${actorPub}/private/starred/${namespace}`;
+}
+
+/**
+ * One actor's own signed slot for a PUBLIC flag (`FlagService.setPublic()`)
+ * - same "one QuBit per actor, enumerated via `ListService.listDerived()`"
+ * shape as everything else in the derived-list family (reactions, pins).
+ * @param {string|number} spaceId @param {string} flagType @param {string} entityKind
+ * @param {string} entityRef @param {string} actorPub @returns {string}
+ */
+export function flagPath(spaceId, flagType, entityKind, entityRef, actorPub) {
+  return `/store/${spaceId}/flags/${flagType}/${entityKind}/${entityRef}/${actorPub}`;
+}
+
+/**
+ * The PARENT path `ListService.listDerived()` enumerates to find every
+ * actor's flag on one entity - one level above `flagPath()`.
+ * @param {string|number} spaceId @param {string} flagType @param {string} entityKind
+ * @param {string} entityRef @returns {string}
+ */
+export function flagParentPath(spaceId, flagType, entityKind, entityRef) {
+  return `/store/${spaceId}/flags/${flagType}/${entityKind}/${entityRef}`;
+}

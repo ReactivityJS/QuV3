@@ -93,9 +93,31 @@ own tests, built bottom-up per the dependency order in
       engine's own one-seed-per-store guard correctly rejected it) was
       caught and fixed by moving to one store per identity, with explicit
       QuBit copies standing in for what `@qu/sync` will do for real.
-- [ ] `@qu/services` (second slice) — `StarredService`/`FlagService` (now
-      unblocked by `@qu/identity`) and the `ThreadService` decomposition
-      (§4.3) on top of `ListService`
+- [x] `@qu/services` (second slice) — `private-storage` (self-encryption
+      helpers), `StarredService`, `FlagService`, and its
+      `FavoritesService`/`ContactsService` facades. **`StarredService` and
+      `FlagService` are not redundant** — `StarredService` is the generic
+      "private list I own" primitive (also used directly by non-flag
+      features), `FlagService` is the Drupal-Flag-style domain API with two
+      modes: *private* (delegates to `StarredService`) and *public* (a
+      visible counter — one signed slot per actor, enumerated via
+      `ListService.listDerived()`, a completely different mechanism
+      `StarredService` can't provide since self-encrypted data is
+      inherently private-only). `StarredService` deliberately does NOT
+      route through `ListService.addCurated()` — that mode stores
+      *references* to items living elsewhere; a starred entry has no
+      separate item to reference, so `StarredService` got its own
+      lock+retry mutation (same proven pattern, adapted to an inline
+      object-array instead of a path-array) rather than being forced
+      through the wrong shape. This closes a real gap: QuV2's
+      `StarredService` had **no** race mitigation at all. No legacy
+      namespace mapping either (same "nothing to migrate in a fresh build"
+      reasoning as `ThreadEngine`). One refinement surfaced while building
+      `FlagService.getPublicFlags()`: `ListService.listDerived()`'s
+      `limit` no longer defaults to 50 — a like-counter silently capped at
+      50 would just be wrong, so that default now belongs to whichever
+      caller actually wants pagination, not to the generic primitive.
+      `ThreadService`'s decomposition (§4.3) is still pending.
 - [ ] `@qu/sync` — outbox, reconnect catch-up, ACL-on-sync fix
 - [ ] Runtime bootstrap, Relay, Apps
 

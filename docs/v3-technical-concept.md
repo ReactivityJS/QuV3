@@ -463,8 +463,15 @@ class ListService {
    * cursor-paginated) - addItem() is just qu.put() to the item's own path. No
    * read-modify-write, no lock, no retry, because there is nothing shared to
    * race on: two actors adding two different items write two different paths.
+   *
+   * REFINEMENT (found while building FlagService.getPublicFlags() on top of
+   * this): no default `limit`. A caller enumerating "every actor who flagged
+   * this" needs the true count, not a silent cap this primitive picked on
+   * its behalf - a UI wanting a bounded page (chat's "last 50 messages")
+   * opts into that itself. Same "mandatory correctness, optional
+   * convenience-default" spirit as §1.2's adapter contract.
    */
-  async listDerived(parentPath, { limit = 50, order = 'desc', cursor = null } = {}) {
+  async listDerived(parentPath, { limit, order = 'desc', cursor = null } = {}) {
     return this.qu.getChildren(parentPath, { sort: 'ts', order, limit, cursor });
   }
 
