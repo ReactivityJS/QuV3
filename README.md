@@ -71,10 +71,31 @@ own tests, built bottom-up per the dependency order in
       `StarredService`/`FlagService` (need `@qu/identity` for "my own
       signing key", not yet built) and the `ThreadService` decomposition
       (§4.3) built on top of `ListService`.
-- [ ] `@qu/identity` — BIP-39 seed, per-space keys, attestation (a
-      prerequisite the original build order under-specified — needed next,
-      before `StarredService`/`FlagService`/`ThreadService` can sign/encrypt
-      as a real identity rather than a hand-rolled test keypair)
+- [x] `@qu/identity` — one BIP-39 seed (`@scure/bip39`, audited, not
+      hand-rolled), SLIP-10 (Ed25519) derivation for a "main" identity plus
+      any number of deterministic, unlinkable per-space pseudonymous
+      identities, and attestations that privately prove a space identity
+      belongs to a main one (individually encrypted per trusted contact,
+      envelope-encrypted once regardless of recipient count). Ported
+      essentially unchanged — already bug-free (bounded key/attestation
+      caches, `importMnemonic()` already validates the mnemonic before
+      deriving) — with one clarity rename: QuV2's `bip32.js` (its own doc
+      comment already said "SLIP-10", the filename didn't) is now
+      `slip10.js`. No incognito-alias vault — per
+      docs/v3-technical-concept.md §1.5, deterministic per-space keys
+      already give unlinkable identity at zero sync/storage cost, so V3
+      doesn't carry the added complexity of a stored, synced secondary-key
+      table. A capstone smoke test signs a thread message with a *real*,
+      seed-derived space identity (not a hand-rolled test keypair) and
+      confirms `AccessEngine` still gates it correctly, and that a
+      *different* space identity derived from the same seed cannot post as
+      it. One test-design bug (three identities sharing one `QuStore` — the
+      engine's own one-seed-per-store guard correctly rejected it) was
+      caught and fixed by moving to one store per identity, with explicit
+      QuBit copies standing in for what `@qu/sync` will do for real.
+- [ ] `@qu/services` (second slice) — `StarredService`/`FlagService` (now
+      unblocked by `@qu/identity`) and the `ThreadService` decomposition
+      (§4.3) on top of `ListService`
 - [ ] `@qu/sync` — outbox, reconnect catch-up, ACL-on-sync fix
 - [ ] Runtime bootstrap, Relay, Apps
 
