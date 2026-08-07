@@ -1,0 +1,17 @@
+{
+  "name": "quv3",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Qu V3 monorepo - a clean, structured rebuild of Qu/QuV2's layered architecture (Core, Runtime, Engines, Services, Relay, Apps). See docs/v3-architecture-spec.md and docs/v3-technical-concept.md.",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
