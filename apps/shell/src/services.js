@@ -1,4 +1,4 @@
-import { ListService, FlagService, ContactsService, FavoritesService, ProfileService, DirectoryService, ActorService } from '@qu/services';
+import { ListService, FlagService, ContactsService, FavoritesService, ProfileService, DirectoryService, ActorService, AccessService, MessageService, ReactionService, PinService } from '@qu/services';
 
 /**
  * The fixed, known set of client-side Services every app under `apps/*`
@@ -32,11 +32,22 @@ import { ListService, FlagService, ContactsService, FavoritesService, ProfileSer
 export function createClientServices(qu, identity, { syncFetch = null, getGeneration = null } = {}) {
   const list = new ListService(qu, syncFetch, getGeneration);
   const flags = new FlagService(qu, identity, list);
+  const access = new AccessService(qu, identity, syncFetch);
   return {
     contacts: new ContactsService(flags, identity),
     favorites: new FavoritesService(flags),
     profile: new ProfileService(qu, identity, syncFetch, getGeneration),
     directory: new DirectoryService(qu, identity, list),
     actors: new ActorService(identity),
+    access,
+    // `apps/forum`'s first real client caller (see its own doc comment) -
+    // MessageService/ReactionService/PinService existed fully tested since
+    // early in this session, with nothing wiring them to a real client
+    // until now, same "backfill hook built, no caller yet" gap this file's
+    // own doc comment already describes for syncFetch/getGeneration
+    // themselves.
+    messages: new MessageService(qu, identity, list, access, syncFetch, getGeneration),
+    reactions: new ReactionService(qu, identity, list),
+    pins: new PinService(qu, identity, list),
   };
 }

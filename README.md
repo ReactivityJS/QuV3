@@ -773,6 +773,61 @@ own tests, built bottom-up per the dependency order in
       `registration.update()` detects it and installs a waiting worker, the update
       bar becomes visible, clicking it posts `SKIP_WAITING` and reloads the page
       exactly once, and the shell re-mounts cleanly under the new controller.
+- [x] **`apps/forum`** — a real browser client for the single public thread `apps/
+      forum/index.js`'s `register()` has ensured exists since early in this project.
+      `MessageService`/`ReactionService`/`PinService` (`@qu/services`) were already
+      fully built and tested, with no real client ever wiring them up - the same
+      "backfill hook built, no caller yet" gap earlier rounds already closed for
+      `ProfileService`'s `syncFetch` and `DirectoryService.setVisible()`. Proposed as
+      the obvious next step after `apps/profile`; built after the user asked for the
+      smaller PWA/updater infrastructure first.
+      **Scope, deliberately**: a client for the ONE existing global thread
+      (`forum`/`general`) - no channels/topics. QuV2's own Forum had a
+      Channel→Topic→per-topic-Thread hierarchy on a `DocumentService`/
+      `CollectionService` pair V3 never ported (superseded by `ListService` - see
+      `DirectoryService`'s own doc comment on why that split doesn't exist here);
+      building a channels concept just for this app would be new service-layer
+      design nobody asked for. Also out of scope, each with a real reason: no
+      delete (`MessageService` has no delete primitive at all, only author-only
+      `editMessage()`); no attachments (no Asset/Blob upload flow wired anywhere in
+      V3 yet, and QuV2's own Forum - unlike its separate Chat app - never had one
+      either); no restricted-thread management UI (the one thread is
+      `THREAD_PRESETS.forum()` - `writers:'*', readers:'*'` - nothing to manage).
+      **Reactions/pins, adapted from QuV2's Chat client** (QuV2's own Forum never had
+      either - only Chat did), deliberately simplified: a fixed, always-visible row
+      of 5 emoji buttons per message instead of a "⋮" popup menu or an expandable
+      150-emoji grid (no other app in V3 uses a popup menu) - clicking a button that
+      isn't your current reaction sets it, clicking your current one clears it,
+      `ReactionService.setReaction()`'s own "second call replaces the first, `null`
+      clears" semantics make that trivial. Pins get one collapsible bar at the top
+      (not QuV2's popup+badge combination) listing every pinned message with an
+      unpin button, plus a live Pin/Unpin button per message.
+      **Reactivity**: the message list re-fetches via `services.messages.
+      listMessages()` (never the raw watched QuBits) every time `watchChildren()`
+      fires on the thread's messages parent path - the same `apps/profile` pattern
+      of ignoring the raw callback value and re-reading through the Service that
+      knows how to decrypt/format it correctly. Each rendered message gets its own
+      `watchChildren()` on its reactions parent path (mirrors QuV2's Chat: reactions
+      live in a separate per-message collection) and its own on the thread's shared
+      pins parent path (so its Pin/Unpin button stays live even when a DIFFERENT
+      message gets pinned) - every one of those watchers is torn down and rebuilt on
+      each message-list re-render, simple and cheap enough with no pagination yet.
+      `formattedHtml` (already computed by `MessageService.postMessage()`/
+      `editMessage()` via `thread-formatting.js`) is inserted via `innerHTML`
+      directly - verified safe (`formatMarkdown()` HTML-escapes the raw body FIRST,
+      then applies only a small whitelist of its own substitutions) both by a unit
+      regression test AND a real Playwright check with an actual `<script>` payload
+      confirming nothing executes.
+      **`apps/shell/src/services.js`** extended: `access`/`messages`/`reactions`/
+      `pins`, wired with the same `syncFetch`/`getGeneration`/`list` already used for
+      `ProfileService`.
+      Full suite green at 871 tests. Verification: `npm run build` bundles
+      `apps/forum` cleanly; a real, isolated `QuRelay` + Playwright with two
+      independent browser contexts confirmed the whole loop live, no reloads: A
+      posts, B sees it instantly; B reacts, A sees the live count; A pins, B sees
+      the pinned bar; A edits their own message, B sees the edit; B (correctly)
+      has no Edit button on A's message; B posts a `<script>` payload, A sees it
+      rendered as inert text with nothing executed.
 
 ## Development
 
@@ -784,11 +839,12 @@ npm test   # node --test (recursive auto-discovery of packages/*/test/*.test.js)
 ## Running Quniverse (Relay + Docker)
 
 **What "Quniverse" means today**: the `@qu/relay` server (`QuRelay`) plus whatever
-apps it loads — `apps/forum` (server-only), the three client apps built on
-`<qu-list>` (`apps/app-list`/`user-list`/`contact-list`), and `apps/profile`
-(editable own profile, directory visibility, `#/~<pub>`), all reachable through
-**`apps/shell`**, the real browser entry point served at `/` (see the status entry
-above for the full account: onboarding, live sync, nav, per-route mounting). Opening a
+apps it loads — the three client apps built on `<qu-list>` (`apps/app-list`/
+`user-list`/`contact-list`), `apps/profile` (editable own profile, directory
+visibility, `#/~<pub>`), and `apps/forum` (a real public message board - post,
+react, pin, edit, all live), all reachable through **`apps/shell`**, the real
+browser entry point served at `/` (see the status entry above for the full
+account: onboarding, live sync, nav, per-route mounting). Opening a
 browser tab and actually clicking around a live Quniverse UI is real and testable
 today, not a deferred gap anymore.
 

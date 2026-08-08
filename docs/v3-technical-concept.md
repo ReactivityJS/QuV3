@@ -685,6 +685,20 @@ documented, narrow escape hatch for what declarative HTML genuinely cannot expre
 imperative-from-scratch is no longer the fallback for "this data has some structure to
 it," only for views with no list shape at all (a single detail page, an ad-hoc lookup).
 
+**Further update — the §5 spike's own second, "more complex" target (`forum`) is now
+built**, and it landed back on imperative `watchChildren()` (the same pattern `apps/
+profile` already established), not `<qu-list>` - a real data point, not a reversal of
+the verdict above. The reason is specific, not a re-litigation of "imperative vs.
+declarative": a forum message needs several INDEPENDENT, per-item async watchers of its
+own (its author's profile, its own reactions, its own pin state, each individually
+live) composed into one DOM subtree per row - exactly the same "signed envelope /
+composed subtree" territory `onItemStamped` was already carved out for, just with more
+than one such resolution per row instead of one. `<qu-list>` remains correct, unchanged
+guidance for what it already serves well (`app-list`/`user-list`/`contact-list`/the
+`apps/shell` nav): a list whose per-row needs stay within `onItemStamped`'s narrow
+escape hatch. A row needing several of its OWN live sub-watchers is the one shape this
+document did not yet have real evidence for - `forum` supplies it.
+
 ---
 
 ## 6. Layer 6 — Quniverse Ecosystem
@@ -706,8 +720,10 @@ robustness fix this surfaced (a failed `boot()` used to leave the HTTP/WS server
 it now tears down whatever it started before rethrowing). **Now has a UI half**:
 `@qu/reactive`/`@qu/ui` are built (§5), and `apps/app-list`/`apps/user-list`/
 `apps/contact-list` are the first apps with a real `clientMain`, bundled via the new
-`scripts/build-apps.mjs`/`npm run build` (esbuild) - `apps/forum` remains
-deliberately server-only, still correctly omitted from `/apps.json`.
+`scripts/build-apps.mjs`/`npm run build` (esbuild). **`apps/forum` also now has a
+`clientMain`** (see §5's own "Further update" above) - a real message board client
+(`MessageService`/`ReactionService`/`PinService`), no longer the one app deliberately
+left server-only; it now appears in `/apps.json` like every other client-bearing app.
 
 ### 6.2 Push routing — simple declarative mapping, not a template DSL
 

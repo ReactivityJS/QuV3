@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "kind": "app",
   "main": "./index.js",
+  "clientMain": "./dist/client.js",
   "label": "Forum",
   "icon": "💬",
   "navOrder": 10,

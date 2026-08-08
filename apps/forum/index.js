@@ -4,17 +4,13 @@
  * discoverLocalPackages() -> QuLoader.loadLocal() -> register()) works
  * against something genuinely useful, not a synthetic test fixture.
  *
- * SERVER-SIDE HALF ONLY, deliberately: this manifest has no `clientMain`.
- * V3 has no browser UI framework yet (`@qu/reactive`/`@qu/ui`, the packages
- * QuV2's own `apps/forum/client.js` depended on, per its own boot()
- * decision `apps/todo`'s equivalent doc comment makes the same call for) -
- * building one just so this app could have a UI would be exactly the
- * "build the general thing before its real need exists" complexity this
- * codebase's own principles (docs/v3-technical-concept.md §0) warn
- * against. `buildAppsCatalog()` (see `@qu/relay`'s `apps-catalog.js`)
- * already correctly omits an app with no `clientMain` from `/apps.json`'s
- * "things a shell should mount" list - this app is real infrastructure
- * today, not a placeholder waiting on a UI half.
+ * This file is the SERVER-SIDE half only - the browser half is `./client.js`
+ * (see that file's own doc comment for the UI itself: message list,
+ * reactions, pins, composing/editing). `SPACE_ID`/`THREAD_ID` are
+ * deliberately NOT imported by `client.js` even though they're exported
+ * here - they're redeclared locally there so the client bundle never pulls
+ * in this server-only `register()`/`@qu/services`' `THREAD_PRESETS` import
+ * path, keeping the two bundles genuinely independent.
  *
  * `register()` ensures the shared public forum thread exists - idempotent
  * (see `@qu/services`' `MessageService.createThread()` doc comment: a
