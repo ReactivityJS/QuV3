@@ -315,6 +315,88 @@ own tests, built bottom-up per the dependency order in
       Manual smoke test: boot a real relay against the real `apps/`
       directory, confirm `/apps.json`/`/apps/forum/manifest.quapp` both
       respond correctly and the real forum thread exists afterward.
+- [x] `@qu/reactive`, `@qu/i18n`, `@qu/ui` (§5's client UI layer), plus
+      `@qu/services`' fifth slice (`ProfileService`/`DirectoryService`/
+      `ActorService`/`actor-format`) and three real, client-bearing apps -
+      `apps/app-list`, `apps/user-list`, `apps/contact-list` - the first
+      Quniverse platform UI. **Resolves §5's open spike**: `@qu/reactive`'s
+      `watch()` and `@qu/ui`'s Custom Elements (`<qu-view>`/`<qu-bind>`/
+      `<qu-list>`/`<qu-key>`/`<qu-if>`) are ported unchanged (they were
+      already correct, just untested in QuV2 - now with a real test suite,
+      including jsdom-based DOM tests this codebase never had before) and
+      shipped as real, documented, OPTIONAL infrastructure - but all three
+      new apps stay IMPERATIVE like their QuV2 originals, because their
+      data genuinely isn't the "one watched Qu path -> one array" shape
+      `<qu-list>` expects (search-filtered results, profiles resolved
+      across multiple Services per row) - not a forced-fit decision, a
+      confirmed one. `@qu/i18n` (`createI18n`/`detectLocale`/`setLocale`)
+      ported unchanged - deliberately no global singleton, so it stays
+      genuinely opt-in per package.
+      **New**: `@qu/ui/theme.js`'s `ensureTheme()` - the shared design-token
+      layer QuV2 never had (every app there hard-coded its own `#5b5bd6`/
+      `#8884`/`#c00`/radii independently). Idempotent like `injectStyle()`;
+      every consumer references a token with the exact QuV2 literal as its
+      CSS fallback (`var(--qu-color-border, #8884)`), so calling
+      `ensureTheme()` is additive, never required - the "scalable AND
+      optional" styling the platform needed. Also fixed while porting:
+      `avatar.js` no longer hand-rolls its own local `ensureStyle()`
+      duplicate of `style.js`'s `injectStyle()` (a QuV2 leftover, in the
+      one file with the least excuse to still have it).
+      `DirectoryService` is a REDESIGN, not a port: QuV2 built it on
+      `DocumentService`+`CollectionService` (both superseded by §4.2);
+      V3's version is a plain derived list (`ListService.listDerived()`
+      over `directory/entries`, an actor's own signed entry as its own
+      path, `null` tombstones on going invisible - the same convention
+      `PinService`/`FlagService.setPublic()` already use) - no separate
+      curated index that could drift out of sync with what it references,
+      and no `syncFetch` backfill needed (a derived list rides sync's own
+      reconnect catch-up, §3.2, same as `MessageService`/`ReactionService`).
+      Caught by its own regression test before committing: an early
+      `listVisible()` draft did `{ actorPub, ...quBit.val }` - since a
+      directory entry's OWN value can itself carry an `actorPub` field, the
+      spread order let a forged entry's self-claimed actor override the
+      verified signer; fixed to `{ ...quBit.val, actorPub }` (verified
+      value always wins, spread first). `ProfileService` ported essentially
+      unchanged (every piece it needs - `private-storage.js`,
+      `sync-freshness.js`, `@qu/identity`'s `publishMainProfile()`/
+      `getProfile()` - already existed with an identical shape).
+      `ActorService` is deliberately a NARROW slice of QuV2's version -
+      only `whoAmI()`, the one method `user-list` actually calls; the rest
+      (`signIn`/`vouchForSpaceIdentity`/`decryptForMe`/...) lands with
+      their own real caller, not speculatively now. Promoted `@qu/identity`
+      from a `@qu/services` devDependency to a real one - `profile-service.js`
+      is the first source file in the package to actually import it at
+      runtime, not just reference it in a JSDoc type.
+      **New**: a minimal client build step (`scripts/build-apps.mjs`,
+      `npm run build`, `esbuild` as a new root devDependency) - a scoped-
+      down port of QuV2's `scripts/build-all.mjs`, bundling every app's
+      `client.js` (whose manifest declares a `clientMain`) into a fully
+      self-contained `apps/<name>/dist/client.js` (`dist/` gitignored, same
+      as QuV2). Genuinely load-bearing, not speculative: bare imports like
+      `@qu/i18n`/`@qu/ui`/`@qu/services` don't resolve in a raw browser, and
+      `@qu/relay`'s static app serving just serves whatever bytes are on
+      disk - without this step, these three apps could never actually run.
+      Scoped to only what's needed this round (bundling `apps/*` client
+      entry points, not every `@qu/*` package for remote-loading) - grows
+      once `@qu/loader`'s `loadRemote()` needs that for real.
+      **New test infrastructure**: `@qu/ui/testing`'s `installDom()`
+      (a jsdom bootstrap - Node has no DOM, and `@qu/ui`'s Custom Elements
+      extend `HTMLElement` at module-evaluation time, so even importing
+      `components.js` requires one first) and `waitFor()` (polls a
+      condition instead of guessing a fixed number of microtask-flush
+      ticks - found to be necessary, not just tidier, when a test's
+      real async chain runs deeper than a mocked one, e.g. a real
+      `ContactsService.listContacts()`'s own internal `Promise.all`).
+      88 new tests across `@qu/reactive`/`@qu/i18n`/`@qu/ui`/`@qu/services`'
+      new files/the three apps, plus one new `@qu/relay` integration test
+      confirming `/apps.json` correctly lists all three alongside the
+      already-loaded `apps/forum` (still correctly omitted, still no
+      `clientMain`) - full suite (746 tests) green. Manual smoke test: real
+      `npm run build` (bundles verified free of any leftover bare `@qu/*`
+      import), then a real `QuRelay` booted against the real repo `apps/`
+      directory - `/apps.json` lists exactly the three client apps with
+      correct `clientMainUrl`s, and `/apps/<name>/dist/client.js` serves
+      the actual built, self-contained bytes for each.
 
 ## Development
 

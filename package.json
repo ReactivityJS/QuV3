@@ -8,10 +8,14 @@
     "packages/*"
   ],
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "build": "node scripts/build-apps.mjs"
   },
   "engines": {
     "node": ">=20"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
   },
   "license": "MIT"
 }

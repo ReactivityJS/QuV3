@@ -608,6 +608,24 @@ also follow) remains the *default*, not a placeholder waiting to be replaced —
 not maintain two supported UI paradigms indefinitely, which is the actual failure mode
 here, not "imperative is wrong."
 
+**Resolved**: `@qu/reactive` (`watch()`) and `@qu/ui` (`<qu-view>`/`<qu-bind>`/
+`<qu-list>`/`<qu-key>`/`<qu-if>`, `injectStyle`/`renderAvatar`/`renderSubpage`/
+`renderFlagToggle`, plus a new `ensureTheme()` shared design-token layer QuV2 never
+had) are ported and, for the first time, actually tested (jsdom-based, via
+`@qu/ui/testing`). The spike itself: `apps/app-list`/`apps/user-list`/
+`apps/contact-list` were built as the first real client apps and evaluated against
+`<qu-list>` directly, not abstractly. Verdict — imperative stays the *default*, not
+because `<qu-list>` doesn't work, but because none of these three apps' data is the
+"one watched Qu path → one array" shape it expects (search-filtered results, profiles
+resolved across several Services per row); QuV2's own choice to build these same three
+apps imperatively, with `qu-components` sitting unused right next to them, turns out to
+have been the right call for exactly this reason, not an oversight. `<qu-list>` remains
+real, documented, OPTIONAL infrastructure for when a genuinely list-shaped view shows
+up (a future `apps/forum` client — "watch one thread's messages, stamp a template" —
+is the concrete candidate). V3 does NOT maintain two competing default paradigms:
+imperative is still it, `@qu/ui`'s declarative layer is an available tool, not a second
+standard.
+
 ---
 
 ## 6. Layer 6 — Quniverse Ecosystem
@@ -626,7 +644,11 @@ manifest → loader → registry pipeline works end to end, not just in isolatio
 only for now (no `clientMain`): a UI half needs `@qu/reactive`/`@qu/ui`, neither built in
 V3 yet - see the README's own status entry for the full account, including a real
 robustness fix this surfaced (a failed `boot()` used to leave the HTTP/WS server open;
-it now tears down whatever it started before rethrowing).
+it now tears down whatever it started before rethrowing). **Now has a UI half**:
+`@qu/reactive`/`@qu/ui` are built (§5), and `apps/app-list`/`apps/user-list`/
+`apps/contact-list` are the first apps with a real `clientMain`, bundled via the new
+`scripts/build-apps.mjs`/`npm run build` (esbuild) - `apps/forum` remains
+deliberately server-only, still correctly omitted from `/apps.json`.
 
 ### 6.2 Push routing — simple declarative mapping, not a template DSL
 
@@ -673,12 +695,13 @@ one is a verified-clean result worth recording precisely because it's the kind o
 that tends to creep in unnoticed.
 
 **Declared package graph is a clean DAG** — `core` (0 deps) → `engines`/`foundation`/
-`identity`/`reactive`/`runtime`/`sync` (→ `core`) → `services` (→ `core`, `engines`,
-`identity`) → `loader` (→ `core`, `foundation`) / `ui` (→ `core`, `reactive`) →
-`thread-ui` (→ `reactive`, `services`, `ui`) → `relay` (→ everything). No circular
-declared dependency, no package importing "upward" against this order. A genuinely
-healthy baseline — the findings below are about avoidable coupling *within* that legal
-graph, plus one dead declaration.
+`identity`/`runtime`/`sync` (→ `core`) / `reactive` (0 deps - see Finding 6) →
+`services` (→ `core`, `identity`) → `loader` (→ `core`, `foundation`) / `ui` (→
+`reactive`) → `relay` (→ everything). No circular declared dependency, no package
+importing "upward" against this order. A genuinely healthy baseline — the findings
+below are about avoidable coupling *within* that legal graph, plus three dead
+declarations (Finding 1, and Finding 6's two) this round verified and did NOT carry
+over into V3.
 
 **Finding 1 — phantom dependency**: `packages/foundation/package.json` declares
 `"@qu/core": "^2.0.0"`, but grepping all 6 of its source files (`registry.js`,
@@ -735,6 +758,17 @@ wiring order by hand. Concretely costly today, not just theoretically: `demo`'s 
 list is missing `ThreadEngine` (present in `shell`'s) — which may be an intentional
 "minimal demo" choice or may simply be stale, and the duplication makes it impossible to
 tell which from the code alone.
+
+**Finding 6 — a second phantom dependency, same shape as Finding 1, caught this time
+before it was ever declared**: QuV2's own `packages/reactive/package.json` declares
+`"@qu/core": "^2.0.0"`, but `watch.js` (its only source file) imports nothing at all -
+zero `@qu/core` usage, not even a type-only reference beyond a JSDoc `@param` comment.
+The graph line above (written when `@qu/reactive` didn't exist in V3 yet) inherited that
+assumption uncritically. Now that `@qu/reactive` is actually built (§5): V3's
+`packages/reactive/package.json` declares **no** dependencies at all, matching its real
+zero imports - the phantom was never carried over. `@qu/ui`'s declared graph edge to
+`@qu/core` is the same story: QuV2 declared it, nothing in `@qu/ui`'s source imports it
+(only `@qu/reactive`, for `watch()`) - V3's version declares only `@qu/reactive`.
 
 ---
 
@@ -801,7 +835,9 @@ generic filter/`WHERE` predicate on `getChildren()` (§1.2).
 4. §7's Findings 1-2 (remove the phantom `foundation`→`core` dependency, `thread-ui`'s
    `watchPath` parameter) — small, independent, no reason to wait.
 5. §3.5, §6.2, §4.3 — independent, parallelizable once 1-3 land.
-6. §5 (UI spike) — can run in parallel with anything above; informs, doesn't block.
+6. §5 (UI spike) — **done**: `@qu/reactive`/`@qu/ui` built and tested, resolved in favor
+   of imperative-by-default via three real apps (`apps/app-list`/`user-list`/
+   `contact-list`), not in the abstract - see §5 and the README's own status entry.
 
 Turning this into an actual phased implementation plan (file-by-file, in the style of
 the earlier QuV2 planning rounds) is a good next step once these design decisions are

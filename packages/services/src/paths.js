@@ -203,6 +203,31 @@ export function threadReadReceiptPath(spaceId, threadId, actorPub) {
 }
 
 /**
+ * One identity's own signed entry in the opt-in public directory -
+ * `DirectoryService`. A DERIVED list (docs/v3-technical-concept.md §4.2):
+ * each entry already lives at its own path under
+ * `directoryEntriesParentPath()`, enumerated via `ListService.listDerived()`
+ * - `setVisible(true, ...)` is a single `qu.put()`, `setVisible(false)`
+ * writes `null` (a tombstone, same convention `threadPinPath()` uses -
+ * `QuStore` has no `delete()`), not a separate curated index to maintain.
+ * Global, not per-space: there is exactly one directory for the whole
+ * Quniverse, unlike a thread's messages/reactions/pins.
+ * @param {string} actorPub @returns {string}
+ */
+export function directoryEntryPath(actorPub) {
+  return `/store/directory/entries/${actorPub}`;
+}
+
+/**
+ * The PARENT path `ListService.listDerived()` enumerates to find every
+ * currently-visible directory entry - one level above `directoryEntryPath()`.
+ * @returns {string}
+ */
+export function directoryEntriesParentPath() {
+  return '/store/directory/entries';
+}
+
+/**
  * One actor's notification preferences document - `NotificationPrefsService`.
  * PUBLIC (signed, not encrypted, see that Service's own doc comment for
  * why): the party that needs to READ this to make a decision is `@qu/relay`,

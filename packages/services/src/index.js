@@ -2,9 +2,11 @@
  * QU SERVICES — public entry point. paths, unwrap, sync-freshness,
  * ListService, private-storage, StarredService, FlagService,
  * FavoritesService, ContactsService, AccessService, crypto-envelope,
- * thread-formatting, link-detect, and the `ThreadService` decomposition
- * (§4.3): MessageService (+ THREAD_PRESETS), ReactionService, PinService,
- * PresenceService. See each file's own doc comment.
+ * thread-formatting, link-detect, the `ThreadService` decomposition (§4.3):
+ * MessageService (+ THREAD_PRESETS), ReactionService, PinService,
+ * PresenceService, NotificationPrefsService, PushSubscriptionService,
+ * ProfileService, DirectoryService, and actor-format's formatActorLabel/
+ * matchesActorQuery. See each file's own doc comment.
  */
 export * as paths from './paths.js';
 export { unwrap, unwrapAll } from './unwrap.js';
@@ -25,3 +27,7 @@ export { PinService } from './pin-service.js';
 export { PresenceService } from './presence-service.js';
 export { NotificationPrefsService } from './notification-prefs-service.js';
 export { PushSubscriptionService } from './push-subscription-service.js';
+export { ProfileService } from './profile-service.js';
+export { DirectoryService } from './directory-service.js';
+export { formatActorLabel, matchesActorQuery } from './actor-format.js';
+export { ActorService } from './actor-service.js';

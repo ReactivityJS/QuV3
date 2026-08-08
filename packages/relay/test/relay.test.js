@@ -425,3 +425,26 @@ test('booting with the REAL repo apps/ directory loads apps/forum and creates th
     await rm(base, { recursive: true, force: true });
   }
 });
+
+test('booting with the REAL repo apps/ directory also loads app-list/user-list/contact-list, and /apps.json lists exactly their (client-bearing) manifests', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'qu-relay-'));
+  try {
+    const relay = await new QuRelay({ storeDir: join(base, 'store'), blobDir: join(base, 'blob'), appsDir: REPO_APPS_DIR, port: 0 }).boot();
+    try {
+      for (const name of ['app-list', 'user-list', 'contact-list']) assert.equal(relay.loader.isLoaded(name), true);
+
+      const res = await fetch(`http://localhost:${relay.port}/apps.json`);
+      const catalog = await res.json();
+      const names = catalog.map((a) => a.name).sort();
+      // apps/forum is real and loaded too (see the test above) but has no
+      // clientMain - buildAppsCatalog() correctly omits it, same "nothing
+      // for a shell to mount" reasoning as ever.
+      assert.deepEqual(names, ['app-list', 'contact-list', 'user-list']);
+      for (const app of catalog) assert.equal(app.clientMainUrl, `/apps/${app.name}/dist/client.js`);
+    } finally {
+      await relay.close();
+    }
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
