@@ -163,6 +163,16 @@ export function mount(container, { qu, services, subscribe, syncFetch }) {
     return profileCache.get(pub);
   }
 
+  // messageId -> in-progress, NOT-YET-SAVED edit text. renderMessages()
+  // rebuilds the ENTIRE list from scratch on every write to ANY message in
+  // the thread (a new post, or anyone editing anything) - without this, a
+  // message someone is mid-edit on would silently revert to its read-only
+  // view (discarding whatever they'd already typed) the moment any other
+  // message in a busy thread changes, not just on an edit to that SAME
+  // message. Cleared on save (the fresh body from the server-confirmed
+  // write is used instead) and on cancel.
+  const editingDrafts = new Map();
+
   let messageWatchers = [];
   function clearMessageWatchers() {
     for (const off of messageWatchers) off();
@@ -224,7 +234,8 @@ export function mount(container, { qu, services, subscribe, syncFetch }) {
     }
 
     const textWrap = document.createElement('div');
-    renderMessageText(textWrap, message);
+    if (editingDrafts.has(message.id)) renderMessageEdit(textWrap, message);
+    else renderMessageText(textWrap, message);
 
     const actions = document.createElement('div');
     actions.className = 'qu-forum-message-actions';
@@ -261,7 +272,12 @@ export function mount(container, { qu, services, subscribe, syncFetch }) {
     const row = document.createElement('div');
     row.className = 'qu-forum-edit-row';
     const textarea = document.createElement('textarea');
-    textarea.value = message.body;
+    // Restores a draft surviving an unrelated re-render (see `editingDrafts`'
+    // own doc comment) - falls back to the message's current body the FIRST
+    // time this message is opened for editing.
+    textarea.value = editingDrafts.get(message.id) ?? message.body;
+    editingDrafts.set(message.id, textarea.value);
+    textarea.addEventListener('input', () => editingDrafts.set(message.id, textarea.value));
     const buttons = document.createElement('div');
     buttons.className = 'qu-forum-edit-row-buttons';
     const saveBtn = document.createElement('button');
@@ -271,14 +287,19 @@ export function mount(container, { qu, services, subscribe, syncFetch }) {
       const body = textarea.value.trim();
       if (!body) return;
       await services.messages.editMessage(SPACE_ID, THREAD_ID, message.id, { body });
+      editingDrafts.delete(message.id);
       // The edit's own write triggers this whole list's watchChildren() ->
       // renderMessages() re-render, which rebuilds this exact node - no
-      // need to manually restore the read-only view here.
+      // need to manually restore the read-only view here (editingDrafts no
+      // longer has an entry for it, so the rebuild renders read-only).
     });
     const cancelBtn = document.createElement('button');
     cancelBtn.type = 'button';
     cancelBtn.textContent = t('cancel');
-    cancelBtn.addEventListener('click', () => renderMessageText(root, message));
+    cancelBtn.addEventListener('click', () => {
+      editingDrafts.delete(message.id);
+      renderMessageText(root, message);
+    });
     buttons.append(saveBtn, cancelBtn);
     row.append(textarea, buttons);
     root.appendChild(row);

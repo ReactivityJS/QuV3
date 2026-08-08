@@ -159,24 +159,50 @@ export function mount(container, { qu, identity, services, segments = [] }) {
       return;
     }
 
+    // `render()` does real async work (getOwnProfile()/isVisible()/
+    // getPublicProfile() each hit ProfileService's own background-refresh/
+    // syncFetch backfill) BETWEEN being triggered and actually touching the
+    // DOM - a live relay can legitimately fire watch()'s callback twice in
+    // quick succession (e.g. the initial local read, then a fresher value
+    // arriving moments later from ProfileService's own background
+    // freshness check - see its own doc comment). Without a guard, two
+    // overlapping render() calls both eventually reach `root.append(...)`,
+    // and since neither call's OWN await chain gives the other a chance to
+    // finish clearing first, BOTH end up appending their own full view on
+    // top of each other (confirmed live: two "Add field" buttons on one
+    // screen). `renderToken` mirrors the exact monotonic-counter pattern
+    // `apps/user-list`'s own `unlistedToken` already uses for the same
+    // "only the LATEST of several overlapping async calls may touch the
+    // DOM" problem: every render() call gets a fresh token; only the call
+    // still holding the latest token when its own async work finishes is
+    // allowed to clear+repopulate `root` - an older, superseded call's
+    // result is simply discarded, never applied.
+    let renderToken = 0;
     async function render() {
+      const token = ++renderToken;
       if (stopped) return;
-      const justSaved = saveState.justSaved;
-      saveState.justSaved = false;
-      root.textContent = '';
       if (isSettings) {
         const own = await services.profile.getOwnProfile();
-        if (!stopped) renderSettings(root, own, services, myPub, saveState, justSaved);
+        if (stopped || token !== renderToken) return;
+        const justSaved = saveState.justSaved;
+        saveState.justSaved = false;
+        root.textContent = '';
+        renderSettings(root, own, services, myPub, saveState, justSaved);
         return;
       }
       if (isOwn) {
         const own = await services.profile.getOwnProfile();
         const listed = await services.directory.isVisible(myPub);
-        if (!stopped) renderOwnProfile(root, own, listed, services, myPub, saveState, justSaved);
+        if (stopped || token !== renderToken) return;
+        const justSaved = saveState.justSaved;
+        saveState.justSaved = false;
+        root.textContent = '';
+        renderOwnProfile(root, own, listed, services, myPub, saveState, justSaved);
         return;
       }
       const pub = await services.profile.getPublicProfile(targetPub);
-      if (stopped) return;
+      if (stopped || token !== renderToken) return;
+      root.textContent = '';
       if (!pub) {
         const p = document.createElement('p');
         p.className = 'qu-profile-not-found';

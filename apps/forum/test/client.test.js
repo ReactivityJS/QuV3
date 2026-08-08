@@ -206,6 +206,40 @@ test('pinning shows the message in the pinned bar, live for a second independent
   }
 });
 
+// Regression: renderMessages() rebuilds the ENTIRE list from scratch on
+// every write to ANY message in the thread - a message someone has an
+// open, unsaved edit form on must survive that rebuild (still showing the
+// form, with whatever they'd already typed), not silently revert back to
+// its read-only view and discard their in-progress text the moment a
+// completely UNRELATED message arrives.
+test('an in-progress, unsaved edit survives an unrelated message arriving in the thread', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread('forum', 'general', THREAD_PRESETS.forum());
+  const own = await a.services.messages.postMessage('forum', 'general', { body: 'Original body' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, subscribe: noopSubscribe });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-message') !== null);
+    container.querySelector('.qu-forum-message-actions button').click(); // "Edit" - the only button own message has besides Pin
+    const textarea = container.querySelector('.qu-forum-edit-row textarea');
+    assert.ok(textarea, 'expected the edit form to be open');
+    textarea.value = 'Not yet saved...';
+    textarea.dispatchEvent(new window.Event('input'));
+
+    // An unrelated write to a DIFFERENT message in the same thread - not a
+    // save, not touching the message being edited at all.
+    await a.services.messages.postMessage('forum', 'general', { body: 'A completely unrelated message' });
+    await waitFor(() => container.querySelectorAll('.qu-forum-message').length === 2);
+
+    const stillOpenTextarea = container.querySelector(`[data-message-id="${own.id}"] .qu-forum-edit-row textarea`);
+    assert.ok(stillOpenTextarea, 'the edit form must still be open after an unrelated message arrived');
+    assert.equal(stillOpenTextarea.value, 'Not yet saved...');
+  } finally {
+    stop();
+  }
+});
+
 test('the edit button only appears on the viewer\'s own message - a genuinely separate author never gets one', async () => {
   const a = await freshEnv('Ada');
   const b = await freshEnv('Bob');

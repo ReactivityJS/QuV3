@@ -828,6 +828,44 @@ own tests, built bottom-up per the dependency order in
       the pinned bar; A edits their own message, B sees the edit; B (correctly)
       has no Edit button on A's message; B posts a `<script>` payload, A sees it
       rendered as inert text with nothing executed.
+- [x] **Two real concurrency bugs, found by a fresh real-relay Playwright pass
+      requested specifically to re-check current state for bugs** (both required a
+      REAL live relay - neither is reachable from an isolated jsdom unit test, since
+      both need a second genuinely-independent write racing against an in-flight
+      render):
+      1. **`apps/forum`**: `renderMessages()` rebuilds the ENTIRE message list from
+         scratch on every write to ANY message in the thread (a new post, or anyone
+         editing anything). A message someone had an open, unsaved Edit form on -
+         with real typed text not yet saved - silently reverted to its read-only
+         view the moment a completely UNRELATED message arrived, discarding
+         whatever they'd typed. Fixed with `editingDrafts` (`messageId -> draft
+         text`, updated live via the textarea's own `input` event, cleared on
+         save/cancel): `renderMessage()` checks it before deciding whether to render
+         read-only or re-open the edit form with the preserved draft. Confirmed live
+         in a real two-browser-context Playwright run: A opens Edit, types
+         unsaved text, B posts something unrelated, A's edit form is still open with
+         the SAME unsaved text afterward.
+      2. **`apps/profile`**: `render()` (the own-profile edit form's own re-render,
+         triggered by `watch()` on this identity's profile path) had no protection
+         against being invoked twice concurrently. It does real async work
+         (`getOwnProfile()`/`isVisible()`, each with their own internal
+         background-refresh/`syncFetch` backfill) between being triggered and
+         actually touching the DOM - a real relay can fire the `watch()` callback
+         twice in quick succession (the initial local read, then a fresher value
+         arriving moments later), and without a guard, BOTH overlapping calls
+         eventually append their own full form on top of each other. Found live
+         (two "Add field" buttons on one screen after editing a fresh profile) and
+         fixed with `renderToken`, a monotonic counter mirroring `apps/user-list`'s
+         own `unlistedToken` guard for the identical "only the LATEST of several
+         overlapping async calls may touch the DOM" shape: an older, superseded
+         `render()` call's result is discarded, never applied. Reproduced as a unit
+         regression test too (two `saveProfile()` calls fired without awaiting the
+         first - confirmed red without the fix, green with it).
+      Full suite green at 873 tests (2 new regression tests). No other apps
+      (`app-list`/`user-list`/`contact-list`, and the PWA/updater flow) showed any
+      console or page errors across the same full real-relay session covering
+      onboarding, profile editing, directory visibility, User List, and the full
+      Forum interaction set.
 
 ## Development
 

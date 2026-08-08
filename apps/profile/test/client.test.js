@@ -98,6 +98,44 @@ test('own profile renders an editable form pre-filled with the current alias/ava
   }
 });
 
+// Regression, found via a real Playwright run against a real relay: two
+// writes to this identity's own profile document close enough together
+// fire this component's own watch() callback twice before the first
+// render() call's own await chain (getOwnProfile()/isVisible(), each with
+// their own internal background-refresh/syncFetch backfill) resolves -
+// without renderToken's guard, BOTH calls eventually append their own full
+// form on top of each other (confirmed live: two "Add field" buttons on
+// one screen).
+test('REGRESSION: two saves close enough together to overlap never leave duplicated DOM content', async () => {
+  const { qu, identity, services, myPub } = await freshEnv();
+  await services.profile.saveProfile({ alias: 'Ada' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`] });
+  try {
+    await waitFor(() => container.querySelector('.qu-profile-own') !== null);
+
+    // Fire two saves back-to-back, NOT awaiting the first before starting
+    // the second - both write to the SAME watched path, racing render()
+    // against itself the same way a live relay's own background-refresh
+    // did in the real browser run that found this.
+    await Promise.all([
+      services.profile.saveProfile({ alias: 'First' }),
+      services.profile.saveProfile({ alias: 'Second' }),
+    ]);
+
+    // Give every triggered render() call - including any that SHOULD be
+    // discarded as stale - a chance to finish and (incorrectly) apply.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    assert.equal(container.querySelectorAll('.qu-profile-own').length, 1, 'exactly one profile form, never duplicated');
+    const addFieldButtons = [...container.querySelectorAll('button')].filter((b) => b.textContent === 'Add field');
+    assert.equal(addFieldButtons.length, 1, 'exactly one "Add field" button, never duplicated');
+  } finally {
+    stop();
+  }
+});
+
 test('editing and saving the own-profile form persists alias/avatar/template/style', async () => {
   const { qu, identity, services, myPub } = await freshEnv();
   await services.profile.saveProfile({ alias: 'Ada' });
