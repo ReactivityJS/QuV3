@@ -23,3 +23,5 @@ export { MessageService, THREAD_PRESETS } from './message-service.js';
 export { ReactionService } from './reaction-service.js';
 export { PinService } from './pin-service.js';
 export { PresenceService } from './presence-service.js';
+export { NotificationPrefsService } from './notification-prefs-service.js';
+export { PushSubscriptionService } from './push-subscription-service.js';

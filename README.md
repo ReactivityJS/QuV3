@@ -191,7 +191,64 @@ own tests, built bottom-up per the dependency order in
       closely enough for deterministic coverage of subscribe/fetch/
       fetchPrefix/reconnect/outbox-replay/hub-re-broadcast, with no real
       network or timers beyond a small polling helper for async delivery.
-- [ ] Runtime bootstrap, Relay, Apps
+- [x] `@qu/push` — dependency-free Web Push: RFC 8292 VAPID auth
+      (`generateVapidKeys()`/`signVapidJwt()`, hand-rolled ES256 JWT, no JOSE
+      library) + RFC 8291/8188 payload encryption (`encryptPayload()`, ECDH +
+      HKDF + AES-128-GCM, all via `node:crypto`) + `sendWebPush()`. Ported
+      essentially unchanged - ~40 tests including a real encrypt/decrypt
+      round-trip against a simulated browser subscriber, VAPID JWT structure/
+      signature verification via plain `node:crypto`, and a mocked-`fetch()`
+      suite covering request shape, encryption (payload is never plaintext
+      on the wire), and 404/410 → `expired: true` mapping.
+- [x] `@qu/services` (fourth slice) — `NotificationPrefsService` (per-identity
+      push settings: global on/off, global @mention on/off, per-app/per-
+      function overrides; `static shouldNotify()` is the pure decision logic
+      both a relay and a settings UI share) and `PushSubscriptionService`
+      (a browser's registered Web Push endpoints). Both PUBLIC/signed, not
+      encrypted - the party that needs to read them to decide whether to
+      push (`@qu/relay`) has no way to decrypt owner-only data.
+      `PushSubscriptionService` moved to the **derived**-list shape (§4.2):
+      QuV2's version needed its own backfill-before-read-modify-write
+      workaround for a confirmed two-device race (device B's subscribe()
+      silently discarding device A's); a derived list has nothing shared to
+      race on - each device's subscription is its own path, `subscribe()`
+      is a single `qu.put()`, the whole workaround doesn't exist to need.
+- [x] `@qu/relay` — a Node.js peer: persists to disk (`@qu/runtime`'s
+      `FsAdapter`, both `/store` and `/blob`), replicates via `@qu/sync`,
+      and delivers Web Push. Built on `RuntimeContainer` (§2.1) from day
+      one, not refactored into it later - `PresenceTracker`,
+      `RelaySettings`, `VapidKeyStore`, `PushDeliveryService`, `AdminHttp`
+      and `HttpRouter` are each independently testable modules, not methods
+      on one growing composition-root class the way QuV2's 894-line
+      `relay.js` was. Routing/replication itself is exactly `@qu/sync`'s
+      `SyncEngine` (nothing relay-specific to add there beyond the
+      `WebSocketServerTransport` - assigns each connection a stable
+      peerId, per-peer rate limiting, live-adjustable via
+      `setRateLimit()`). `PushDeliveryService` ports QuV2's notification
+      pipeline (candidate resolution from thread `readers`/`mentions`,
+      `NotificationPrefsService` gating, in-app notification write +
+      presence-suppressed Web Push) with ONE deliberate redesign: routing
+      is now **pluggable** (`resolveNotification(spaceId, threadId,
+      {authorPub, mention, mentions})`) instead of a hardcoded per-app
+      if/else chain naming apps that don't exist in V3 yet
+      (`calendar-<id>`/`geochase-<id>`/`chat`) - the exact extension point
+      §6.2's manifest-driven `pushRouting` table plugs into once apps
+      exist. `AdminHttp` ports the signature-gated settings + Data Explorer
+      routes unchanged. **Deliberately out of scope**: app
+      discovery/loading, static app serving, shell serving, the
+      `apps.json` catalog - all need `@qu/loader` + `apps/shell`, neither
+      built in V3 yet (see `http-router.js`'s own doc comment for the
+      exact routes this omits). Caught in review before committing: an
+      early draft of the `authorPub` derivation dropped `QuBit.pub`'s
+      base64→base64url conversion (present in QuV2's own version) - would
+      have made every "is this the author"/"who gets notified" comparison
+      silently fail, since every other actor-pub string in this codebase is
+      base64url. 79 new tests across both packages
+      (`@qu/push`, `@qu/relay`) plus the two new `@qu/services` additions,
+      full suite (554 tests, up from 475) green, including a `relay.test.js`
+      that boots a REAL relay (real disk, real HTTP, real WebSocket) and reproduces
+      the §3.3 ACL-on-sync fix end-to-end against it.
+- [ ] Apps (needs `@qu/loader` first)
 
 ## Development
 

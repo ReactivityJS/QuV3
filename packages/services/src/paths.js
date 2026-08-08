@@ -201,3 +201,39 @@ export function threadPresencePath(spaceId, threadId, actorPub) {
 export function threadReadReceiptPath(spaceId, threadId, actorPub) {
   return `/store/${spaceId}/threads/${threadId}/reads/${actorPub}`;
 }
+
+/**
+ * One actor's notification preferences document - `NotificationPrefsService`.
+ * PUBLIC (signed, not encrypted, see that Service's own doc comment for
+ * why): the party that needs to READ this to make a decision is `@qu/relay`,
+ * which has no way to decrypt something only the owner's own key can read.
+ * @param {string} actorPub @returns {string}
+ */
+export function notificationPrefsPath(actorPub) {
+  return `/store/actors/~${actorPub}/notification-prefs`;
+}
+
+/**
+ * One of an actor's registered Web Push subscriptions (one per device/
+ * browser) - `PushSubscriptionService`. A DERIVED list
+ * (docs/v3-technical-concept.md §4.2): each subscription already lives at
+ * its own path under `pushSubscriptionsParentPath()`, enumerated via
+ * `ListService.listDerived()` - `subscribe()` is a single `qu.put()`, no
+ * index write. PUBLIC (signed, not encrypted) for the same reason
+ * `notificationPrefsPath()` is - `@qu/relay`'s push delivery is the reader
+ * that matters here.
+ * @param {string} actorPub @param {string} subscriptionId @returns {string}
+ */
+export function pushSubscriptionPath(actorPub, subscriptionId) {
+  return `/store/actors/~${actorPub}/push-subscriptions/${subscriptionId}`;
+}
+
+/**
+ * The PARENT path `ListService.listDerived()` enumerates to find every one
+ * of an actor's registered push subscriptions - one level above
+ * `pushSubscriptionPath()`.
+ * @param {string} actorPub @returns {string}
+ */
+export function pushSubscriptionsParentPath(actorPub) {
+  return `/store/actors/~${actorPub}/push-subscriptions`;
+}

@@ -426,6 +426,11 @@ lastSeenAt}>` that `#deliverThreadPush()` consults before sending a Web Push (in
 notification always still written) is a sound, already-implemented design. **No
 change.**
 
+**Implemented** (`packages/relay/src/presence-tracker.js`): ported as `PresenceTracker`
+(`recordSeen()`/`isRecentlyOnline()`), wired to `SyncEngine`'s `onPeerIdentified` in
+`relay.js`'s `boot()`. Same bounded-map/staleness-window design, no changes needed — this
+piece was already correct.
+
 ### 3.5 Push delivery batching
 
 **Weakness**: `#deliverThreadPush()`'s candidate loop is still a plain sequential
@@ -435,6 +440,12 @@ change.**
 a self-contained, low-risk change independent of everything else in this document, and
 worth doing early since every feature that fans out notifications (Flags, Mentions,
 future Views-style digests) sits on top of it.
+
+**Status: not done this round.** `PushDeliveryService.deliverThreadMessage()`
+(`packages/relay/src/push-delivery.js`) ports the same sequential `for...of` loop
+unchanged — a real, still-open, low-risk optimization, correctly scoped as
+self-contained and independent of everything else in this milestone. Left for a
+follow-up pass rather than bundled into the routing/porting work this round focused on.
 
 ### 3.6 Transport topology — star kept, "Universal Peer" scoped to a principle
 
@@ -617,6 +628,16 @@ lookup table instead of a general `{param}`-template pattern-matching engine —
 earlier plan's `fillTemplate`/`matchTemplate` DSL is more machinery than 5 apps justify
 (§principle 4). Grow into a template language only if a 6th or 7th app's routing needs
 genuinely can't be expressed as a lookup.
+
+**Partially implemented**: `PushDeliveryService`'s hardcoded if/else chain was NOT
+ported — V3 has no apps yet to hardcode against, so there is nothing to port from.
+Instead, `deliverThreadMessage()` accepts an optional `resolveNotification(spaceId,
+threadId, {authorPub, mention, mentions})` hook (`packages/relay/src/push-delivery.js`)
+that returns a specific `{appId, functionName, title, body, url}` or falls through to a
+generic default — this is the concrete extension point this section's manifest-driven
+`pushRouting` lookup table plugs into once apps (and their manifests) exist, not a
+second, competing mechanism. The manifest field + lookup table itself is still not
+built — correctly deferred until real app manifests exist to carry `pushRouting` data.
 
 ### 6.3 Notifications as the Hooks-&-Actions worked example
 

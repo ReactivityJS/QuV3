@@ -1,0 +1,11 @@
+{
+  "name": "@qu/push",
+  "version": "0.1.0",
+  "description": "Dependency-free Web Push (RFC 8291 payload encryption + RFC 8292 VAPID auth) using only node:crypto and the global fetch() - the relay's side of browser push notifications. Hand-rolled rather than a dependency: it's a small, stable, fully-specified RFC, and this codebase already treats every OTHER signature/encryption primitive as core infrastructure, not something to outsource.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "license": "MIT"
+}

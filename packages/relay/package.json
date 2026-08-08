@@ -1,0 +1,25 @@
+{
+  "name": "@qu/relay",
+  "version": "0.1.0",
+  "description": "A Node.js Qu peer: persists to disk (FsAdapter, both /store and /blob), syncs with other peers over WebSocket (@qu/sync), and delivers Web Push notifications for thread messages. Built on @qu/foundation's RuntimeContainer from day one (docs/v3-technical-concept.md §2.1) instead of one growing composition-root class - PresenceTracker, RelaySettings, VapidKeyStore, PushDeliveryService, AdminHttp and HttpRouter are each independently testable modules. Deliberately does NOT yet serve apps or a shell (needs @qu/loader + apps/, neither built in V3 yet) - see http-router.js's own doc comment.",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "qu-relay": "./src/server.js"
+  },
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "dependencies": {
+    "@qu/core": "^0.1.0",
+    "@qu/runtime": "^0.1.0",
+    "@qu/foundation": "^0.1.0",
+    "@qu/identity": "^0.1.0",
+    "@qu/sync": "^0.1.0",
+    "@qu/engines": "^0.1.0",
+    "@qu/services": "^0.1.0",
+    "@qu/push": "^0.1.0",
+    "ws": "^8.18.0"
+  },
+  "license": "MIT"
+}
