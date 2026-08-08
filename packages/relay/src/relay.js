@@ -9,6 +9,7 @@ import { SyncEngine } from '@qu/sync';
 import { AccessEngine, DocumentEngine, CollectionEngine, AssetEngine, ThreadEngine } from '@qu/engines';
 import { ListService, AccessService, MessageService, NotificationPrefsService, PushSubscriptionService } from '@qu/services';
 import { QuLoader, discoverLocalPackages } from '@qu/loader';
+import { createLogger } from '@qu/log';
 
 import { WebSocketServerTransport } from './transports/websocket-server-transport.js';
 import { PresenceTracker } from './presence-tracker.js';
@@ -41,11 +42,16 @@ import { publishAppsCatalog } from './apps-catalog-store.js';
  * dependency-ordered via `@qu/loader`'s `QuLoader`) and, if configured, any
  * `remoteApps` from trusted manifest URLs - the exact "a relay always loads
  * its own local apps, and optionally loads additional ones from remote
- * manifest URLs" shape `@qu/loader`'s own doc comment describes. Shell
- * serving (`/`, PWA files) is still not wired - no `apps/shell` exists in
- * V3 yet (see `http-router.js`'s own doc comment for the one route this
- * still omits).
+ * manifest URLs" shape `@qu/loader`'s own doc comment describes. `apps/shell`
+ * is served separately from that pipeline (`serveShell`/`shellDir` options,
+ * see `static-shell.js`) - it's a fixed, always-known special case (the one
+ * page that boots itself, not a loaded/mountable app with a manifest), not
+ * discovered/loaded through `@qu/loader` at all. PWA/service-worker/offline
+ * update flow is NOT part of that - see `apps/shell`'s own doc comment for
+ * what's deliberately deferred.
  */
+const log = createLogger('QuRelay');
+
 export class QuRelay {
   /**
    * @param {object} [options]
@@ -56,6 +62,11 @@ export class QuRelay {
    *   `QuLoader.loadLocal()`) and served back out over HTTP (see
    *   `static-apps.js`) for other relays to consume.
    * @param {number} [options.port=8080]
+   * @param {boolean} [options.serveShell=true] - Serve `apps/shell` (see
+   *   `static-shell.js`) at `/`, `/index.html`, `/shell-bundle.js`. `false`
+   *   disables it (e.g. a relay meant purely as a headless sync peer, or a
+   *   deployment fronting its own separately-hosted shell).
+   * @param {string} [options.shellDir='./apps/shell']
    * @param {string} [options.identityMnemonic] - Pin the relay's own operational identity
    *   across restarts. Without it, a fresh one is generated on first boot and then reused.
    * @param {string[]} [options.adminPubs=[]] - base64url actor pubkeys treated as relay admins.
@@ -77,6 +88,8 @@ export class QuRelay {
       blobDir: './relay-data/blob',
       appsDir: './apps',
       port: 8080,
+      serveShell: true,
+      shellDir: './apps/shell',
       adminPubs: [],
       vapidSubject: 'mailto:admin@example.com',
       resolveNotification: null,
@@ -134,7 +147,13 @@ export class QuRelay {
 
     this.runtime.register('presence', () => new PresenceTracker());
     this.runtime.register('adminHttp', () => new AdminHttp(this.qu, { adminPubs: this.options.adminPubs, storeDir: this.options.storeDir, blobDir: this.options.blobDir, identity: this.identity, loader: this.loader }, this._state));
-    this.runtime.register('httpRouter', (rt) => new HttpRouter(this.qu, rt.resolve('adminHttp'), this.loader, { adminPubs: this.options.adminPubs, appsDir: this.options.appsDir, state: this._state }));
+    this.runtime.register('httpRouter', (rt) => new HttpRouter(this.qu, rt.resolve('adminHttp'), this.loader, {
+      adminPubs: this.options.adminPubs,
+      appsDir: this.options.appsDir,
+      serveShell: this.options.serveShell,
+      shellDir: this.options.shellDir,
+      state: this._state,
+    }));
     this.runtime.register('pushDelivery', (rt) => new PushDeliveryService({
       messages: this.messages,
       notificationPrefs: this.notificationPrefs,
@@ -175,10 +194,16 @@ export class QuRelay {
   }
 
   async #bootInner() {
+    // Captured only on the branch that actually calls generateMnemonic() -
+    // `null` on every other boot (pinned via options, or already persisted
+    // from a previous boot) - what gates the one-time log below. A restart
+    // that just reuses an already-persisted identity must stay silent here.
+    let freshMnemonic = null;
     if (this.options.identityMnemonic) {
       await this.identity.importMnemonic(this.options.identityMnemonic);
     } else if (!(await this.identity.hasIdentity())) {
-      await this.identity.importMnemonic(this.identity.generateMnemonic());
+      freshMnemonic = this.identity.generateMnemonic();
+      await this.identity.importMnemonic(freshMnemonic);
     }
 
     // A published profile is what makes this identity's X25519 key
@@ -196,6 +221,24 @@ export class QuRelay {
     // apps-catalog-store.js's own doc comment for the full reasoning).
     this._state.relayPub = ownPub;
 
+    // A freshly generated identity already persists in `storeDir` (see
+    // constructor) for as long as that volume survives - this log is an
+    // ESCAPE HATCH, not a requirement: the ONLY way to recover this exact
+    // identity if the volume is ever lost, and the only way to give every
+    // replica in a multi-instance/ephemeral deployment (no shared volume)
+    // the SAME identity instead of each generating its own independently.
+    // Fires exactly once, on the boot that generated it - never on a
+    // restart that reuses an already-persisted or explicitly pinned one.
+    if (freshMnemonic) {
+      log.warn(
+        'generated a NEW relay identity (no QU_IDENTITY_MNEMONIC set, none persisted yet).',
+        'This is the ONLY time this mnemonic is shown - copy it now if you want to pin this identity',
+        '(backup, or a multi-replica/ephemeral deployment where every instance must share one identity):'
+      );
+      log.warn(`  QU_IDENTITY_MNEMONIC="${freshMnemonic}"`);
+      log.warn(`  (relay pubkey: ${ownPub})`);
+    }
+
     // Resolved BEFORE `pushDelivery` is ever resolved - see that module's
     // registration above, which captures `this._state.vapidKeys` at
     // resolve() time. RuntimeContainer factories run at most once, so this
@@ -207,6 +250,14 @@ export class QuRelay {
       privateKey: this.options.vapidPrivateKey,
       subject: this.options.vapidSubject,
     });
+    // Same one-time, copy-pasteable escape hatch as the identity mnemonic
+    // above - `setupVapidKeys()`'s own `generated` flag is exactly "did
+    // generateVapidKeys() run THIS boot", never true again once persisted.
+    if (this._state.vapidKeys.generated) {
+      log.warn('generated new VAPID keys (no QU_VAPID_PUBLIC_KEY/QU_VAPID_PRIVATE_KEY set). To pin them (backup, multi-replica):');
+      log.warn(`  QU_VAPID_PUBLIC_KEY="${this._state.vapidKeys.publicKey}"`);
+      log.warn(`  QU_VAPID_PRIVATE_KEY="${this._state.vapidKeys.privateKey}"`);
+    }
 
     const httpRouter = this.runtime.resolve('httpRouter');
     this._httpServer = createServer((req, res) => httpRouter.handle(req, res));
@@ -236,7 +287,7 @@ export class QuRelay {
       if (!match) return;
       const [, spaceId, threadId] = match;
       pushDelivery.deliverThreadMessage(spaceId, threadId, quBit).catch((err) => {
-        console.error(`[QuRelay] push delivery failed for ${path}:`, err);
+        log.error(`push delivery failed for ${path}:`, err);
       });
     });
 
@@ -259,8 +310,8 @@ export class QuRelay {
     // the rate limit - `disabledApps` can't have changed mid-boot.
     await publishAppsCatalog(this.qu, this.identity, this.loader, settings);
 
-    console.log(`[QuRelay] listening on http://localhost:${this.port} (peer ${this.transport.getPeerId()})`);
-    console.log(`[QuRelay] loaded apps: ${this.loader.listLoaded().join(', ') || '(none)'}`);
+    log.info(`listening on http://localhost:${this.port} (peer ${this.transport.getPeerId()})`);
+    log.info(`loaded apps: ${this.loader.listLoaded().join(', ') || '(none)'}`);
     return this;
   }
 

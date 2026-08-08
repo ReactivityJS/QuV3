@@ -16,19 +16,24 @@ const VAPID_PATH = '/store/secure/push/vapid';
  *   `subject` (default 'mailto:admin@example.com') is required by every
  *   push service (RFC 8292) so they have someone to contact about abuse -
  *   override this for a real deployment.
- * @returns {Promise<{publicKey: string, privateKey: string, subject: string}>}
+ * @returns {Promise<{publicKey: string, privateKey: string, subject: string, generated: boolean}>}
+ *   `generated`: true only on the call where `generateVapidKeys()` actually
+ *   ran (neither pinned via options nor already persisted) - what
+ *   `relay.js#bootInner()` checks before logging the fresh keys once (see
+ *   its own comment) so restarts that just reload the persisted pair stay
+ *   silent.
  */
 export async function setupVapidKeys(qu, { publicKey, privateKey, subject = 'mailto:admin@example.com' } = {}) {
   if (publicKey && privateKey) {
-    return { publicKey, privateKey, subject };
+    return { publicKey, privateKey, subject, generated: false };
   }
   const stored = await qu.get(VAPID_PATH);
   if (stored?.val) {
-    return { ...stored.val, subject };
+    return { ...stored.val, subject, generated: false };
   }
-  const generated = generateVapidKeys();
-  await qu.put(VAPID_PATH, generated);
-  return { ...generated, subject };
+  const freshKeys = generateVapidKeys();
+  await qu.put(VAPID_PATH, freshKeys);
+  return { ...freshKeys, subject, generated: true };
 }
 
 export { VAPID_PATH };

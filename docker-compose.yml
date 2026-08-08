@@ -15,6 +15,13 @@ services:
       # until you set this to your own identity's pubkey (see the
       # README's "Running Quniverse" section for how to get one).
       QU_ADMIN_PUBS: ""
+      # QU_LOG_LEVEL: "debug"   # debug/info(default)/warn/error - every @qu/log
+      #                          # logger process-wide (see packages/log). Useful
+      #                          # while debugging a fresh setup; noisy for normal
+      #                          # operation, hence commented out by default.
+      # QU_SERVE_SHELL: "0"    # apps/shell (the browser UI) is served at "/" by
+      #                         # default - set to "0"/"false"/"no" to disable it
+      #                         # (e.g. a headless sync-only relay).
       # QU_APPS_DIR defaults to ./apps (baked into the image) - override
       # only if you bind-mount a different apps/ directory, see below.
       # QU_IDENTITY_MNEMONIC: "<24 words>"   # pin the relay's own identity explicitly;

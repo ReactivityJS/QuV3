@@ -56,6 +56,19 @@ function makeContainer() {
   return el;
 }
 
+test('passes a given syncFetch through to <qu-list>, called with the directory\'s parent path', async () => {
+  const { qu, services } = await freshEnv();
+  const calls = [];
+  const syncFetch = (prefix) => { calls.push(prefix); return Promise.resolve(); };
+
+  const container = makeContainer();
+  mount(container, { qu, services, subscribe: noopSubscribe, syncFetch });
+  await new Promise((resolve) => setTimeout(resolve, 60));
+
+  assert.ok(calls.length >= 1);
+  assert.ok(calls.every((c) => c === paths.directoryEntriesParentPath()));
+});
+
 test('renders every visible directory entry except the viewer\'s own', async () => {
   const { qu, identity, services } = await freshEnv();
   await services.directory.setVisible(true, {}); // the viewer opts in too...

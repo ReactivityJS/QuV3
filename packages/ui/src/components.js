@@ -90,12 +90,36 @@
  * up next line" ordering before giving up for real.
  */
 import { watch, watchChildren } from '@qu/reactive';
+import { createLogger } from '@qu/log';
+
+const log = createLogger('qu-ui');
 
 /** Exported so other browser-only Qu-Components can reuse the same "walk up for `.qu`" resolution. */
 export function findQu(el) {
   let node = el;
   while (node) {
     if (node.qu) return node.qu;
+    node = node.parentNode || node.host || null;
+  }
+  return null;
+}
+
+/**
+ * Same walk as `findQu()`, for `.syncFetch` - kept as a SEPARATE property
+ * (not bundled onto the `qu` object itself) so a container can be given a
+ * real `qu` plus a real backfill function independently, and so `<qu-list>`
+ * can resolve it BEFORE it mounts by reading it off an ancestor set ahead
+ * of time (`container.qu = qu; container.syncFetch = (p) => sync.fetchPrefix(p);`
+ * - same "set both before inserting/connecting" discipline as `.qu` alone
+ * already requires), rather than needing it set as a property on the
+ * `<qu-list>` element itself AFTER insertion, which would already be too
+ * late (`watch()`/`watchChildren()`'s own `syncFetch` fires synchronously,
+ * the moment `_mount()` calls them - see `<qu-list>`'s own doc comment).
+ */
+export function findSyncFetch(el) {
+  let node = el;
+  while (node) {
+    if (node.syncFetch) return node.syncFetch;
     node = node.parentNode || node.host || null;
   }
   return null;
@@ -135,7 +159,7 @@ function resolvePath(el, context) {
   if (relatedAttr !== null) {
     const related = context.relatedPaths?.[relatedAttr];
     if (!related) {
-      console.error(`[${el.tagName.toLowerCase()}] related="${relatedAttr}" not found on the current .qu context's relatedPaths`, el);
+      log.error(`${el.tagName.toLowerCase()}: related="${relatedAttr}" not found on the current .qu context's relatedPaths`, el);
       return null;
     }
     return related;
@@ -143,7 +167,7 @@ function resolvePath(el, context) {
   const pathAttr = el.getAttribute('path');
   const path = pathAttr !== null ? pathAttr : context.ownPath;
   if (!path) {
-    console.error(`[${el.tagName.toLowerCase()}] missing "path"/"related" attribute (and the current .qu context has no implicit path to fall back to)`, el);
+    log.error(`${el.tagName.toLowerCase()}: missing "path"/"related" attribute (and the current .qu context has no implicit path to fall back to)`, el);
     return null;
   }
   return path;
@@ -175,7 +199,7 @@ export class QuViewElement extends HTMLElement {
     const context = findQu(this);
     if (!context) {
       if (!isRetry) queueMicrotask(() => { if (this.isConnected && !this._off) this._mount(true); });
-      else console.error(`[${this.tagName.toLowerCase()}] no Qu instance found - set .qu on this element or an ancestor`, this);
+      else log.error(`${this.tagName.toLowerCase()}: no Qu instance found - set .qu on this element or an ancestor`, this);
       return;
     }
     const path = resolvePath(this, context);
@@ -289,6 +313,23 @@ class ItemContext {
  * `_render()` below for what it's for and why it exists alongside
  * `relatedPaths` instead of trying to express everything as paths.
  *
+ * `.syncFetch` - an optional function, resolved via the SAME ancestor-walk
+ * as `.qu` (`findSyncFetch()`, mirroring `findQu()`) rather than a property
+ * on the `<qu-list>` element itself, and passed straight through as
+ * `watch()`/`watchChildren()`'s own `syncFetch` option (see either's doc
+ * comment in `@qu/reactive`): `container.qu = qu; container.syncFetch =
+ * (prefix) => sync.fetchPrefix(prefix);` on the SAME container a `<qu-list
+ * parent="...">` is about to be inserted into. Without this, a fresh client
+ * only ever sees whatever's already LOCAL (disk/IndexedDB) plus whatever a
+ * broad `subscribe()` happens to push AFTER this list mounted - data a peer
+ * wrote before this session ever connected sits invisible until something
+ * unrelated triggers a re-read. Must be set BEFORE the list connects (same
+ * as `.qu`) - `watch()`/`watchChildren()` invoke `syncFetch` synchronously,
+ * the moment `_mount()` calls them, too early for a property set on the
+ * `<qu-list>` element itself AFTER an `innerHTML` assignment already
+ * connected it to pick up (unlike `.relatedPaths`/`.onItemStamped`, which
+ * are read later, at per-item stamp time).
+ *
  * Keyed by each item's own `path`: re-renders reuse the SAME cloned
  * elements across changes (tracked in `this._renderedByPath`), only
  * removing entries that dropped out and only reordering when position
@@ -315,19 +356,20 @@ export class QuListElement extends HTMLElement {
     const context = findQu(this);
     if (!context) {
       if (!isRetry) queueMicrotask(() => { if (this.isConnected && !this._off) this._mount(true); });
-      else console.error('[qu-list] no Qu instance found - set .qu on this element or an ancestor', this);
+      else log.error('qu-list: no Qu instance found - set .qu on this element or an ancestor', this);
       return;
     }
     const path = this.getAttribute('path');
     const parent = this.getAttribute('parent');
-    if (!path && !parent) { console.error('[qu-list] missing required "path" or "parent" attribute', this); return; }
+    if (!path && !parent) { log.error('qu-list: missing required "path" or "parent" attribute', this); return; }
     const template = this.querySelector('template');
-    if (!template) { console.error('[qu-list] missing a <template> child to stamp per item', this); return; }
+    if (!template) { log.error('qu-list: missing a <template> child to stamp per item', this); return; }
 
+    const syncFetch = findSyncFetch(this);
     this._renderedByPath = new Map();
     this._off = path
-      ? watch(context, path, (items) => this._render(items ?? [], context, template))
-      : watchChildren(context, parent, (entries) => this._render(entries, context, template));
+      ? watch(context, path, (items) => this._render(items ?? [], context, template), { syncFetch })
+      : watchChildren(context, parent, (entries) => this._render(entries, context, template), { syncFetch });
   }
 
   _render(items, qu, template) {
@@ -452,7 +494,7 @@ export class QuIfElement extends HTMLElement {
     const context = findQu(this);
     if (!context) {
       if (!isRetry) queueMicrotask(() => { if (this.isConnected && !this._off) this._mount(true); });
-      else console.error('[qu-if] no Qu instance found - set .qu on this element or an ancestor', this);
+      else log.error('qu-if: no Qu instance found - set .qu on this element or an ancestor', this);
       return;
     }
     const path = resolvePath(this, context);

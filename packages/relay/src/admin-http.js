@@ -1,8 +1,11 @@
 import { readdir } from 'node:fs/promises';
 import { relative, sep } from 'node:path';
 import { QuCrypto } from '@qu/core';
+import { createLogger } from '@qu/log';
 import { saveSettings } from './relay-settings.js';
 import { publishAppsCatalog } from './apps-catalog-store.js';
+
+const log = createLogger('AdminHttp');
 
 /**
  * ADMIN HTTP — the relay's privileged, signature-gated HTTP surface:
@@ -80,6 +83,7 @@ export class AdminHttp {
    */
   async #verifyAdmin(res, actorPub, signature, signedPayload) {
     if (!this.adminPubs.includes(actorPub)) {
+      log.warn(`rejected: ~${String(actorPub).slice(0, 10)}… is not a configured relay admin`);
       res.writeHead(403, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'not a configured relay admin' }));
       return false;
     }
@@ -94,6 +98,7 @@ export class AdminHttp {
       verified = false; // malformed base64/signature - treat exactly like "did not verify"
     }
     if (!verified) {
+      log.warn(`rejected: signature from ~${actorPub.slice(0, 10)}… does not verify`);
       res.writeHead(403, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'signature does not verify' }));
       return false;
     }
@@ -124,6 +129,7 @@ export class AdminHttp {
     // to, no relay restart needed (see apps-catalog-store.js's own doc comment).
     if (settings.disabledApps) await publishAppsCatalog(this.qu, this.identity, this.loader, merged);
 
+    log.info(`settings updated by ~${actorPub.slice(0, 10)}…:`, Object.keys(settings).join(', '));
     res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(merged));
   }
 
@@ -225,6 +231,7 @@ export class AdminHttp {
       }
     }
 
+    log.info(`data import by ~${actorPub.slice(0, 10)}…: ${imported} imported, ${skipped} skipped, ${entries.length} total`);
     res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ imported, skipped, total: entries.length }));
   }
 }

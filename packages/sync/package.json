@@ -10,7 +10,8 @@
   },
   "dependencies": {
     "@qu/core": "^0.1.0",
-    "@qu/engines": "^0.1.0"
+    "@qu/engines": "^0.1.0",
+    "@qu/log": "^0.1.0"
   },
   "license": "MIT"
 }

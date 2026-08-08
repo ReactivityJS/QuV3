@@ -1,17 +1,19 @@
+import { createLogger } from '@qu/log';
+
 import { getSettings } from './relay-settings.js';
 import { buildAppsCatalog } from './apps-catalog.js';
 import { serveApps } from './static-apps.js';
+import { serveShell } from './static-shell.js';
+
+const log = createLogger('HttpRouter');
 
 /**
  * HTTP ROUTER — the relay's PUBLIC HTTP surface (liveness, public config,
- * VAPID public key, the apps catalog + static app serving) plus dispatch
- * into `AdminHttp`'s privileged routes. Split out of the relay's own
- * composition root for the same one-cross-cutting-concern-per-file reason
- * `admin-http.js`'s own doc comment states (docs/v3-technical-concept.md §2.1).
- *
- * DELIBERATELY STILL NOT WIRED HERE: shell serving (`/`, `/shell-bundle.js`,
- * PWA files) - needs a real `apps/shell` to serve, which doesn't exist in
- * V3 yet. `handle()` falls through to a plain 404 for those paths today.
+ * VAPID public key, the apps catalog + static app/shell serving) plus
+ * dispatch into `AdminHttp`'s privileged routes. Split out of the relay's
+ * own composition root for the same one-cross-cutting-concern-per-file
+ * reason `admin-http.js`'s own doc comment states
+ * (docs/v3-technical-concept.md §2.1).
  */
 export class HttpRouter {
   /**
@@ -22,7 +24,7 @@ export class HttpRouter {
    *   fresh on every request via `loader.listManifests()`, so apps loaded
    *   partway through `boot()` (see `relay.js`) show up the moment they're
    *   actually loaded, not just after `boot()` fully completes.
-   * @param {{adminPubs: string[], appsDir: string, state: {transport: object|null, vapidKeys: {publicKey: string}|null}}} options -
+   * @param {{adminPubs: string[], appsDir: string, serveShell: boolean, shellDir: string, state: {transport: object|null, vapidKeys: {publicKey: string}|null}}} options -
    *   `state` is a mutable, shared reference the caller keeps populating as
    *   the relay boots (`transport`/`vapidKeys` aren't known until partway
    *   through `boot()` - see `relay.js`) - read fresh on every request
@@ -31,12 +33,14 @@ export class HttpRouter {
    *   (`/healthz`'s own `peerId` field, `/push/vapid-public-key`'s
    *   `publicKey` field) instead of a stale/undefined value.
    */
-  constructor(qu, adminHttp, loader, { adminPubs, appsDir, state }) {
+  constructor(qu, adminHttp, loader, { adminPubs, appsDir, serveShell: serveShellOption, shellDir, state }) {
     this.qu = qu;
     this.adminHttp = adminHttp;
     this.loader = loader;
     this.adminPubs = adminPubs;
     this.appsDir = appsDir;
+    this.serveShellOption = serveShellOption;
+    this.shellDir = shellDir;
     this.state = state;
   }
 
@@ -110,17 +114,19 @@ export class HttpRouter {
       }
 
       // So OTHER relays can load the apps THIS one hosts (see
-      // static-apps.js's own doc comment) - checked last, right before the
-      // final 404 fallback, same position this had in the prototype this is
-      // rebuilt from (right before shell serving, which still isn't wired here).
+      // static-apps.js's own doc comment).
       if (await serveApps(req, res, this.appsDir)) return;
+
+      // `apps/shell` - checked last, right before the final 404 fallback,
+      // same position this had in the prototype this is rebuilt from.
+      if (this.serveShellOption && (await serveShell(req, res, this.shellDir))) return;
 
       res.writeHead(404).end('Not Found');
     } catch (err) {
       if (err.code === 'ENOENT') {
         res.writeHead(404).end('Not Found');
       } else {
-        console.error('[HttpRouter] handler error:', err);
+        log.error('handler error:', err);
         res.writeHead(500).end('Internal Server Error');
       }
     }

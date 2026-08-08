@@ -12,7 +12,7 @@ function freshQu() {
 test('explicit publicKey+privateKey options win, without touching storage', async () => {
   const qu = freshQu();
   const keys = await setupVapidKeys(qu, { publicKey: 'pinned-pub', privateKey: 'pinned-priv' });
-  assert.deepEqual(keys, { publicKey: 'pinned-pub', privateKey: 'pinned-priv', subject: 'mailto:admin@example.com' });
+  assert.deepEqual(keys, { publicKey: 'pinned-pub', privateKey: 'pinned-priv', subject: 'mailto:admin@example.com', generated: false });
   assert.equal(await qu.get(VAPID_PATH), null);
 });
 
@@ -21,6 +21,7 @@ test('with neither option given, a fresh keypair is generated and persisted on f
   const keys = await setupVapidKeys(qu);
   assert.ok(keys.publicKey);
   assert.ok(keys.privateKey);
+  assert.equal(keys.generated, true);
   assert.ok(await qu.get(VAPID_PATH));
 });
 
@@ -30,6 +31,8 @@ test('a second call reuses the SAME persisted keypair, not a freshly generated o
   const second = await setupVapidKeys(qu);
   assert.equal(first.publicKey, second.publicKey);
   assert.equal(first.privateKey, second.privateKey);
+  assert.equal(first.generated, true);
+  assert.equal(second.generated, false);
 });
 
 test('custom subject is applied even to an auto-generated keypair', async () => {

@@ -12,7 +12,7 @@ function fakeLoader(manifests = []) {
   return { listManifests: () => manifests.map((manifest) => ({ manifest, originUrl: null })) };
 }
 
-async function freshEnv({ manifests = [] } = {}) {
+async function freshEnv({ manifests = [], serveShell = false, shellDir = null } = {}) {
   const appsDir = await mkdtemp(join(tmpdir(), 'qu-http-router-apps-'));
   const qu = new QuStore();
   qu.mount('store', new MemoryStoreAdapter());
@@ -26,7 +26,7 @@ async function freshEnv({ manifests = [] } = {}) {
     handleDataImport(req, res) { this.dataImportCalls++; res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}'); },
   };
   const loader = fakeLoader(manifests);
-  const router = new HttpRouter(qu, adminHttp, loader, { adminPubs: ['admin-pub-1'], appsDir, state });
+  const router = new HttpRouter(qu, adminHttp, loader, { adminPubs: ['admin-pub-1'], appsDir, serveShell, shellDir, state });
 
   const httpServer = createServer((req, res) => router.handle(req, res));
   await new Promise((resolve) => httpServer.listen(0, resolve));
@@ -274,8 +274,82 @@ test('an unrecognized route returns 404', async () => {
   }
 });
 
-test('the root path is not served (no shell in this milestone)', async () => {
+test('the root path 404s when serveShell is off (the default)', async () => {
   const env = await freshEnv();
+  try {
+    const res = await fetch(`http://localhost:${env.port}/`);
+    assert.equal(res.status, 404);
+  } finally {
+    await env.teardown();
+  }
+});
+
+// ===== apps/shell serving ==============================================================
+
+async function freshEnvWithShell(files = { 'index.html': '<html>shell</html>' }) {
+  const shellDir = await mkdtemp(join(tmpdir(), 'qu-http-router-shell-'));
+  for (const [name, contents] of Object.entries(files)) {
+    await mkdir(join(shellDir, name, '..'), { recursive: true });
+    await writeFile(join(shellDir, name), contents);
+  }
+  const env = await freshEnv({ serveShell: true, shellDir });
+  const originalTeardown = env.teardown;
+  env.teardown = async () => {
+    await originalTeardown();
+    await rm(shellDir, { recursive: true, force: true });
+  };
+  return env;
+}
+
+test('GET / serves apps/shell\'s index.html when serveShell is on', async () => {
+  const env = await freshEnvWithShell();
+  try {
+    const res = await fetch(`http://localhost:${env.port}/`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-type'), 'text/html');
+    assert.equal(await res.text(), '<html>shell</html>');
+  } finally {
+    await env.teardown();
+  }
+});
+
+test('GET /index.html serves the same file as GET /', async () => {
+  const env = await freshEnvWithShell();
+  try {
+    const res = await fetch(`http://localhost:${env.port}/index.html`);
+    assert.equal(await res.text(), '<html>shell</html>');
+  } finally {
+    await env.teardown();
+  }
+});
+
+test('GET /shell-bundle.js serves the built bundle with the right content-type', async () => {
+  const env = await freshEnvWithShell({
+    'index.html': '<html>shell</html>',
+    'dist/shell-bundle.js': 'console.log("shell");',
+  });
+  try {
+    const res = await fetch(`http://localhost:${env.port}/shell-bundle.js`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-type'), 'text/javascript');
+    assert.equal(await res.text(), 'console.log("shell");');
+  } finally {
+    await env.teardown();
+  }
+});
+
+test('a route not among the shell\'s fixed files still falls through to 404, even with serveShell on', async () => {
+  const env = await freshEnvWithShell();
+  try {
+    const res = await fetch(`http://localhost:${env.port}/some-random-path`);
+    assert.equal(res.status, 404);
+  } finally {
+    await env.teardown();
+  }
+});
+
+test('serveShell: true with a missing shellDir file 404s rather than throwing', async () => {
+  const env = await freshEnvWithShell({}); // no index.html written
   try {
     const res = await fetch(`http://localhost:${env.port}/`);
     assert.equal(res.status, 404);

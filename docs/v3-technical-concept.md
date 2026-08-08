@@ -293,6 +293,17 @@ surface" this document's own principles warn against (the same reasoning `regist
 already states for why `registerCapability()` isn't ported until it has a real caller).
 It returns once `@qu/relay` or a first `apps/shell` exists to actually need it.
 
+**Update — `apps/shell` built**: its own scoped-down version of this idea
+(`apps/shell/src/services.js`'s `createClientServices()`) landed LOCAL to that app, not
+promoted into this package — still only one real caller (`apps/demo` doesn't exist in V3),
+so the "comes back once a SECOND caller needs it" bar from this section's own reasoning
+still hasn't been cleared. See the README's own status entry for the full account,
+including two real backfill gaps a genuine two-process (browser + relay) check caught
+that no earlier in-process test had ever exercised: `<qu-list>` never threaded a
+`syncFetch` through to `watch()`/`watchChildren()`, and `ListService`/`ProfileService`'s
+own already-designed `syncFetch` constructor parameters were never actually wired to a
+real `SyncEngine` before now.
+
 ### 2.2 Registry — kept, `registerCapability` gets a real caller or gets cut
 
 `packages/foundation/src/registry.js` (engine/service lookup + capability registration +

@@ -1,5 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { Transport } from '@qu/sync';
+import { createLogger } from '@qu/log';
+
+const log = createLogger('WebSocketServerTransport');
 
 /**
  * WEBSOCKET SERVER TRANSPORT — the server side of `@qu/sync`'s `Transport`
@@ -39,6 +42,7 @@ export class WebSocketServerTransport extends Transport {
     this.wss.on('connection', (ws) => {
       const peerId = `peer-${randomUUID()}`;
       this.#peers.set(peerId, ws);
+      log.debug(`${peerId} connected (${this.#peers.size} total)`);
 
       ws.on('message', (raw) => {
         if (this.#isRateLimited(peerId)) return; // silently dropped - a misbehaving/abusive peer gets no signal to adapt to, an honest one self-throttles from normal usage patterns anyway
@@ -46,7 +50,7 @@ export class WebSocketServerTransport extends Transport {
         try {
           data = JSON.parse(raw.toString());
         } catch {
-          console.warn(`[WebSocketServerTransport] dropping malformed message from ${peerId}`);
+          log.warn(`dropping malformed message from ${peerId}`);
           return;
         }
         for (const cb of this.#callbacks) cb({ data, peerId });
@@ -55,6 +59,7 @@ export class WebSocketServerTransport extends Transport {
       ws.on('close', () => {
         this.#peers.delete(peerId);
         this.#messageCounts.delete(peerId);
+        log.debug(`${peerId} disconnected (${this.#peers.size} remaining)`);
       });
     });
   }

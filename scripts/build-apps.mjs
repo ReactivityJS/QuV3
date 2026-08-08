@@ -19,13 +19,20 @@
  * `packages/*` is remote-loaded yet, so there is nothing there to bundle
  * ahead of a real caller. Grows into that once `@qu/loader`'s `loadRemote()`
  * needs a self-contained `dist/index.min.js` per package for real.
+ *
+ * `apps/shell` also gets bundled here, UNCONDITIONALLY (no `manifest.quapp`
+ * gate - it has none, see `apps/shell/client.js`'s own doc comment for why
+ * it isn't a `@qu/loader`-discovered app at all) into
+ * `apps/shell/dist/shell-bundle.js` - the fixed name `@qu/relay`'s
+ * `static-shell.js` serves at `/shell-bundle.js`.
  */
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, access } from 'node:fs/promises';
 import { join } from 'node:path';
 import esbuild from 'esbuild';
 
 const ROOT = new URL('..', import.meta.url).pathname;
 const APPS_DIR = join(ROOT, 'apps');
+const SHELL_DIR = join(APPS_DIR, 'shell');
 
 /**
  * `manifest.quapp`'s own `clientMain` field is the SERVED path (e.g.
@@ -60,9 +67,9 @@ async function findClientApps() {
   return apps;
 }
 
-async function buildApp({ name, dir }) {
+async function buildApp({ name, dir }, outname = 'client.js') {
   const entry = join(dir, 'client.js');
-  const outfile = join(dir, 'dist', 'client.js');
+  const outfile = join(dir, 'dist', outname);
   await esbuild.build({
     entryPoints: [entry],
     outfile,
@@ -77,10 +84,25 @@ async function buildApp({ name, dir }) {
   console.log(`  ${name} -> ${outfile.replace(ROOT, '')}`);
 }
 
+async function shellExists() {
+  try {
+    await access(join(SHELL_DIR, 'client.js'));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 console.log('Building apps...');
 const apps = await findClientApps();
 if (apps.length === 0) {
   console.log('  (no app under apps/* declares a clientMain yet)');
 } else {
   for (const app of apps) await buildApp(app);
+}
+
+if (await shellExists()) {
+  await buildApp({ name: 'shell', dir: SHELL_DIR }, 'shell-bundle.js');
+} else {
+  console.log('  (no apps/shell/client.js yet - nothing to bundle)');
 }

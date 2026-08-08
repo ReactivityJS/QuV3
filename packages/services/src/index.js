@@ -7,8 +7,10 @@
  * crypto-envelope, thread-formatting, link-detect, the `ThreadService`
  * decomposition (§4.3): MessageService (+ THREAD_PRESETS), ReactionService,
  * PinService, PresenceService, NotificationPrefsService,
- * PushSubscriptionService, ProfileService, DirectoryService, and
- * actor-format's formatActorLabel/matchesActorQuery. See each file's own
+ * PushSubscriptionService, ProfileService, DirectoryService,
+ * actor-format's formatActorLabel/matchesActorQuery, and
+ * createTrustedCatalogStore (the signer-filtered `/store/apps/catalog`
+ * facade shared by `apps/app-list` and `apps/shell`). See each file's own
  * doc comment.
  */
 export * as paths from './paths.js';
@@ -33,3 +35,4 @@ export { ProfileService } from './profile-service.js';
 export { DirectoryService } from './directory-service.js';
 export { formatActorLabel, matchesActorQuery } from './actor-format.js';
 export { ActorService } from './actor-service.js';
+export { createTrustedCatalogStore } from './apps-catalog-store.js';

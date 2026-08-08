@@ -85,6 +85,35 @@ test('the relay establishes and persists its own operational identity across a r
   }
 });
 
+test('a freshly generated identity AND freshly generated VAPID keys are logged once, in copy-pasteable QU_* form - a reboot reusing them stays silent', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'qu-relay-'));
+  const originalWarn = console.warn;
+  const calls = [];
+  console.warn = (...args) => calls.push(args.join(' '));
+  try {
+    const first = await new QuRelay({ storeDir: join(base, 'store'), blobDir: join(base, 'blob'), appsDir: join(base, 'apps'), port: 0 }).boot();
+    const firstPub = QuCrypto.toBase64Url((await first.identity.getMainKey()).publicKey);
+    await first.close();
+
+    const firstBootLog = calls.join('\n');
+    assert.match(firstBootLog, /generated a NEW relay identity/);
+    assert.match(firstBootLog, /QU_IDENTITY_MNEMONIC="[a-z]+( [a-z]+){23}"/);
+    assert.match(firstBootLog, new RegExp(`relay pubkey: ${firstPub}`));
+    assert.match(firstBootLog, /generated new VAPID keys/);
+    assert.match(firstBootLog, /QU_VAPID_PUBLIC_KEY="[^"]+"/);
+    assert.match(firstBootLog, /QU_VAPID_PRIVATE_KEY="[^"]+"/);
+
+    calls.length = 0;
+    const second = await new QuRelay({ storeDir: join(base, 'store'), blobDir: join(base, 'blob'), appsDir: join(base, 'apps'), port: 0 }).boot();
+    await second.close();
+
+    assert.equal(calls.length, 0);
+  } finally {
+    console.warn = originalWarn;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
 test('identityMnemonic pins the relay\'s identity explicitly, independent of stored state', async () => {
   const base = await mkdtemp(join(tmpdir(), 'qu-relay-'));
   try {

@@ -347,6 +347,40 @@ test('<qu-list parent="..."> removes an element when its child is later tombston
   assert.equal(container.querySelectorAll('li').length, 0);
 });
 
+// ===== .syncFetch =============================================================
+
+test('<qu-list parent="..."> calls .syncFetch (resolved from an ancestor, like .qu) with the parent path on mount', async () => {
+  const qu = fakeQu({ '/list/a': { title: 'Alpha' } });
+  const container = makeContainer(qu);
+  const calls = [];
+  container.syncFetch = (prefix) => { calls.push(prefix); return Promise.resolve(); };
+  container.innerHTML = '<qu-list parent="/list"><template><li></li></template></qu-list>';
+  await flush();
+  // Called twice, not once - same "parsed from markup with an attribute
+  // already present" double-mount documented on the "<qu-list> missing a
+  // <template>" test above (connectedCallback() AND attributeChangedCallback()
+  // both fire _mount() for a `parent` attribute already present at parse time).
+  assert.deepEqual(calls, ['/list', '/list']);
+});
+
+test('<qu-list path="..."> calls .syncFetch with the exact path on mount', async () => {
+  const qu = fakeQu({ '/doc': [{ title: 'Alpha' }] });
+  const container = makeContainer(qu);
+  const calls = [];
+  container.syncFetch = (path) => { calls.push(path); return Promise.resolve(); };
+  container.innerHTML = '<qu-list path="/doc"><template><li></li></template></qu-list>';
+  await flush();
+  assert.deepEqual(calls, ['/doc', '/doc']); // same double-mount as the parent-mode test above
+});
+
+test('without .syncFetch set anywhere in the ancestor chain, <qu-list> still renders normally from local data', async () => {
+  const qu = fakeQu({ '/list/a': { title: 'Alpha' } });
+  const container = makeContainer(qu); // no .syncFetch set
+  container.innerHTML = '<qu-list parent="/list"><template><li><qu-view field="title"></qu-view></li></template></qu-list>';
+  await flush();
+  assert.equal(container.querySelector('li').textContent, 'Alpha');
+});
+
 // ===== .relatedPaths / related="..." =========================================
 
 test('.relatedPaths resolves a named path from the item\'s own id, readable via related="name"', async () => {

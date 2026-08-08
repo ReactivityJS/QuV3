@@ -1,7 +1,7 @@
 {
   "name": "@qu/relay",
   "version": "0.1.0",
-  "description": "A Node.js Qu peer: persists to disk (FsAdapter, both /store and /blob), syncs with other peers over WebSocket (@qu/sync), delivers Web Push notifications for thread messages, and loads/serves Engines, Services and Apps via @qu/loader (local auto-discovery + dependency-ordered load at boot, optional integrity-checked remote apps, an apps.json catalog, and static app serving so other relays can load what this one hosts). Built on @qu/foundation's RuntimeContainer from day one (docs/v3-technical-concept.md §2.1) instead of one growing composition-root class - PresenceTracker, RelaySettings, VapidKeyStore, PushDeliveryService, AdminHttp and HttpRouter are each independently testable modules. Deliberately does NOT yet serve a shell (needs a real apps/shell, not built in V3 yet) - see http-router.js's own doc comment.",
+  "description": "A Node.js Qu peer: persists to disk (FsAdapter, both /store and /blob), syncs with other peers over WebSocket (@qu/sync), delivers Web Push notifications for thread messages, loads/serves Engines, Services and Apps via @qu/loader (local auto-discovery + dependency-ordered load at boot, optional integrity-checked remote apps, an apps.json catalog, and static app serving so other relays can load what this one hosts), and serves apps/shell (the browser entry point) at /. Built on @qu/foundation's RuntimeContainer from day one (docs/v3-technical-concept.md §2.1) instead of one growing composition-root class - PresenceTracker, RelaySettings, VapidKeyStore, PushDeliveryService, AdminHttp and HttpRouter are each independently testable modules.",
   "type": "module",
   "main": "src/index.js",
   "bin": {
@@ -20,6 +20,7 @@
     "@qu/services": "^0.1.0",
     "@qu/push": "^0.1.0",
     "@qu/loader": "^0.1.0",
+    "@qu/log": "^0.1.0",
     "ws": "^8.18.0"
   },
   "license": "MIT"

@@ -45,6 +45,24 @@ function makeContainer() {
   return el;
 }
 
+test('passes a given syncFetch through to <qu-list>, called with the catalog\'s parent path', async (t) => {
+  const { qu, services, relayKp, relayPub } = await freshEnv();
+  await publishCatalogEntry(qu, relayKp, 'notes', { label: 'Notes' });
+  t.mock.method(globalThis, 'fetch', mockConfigFetch(relayPub));
+  const calls = [];
+  const syncFetch = (prefix) => { calls.push(prefix); return Promise.resolve(); };
+
+  const container = makeContainer();
+  mount(container, { qu, services, syncFetch });
+  await waitFor(() => container.querySelector('li') !== null);
+
+  // At least once (possibly twice - <qu-list>'s own well-documented
+  // double-mount for an attribute already present at parse time), always
+  // with the catalog's own parent path.
+  assert.ok(calls.length >= 1);
+  assert.ok(calls.every((c) => c === paths.appCatalogParentPath()));
+});
+
 test('renders every enabled, relay-signed catalog entry', async (t) => {
   const { qu, services, relayKp, relayPub } = await freshEnv();
   await publishCatalogEntry(qu, relayKp, 'notes', { label: 'Notes', icon: '📝' });

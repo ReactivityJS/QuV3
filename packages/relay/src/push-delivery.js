@@ -1,6 +1,9 @@
 import { QuCrypto } from '@qu/core';
 import { sendWebPush as defaultSendWebPush } from '@qu/push';
 import { THREAD_PRESETS, NotificationPrefsService } from '@qu/services';
+import { createLogger } from '@qu/log';
+
+const log = createLogger('PushDelivery');
 
 /**
  * PUSH DELIVERY — notification delivery for one thread message: figures out
@@ -96,7 +99,7 @@ export class PushDeliveryService {
       try {
         await this.#writeInAppNotification(actorPub, { title: resolved.title, body: resolved.body, appId, url: resolved.url });
       } catch (err) {
-        console.error(`[PushDelivery] in-app notification write failed for ~${actorPub.slice(0, 10)}…:`, err.message);
+        log.error(`in-app notification write failed for ~${actorPub.slice(0, 10)}…:`, err.message);
       }
 
       if (!this.vapidKeys) continue;
@@ -117,10 +120,10 @@ export class PushDeliveryService {
             // relay logs can see stale subscriptions accumulating; the
             // owner's own client naturally re-subscribes/cleans up next
             // time it runs.
-            console.warn(`[PushDelivery] push subscription for ~${actorPub.slice(0, 10)}… has expired`);
+            log.warn(`push subscription for ~${actorPub.slice(0, 10)}… has expired`);
           }
         } catch (err) {
-          console.error(`[PushDelivery] push send failed for ~${actorPub.slice(0, 10)}…:`, err.message);
+          log.error(`push send failed for ~${actorPub.slice(0, 10)}…:`, err.message);
         }
       }
     }

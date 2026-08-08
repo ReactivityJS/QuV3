@@ -1,6 +1,8 @@
 import { readFile } from 'node:fs/promises';
 import { join, normalize, sep } from 'node:path';
+import { createLogger } from '@qu/log';
 
+const log = createLogger('serveApps');
 const CONTENT_TYPES = { '.quapp': 'application/json', '.js': 'text/javascript', '.json': 'application/json' };
 
 /**
@@ -42,7 +44,7 @@ export async function serveApps(req, res, appsDir) {
   } catch (err) {
     if (err.code === 'ENOENT') res.writeHead(404).end('Not Found');
     else {
-      console.error('[serveApps]', err);
+      log.error(err);
       res.writeHead(500).end('Internal Server Error');
     }
   }

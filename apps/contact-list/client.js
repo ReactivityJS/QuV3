@@ -52,7 +52,7 @@ const STYLE = `
 
 const CONTACT_ROW_SLOT = 'contact-row';
 
-export function mount(container, { qu, identity, services, apps }) {
+export function mount(container, { qu, identity, services, apps, syncFetch }) {
   ensureTheme();
   injectStyle(STYLE_ID, STYLE);
   let stopped = false;
@@ -83,6 +83,11 @@ export function mount(container, { qu, identity, services, apps }) {
     if (stopped) return;
 
     listRoot.qu = createPrivateStore(qu, identity);
+    // Backfills contacts added from a DIFFERENT session/device before this
+    // one connected (see <qu-list>'s own `.syncFetch` doc comment) -
+    // encryption is transparent to sync itself, which only ever replicates
+    // raw QuBits; createPrivateStore()'s getChildren() still decrypts them.
+    if (syncFetch) listRoot.syncFetch = syncFetch;
     listRoot.innerHTML = `
       <qu-list class="qu-contact-list" parent="${paths.privateFlagParentPath(selfPub, 'favorite', 'user')}">
         <template>

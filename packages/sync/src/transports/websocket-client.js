@@ -1,4 +1,7 @@
 import { Transport } from '../transport.js';
+import { createLogger } from '@qu/log';
+
+const log = createLogger('WebSocketClientTransport');
 
 /**
  * WEBSOCKET CLIENT TRANSPORT — connects to a single remote peer (typically a
@@ -82,6 +85,7 @@ export class WebSocketClientTransport extends Transport {
 
       ws.addEventListener('open', () => {
         settled = true;
+        log.debug(`connected to ${this.url}`);
         this.#reconnectAttempt = 0;
         this.#flushQueue();
         for (const cb of this.#reconnectCallbacks) cb();
@@ -103,7 +107,7 @@ export class WebSocketClientTransport extends Transport {
           const data = JSON.parse(typeof event.data === 'string' ? event.data : event.data.toString());
           for (const cb of this.#callbacks) cb({ data, peerId: 'relay' });
         } catch (err) {
-          console.error('[WebSocketClientTransport] invalid message:', err);
+          log.error('invalid message:', err);
         }
       });
       ws.addEventListener('close', () => {
@@ -117,6 +121,7 @@ export class WebSocketClientTransport extends Transport {
     const base = Math.min(1000 * 2 ** this.#reconnectAttempt, this.maxReconnectDelayMs);
     const delay = base * (0.5 + Math.random() * 0.5); // 50-100% of base, so many clients don't retry in lockstep
     this.#reconnectAttempt++;
+    log.debug(`connection to ${this.url} dropped - reconnecting in ${Math.round(delay)}ms (attempt ${this.#reconnectAttempt})`);
     this.#reconnectTimer = setTimeout(() => {
       this.#connectOnce().catch((err) => {
         // #connectOnce()'s promise only rejects via the 'error' listener
@@ -124,7 +129,7 @@ export class WebSocketClientTransport extends Transport {
         // reconnect attempt that fails outright (not just drops later)
         // still triggers its OWN 'close' event and schedules the next
         // retry from there, so nothing is lost by not chaining further here.
-        console.error('[WebSocketClientTransport] reconnect attempt failed:', err);
+        log.error('reconnect attempt failed:', err);
       });
     }, delay);
   }

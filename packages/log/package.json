@@ -1,0 +1,11 @@
+{
+  "name": "@qu/log",
+  "version": "0.1.0",
+  "description": "Minimal, dependency-free leveled logging: createLogger(scope) plus setLogLevel()/getLogLevel(). Not a full logging framework - just enough structure that every package/app logs through the same scoped, level-filterable channel instead of bare console.* calls, in both Node (a relay's process.env.QU_LOG_LEVEL) and a browser (localStorage's qu:logLevel, controllable live from DevTools).",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "license": "MIT"
+}

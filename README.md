@@ -502,6 +502,93 @@ own tests, built bottom-up per the dependency order in
       `/store/apps/catalog/*` holds all three apps' entries each signed by
       that exact key: `npm run build` bundles all three cleanly with no
       leftover bare `@qu/*` imports.
+- [x] `@qu/log`, visible key generation, a real `WebSocketClientTransport` test, and
+      **`apps/shell`** - Quniverse is usable in a real browser now, not just via
+      curl/jsdom. Triggered by the user's own question "what's the next step to make
+      Quniverse usable" plus two explicit requirements: logging (relay AND client)
+      from the start, and generated keys visible in the log instead of silently
+      disappearing into the volume.
+      **`@qu/log`** (new, minimal, dependency-free package): `createLogger(scope)` +
+      `setLogLevel()`/`getLogLevel()`, level resolved once at import time
+      (`QU_LOG_LEVEL` in Node, `localStorage['qu:logLevel']` in a browser, default
+      `info`). Migrates every previous bare `console.*` call in `@qu/relay` and
+      `@qu/ui` (plus new, previously-silent debug logs in `admin-http.js` and
+      `websocket-server-transport.js`). A real bug found and fixed along the way:
+      `console.*` references were originally bound ONCE at `createLogger()` time
+      instead of resolved fresh on every call - breaks any test that mocks
+      `console.error` afterward (4 existing `@qu/ui` tests) - fixed by resolving
+      dynamically on every log call instead.
+      **Visible key generation**: `setupVapidKeys()` now returns a `generated` flag;
+      `relay.js#bootInner()` logs, only on the very first boot (never on a restart
+      that reuses an already-persisted/pinned value), the freshly generated identity
+      mnemonic AND VAPID keys in copy-pasteable
+      `QU_IDENTITY_MNEMONIC="..."`/`QU_VAPID_PUBLIC_KEY="..."`/
+      `QU_VAPID_PRIVATE_KEY="..."` form - they already persist in the volume either
+      way, but this is the only way to pin them explicitly (backup, multi-replica
+      deployments without a shared volume).
+      **`WebSocketClientTransport`** (`@qu/sync`'s browser-facing sync transport) had
+      zero tests of its own - only a hand-built fake in `sync-engine.test.js`
+      simulated its shape. New
+      `packages/relay/test/websocket-client-integration.test.js`: a real client
+      (Node 22's native `WebSocket`, no `ws` package, the exact path a real browser
+      takes too), a real `QuRelay`, bidirectional sync + reconnect catch-up via
+      `fetchPrefix()` - all green on the first run.
+      **`createTrustedCatalogStore()`** extracted from `apps/app-list/client.js` into
+      `@qu/services` (a second real caller - `apps/shell`'s own nav - justifies the
+      extraction, the same pattern demonstrated elsewhere in this document).
+      **Relay shell-serving**: new `serveShell`/`shellDir` options
+      (`QU_SERVE_SHELL`/`QU_SHELL_DIR`), new `static-shell.js` (fixed routes `/`,
+      `/index.html`, `/shell-bundle.js` + `.map`) - fills exactly the gap
+      `http-router.js`'s own comment had documented as a deliberate omission.
+      **`apps/shell`** itself: `index.html` + `client.js` (composition root,
+      deliberately short) + `src/onboarding.js` (create/import identity, ported and
+      trimmed from QuV2 - no QR/camera, no `@qu/qr` package in V3) + `src/router.js`
+      (`#/<appId>`, nearly 1:1 from QuV2) + `src/services.js` (`createClientServices()`
+      - this round's own, deliberately LOCAL `bootClientRuntime()`, see
+      `runtime-container.js`'s own comment: arrives with its first real caller, no
+      promotion into a shared package before a second one exists) + `src/nav.js`
+      (compact top nav via `<qu-list parent="...">`) + `src/sync.js`
+      (`connectToRelay()` - `WebSocketClientTransport` + `IndexedDBOutboxStore` +
+      `SyncEngine({publishAllTo, outbox})`, the star-topology client pattern from
+      `sync-engine.js`'s own comment). `scripts/build-apps.mjs` now also bundles
+      `apps/shell/client.js` unconditionally (no `manifest.quapp` gate like the other
+      apps - shell is a known special case). `#/~<pub>` shows a placeholder instead of
+      crashing (no `apps/profile` in V3) - an explicit, accepted scope cut, not a
+      silent bug.
+      **Two real, previously invisible bugs**, found by the Playwright real-browser
+      check this round newly established (see Verification below) - no earlier
+      in-process test could ever have caught either, since "relay" and "client" always
+      shared the same `qu` there:
+      1. `<qu-list>` never threaded a `syncFetch` through to
+         `watch()`/`watchChildren()` - a fresh browser store starts empty, and any
+         `<qu-list parent="...">` (the app-catalog nav, user-list, contact-list)
+         stayed empty until some unrelated write happened to trigger a re-read. Fixed
+         with a new `findSyncFetch()` (mirrors `findQu()`'s own ancestor walk) instead
+         of a property set directly on the `<qu-list>` element -
+         `watch()`/`watchChildren()` call `syncFetch` SYNCHRONOUSLY at mount time, too
+         early for a property set AFTER an `innerHTML` assignment already connected it
+         (unlike `.relatedPaths`/`.onItemStamped`, which are read later, at per-item
+         stamp time). New `@qu/ui` tests, plus wiring in
+         `apps/app-list`/`user-list`/`contact-list` and `apps/shell`'s own `nav.js`.
+      2. `ListService`/`ProfileService` already had a `syncFetch` constructor
+         parameter designed in from the start (their own doc comment: "without it,
+         `getPublicProfile()` for a profile published before this session connected
+         returns null forever") - but it had never actually been wired to a real
+         `SyncEngine`, because no real client caller existed yet. Made visible when
+         `user-list` in a real browser showed other identities only as truncated
+         pubkeys instead of their real alias. Fixed in `apps/shell/src/services.js`.
+      Full suite green at 821 tests (up from 785). Verification: `npm run build`
+      bundles all 4 client bundles cleanly; a real, isolated `QuRelay` (Playwright +
+      headless Chromium) walked through onboarding ("create a new identity"), showed
+      the nav with all 3 apps, navigated into `app-list` and showed its favorite
+      stars; a SECOND, independent Node peer (its own identity, a real
+      `WebSocketClientTransport` against the same relay) called `setVisible(true)`
+      and appeared LIVE (no manual reload) in the real browser tab's `user-list`,
+      with its alias correctly resolved - the first real cross-client sync proof in
+      this repo. An earlier, noisy version of this check (repeated manual runs
+      against the same long-running relay process) showed apparent duplicates; a
+      clean, single-shot run with an isolated temp store proved that was an artifact
+      of the test method, not a real rendering bug.
 
 ## Development
 
@@ -514,22 +601,24 @@ npm test   # node --test (recursive auto-discovery of packages/*/test/*.test.js)
 
 **What "Quniverse" means today**: the `@qu/relay` server (`QuRelay`) plus whatever
 apps it loads — `apps/forum` (server-only) and the three client apps built on
-`<qu-list>` (`apps/app-list`/`user-list`/`contact-list`, see the status entry above).
-**There is no `apps/shell` in V3 yet** — the one thing QuV2 had that actually renders
-a Quniverse platform page in a real browser (nav, app switching, mounting each app's
-`client.js` into a live page). That's a known, deliberate gap (see §5's revised
-verdict and §6.1 in `docs/v3-technical-concept.md`), not an oversight this section is
-covering up — it comes back with its own real caller, same "not speculatively" pattern
-every other deferred piece in this README follows. Concretely, that means:
+`<qu-list>` (`apps/app-list`/`user-list`/`contact-list`), all reachable through
+**`apps/shell`**, the real browser entry point served at `/` (see the status entry
+above for the full account: onboarding, live sync, nav, per-route mounting). Opening a
+browser tab and actually clicking around a live Quniverse UI is real and testable
+today, not a deferred gap anymore.
 
-- **Testable today**: the relay's whole HTTP surface (`/healthz`, `/apps.json`,
-  `/config.json`, `/store/apps/catalog/*`, `/admin/*`, static app-bundle serving),
-  every package's own test suite (`npm test`), and each of the three client apps'
-  `mount()` functions — their own `apps/*/test/client.test.js` suites already exercise
-  real `@qu/services` instances end to end in jsdom, not mocks (see the status entry
-  above for how those tests are built).
-- **Not yet testable**: actually opening a browser tab and clicking around a live
-  Quniverse UI. That needs `apps/shell` to exist first.
+- **Testable today**: everything above, end to end — the relay's whole HTTP surface
+  (`/healthz`, `/apps.json`, `/config.json`, `/store/apps/catalog/*`, `/admin/*`,
+  static app/shell serving), every package's own test suite (`npm test`), each of the
+  three client apps' `mount()` functions in isolation (jsdom, real `@qu/services`
+  instances, not mocks), `apps/shell` itself in isolation (jsdom, same rigor), AND a
+  real multi-browser session against a real relay (see the status entry above's
+  Playwright-verified account, including live cross-client sync between two real
+  identities).
+- **Still deliberately not built** (see the status entry above for the full list):
+  PWA/offline support, QR-code identity import, `apps/profile` (so `#/~<pub>` shows a
+  graceful placeholder rather than a real profile page), a Space switcher,
+  `apps/relay-admin`.
 
 ### Build
 
@@ -560,10 +649,13 @@ Three layers, each overriding the one before (`packages/relay/src/server.js`):
 | `QU_STORE_DIR` | `storeDir` | default `./relay-data/store` |
 | `QU_BLOB_DIR` | `blobDir` | default `./relay-data/blob` |
 | `QU_APPS_DIR` | `appsDir` | default `./apps` |
+| `QU_SERVE_SHELL` | `serveShell` | default `true` — serves `apps/shell` at `/`, `/index.html`, `/shell-bundle.js`; `"0"`/`"false"`/`"no"` disables it |
+| `QU_SHELL_DIR` | `shellDir` | default `./apps/shell` |
 | `QU_IDENTITY_MNEMONIC` | `identityMnemonic` | pins the relay's own signing identity across restarts; omit to generate-and-persist one on first boot |
 | `QU_ADMIN_PUBS` | `adminPubs` | comma-separated base64url actor pubkeys allowed to use `/admin/*` (settings, data import/export) |
 | `QU_VAPID_PUBLIC_KEY` / `QU_VAPID_PRIVATE_KEY` / `QU_VAPID_SUBJECT` | `vapidPublicKey`/`vapidPrivateKey`/`vapidSubject` | Web Push (`@qu/push`); omit the keys to generate-and-persist a pair on first boot |
 | `QU_REMOTE_APPS_JSON` | `remoteApps` | JSON array, same shape as `relay.config.json`'s `remoteApps` field |
+| `QU_LOG_LEVEL` | *(not a `QuRelayOptions` field)* | `debug`/`info`(default)/`warn`/`error` — controls every `@qu/log` logger process-wide (see `packages/log`), read directly by `@qu/log` itself rather than through the config-layering table above |
 
 **Getting your own actor pubkey**, to put in `QU_ADMIN_PUBS` (there's no `apps/relay-admin`
 UI in V3 yet either — this is the Node equivalent for now):
@@ -583,6 +675,20 @@ import('@qu/core').then(async ({ QuStore, MemoryStoreAdapter, QuCrypto }) => {
 });
 "
 ```
+
+**Generated keys appear once in the logs.** If you don't pin `QU_IDENTITY_MNEMONIC`
+and/or `QU_VAPID_PUBLIC_KEY`/`QU_VAPID_PRIVATE_KEY`, the relay generates fresh ones on
+first boot and persists them under `QU_STORE_DIR` — that's enough for a single,
+persistent deployment, nothing further to do. But on that exact first boot, `relay.js`
+also logs them once, already formatted as ready-to-paste `QU_*="..."` lines (via
+`@qu/log`, at `warn` level so they show even at the default log level) — pin them from
+there into your environment if you want an explicit backup, or if you're running
+multiple relay replicas without a shared volume (each would otherwise generate its own,
+independent identity). A restart that just reuses an already-persisted or explicitly
+pinned identity/keys stays silent — this only ever fires on the boot that actually
+generated something. Treat your log stream accordingly until you've either pinned these
+or decided the volume-only persistence is enough — a mnemonic is as sensitive as any
+other seed phrase.
 
 ### Start — plain Node
 
@@ -614,3 +720,6 @@ curl http://localhost:8080/healthz      # {"status":"ok","peerId":"relay-..."}
 curl http://localhost:8080/config.json  # relayPub, adminPubs, relay-wide settings
 curl http://localhost:8080/apps.json    # every loaded app with a clientMain
 ```
+
+Or just open `http://localhost:8080/` in a browser — that's `apps/shell` itself now, not
+a stub.

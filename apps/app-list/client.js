@@ -9,12 +9,13 @@
  * was extended for. Two things pure `<qu-list>`/`<qu-view>` genuinely can't
  * express, handled via its `onItemStamped` escape hatch:
  *   - SIGNER VERIFICATION: the catalog isn't `AccessEngine`-ACL-protected
- *     (see `apps-catalog-store.js`'s own doc comment for why) - a reader
- *     must check each entry's signer against this specific relay's own
+ *     (see `@qu/relay`'s `apps-catalog-store.js` for why) - a reader must
+ *     check each entry's signer against this specific relay's own
  *     `relayPub` (`/config.json`) before trusting it. Done by wrapping
- *     `getChildren()` itself (`createTrustedCatalogQu()` below), so an
- *     untrusted entry never reaches `<qu-list>`'s rendering at all - not a
- *     per-row hide-after-render check.
+ *     `getChildren()` itself (`@qu/services`' `createTrustedCatalogStore()`,
+ *     shared with `apps/shell`'s own top nav), so an untrusted entry never
+ *     reaches `<qu-list>`'s rendering at all - not a per-row
+ *     hide-after-render check.
  *   - The Favorite STAR: reuses the existing, already-correct
  *     `renderFlagToggle()` (`@qu/ui`) rather than reimplementing its
  *     encrypt/tombstone semantics declaratively - a private flag's "off"
@@ -23,8 +24,7 @@
  */
 import { createI18n } from '@qu/i18n';
 import { injectStyle, ensureTheme, renderFlagToggle } from '@qu/ui';
-import { paths } from '@qu/services';
-import { QuCrypto } from '@qu/core';
+import { paths, createTrustedCatalogStore } from '@qu/services';
 
 const DICT = {
   en: {
@@ -50,31 +50,7 @@ const STYLE = `
   .qu-app-list button { background: none; border: none; cursor: pointer; font-size: 1.1em; }
 `;
 
-/**
- * Wraps the real `qu` so `<qu-list parent="/store/apps/catalog">` only ever
- * sees entries actually signed by THIS relay - "path is addressing, signer
- * is truth", the same convention every derived list in this codebase
- * relies on (see `apps-catalog-store.js`). Also filters out
- * admin-disabled apps here (same job QuV2's own `mountableApps()` did) -
- * one filtering pass, not two.
- */
-function createTrustedCatalogQu(qu, relayPub) {
-  return {
-    get: (path) => qu.get(path),
-    put: (path, value) => qu.put(path, value),
-    async getChildren(parentPath, options) {
-      const entries = await qu.getChildren(parentPath, options);
-      return entries.filter((e) => {
-        const pub = e.quBit?.pub;
-        const signer = pub ? QuCrypto.toBase64Url(QuCrypto.fromBase64(pub)) : null;
-        return signer === relayPub && e.quBit.val?.enabled !== false;
-      });
-    },
-    onStorageChange: (handler) => qu.onStorageChange(handler),
-  };
-}
-
-export function mount(container, { qu, services }) {
+export function mount(container, { qu, services, syncFetch }) {
   ensureTheme();
   injectStyle(STYLE_ID, STYLE);
   let stopped = false;
@@ -89,7 +65,12 @@ export function mount(container, { qu, services }) {
     const relayPub = res.ok ? (await res.json()).relayPub : null;
     if (stopped || !relayPub) return;
 
-    listRoot.qu = createTrustedCatalogQu(qu, relayPub);
+    listRoot.qu = createTrustedCatalogStore(qu, relayPub);
+    // Backfills catalog entries the relay wrote before this session
+    // connected (see <qu-list>'s own `.syncFetch` doc comment) - without
+    // it, a fresh browser's local store starts empty and this list would
+    // stay empty until an unrelated write happened to trigger a re-read.
+    if (syncFetch) listRoot.syncFetch = syncFetch;
     listRoot.innerHTML = `
       <qu-list class="qu-app-list" parent="${paths.appCatalogParentPath()}">
         <template>

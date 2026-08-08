@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { QuStore, MemoryStoreAdapter } from '@qu/core';
+import { QuStore, MemoryStoreAdapter, QuCrypto } from '@qu/core';
 import { QuIdentityEngine, actorPath } from '@qu/identity';
-import { ListService, FlagService, ContactsService, ProfileService } from '@qu/services';
+import { ListService, FlagService, ContactsService, ProfileService, paths } from '@qu/services';
 import { installDom, waitFor } from '@qu/ui/testing';
 
 installDom();
@@ -40,6 +40,20 @@ function makeContainer() {
   document.body.appendChild(el);
   return el;
 }
+
+test('passes a given syncFetch through to <qu-list>, called with this identity\'s own private contacts path', async () => {
+  const { qu, identity, services } = await freshEnv();
+  const selfPub = QuCrypto.toBase64Url((await identity.getMainKey()).publicKey);
+  const calls = [];
+  const syncFetch = (prefix) => { calls.push(prefix); return Promise.resolve(); };
+
+  const container = makeContainer();
+  mount(container, { qu, identity, services, apps: [], syncFetch });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  assert.ok(calls.length >= 1);
+  assert.ok(calls.every((c) => c === paths.privateFlagParentPath(selfPub, 'favorite', 'user')));
+});
 
 test('shows no rows with no contacts', async () => {
   const { qu, identity, services } = await freshEnv();

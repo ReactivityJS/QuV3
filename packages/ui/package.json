@@ -9,7 +9,8 @@
     "./testing": "./src/testing.js"
   },
   "dependencies": {
-    "@qu/reactive": "^0.1.0"
+    "@qu/reactive": "^0.1.0",
+    "@qu/log": "^0.1.0"
   },
   "devDependencies": {
     "jsdom": "^25.0.1"

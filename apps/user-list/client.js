@@ -109,7 +109,7 @@ function createVerifiedDirectoryQu(qu, selfPub) {
   };
 }
 
-export function mount(container, { qu, services, subscribe }) {
+export function mount(container, { qu, services, subscribe, syncFetch }) {
   ensureTheme();
   injectStyle(STYLE_ID, STYLE);
   let stopped = false;
@@ -196,6 +196,10 @@ export function mount(container, { qu, services, subscribe }) {
     if (stopped) return;
 
     listRoot.qu = createVerifiedDirectoryQu(qu, myPub);
+    // Backfills directory entries written before this session connected
+    // (see <qu-list>'s own `.syncFetch` doc comment) - subscribe() above
+    // only ever delivers FUTURE writes.
+    if (syncFetch) listRoot.syncFetch = syncFetch;
     listRoot.innerHTML = `
       <qu-list class="qu-user-list" parent="${paths.directoryEntriesParentPath()}">
         <template>
