@@ -1,24 +1,44 @@
 /**
- * APP LIST — browser half. Every currently loaded app (from the relay's
- * `/apps.json`, see @qu/relay's `apps-catalog.js`), each with a Favorite
- * toggle - favoriting here is the mechanism a future shell's header
- * dropdown menu would read to decide which apps to pin; this app and that
- * menu would both just read/write `FavoritesService`, neither owns the
- * favorite list.
+ * APP LIST — every currently loaded, enabled app (from
+ * `/store/apps/catalog`, `@qu/relay`'s `apps-catalog-store.js`), each with
+ * a Favorite toggle - favoriting here is the mechanism a future shell's
+ * header dropdown menu would read to decide which apps to pin.
  *
- * Stays IMPERATIVE, not built on `@qu/ui`'s `<qu-list>`: the rendered rows
- * combine `/apps.json` (an HTTP fetch, not a Qu path at all) with
- * `FavoritesService.list()` (a second, independent read) - not the
- * "one watched Qu path -> one array" shape `<qu-list>` expects. See
- * docs/v3-technical-concept.md §5 for the resolved open question this is
- * part of.
+ * Built on `<qu-list parent="...">` (`@qu/ui`) - the app catalog is a
+ * derived list, one signed QuBit per app, exactly the shape that primitive
+ * was extended for. Two things pure `<qu-list>`/`<qu-view>` genuinely can't
+ * express, handled via its `onItemStamped` escape hatch:
+ *   - SIGNER VERIFICATION: the catalog isn't `AccessEngine`-ACL-protected
+ *     (see `apps-catalog-store.js`'s own doc comment for why) - a reader
+ *     must check each entry's signer against this specific relay's own
+ *     `relayPub` (`/config.json`) before trusting it. Done by wrapping
+ *     `getChildren()` itself (`createTrustedCatalogQu()` below), so an
+ *     untrusted entry never reaches `<qu-list>`'s rendering at all - not a
+ *     per-row hide-after-render check.
+ *   - The Favorite STAR: reuses the existing, already-correct
+ *     `renderFlagToggle()` (`@qu/ui`) rather than reimplementing its
+ *     encrypt/tombstone semantics declaratively - a private flag's "off"
+ *     state is a PLAIN `null` write, not a boolean, which a generic
+ *     `<qu-bind attr="checked">` has no way to express correctly.
  */
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme } from '@qu/ui';
+import { injectStyle, ensureTheme, renderFlagToggle } from '@qu/ui';
+import { paths } from '@qu/services';
+import { QuCrypto } from '@qu/core';
 
 const DICT = {
-  en: { title: 'App List', empty: 'No mountable apps loaded on this relay yet.' },
-  de: { title: 'App-Liste', empty: 'Noch keine startbaren Apps auf diesem Relay geladen.' },
+  en: {
+    title: 'App List',
+    empty: 'No mountable apps loaded on this relay yet.',
+    favoriteAdd: 'Add to favorites',
+    favoriteRemove: 'Remove from favorites',
+  },
+  de: {
+    title: 'App-Liste',
+    empty: 'Noch keine startbaren Apps auf diesem Relay geladen.',
+    favoriteAdd: 'Zu Favoriten hinzufügen',
+    favoriteRemove: 'Aus Favoriten entfernen',
+  },
 };
 const { t } = createI18n(DICT);
 
@@ -30,64 +50,81 @@ const STYLE = `
   .qu-app-list button { background: none; border: none; cursor: pointer; font-size: 1.1em; }
 `;
 
-/** Same "mountable, not explicitly disabled" filter + navOrder sort a future shell's own nav would use - small enough to keep local rather than importing across an app boundary. */
-function mountableApps(manifests) {
-  return manifests
-    .filter((m) => m.enabled !== false && !!m.clientMainUrl)
-    .sort((a, b) => (a.navOrder ?? Infinity) - (b.navOrder ?? Infinity) || (a.label ?? a.name).localeCompare(b.label ?? b.name));
+/**
+ * Wraps the real `qu` so `<qu-list parent="/store/apps/catalog">` only ever
+ * sees entries actually signed by THIS relay - "path is addressing, signer
+ * is truth", the same convention every derived list in this codebase
+ * relies on (see `apps-catalog-store.js`). Also filters out
+ * admin-disabled apps here (same job QuV2's own `mountableApps()` did) -
+ * one filtering pass, not two.
+ */
+function createTrustedCatalogQu(qu, relayPub) {
+  return {
+    get: (path) => qu.get(path),
+    put: (path, value) => qu.put(path, value),
+    async getChildren(parentPath, options) {
+      const entries = await qu.getChildren(parentPath, options);
+      return entries.filter((e) => {
+        const pub = e.quBit?.pub;
+        const signer = pub ? QuCrypto.toBase64Url(QuCrypto.fromBase64(pub)) : null;
+        return signer === relayPub && e.quBit.val?.enabled !== false;
+      });
+    },
+    onStorageChange: (handler) => qu.onStorageChange(handler),
+  };
 }
 
-export function mount(container, { services }) {
+export function mount(container, { qu, services }) {
   ensureTheme();
   injectStyle(STYLE_ID, STYLE);
   let stopped = false;
 
+  const heading = document.createElement('h1');
+  heading.textContent = t('title');
+  const listRoot = document.createElement('div');
+  container.append(heading, listRoot);
+
   (async () => {
-    const res = await fetch('/apps.json');
-    const apps = mountableApps(res.ok ? await res.json() : []);
-    const favoriteIds = new Set(await services.favorites.list());
-    if (stopped) return;
+    const res = await fetch('/config.json');
+    const relayPub = res.ok ? (await res.json()).relayPub : null;
+    if (stopped || !relayPub) return;
 
-    const heading = document.createElement('h1');
-    heading.textContent = t('title');
+    listRoot.qu = createTrustedCatalogQu(qu, relayPub);
+    listRoot.innerHTML = `
+      <qu-list class="qu-app-list" parent="${paths.appCatalogParentPath()}">
+        <template>
+          <li>
+            <a class="qu-app-list-link"><qu-view field="icon"></qu-view> <qu-view field="label"></qu-view></a>
+            <span class="qu-app-fav-slot"></span>
+          </li>
+        </template>
+      </qu-list>`;
 
-    if (apps.length === 0) {
-      const empty = document.createElement('p');
-      empty.textContent = t('empty');
-      container.append(heading, empty);
-      return;
-    }
+    const list = listRoot.querySelector('qu-list');
+    list.onItemStamped = (els, itemId) => {
+      const link = els[0].querySelector('.qu-app-list-link');
+      link.href = `#/${itemId}`;
 
-    const list = document.createElement('ul');
-    list.className = 'qu-app-list';
-    for (const app of apps) list.appendChild(row(app, favoriteIds.has(app.name), services));
-
-    container.append(heading, list);
+      const slot = els[0].querySelector('.qu-app-fav-slot');
+      // renderFlagToggle() already broadcasts qu:flag-changed itself on
+      // click (see its own doc comment) - a future shell's header menu (or
+      // any other app) picks that up directly, nothing extra to wire here.
+      const toggle = renderFlagToggle({
+        flags: {
+          hasPrivate: () => services.favorites.isFavorite(itemId),
+          setPrivate: (_flagType, _entityKind, _entityRef, on) => (on ? services.favorites.add(itemId) : services.favorites.remove(itemId)),
+        },
+        flagType: 'favorite',
+        entityKind: 'app',
+        entityRef: itemId,
+        icon: '☆',
+        activeIcon: '★',
+        title: t('favoriteAdd'),
+        activeTitle: t('favoriteRemove'),
+      });
+      slot.replaceWith(toggle);
+    };
   })();
 
   return () => { stopped = true; };
-}
-
-function row(app, isFavorite, services) {
-  const li = document.createElement('li');
-  const link = document.createElement('a');
-  link.href = `#/${app.name}`;
-  link.textContent = `${app.icon ?? ''} ${app.label ?? app.name}`.trim();
-
-  const toggle = document.createElement('button');
-  toggle.type = 'button';
-  toggle.textContent = isFavorite ? '★' : '☆';
-  toggle.addEventListener('click', async () => {
-    const nowFavorite = toggle.textContent === '★';
-    if (nowFavorite) await services.favorites.remove(app.name);
-    else await services.favorites.add(app.name);
-    toggle.textContent = nowFavorite ? '☆' : '★';
-    // Notifies a future shell's header menu (or any other app) to refresh -
-    // same "mounted independently, no direct reference to a host object"
-    // reasoning as @qu/ui's renderFlagToggle().
-    window.dispatchEvent(new CustomEvent('qu:flag-changed', { detail: { flagType: 'favorite', entityKind: 'app', entityRef: app.name, on: !nowFavorite } }));
-  });
-
-  li.append(link, toggle);
-  return li;
 }

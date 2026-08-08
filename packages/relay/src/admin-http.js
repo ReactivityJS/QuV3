@@ -2,6 +2,7 @@ import { readdir } from 'node:fs/promises';
 import { relative, sep } from 'node:path';
 import { QuCrypto } from '@qu/core';
 import { saveSettings } from './relay-settings.js';
+import { publishAppsCatalog } from './apps-catalog-store.js';
 
 /**
  * ADMIN HTTP — the relay's privileged, signature-gated HTTP surface:
@@ -22,7 +23,12 @@ import { saveSettings } from './relay-settings.js';
 export class AdminHttp {
   /**
    * @param {import('@qu/core').QuStore} qu
-   * @param {{adminPubs: string[], storeDir: string, blobDir: string}} options
+   * @param {{adminPubs: string[], storeDir: string, blobDir: string, identity: import('@qu/identity').QuIdentityEngine, loader: import('@qu/loader').QuLoader}} options -
+   *   `identity`/`loader` are only needed for `handleSettings()`'s
+   *   re-publish of the app catalog (see `apps-catalog-store.js`) after a
+   *   `disabledApps` change - both are stable, already-constructed
+   *   references by the time this module is ever resolved (unlike
+   *   `state.transport` below, neither is populated lazily during `boot()`).
    * @param {{transport: import('./transports/websocket-server-transport.js').WebSocketServerTransport|null}} [state] -
    *   Optional, a mutable shared reference (same pattern `http-router.js`
    *   uses) - if `state.transport` is set by the time a settings change
@@ -34,11 +40,13 @@ export class AdminHttp {
    *   `relay.js`) - by the time any HTTP request can actually arrive it
    *   will be, but this module doesn't need to assume that ordering itself.
    */
-  constructor(qu, { adminPubs, storeDir, blobDir }, state = { transport: null }) {
+  constructor(qu, { adminPubs, storeDir, blobDir, identity, loader }, state = { transport: null }) {
     this.qu = qu;
     this.adminPubs = adminPubs;
     this.storeDir = storeDir;
     this.blobDir = blobDir;
+    this.identity = identity;
+    this.loader = loader;
     this.state = state;
   }
 
@@ -111,6 +119,10 @@ export class AdminHttp {
 
     const merged = await saveSettings(this.qu, settings);
     if (settings.rateLimits) this.state.transport?.setRateLimit(merged.rateLimits.maxMessagesPerMinute);
+    // An enable/disable takes effect for every connected client immediately -
+    // re-publishing is what a <qu-list parent="/store/apps/catalog"> reacts
+    // to, no relay restart needed (see apps-catalog-store.js's own doc comment).
+    if (settings.disabledApps) await publishAppsCatalog(this.qu, this.identity, this.loader, merged);
 
     res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(merged));
   }

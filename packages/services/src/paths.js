@@ -85,17 +85,33 @@ export function threadMessagesParentPath(spaceId, threadId) {
 }
 
 /**
- * A PRIVATE, self-encrypted "list of things I've marked" - `StarredService`'s
- * one storage location per (identity, namespace). Not a `ListService` shape
- * at all (neither derived nor curated-via-references): the whole namespace's
- * items live INLINE in this one document, self-encrypted, because they're
- * small records that only exist as entries in this list (there is no
- * separate QuBit elsewhere to reference) - see `starred-service.js`'s own
- * doc comment.
- * @param {string} actorPub @param {string} namespace @returns {string}
+ * One identity's own self-encrypted PRIVATE flag on an entity
+ * (`FlagService.setPrivate()`) - the private-mode counterpart to
+ * `flagPath()` below: same "one QuBit per (flag, entity)" shape, enumerated
+ * via `private-storage.js`'s `getPrivateChildren()` instead of
+ * `ListService.listDerived()` (the extra step being decryption, not a
+ * different storage shape). This is what `FavoritesService`/`ContactsService`
+ * are built on - each favorite/contact is its OWN small encrypted document,
+ * not an entry in one shared array, so adding/removing one is a single
+ * write (O(1)), never a read-modify-write of everything this identity has
+ * ever flagged.
+ * @param {string} actorPub - This identity's OWN pubkey (never someone else's - a private flag has no meaning for anyone but its owner).
+ * @param {string} flagType @param {string} entityKind @param {string} entityRef
+ * @returns {string}
  */
-export function starredPath(actorPub, namespace) {
-  return `/store/actors/~${actorPub}/private/starred/${namespace}`;
+export function privateFlagPath(actorPub, flagType, entityKind, entityRef) {
+  return `/store/actors/~${actorPub}/private/flags/${flagType}/${entityKind}/${entityRef}`;
+}
+
+/**
+ * The PARENT path `private-storage.js`'s `getPrivateChildren()` enumerates
+ * to find every entity this identity has privately flagged with `flagType`/
+ * `entityKind` - one level above `privateFlagPath()`.
+ * @param {string} actorPub @param {string} flagType @param {string} entityKind
+ * @returns {string}
+ */
+export function privateFlagParentPath(actorPub, flagType, entityKind) {
+  return `/store/actors/~${actorPub}/private/flags/${flagType}/${entityKind}`;
 }
 
 /**
@@ -122,7 +138,7 @@ export function flagParentPath(spaceId, flagType, entityKind, entityRef) {
 /**
  * One actor's PRIVATE (self-encrypted) "read up to" marker for a thread -
  * `MessageService.markRead()`/`getLastReadAt()`. Lives under the actor's own
- * `private/` prefix, same convention `starredPath()` uses - see
+ * `private/` prefix, same convention `privateFlagPath()` uses - see
  * private-storage.js. Not visible to (or enumerable by) anyone else, which
  * is the whole point: how far YOU'VE read is nobody else's business. Compare
  * `threadReadReceiptPath()` below - a deliberately DIFFERENT, PUBLIC
@@ -261,4 +277,36 @@ export function pushSubscriptionPath(actorPub, subscriptionId) {
  */
 export function pushSubscriptionsParentPath(actorPub) {
   return `/store/actors/~${actorPub}/push-subscriptions`;
+}
+
+/**
+ * One relay-hosted app's catalog announcement (`@qu/relay`'s
+ * `apps-catalog-store.js`) - a DERIVED list (docs/v3-technical-concept.md
+ * §4.2): each app's entry lives at its own path under
+ * `appCatalogParentPath()`, so a client can `<qu-list parent="...">` it
+ * directly (see `@qu/ui`'s `components.js`) instead of polling the relay's
+ * `/apps.json` HTTP endpoint (kept as a lightweight compat/debug route,
+ * fed by the exact same `buildAppsCatalog()` data). Global, not per-space -
+ * a relay hosts one app catalog, same reasoning `directoryEntryPath()` is
+ * global. Signed by the RELAY's own identity, never a regular client's -
+ * a reader verifies the entry's signer against the relay's own pubkey
+ * (exposed via `/config.json`), the same "path is addressing, signer is
+ * truth" convention every other derived list in this codebase already
+ * relies on (no `AccessEngine` ACL needed - see `apps-catalog-store.js`'s
+ * own doc comment for why that's a deliberate, not missing, choice).
+ * @param {string} name - The app's manifest `name`.
+ * @returns {string}
+ */
+export function appCatalogEntryPath(name) {
+  return `/store/apps/catalog/${name}`;
+}
+
+/**
+ * The PARENT path `ListService.listDerived()`/`<qu-list parent="...">`
+ * enumerates to find every currently-catalogued app - one level above
+ * `appCatalogEntryPath()`.
+ * @returns {string}
+ */
+export function appCatalogParentPath() {
+  return '/store/apps/catalog';
 }

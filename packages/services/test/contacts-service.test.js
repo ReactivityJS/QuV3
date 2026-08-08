@@ -2,7 +2,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { QuStore, MemoryStoreAdapter, QuCrypto } from '@qu/core';
 import { QuIdentityEngine } from '@qu/identity';
-import { StarredService } from '../src/starred-service.js';
 import { ListService } from '../src/list-service.js';
 import { FlagService } from '../src/flag-service.js';
 import { ContactsService } from '../src/contacts-service.js';
@@ -12,7 +11,7 @@ async function freshContacts() {
   qu.mount('store', new MemoryStoreAdapter());
   const identity = new QuIdentityEngine(qu);
   await identity.importMnemonic(identity.generateMnemonic());
-  const flags = new FlagService(qu, identity, new StarredService(qu, identity), new ListService(qu));
+  const flags = new FlagService(qu, identity, new ListService(qu));
   return { qu, identity, contacts: new ContactsService(flags, identity) };
 }
 

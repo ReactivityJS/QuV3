@@ -1,19 +1,21 @@
 /**
  * QU SERVICES — public entry point. paths, unwrap, sync-freshness,
- * ListService, private-storage, StarredService, FlagService,
- * FavoritesService, ContactsService, AccessService, crypto-envelope,
- * thread-formatting, link-detect, the `ThreadService` decomposition (§4.3):
- * MessageService (+ THREAD_PRESETS), ReactionService, PinService,
- * PresenceService, NotificationPrefsService, PushSubscriptionService,
- * ProfileService, DirectoryService, and actor-format's formatActorLabel/
- * matchesActorQuery. See each file's own doc comment.
+ * ListService, private-storage (incl. `getPrivateChildren()`/
+ * `createPrivateStore()` - the self-encrypted derived-list primitives
+ * `FlagService`'s private mode and `@qu/ui`'s `<qu-list>` both build on),
+ * FlagService, FavoritesService, ContactsService, AccessService,
+ * crypto-envelope, thread-formatting, link-detect, the `ThreadService`
+ * decomposition (§4.3): MessageService (+ THREAD_PRESETS), ReactionService,
+ * PinService, PresenceService, NotificationPrefsService,
+ * PushSubscriptionService, ProfileService, DirectoryService, and
+ * actor-format's formatActorLabel/matchesActorQuery. See each file's own
+ * doc comment.
  */
 export * as paths from './paths.js';
 export { unwrap, unwrapAll } from './unwrap.js';
 export { createFreshnessTracker, createMissGate } from './sync-freshness.js';
 export { ListService } from './list-service.js';
-export { getPrivate, putPrivate } from './private-storage.js';
-export { StarredService } from './starred-service.js';
+export { getPrivate, putPrivate, getPrivateChildren, createPrivateStore } from './private-storage.js';
 export { FlagService } from './flag-service.js';
 export { FavoritesService } from './favorites-service.js';
 export { ContactsService } from './contacts-service.js';

@@ -302,3 +302,183 @@ test('<qu-if negate> inverts the truthy/falsy decision', async () => {
   await flush();
   assert.equal(container.querySelector('qu-if').hidden, true);
 });
+
+// ===== <qu-list parent="..."> (derived lists) ================================
+
+test('<qu-list parent="..."> renders every direct child, live', async () => {
+  const qu = fakeQu({ '/list/a': { title: 'Alpha' }, '/list/b': { title: 'Beta' } });
+  const container = makeContainer(qu);
+  container.innerHTML = '<qu-list parent="/list"><template><li><qu-view field="title"></qu-view></li></template></qu-list>';
+  await flush();
+  const titles = [...container.querySelectorAll('li')].map((li) => li.textContent).sort();
+  assert.deepEqual(titles, ['Alpha', 'Beta']);
+});
+
+test('<qu-list parent="..."> picks up a new child written after mount', async () => {
+  const qu = fakeQu({ '/list/a': { title: 'Alpha' } });
+  const container = makeContainer(qu);
+  container.innerHTML = '<qu-list parent="/list"><template><li><qu-view field="title"></qu-view></li></template></qu-list>';
+  await flush();
+  await qu.put('/list/b', { title: 'Beta' });
+  await flush();
+  const titles = [...container.querySelectorAll('li')].map((li) => li.textContent).sort();
+  assert.deepEqual(titles, ['Alpha', 'Beta']);
+});
+
+test('<qu-list parent="..."> excludes a tombstoned (val: null) child', async () => {
+  const qu = fakeQu({ '/list/a': { title: 'Alpha' }, '/list/b': { title: 'Beta' } });
+  const container = makeContainer(qu);
+  container.innerHTML = '<qu-list parent="/list"><template><li><qu-view field="title"></qu-view></li></template></qu-list>';
+  await flush();
+  await qu.put('/list/b', null); // clears it, same tombstone convention every derived-list Service uses
+  await flush();
+  const titles = [...container.querySelectorAll('li')].map((li) => li.textContent);
+  assert.deepEqual(titles, ['Alpha']);
+});
+
+test('<qu-list parent="..."> removes an element when its child is later tombstoned', async () => {
+  const qu = fakeQu({ '/list/a': { title: 'Alpha' } });
+  const container = makeContainer(qu);
+  container.innerHTML = '<qu-list parent="/list"><template><li></li></template></qu-list>';
+  await flush();
+  assert.equal(container.querySelectorAll('li').length, 1);
+  await qu.put('/list/a', null);
+  await flush();
+  assert.equal(container.querySelectorAll('li').length, 0);
+});
+
+// ===== .relatedPaths / related="..." =========================================
+
+test('.relatedPaths resolves a named path from the item\'s own id, readable via related="name"', async () => {
+  const qu = fakeQu({
+    '/entries/pub1': { visible: true },
+    '/profiles/pub1': { alias: 'Ada' },
+  });
+  const container = makeContainer(qu);
+  container.innerHTML = '<qu-list parent="/entries"><template><li><qu-view related="profile" field="alias"></qu-view></li></template></qu-list>';
+  const list = container.querySelector('qu-list');
+  list.relatedPaths = (id) => ({ profile: `/profiles/${id}` });
+  // relatedPaths must be set before the list's own _mount() has already
+  // stamped items without it - re-triggering by re-setting the parent
+  // attribute isn't needed here since innerHTML parsing + property
+  // assignment above both happen before the first microtask flush below.
+  await flush();
+
+  assert.equal(container.querySelector('li').textContent, 'Ada');
+});
+
+test('related="name" not present in relatedPaths logs an error, does not throw', async () => {
+  const qu = fakeQu({ '/entries/pub1': { visible: true } });
+  const container = makeContainer(qu);
+  container.innerHTML = '<qu-list parent="/entries"><template><li><qu-view related="nonexistent"></qu-view></li></template></qu-list>';
+  const list = container.querySelector('qu-list');
+  list.relatedPaths = () => ({});
+
+  const origError = console.error;
+  const errors = [];
+  console.error = (...args) => errors.push(args);
+  try {
+    await flush();
+    // Twice, not once - same "parsed from markup with an attribute already
+    // present" double-mount as documented on the "<qu-list> missing a
+    // <template>" test above: a template-cloned element carries its
+    // `related` attribute already set at insertion time, so both
+    // connectedCallback() and attributeChangedCallback() fire _mount().
+    assert.equal(errors.length, 2);
+  } finally {
+    console.error = origError;
+  }
+});
+
+test('without .relatedPaths set, related="..." logs an error rather than silently rendering nothing meaningful', async () => {
+  const qu = fakeQu({ '/entries/pub1': { visible: true } });
+  const container = makeContainer(qu);
+  container.innerHTML = '<qu-list parent="/entries"><template><li><qu-view related="profile"></qu-view></li></template></qu-list>';
+
+  const origError = console.error;
+  const errors = [];
+  console.error = (...args) => errors.push(args);
+  try {
+    await flush();
+    assert.equal(errors.length, 2); // same double-mount reasoning as the test above
+  } finally {
+    console.error = origError;
+  }
+});
+
+test('<qu-if related="..."> resolves through relatedPaths too', async () => {
+  const qu = fakeQu({
+    '/entries/pub1': { visible: true },
+    '/profiles/pub1': { verified: true },
+  });
+  const container = makeContainer(qu);
+  container.innerHTML = '<qu-list parent="/entries"><template><li><qu-if related="profile" field="verified">shown</qu-if></li></template></qu-list>';
+  const list = container.querySelector('qu-list');
+  list.relatedPaths = (id) => ({ profile: `/profiles/${id}` });
+  await flush();
+
+  assert.equal(container.querySelector('qu-if').hidden, false);
+});
+
+// ===== .onItemStamped ==========================================================
+
+test('.onItemStamped is called once per newly stamped item with its elements, id, and raw item', async () => {
+  const qu = fakeQu({ '/list/a': { title: 'Alpha' }, '/list/b': { title: 'Beta' } });
+  const container = makeContainer(qu);
+  container.innerHTML = '<qu-list parent="/list"><template><li></li></template></qu-list>';
+  const list = container.querySelector('qu-list');
+  const calls = [];
+  list.onItemStamped = (els, itemId, item) => calls.push({ itemId, path: item.path, elCount: els.length });
+  await flush();
+
+  const byId = Object.fromEntries(calls.map((c) => [c.itemId, c]));
+  assert.deepEqual(Object.keys(byId).sort(), ['a', 'b']);
+  assert.equal(byId.a.path, '/list/a');
+  assert.equal(byId.a.elCount, 1);
+});
+
+test('.onItemStamped can mount an imperative element into a slot inside the stamped clone', async () => {
+  const qu = fakeQu({ '/list/a': { title: 'Alpha' } });
+  const container = makeContainer(qu);
+  container.innerHTML = '<qu-list parent="/list"><template><li><span class="slot"></span></li></template></qu-list>';
+  const list = container.querySelector('qu-list');
+  list.onItemStamped = (els) => {
+    const slot = els[0].querySelector('.slot');
+    const button = document.createElement('button');
+    button.textContent = 'mounted';
+    slot.replaceWith(button);
+  };
+  await flush();
+
+  assert.equal(container.querySelector('button').textContent, 'mounted');
+});
+
+test('.onItemStamped is NOT called again for an item that re-renders in place (same path, keyed reuse)', async () => {
+  const qu = fakeQu({ '/list/a': { title: 'Alpha' } });
+  const container = makeContainer(qu);
+  container.innerHTML = '<qu-list parent="/list"><template><li></li></template></qu-list>';
+  const list = container.querySelector('qu-list');
+  let calls = 0;
+  list.onItemStamped = () => { calls++; };
+  await flush();
+  assert.equal(calls, 1);
+
+  await qu.put('/list/a', { title: 'Alpha renamed' }); // same path, different value - keyed reuse, no re-stamp
+  await flush();
+  assert.equal(calls, 1);
+});
+
+test('.onItemStamped can give a specific descendant its OWN .qu, distinct from the item context', async () => {
+  const qu = fakeQu({ '/list/a': { title: 'Alpha' } });
+  const otherQu = fakeQu({ '/other/a': 'from another store' });
+  const container = makeContainer(qu);
+  container.innerHTML = '<qu-list parent="/list"><template><li><span class="normal"><qu-view field="title"></qu-view></span><span class="special"><qu-view path="/other/a"></qu-view></span></template></qu-list>';
+  const list = container.querySelector('qu-list');
+  list.onItemStamped = (els) => {
+    els[0].querySelector('.special').qu = otherQu;
+  };
+  await flush();
+
+  assert.equal(container.querySelector('.normal').textContent, 'Alpha');
+  assert.equal(container.querySelector('.special').textContent, 'from another store');
+});

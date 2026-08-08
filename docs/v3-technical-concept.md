@@ -575,11 +575,28 @@ instead, the same trade-off `THREAD_PRESETS.group`'s own doc comment already acc
 ### 4.4 `FlagService` — kept as-is, now built on `ListService`
 
 Already a complete, correct implementation of the concept's "universal Flags module"
-goal (`packages/services/src/flag-service.js`) — private mode via `StarredService`
-(→ `ListService.addCurated`/`removeCurated` in V3), public mode via `CollectionService`
+goal (`packages/services/src/flag-service.js`) — public mode via `CollectionService`
 (→ `ListService.listDerived` in V3, since public flags are exactly the per-actor-QuBit
 shape §4.2 describes). No API change for `FlagService`'s own callers — only its internal
 storage strategy improves.
+
+**Revised, private mode**: initially ported private mode onto `StarredService` — one
+self-encrypted BLOB per namespace holding the whole list inline (closer to
+`ListService.addCurated`/`removeCurated`'s single-document shape than to a derived
+list). That turned out to be the wrong call once `<qu-list>` needed to render private
+lists too (§5's revised verdict): a single encrypted blob re-encrypts and rewrites the
+*entire* list on every mutation (O(n) per write) and has no per-item reactivity —
+exactly the RMW/scaling problem this section already solved for *public* lists, just
+reintroduced on the private side. `StarredService` deleted outright (zero callers besides
+`FlagService`'s private mode, confirmed before removal); private mode rebuilt onto the
+*same* per-item derived-list shape public lists use, via a new `createPrivateStore(qu,
+identity)` facade (`packages/services/src/private-storage.js`) that transparently
+self-encrypts/decrypts each item — so `ListService`'s derived-list pattern, and every
+reactive primitive built on top of it (`watchChildren()`, `<qu-list parent="...">`), work
+identically for private data with zero new code in either `@qu/reactive` or `@qu/ui`.
+Still no API change for `FlagService`'s own callers (`ContactsService`/
+`FavoritesService`) — the consumer-facing shape (`{id, starredAt, ...data}`) is
+preserved exactly; only the internal storage strategy changed, twice now.
 
 ### 4.5 `AssetEngine` — kept
 
@@ -608,23 +625,54 @@ also follow) remains the *default*, not a placeholder waiting to be replaced —
 not maintain two supported UI paradigms indefinitely, which is the actual failure mode
 here, not "imperative is wrong."
 
-**Resolved**: `@qu/reactive` (`watch()`) and `@qu/ui` (`<qu-view>`/`<qu-bind>`/
-`<qu-list>`/`<qu-key>`/`<qu-if>`, `injectStyle`/`renderAvatar`/`renderSubpage`/
-`renderFlagToggle`, plus a new `ensureTheme()` shared design-token layer QuV2 never
-had) are ported and, for the first time, actually tested (jsdom-based, via
+**Resolved, then REVISED**: `@qu/reactive` (`watch()`) and `@qu/ui` (`<qu-view>`/
+`<qu-bind>`/`<qu-list>`/`<qu-key>`/`<qu-if>`, `injectStyle`/`renderAvatar`/
+`renderSubpage`/`renderFlagToggle`, plus a new `ensureTheme()` shared design-token layer
+QuV2 never had) are ported and, for the first time, actually tested (jsdom-based, via
 `@qu/ui/testing`). The spike itself: `apps/app-list`/`apps/user-list`/
 `apps/contact-list` were built as the first real client apps and evaluated against
-`<qu-list>` directly, not abstractly. Verdict — imperative stays the *default*, not
-because `<qu-list>` doesn't work, but because none of these three apps' data is the
-"one watched Qu path → one array" shape it expects (search-filtered results, profiles
-resolved across several Services per row); QuV2's own choice to build these same three
-apps imperatively, with `qu-components` sitting unused right next to them, turns out to
-have been the right call for exactly this reason, not an oversight. `<qu-list>` remains
-real, documented, OPTIONAL infrastructure for when a genuinely list-shaped view shows
-up (a future `apps/forum` client — "watch one thread's messages, stamp a template" —
-is the concrete candidate). V3 does NOT maintain two competing default paradigms:
-imperative is still it, `@qu/ui`'s declarative layer is an available tool, not a second
-standard.
+`<qu-list>` directly, not abstractly. First verdict — imperative stays the *default*,
+because none of these three apps' data was the "one watched Qu path → one array" shape
+`<qu-list>` supported at the time (all three are actually **derived** lists — many
+sibling documents under a shared prefix — and `<qu-list>` only knew how to `watch()` a
+single document whose value already IS an array).
+
+That verdict was **wrong in one specific, fixable way**, caught by direct pushback: the
+gap was in `<qu-list>` itself, not an inherent property of the data. §4.2 had already
+solved "many sibling documents" for public, curated/derived lists — the missing piece
+was carrying that same shape into `<qu-list>` and into *private* (self-encrypted) lists,
+not accepting imperative construction as the permanent default. Fixed with three small,
+composable additions rather than a bespoke component per app:
+- `watchChildren()` (`@qu/reactive`) — `watch()`'s counterpart for derived lists, built
+  on `getChildren()` with the same race-guard `watch()` already uses. `<qu-list>` grew a
+  `parent` attribute (derived, `watchChildren()`) alongside `path` (curated, `watch()`).
+- Private lists redesigned onto the *same* per-item derived shape public lists use
+  (`createPrivateStore()`, a Qu-shaped facade that transparently self-encrypts/decrypts —
+  see §4.2's own update below), replacing a single self-encrypted blob-per-namespace
+  (`StarredService`, deleted) that re-wrote its *entire* list on every mutation and
+  had no reactivity at all.
+- `relatedPaths`/`related="name"` for per-row referenced data (e.g. a directory entry's
+  own profile document), and `onItemStamped(els, id, item)` as a deliberately narrow
+  escape hatch for the genuinely non-declarative remainder — mounting an existing
+  imperative helper (`renderFlagToggle()`) into a slot, or resolving a value that legally
+  *cannot* be read via a plain path (a profile document is a signed, wrapped envelope;
+  only `getPublicProfile()` may unwrap it — a `<qu-view related="profile">` would render
+  raw, unverified envelope data).
+
+**Current verdict**: all three apps are now built on `<qu-list parent="...">` — genuinely
+list-shaped construction, live add/remove with no manual re-fetch, `<qu-list>` is no
+longer "optional infrastructure nothing uses" but the actual foundation these apps run
+on. Search stays a plain post-render visibility toggle over rendered rows (not promoted
+into a new reactive filter primitive — disproportionate machinery for three apps, and not
+a "workaround" of list *construction*, which stays 100% `<qu-list>`-driven), and per-row
+referenced-data resolution stays imperative in `onItemStamped` exactly where a real
+constraint (signed envelopes, DOM subtrees `<qu-view>` can't compose) forces it — not
+because the data "isn't list-shaped." V3 still does not maintain two competing default
+UI paradigms: `<qu-list>`/`<qu-view>`/`<qu-bind>` are now the default for anything that
+*is* a list (curated or derived, public or private), with `onItemStamped` as the one
+documented, narrow escape hatch for what declarative HTML genuinely cannot express —
+imperative-from-scratch is no longer the fallback for "this data has some structure to
+it," only for views with no list shape at all (a single detail page, an ad-hoc lookup).
 
 ---
 
@@ -835,9 +883,13 @@ generic filter/`WHERE` predicate on `getChildren()` (§1.2).
 4. §7's Findings 1-2 (remove the phantom `foundation`→`core` dependency, `thread-ui`'s
    `watchPath` parameter) — small, independent, no reason to wait.
 5. §3.5, §6.2, §4.3 — independent, parallelizable once 1-3 land.
-6. §5 (UI spike) — **done**: `@qu/reactive`/`@qu/ui` built and tested, resolved in favor
-   of imperative-by-default via three real apps (`apps/app-list`/`user-list`/
-   `contact-list`), not in the abstract - see §5 and the README's own status entry.
+6. §5 (UI spike) — **done, then revised**: `@qu/reactive`/`@qu/ui` built and tested via
+   three real apps (`apps/app-list`/`user-list`/`contact-list`); first verdict favored
+   imperative-by-default, revised once `<qu-list>` gained derived-list support
+   (`watchChildren()`, `parent` attribute) and private lists were rebuilt onto the same
+   shape (`createPrivateStore()`, replacing `StarredService` — see §4.4) - all three apps
+   now built genuinely on `<qu-list>`, imperative reserved for the one documented escape
+   hatch (`onItemStamped`) - see §5 and the README's own status entry.
 
 Turning this into an actual phased implementation plan (file-by-file, in the style of
 the earlier QuV2 planning rounds) is a good next step once these design decisions are

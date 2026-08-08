@@ -397,6 +397,111 @@ own tests, built bottom-up per the dependency order in
       directory - `/apps.json` lists exactly the three client apps with
       correct `clientMainUrl`s, and `/apps/<name>/dist/client.js` serves
       the actual built, self-contained bytes for each.
+- [x] `apps/app-list`/`user-list`/`contact-list` REBUILT genuinely on
+      `<qu-list>` - the previous round's "these three stay imperative, the
+      data isn't `<qu-list>`'s shape" conclusion above turned out to be a
+      real, fixable gap in `<qu-list>` itself, not an inherent property of
+      the data. Raised directly by the user: all three ARE lists from the
+      store (flagged apps, flagged users, the directory) even though each
+      needs some referenced data per row - closing that gap was preferred
+      over leaving the apps imperative, and turned out to also fix a real
+      efficiency problem in private lists, not just an aesthetic one.
+      **`@qu/reactive`**: new `watchChildren(qu, parentPath, callback, opts)` -
+      `watch()`'s counterpart for DERIVED lists (many sibling documents
+      under a shared prefix, no single value to `watch()`), built on
+      `getChildren()` with the same monotonic-call-counter race guard as
+      `watch()`. Regression caught by its own test: an early version
+      refetched on a write to ANY descendant path, not just a direct
+      child - narrowed to match `getChildren()`'s own documented "one
+      level deep" contract.
+      **`@qu/services`**: private (self-encrypted) lists redesigned from a
+      single self-encrypted BLOB per namespace (`StarredService` - the
+      WHOLE array re-encrypted on every mutation, O(n) per write, and
+      un-reactive by construction) onto the SAME per-item derived-list
+      shape `ListService`'s public lists already use. `StarredService`
+      deleted outright (verified via grep: zero callers besides
+      `FlagService`'s private mode). New `private-storage.js` primitives:
+      `getPrivateChildren()` (derived-list fetch + decrypt, xKey resolved
+      once not per item, tombstones skipped before decrypting - mirrors
+      `ListService.listDerived()`) and `createPrivateStore(qu, identity)`,
+      a Qu-SHAPED facade (`{get, put, getChildren, onStorageChange}`) that
+      transparently self-encrypts/decrypts. That facade is what avoided
+      needing any new UI-layer component for "reactive private data" -
+      `<qu-view>`/`<qu-list>`/`watch()`/`watchChildren()` are all already
+      duck-typed against exactly this interface (`findQu()` just walks up
+      for the nearest `.qu`), so a container with
+      `.qu = createPrivateStore(qu, identity)` gets every reactive
+      primitive to work transparently through encryption with zero changes
+      to `@qu/reactive`/`@qu/ui`. `FlagService`'s private mode rewritten
+      onto these (constructor no longer takes a `starredService`) while
+      preserving the EXACT same consumer shape - `ContactsService`/
+      `FavoritesService` needed zero changes. Tombstone convention (`null`
+      = removed, written PLAIN/unencrypted, matching every other derived
+      list in the codebase) applies here too, checked before decrypting.
+      **`@qu/ui`**: `<qu-list>` gained a `parent` attribute (derived lists,
+      via `watchChildren()`) alongside the existing `path` attribute
+      (curated lists, `watch()`) - both modes share the same `_render()`.
+      Regression caught by its own test: derived-mode tombstones
+      (`quBit.val: null`) were still rendering, since the old `validItems`
+      filter only checked `item?.path`, which a tombstone still has -
+      fixed to also check `!('quBit' in item) || item.quBit?.val`, scoped
+      so curated-mode items (no `.quBit` field at all) are unaffected. New
+      `relatedPaths` property on `<qu-list>` - a JS function
+      `(itemId, item) => Record<string,string>` resolved once per stamped
+      item, exposed to descendants via a new `related="name"` attribute on
+      `<qu-view>`/`<qu-bind>`/`<qu-if>` (alternative to `path`). Kept as a
+      JS callback, not a string-template DSL - same anti-pattern-matching-
+      engine principle already documented for search below. New
+      `onItemStamped(els, itemId, item)` hook on `<qu-list>`, called once
+      per newly-stamped item before DOM insertion - added when a genuine
+      compositional gap showed up TWICE independently while rebuilding the
+      apps (mounting `renderFlagToggle()`'s existing imperative helper into
+      a slot; giving one descendant its own `.qu` distinct from the item's
+      inherited context) - a real escape hatch for what pure declarative
+      HTML/`related` can't express, not a second templating mechanism.
+      **`@qu/relay`**: new `apps-catalog-store.js` - `publishAppsCatalog()`
+      writes one signed QuBit per app under `/store/apps/catalog/<name>`
+      (same field shape as `/apps.json`'s `buildAppsCatalog()`), called
+      once after boot's app-loading and again after any `disabledApps`
+      change via Relay Admin, so enable/disable reflects into the store
+      live, no restart needed. Deliberately NO new `AccessEngine` ACL -
+      consistent with the codebase's established convention for every
+      other derived list (directory/reactions/pins/presence): "path is
+      addressing, signer is truth". Instead, the relay's own pubkey is
+      exposed via a new `relayPub` field on `/config.json`, and
+      `apps/app-list` verifies every catalog entry's signer against it
+      before trusting it. `/apps.json` unchanged, still fed by the same
+      `buildAppsCatalog()`.
+      **The three apps**, all now built on `<qu-list parent="...">`:
+      `app-list` filters catalog entries to `relayPub`-signed and
+      `enabled !== false` before rendering, `.onItemStamped` mounts
+      `renderFlagToggle()` against `createPrivateStore()`; `user-list`
+      re-verifies each directory entry's signer against its own path
+      segment (same check `DirectoryService.listVisible()` already does
+      internally - binding straight to the raw path bypasses that Service)
+      and resolves avatar/alias imperatively per row, because a profile
+      document is a signed, WRAPPED envelope
+      (`{profile: {...}, signature}`) that only `getPublicProfile()` can
+      safely unwrap - a real finding made while wiring this up: a first
+      draft tried `related="profile"` and would have rendered raw,
+      unverified envelope garbage instead of an alias, so `relatedPaths`
+      was removed from that file as genuinely the wrong fit, not kept as
+      dead flexibility; `contact-list` lists `<qu-list parent="...">`
+      against `privateFlagParentPath(self, 'favorite', 'user')` with `.qu`
+      set to `createPrivateStore()`, so Remove-then-gone is fully live,
+      no manual re-fetch, unlike the previous imperative version. All
+      three keep client-side search as a plain post-render visibility
+      toggle over already-`<qu-list>`-rendered rows' own text - still not
+      promoted into a new reactive filter primitive, disproportionate
+      machinery for three apps, and not a "workaround" of list
+      construction since the list itself stays fully `<qu-list>`-driven.
+      Full suite green at 785 tests (up from 746, net of `StarredService`'s
+      tests removed and everything above's new coverage added). Manual
+      smoke test: a real `QuRelay` booted against the real `apps/`
+      directory - `/config.json` returns a real `relayPub`,
+      `/store/apps/catalog/*` holds all three apps' entries each signed by
+      that exact key: `npm run build` bundles all three cleanly with no
+      leftover bare `@qu/*` imports.
 
 ## Development
 

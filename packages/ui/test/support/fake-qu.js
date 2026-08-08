@@ -1,4 +1,4 @@
-/** A minimal fake Qu instance - just enough of QuStore's surface (get/put/onStorageChange) for @qu/reactive's watch() (and therefore every Qu-Component) to work against. */
+/** A minimal fake Qu instance - just enough of QuStore's surface (get/put/getChildren/onStorageChange) for @qu/reactive's watch()/watchChildren() (and therefore every Qu-Component) to work against. */
 export function fakeQu(initial = {}) {
   const store = new Map(Object.entries(initial).map(([path, val]) => [path, { val, ts: 1 }]));
   const listeners = new Set();
@@ -11,6 +11,14 @@ export function fakeQu(initial = {}) {
       ts += 1;
       store.set(path, { val, ts });
       for (const listener of listeners) listener({ path });
+    },
+    async getChildren(parentPath, { order = 'desc' } = {}) {
+      const prefix = `${parentPath}/`;
+      const entries = [...store.entries()]
+        .filter(([path]) => path.startsWith(prefix) && !path.slice(prefix.length).includes('/'))
+        .map(([path, quBit]) => ({ path, quBit }));
+      entries.sort((a, b) => (order === 'asc' ? a.quBit.ts - b.quBit.ts : b.quBit.ts - a.quBit.ts));
+      return entries;
     },
     onStorageChange(handler) {
       listeners.add(handler);

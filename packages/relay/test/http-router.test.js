@@ -16,7 +16,7 @@ async function freshEnv({ manifests = [] } = {}) {
   const appsDir = await mkdtemp(join(tmpdir(), 'qu-http-router-apps-'));
   const qu = new QuStore();
   qu.mount('store', new MemoryStoreAdapter());
-  const state = { transport: null, vapidKeys: null };
+  const state = { transport: null, vapidKeys: null, relayPub: null };
   const adminHttp = {
     settingsCalls: 0,
     dataListCalls: 0,
@@ -83,6 +83,27 @@ test('GET /config.json reflects a saved settings change', async () => {
     const res = await fetch(`http://localhost:${env.port}/config.json`);
     const body = await res.json();
     assert.equal(body.settings.defaultLocale, 'de');
+  } finally {
+    await env.teardown();
+  }
+});
+
+test('GET /config.json returns null relayPub before boot() has established one', async () => {
+  const env = await freshEnv();
+  try {
+    const res = await fetch(`http://localhost:${env.port}/config.json`);
+    assert.equal((await res.json()).relayPub, null);
+  } finally {
+    await env.teardown();
+  }
+});
+
+test('GET /config.json reflects state.relayPub once boot() has set it - what apps/app-list checks a catalog entry\'s signer against', async () => {
+  const env = await freshEnv();
+  try {
+    env.state.relayPub = 'relay-pub-abc123';
+    const res = await fetch(`http://localhost:${env.port}/config.json`);
+    assert.equal((await res.json()).relayPub, 'relay-pub-abc123');
   } finally {
     await env.teardown();
   }

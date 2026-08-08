@@ -6,20 +6,29 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { QuStore, QuCrypto } from '@qu/core';
 import { FsAdapter } from '@qu/runtime/fs';
+import { QuIdentityEngine } from '@qu/identity';
+import { paths } from '@qu/services';
 import { AdminHttp } from '../src/admin-http.js';
 
-async function freshEnv() {
+function fakeLoader(manifests = []) {
+  return { listManifests: () => manifests.map((manifest) => ({ manifest, originUrl: null })) };
+}
+
+async function freshEnv({ manifests = [] } = {}) {
   const base = await mkdtemp(join(tmpdir(), 'qu-admin-http-'));
   const storeDir = join(base, 'store');
   const blobDir = join(base, 'blob');
   const qu = new QuStore();
   qu.mount('store', new FsAdapter(storeDir));
   qu.mount('blob', new FsAdapter(blobDir));
+  const identity = new QuIdentityEngine(qu);
+  await identity.importMnemonic(identity.generateMnemonic());
+  const loader = fakeLoader(manifests);
 
   const adminKp = await QuCrypto.generateKeypair();
   const adminPub = QuCrypto.toBase64Url(adminKp.publicKey);
   const state = { transport: null };
-  const adminHttp = new AdminHttp(qu, { adminPubs: [adminPub], storeDir, blobDir }, state);
+  const adminHttp = new AdminHttp(qu, { adminPubs: [adminPub], storeDir, blobDir, identity, loader }, state);
 
   const httpServer = createServer((req, res) => {
     if (req.url === '/admin/settings' && req.method === 'POST') return adminHttp.handleSettings(req, res);
@@ -31,7 +40,7 @@ async function freshEnv() {
   const port = httpServer.address().port;
 
   return {
-    qu, adminKp, adminPub, state, adminHttp, port, base,
+    qu, identity, adminKp, adminPub, state, adminHttp, port, base,
     teardown: async () => {
       await new Promise((resolve) => httpServer.close(resolve));
       await rm(base, { recursive: true, force: true });
@@ -138,6 +147,53 @@ test('a settings change with NO rateLimits field does not touch the transport', 
   }
 });
 
+test('a disabledApps change re-publishes the app catalog into the store - a disabled app becomes enabled: false live, no restart', async () => {
+  const env = await freshEnv({
+    manifests: [{ name: 'forum', clientMain: './dist/client.js', label: 'Forum' }],
+  });
+  try {
+    // freshEnv() doesn't boot a real relay (no publishAppsCatalog() call at
+    // startup here) - the catalog entry is published for the FIRST time by
+    // this very handleSettings() call, same as it would be re-published on
+    // any later admin action.
+    assert.equal(await env.qu.get(paths.appCatalogEntryPath('forum')), null);
+
+    await signedPost(env, '/admin/settings', env.adminPub, env.adminKp, 'settings', { disabledApps: ['forum'] });
+
+    const after = await env.qu.get(paths.appCatalogEntryPath('forum'));
+    assert.equal(after.val.enabled, false);
+  } finally {
+    await env.teardown();
+  }
+});
+
+test('a settings change with NO disabledApps field does not touch the app catalog at all', async () => {
+  const env = await freshEnv({
+    manifests: [{ name: 'forum', clientMain: './dist/client.js', label: 'Forum' }],
+  });
+  try {
+    await signedPost(env, '/admin/settings', env.adminPub, env.adminKp, 'settings', { defaultLocale: 'fr' });
+    const entry = await env.qu.get(paths.appCatalogEntryPath('forum'));
+    assert.equal(entry, null); // never published - nothing triggered it
+  } finally {
+    await env.teardown();
+  }
+});
+
+test('a re-published catalog entry is signed with the relay\'s own identity', async () => {
+  const env = await freshEnv({
+    manifests: [{ name: 'forum', clientMain: './dist/client.js', label: 'Forum' }],
+  });
+  try {
+    await signedPost(env, '/admin/settings', env.adminPub, env.adminKp, 'settings', { disabledApps: [] });
+    const entry = await env.qu.get(paths.appCatalogEntryPath('forum'));
+    const relayPub = QuCrypto.toBase64Url((await env.identity.getMainKey()).publicKey);
+    assert.equal(QuCrypto.toBase64Url(QuCrypto.fromBase64(entry.pub)), relayPub);
+  } finally {
+    await env.teardown();
+  }
+});
+
 test('POST /admin/data/list finds a QuBit written through the real QuStore', async () => {
   const env = await freshEnv();
   try {
@@ -167,7 +223,12 @@ test('POST /admin/data/list respects a limit and reports hasMore', async () => {
   const env = await freshEnv();
   try {
     for (let i = 0; i < 5; i++) await env.qu.put(`/store/space/docs/d${i}`, { i });
-    const { body } = await signedPost(env, '/admin/data/list', env.adminPub, env.adminKp, 'query', { prefix: '/store', limit: 2 });
+    // A precise prefix ('/store/space', not the broad '/store') - freshEnv()
+    // constructs a real identity, which writes its own seed under
+    // /store/secure/... (see @qu/identity's importMnemonic()), an unrelated
+    // document an exact-total assertion against the wider prefix would
+    // otherwise (correctly!) pick up too.
+    const { body } = await signedPost(env, '/admin/data/list', env.adminPub, env.adminKp, 'query', { prefix: '/store/space', limit: 2 });
     assert.equal(body.entries.length, 2);
     assert.equal(body.total, 5);
     assert.equal(body.hasMore, true);

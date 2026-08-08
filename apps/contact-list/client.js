@@ -1,52 +1,41 @@
 /**
  * CONTACT LIST — everyone this identity has starred as a contact (see
- * `@qu/services`' `ContactsService`), the User List app's counterpart -
- * that app ADDS contacts, this one just shows/removes them, each with
- * their CURRENT public profile resolved live (not a snapshot taken at
- * contact-time - see `ContactsService.listContacts()`'s own doc comment).
+ * `@qu/services`' `ContactsService`/`FlagService`), the User List app's
+ * counterpart - that app ADDS contacts, this one just shows/removes them,
+ * each with their CURRENT public profile resolved live (not a snapshot
+ * taken at contact-time).
+ *
+ * Built on `<qu-list parent="...">` (`@qu/ui`) pointed at
+ * `createPrivateStore(qu, identity)` (`@qu/services`) instead of the raw
+ * `qu` - contacts are a PRIVATE derived list (§4.2's derived-list shape,
+ * self-encrypted per entry, see `FlagService`'s own doc comment), and that
+ * facade is what lets `watchChildren()`/`<qu-list>` decrypt each entry
+ * transparently with zero changes to either. Removing a contact updates
+ * this list live, with no manual refresh needed - unlike the previous
+ * imperative version, which had to re-fetch the whole list itself after
+ * every remove.
  *
  * Each row's action links (Chat, or anything else that plugs in later) are
  * NOT hardcoded here - this app exposes a "contact-row" SLOT, and renders
  * whatever OTHER apps declared for it in their own manifest's `actions`
- * field (see `@qu/foundation`'s `actionsForSlot()`). Contact List has never
- * heard of Chat; Chat's manifest just declares `{slot: "contact-row", id:
- * "chat", hrefTemplate: "#/chat/{pub}"}`, and this file resolves `{pub}`
- * per contact. A future app shows up here automatically the moment its
- * manifest declares the same slot - no change needed on this side.
+ * field (see `@qu/foundation`'s `actionsForSlot()`).
  *
- * Also has a search box filtering by alias or pub/FP substring. Unlike User
- * List, there's no "not listed" lookup needed here: a contact's profile is
- * already resolved live regardless of whether they ever opted into the
- * public directory - once someone's been added as a Contact (e.g. via User
- * List's own FP lookup for someone unlisted), they just show up here like
- * anyone else.
- *
- * Stays IMPERATIVE, not built on `@qu/ui`'s `<qu-list>`: `listContacts()`
- * already resolves each entry's profile server-side (one combined async
- * result, not a raw Qu path), plus client-side search filtering - not the
- * "one watched Qu path -> one array" shape `<qu-list>` expects. See
- * docs/v3-technical-concept.md §5.
+ * Avatar/name resolution and the action-slot links stay imperative in
+ * `onItemStamped`, same reasoning as `apps/user-list`: a profile document
+ * is a signed, wrapped envelope only `services.profile.getPublicProfile()`
+ * can safely unwrap, and `renderAvatar()` composes a DOM subtree a
+ * `<qu-view>` can't mirror. Search is a plain post-render visibility
+ * toggle over the rendered rows' own text.
  */
 import { createI18n } from '@qu/i18n';
+import { formatActorLabel, paths, createPrivateStore } from '@qu/services';
 import { actionsForSlot, resolveActionHref } from '@qu/foundation';
 import { renderAvatar, injectStyle, ensureTheme } from '@qu/ui';
-import { formatActorLabel, matchesActorQuery } from '@qu/services';
+import { QuCrypto } from '@qu/core';
 
 const DICT = {
-  en: {
-    title: 'Contacts',
-    empty: 'No contacts yet — add some from the User List.',
-    noMatch: 'No contact matches that alias or FP.',
-    searchPlaceholder: 'Search by alias or FP…',
-    remove: 'Remove',
-  },
-  de: {
-    title: 'Kontakte',
-    empty: 'Noch keine Kontakte — in der Nutzerliste hinzufügen.',
-    noMatch: 'Kein Kontakt passt zu Alias oder FP.',
-    searchPlaceholder: 'Suche nach Alias oder FP…',
-    remove: 'Entfernen',
-  },
+  en: { title: 'Contacts', searchPlaceholder: 'Search by alias or FP…', remove: 'Remove' },
+  de: { title: 'Kontakte', searchPlaceholder: 'Suche nach Alias oder FP…', remove: 'Entfernen' },
 };
 const { t } = createI18n(DICT);
 
@@ -55,20 +44,18 @@ const STYLE = `
   .qu-contact-search { width: 100%; box-sizing: border-box; margin: 0 0 0.6rem; padding: 0.5rem 0.7rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); font: inherit; }
   .qu-contact-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
   .qu-contact-list li { display: flex; align-items: center; gap: 0.6rem; padding: 0.5rem 0.7rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); }
-  .qu-contact-list .qu-contact-name { flex: 1; font-family: var(--qu-font-mono, ui-monospace, monospace); text-decoration: none; color: inherit; }
-  .qu-contact-list .qu-contact-name:hover { text-decoration: underline; }
+  .qu-contact-name { flex: 1; font-family: var(--qu-font-mono, ui-monospace, monospace); text-decoration: none; color: inherit; }
+  .qu-contact-name:hover { text-decoration: underline; }
   .qu-contact-list button { background: none; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-sm, 0.3rem); cursor: pointer; padding: 0.2rem 0.5rem; }
-  .qu-contact-list .qu-contact-action { text-decoration: none; font-size: 1.1em; }
+  .qu-contact-action { text-decoration: none; font-size: 1.1em; }
 `;
 
 const CONTACT_ROW_SLOT = 'contact-row';
 
-export function mount(container, { services, apps }) {
+export function mount(container, { qu, identity, services, apps }) {
   ensureTheme();
   injectStyle(STYLE_ID, STYLE);
   let stopped = false;
-  let filterText = '';
-  let contacts = [];
   const rowActions = actionsForSlot(apps, CONTACT_ROW_SLOT);
 
   const heading = document.createElement('h1');
@@ -78,91 +65,65 @@ export function mount(container, { services, apps }) {
   search.type = 'search';
   search.className = 'qu-contact-search';
   search.placeholder = t('searchPlaceholder');
-  search.addEventListener('input', () => {
-    filterText = search.value;
-    renderResults();
-  });
+  search.addEventListener('input', () => applyFilter(search.value));
 
-  const resultsEl = document.createElement('div');
-  container.append(heading, search, resultsEl);
+  const listRoot = document.createElement('div');
+  container.append(heading, search, listRoot);
 
-  function matches({ actorPub, profile }) {
-    return matchesActorQuery(actorPub, profile, filterText);
-  }
-
-  function renderResults() {
-    if (stopped) return;
-    resultsEl.textContent = '';
-
-    if (contacts.length === 0) {
-      const empty = document.createElement('p');
-      empty.textContent = t('empty');
-      resultsEl.appendChild(empty);
-      return;
+  function applyFilter(query) {
+    const q = query.trim().toLowerCase();
+    for (const li of listRoot.querySelectorAll('li')) {
+      li.hidden = q.length > 0 && !li.textContent.toLowerCase().includes(q);
     }
-
-    const filtered = contacts.filter(matches);
-    if (filtered.length === 0) {
-      const empty = document.createElement('p');
-      empty.textContent = t('noMatch');
-      resultsEl.appendChild(empty);
-      return;
-    }
-
-    const list = document.createElement('ul');
-    list.className = 'qu-contact-list';
-    for (const contact of filtered) list.appendChild(row(contact, services, refresh, rowActions));
-    resultsEl.appendChild(list);
   }
 
-  // A named, reusable refresh function (rather than mount() calling itself)
-  // so a Remove click's refresh reuses this ONE closure's `stopped` flag -
-  // an inner `mount(container, ...)` call would spin up an independent
-  // `stopped` of its own that this mount's own returned stop function could
-  // never reach, and a stale in-flight render could then write into
-  // `container` after the caller had already unmounted this app.
-  async function refresh() {
-    const fetched = await services.contacts.listContacts();
+  (async () => {
+    const mainKey = await identity.getMainKey();
+    const selfPub = QuCrypto.toBase64Url(mainKey.publicKey);
     if (stopped) return;
-    contacts = fetched;
-    renderResults();
-  }
 
-  refresh();
+    listRoot.qu = createPrivateStore(qu, identity);
+    listRoot.innerHTML = `
+      <qu-list class="qu-contact-list" parent="${paths.privateFlagParentPath(selfPub, 'favorite', 'user')}">
+        <template>
+          <li>
+            <span class="qu-contact-avatar-slot"></span>
+            <a class="qu-contact-name"></a>
+            <span class="qu-contact-actions-slot"></span>
+            <button type="button" class="qu-contact-remove">${t('remove')}</button>
+          </li>
+        </template>
+      </qu-list>`;
+
+    const list = listRoot.querySelector('qu-list');
+    list.onItemStamped = (els, contactPub) => {
+      const li = els[0];
+      li.querySelector('.qu-contact-name').href = `#/~${contactPub}`;
+
+      (async () => {
+        const profile = await services.profile.getPublicProfile(contactPub);
+        if (stopped) return;
+        const alias = formatActorLabel(contactPub, profile);
+        li.querySelector('.qu-contact-avatar-slot').replaceChildren(renderAvatar(contactPub, alias, profile?.avatar, { size: '2.2rem' }));
+        li.querySelector('.qu-contact-name').textContent = alias;
+        applyFilter(search.value);
+      })();
+
+      const actionsSlot = li.querySelector('.qu-contact-actions-slot');
+      for (const action of rowActions) {
+        const link = document.createElement('a');
+        link.className = 'qu-contact-action';
+        link.href = resolveActionHref(action, { pub: contactPub });
+        link.title = action.label;
+        link.textContent = action.icon ?? action.label;
+        actionsSlot.appendChild(link);
+      }
+
+      li.querySelector('.qu-contact-remove').addEventListener('click', () => {
+        services.contacts.removeContact(contactPub); // <qu-list> picks up the removal live - no manual refresh needed
+      });
+    };
+  })();
 
   return () => { stopped = true; };
-}
-
-function row({ actorPub, profile }, services, refresh, rowActions) {
-  const li = document.createElement('li');
-  const alias = formatActorLabel(actorPub, profile);
-  li.appendChild(renderAvatar(actorPub, alias, profile?.avatar, { size: '2.2rem' }));
-  const name = document.createElement('a');
-  name.className = 'qu-contact-name';
-  name.href = `#/~${actorPub}`;
-  name.textContent = alias;
-  li.appendChild(name);
-
-  // Every action any OTHER app declared for the "contact-row" slot (see
-  // this file's own doc comment) - Chat today, whatever else registers
-  // itself here tomorrow, with zero changes needed in THIS file.
-  for (const action of rowActions) {
-    const link = document.createElement('a');
-    link.className = 'qu-contact-action';
-    link.href = resolveActionHref(action, { pub: actorPub });
-    link.title = action.label;
-    link.textContent = action.icon ?? action.label;
-    li.appendChild(link);
-  }
-
-  const removeBtn = document.createElement('button');
-  removeBtn.type = 'button';
-  removeBtn.textContent = t('remove');
-  removeBtn.addEventListener('click', async () => {
-    await services.contacts.removeContact(actorPub);
-    await refresh();
-  });
-  li.appendChild(removeBtn);
-
-  return li;
 }

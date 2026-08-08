@@ -1,1 +1,1 @@
-export { watch } from './watch.js';
+export { watch, watchChildren } from './watch.js';

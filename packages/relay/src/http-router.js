@@ -68,8 +68,13 @@ export class HttpRouter {
 
       // Public, non-secret config a client needs before it knows anything
       // else: which actor pubkeys are relay admins, so a UI can show (or
-      // hide) an admin nav entry for the connected identity, plus this
-      // relay's current admin-configurable settings. This is a UX
+      // hide) an admin nav entry for the connected identity, this relay's
+      // current admin-configurable settings, and `relayPub` - this relay's
+      // own signing identity, what `apps/app-list` checks each
+      // `/store/apps/catalog/<name>` entry's signer against before trusting
+      // it (see `apps-catalog-store.js`'s own doc comment: no AccessEngine
+      // ACL guards that path, the reader verifies the signer instead, same
+      // as every other derived list in this codebase). This is a UX
       // convenience ONLY, never an authorization boundary - all of this is
       // public information anyone could read here regardless; the actual
       // privileged admin ACTION (`POST /admin/settings`) independently
@@ -78,7 +83,7 @@ export class HttpRouter {
       // that only an admin's client would ever render the button.
       if (req.url === '/config.json') {
         const settings = await getSettings(this.qu);
-        res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }).end(JSON.stringify({ adminPubs: this.adminPubs, settings }));
+        res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }).end(JSON.stringify({ adminPubs: this.adminPubs, relayPub: this.state.relayPub, settings }));
         return;
       }
 

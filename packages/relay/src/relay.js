@@ -17,6 +17,7 @@ import { PushDeliveryService } from './push-delivery.js';
 import { AdminHttp } from './admin-http.js';
 import { HttpRouter } from './http-router.js';
 import { getSettings } from './relay-settings.js';
+import { publishAppsCatalog } from './apps-catalog-store.js';
 
 /**
  * QU RELAY — a Node.js peer that persists to disk, syncs with other peers,
@@ -125,13 +126,14 @@ export class QuRelay {
     this.loader = new QuLoader(this.qu, this.registry);
 
     // Shared, mutable state `AdminHttp`/`HttpRouter` read fresh on every
-    // request - `transport`/`vapidKeys` aren't known until partway through
-    // `boot()` (see below), and by construction time here neither module's
-    // factory has run yet either (RuntimeContainer factories are lazy).
-    this._state = { transport: null, vapidKeys: null };
+    // request - `transport`/`vapidKeys`/`relayPub` aren't known until
+    // partway through `boot()` (see below), and by construction time here
+    // neither module's factory has run yet either (RuntimeContainer
+    // factories are lazy).
+    this._state = { transport: null, vapidKeys: null, relayPub: null };
 
     this.runtime.register('presence', () => new PresenceTracker());
-    this.runtime.register('adminHttp', () => new AdminHttp(this.qu, { adminPubs: this.options.adminPubs, storeDir: this.options.storeDir, blobDir: this.options.blobDir }, this._state));
+    this.runtime.register('adminHttp', () => new AdminHttp(this.qu, { adminPubs: this.options.adminPubs, storeDir: this.options.storeDir, blobDir: this.options.blobDir, identity: this.identity, loader: this.loader }, this._state));
     this.runtime.register('httpRouter', (rt) => new HttpRouter(this.qu, rt.resolve('adminHttp'), this.loader, { adminPubs: this.options.adminPubs, appsDir: this.options.appsDir, state: this._state }));
     this.runtime.register('pushDelivery', (rt) => new PushDeliveryService({
       messages: this.messages,
@@ -189,6 +191,10 @@ export class QuRelay {
     if (!(await this.identity.getProfile(ownPub))) {
       await this.identity.publishMainProfile({});
     }
+    // Public via /config.json (see http-router.js) - what a client checks
+    // an app-catalog entry's signer against before trusting it (see
+    // apps-catalog-store.js's own doc comment for the full reasoning).
+    this._state.relayPub = ownPub;
 
     // Resolved BEFORE `pushDelivery` is ever resolved - see that module's
     // registration above, which captures `this._state.vapidKeys` at
@@ -246,6 +252,12 @@ export class QuRelay {
     for (const remote of this.options.remoteApps) {
       await this.loader.loadRemote(remote.manifestUrl, { trustedPublisherPubs: remote.trustedPublisherPubs ?? [] });
     }
+
+    // Publishes into the store what /apps.json has always served over
+    // HTTP, so `apps/app-list` can watch it live via `<qu-list parent=...>`
+    // instead of a one-shot fetch. Same `settings` already read above for
+    // the rate limit - `disabledApps` can't have changed mid-boot.
+    await publishAppsCatalog(this.qu, this.identity, this.loader, settings);
 
     console.log(`[QuRelay] listening on http://localhost:${this.port} (peer ${this.transport.getPeerId()})`);
     console.log(`[QuRelay] loaded apps: ${this.loader.listLoaded().join(', ') || '(none)'}`);

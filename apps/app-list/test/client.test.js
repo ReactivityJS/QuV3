@@ -1,124 +1,147 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { QuStore, MemoryStoreAdapter } from '@qu/core';
+import { QuStore, MemoryStoreAdapter, QuCrypto } from '@qu/core';
 import { QuIdentityEngine } from '@qu/identity';
-import { FavoritesService, StarredService, FlagService, ListService } from '@qu/services';
+import { FavoritesService, FlagService, ListService, paths } from '@qu/services';
 import { installDom, waitFor } from '@qu/ui/testing';
 
 installDom();
 const { mount } = await import('../client.js');
 
-async function freshServices() {
+async function freshEnv() {
   const qu = new QuStore();
   qu.mount('store', new MemoryStoreAdapter());
-  const identity = new QuIdentityEngine(qu);
+  const identity = new QuIdentityEngine(qu); // the VIEWER's own identity - drives services.favorites
   await identity.importMnemonic(identity.generateMnemonic());
-  const flags = new FlagService(qu, identity, new StarredService(qu, identity), new ListService(qu));
+  const flags = new FlagService(qu, identity, new ListService(qu));
   const favorites = new FavoritesService(flags);
-  return { favorites };
+
+  const relayKp = await QuCrypto.generateKeypair(); // a DIFFERENT identity - simulates the relay's own signing key
+  const relayPub = QuCrypto.toBase64Url(relayKp.publicKey);
+
+  return { qu, services: { favorites }, relayKp, relayPub };
 }
 
-function fakeFetch(body, { ok = true } = {}) {
-  return async () => ({ ok, json: async () => body });
+/** Writes a catalog entry directly, as @qu/relay's apps-catalog-store.js would - signed by relayKp unless a forger key is given. */
+async function publishCatalogEntry(qu, relayKp, name, fields = {}) {
+  const path = paths.appCatalogEntryPath(name);
+  await qu.put(path, { name, label: name, icon: '🧩', navOrder: 0, enabled: true, ...fields }, {
+    signWith: relayKp.privateKey,
+    writerPub: relayKp.publicKey,
+  });
 }
 
-test('renders every mountable app from /apps.json, sorted by navOrder', async (t) => {
-  const { favorites } = await freshServices();
-  t.mock.method(globalThis, 'fetch', fakeFetch([
-    { name: 'b', label: 'Bravo', navOrder: 2, clientMainUrl: '/apps/b/dist/client.js' },
-    { name: 'a', label: 'Alpha', navOrder: 1, clientMainUrl: '/apps/a/dist/client.js' },
-  ]));
-  const container = document.createElement('div');
-  mount(container, { services: { favorites } });
-  await waitFor(() => container.querySelectorAll('a').length > 0);
+function mockConfigFetch(relayPub) {
+  return async (url) => {
+    if (url === '/config.json') return { ok: true, json: async () => ({ relayPub }) };
+    return { ok: false, json: async () => ({}) };
+  };
+}
 
-  const links = [...container.querySelectorAll('a')].map((a) => a.textContent);
-  assert.deepEqual(links, ['Alpha', 'Bravo']);
+/** Must be attached to document.body - <qu-list>/<qu-view> only fire connectedCallback() once actually part of the document, not just a detached node tree. */
+function makeContainer() {
+  const el = document.createElement('div');
+  document.body.appendChild(el);
+  return el;
+}
+
+test('renders every enabled, relay-signed catalog entry', async (t) => {
+  const { qu, services, relayKp, relayPub } = await freshEnv();
+  await publishCatalogEntry(qu, relayKp, 'notes', { label: 'Notes', icon: '📝' });
+  t.mock.method(globalThis, 'fetch', mockConfigFetch(relayPub));
+
+  const container = makeContainer();
+  mount(container, { qu, services });
+  await waitFor(() => container.querySelector('li') !== null);
+
+  assert.match(container.querySelector('.qu-app-list-link').textContent, /Notes/);
+  assert.equal(container.querySelector('.qu-app-list-link').getAttribute('href'), '#/notes');
 });
 
-test('an app with no clientMainUrl (server-only) is omitted', async (t) => {
-  const { favorites } = await freshServices();
-  t.mock.method(globalThis, 'fetch', fakeFetch([
-    { name: 'forum', label: 'Forum', clientMainUrl: null },
-    { name: 'notes', label: 'Notes', clientMainUrl: '/apps/notes/dist/client.js' },
-  ]));
-  const container = document.createElement('div');
-  mount(container, { services: { favorites } });
-  await waitFor(() => container.querySelectorAll('a').length > 0);
+test('a catalog entry signed by someone OTHER than relayPub is never rendered', async (t) => {
+  const { qu, services, relayPub } = await freshEnv();
+  const forgerKp = await QuCrypto.generateKeypair();
+  await publishCatalogEntry(qu, forgerKp, 'evil-app', { label: 'Evil App' });
+  t.mock.method(globalThis, 'fetch', mockConfigFetch(relayPub));
 
-  const links = [...container.querySelectorAll('a')].map((a) => a.textContent);
-  assert.deepEqual(links, ['Notes']);
+  const container = makeContainer();
+  mount(container, { qu, services });
+  await new Promise((resolve) => setTimeout(resolve, 100)); // give it time to (not) render
+
+  assert.equal(container.querySelectorAll('li').length, 0);
 });
 
-test('a disabled app (enabled: false) is omitted', async (t) => {
-  const { favorites } = await freshServices();
-  t.mock.method(globalThis, 'fetch', fakeFetch([
-    { name: 'notes', label: 'Notes', enabled: false, clientMainUrl: '/apps/notes/dist/client.js' },
-  ]));
-  const container = document.createElement('div');
-  mount(container, { services: { favorites } });
-  await waitFor(() => container.textContent.length > 0);
+test('a disabled catalog entry (enabled: false) is not rendered', async (t) => {
+  const { qu, services, relayKp, relayPub } = await freshEnv();
+  await publishCatalogEntry(qu, relayKp, 'off', { label: 'Off', enabled: false });
+  t.mock.method(globalThis, 'fetch', mockConfigFetch(relayPub));
 
-  assert.equal(container.querySelectorAll('a').length, 0);
-  assert.match(container.textContent, /No mountable apps/);
+  const container = makeContainer();
+  mount(container, { qu, services });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  assert.equal(container.querySelectorAll('li').length, 0);
 });
 
-test('a failed /apps.json fetch renders the empty state instead of throwing', async (t) => {
-  const { favorites } = await freshServices();
-  t.mock.method(globalThis, 'fetch', fakeFetch([], { ok: false }));
-  const container = document.createElement('div');
-  mount(container, { services: { favorites } });
-  await waitFor(() => container.textContent.length > 0);
+test('the list updates live when a new catalog entry is published', async (t) => {
+  const { qu, services, relayKp, relayPub } = await freshEnv();
+  t.mock.method(globalThis, 'fetch', mockConfigFetch(relayPub));
 
-  assert.match(container.textContent, /No mountable apps/);
+  const container = makeContainer();
+  mount(container, { qu, services });
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(container.querySelectorAll('li').length, 0);
+
+  await publishCatalogEntry(qu, relayKp, 'notes', { label: 'Notes' });
+  await waitFor(() => container.querySelector('li') !== null);
+  assert.match(container.querySelector('.qu-app-list-link').textContent, /Notes/);
 });
 
 test('clicking the favorite toggle adds it, re-clicking removes it, and broadcasts qu:flag-changed', async (t) => {
-  const { favorites } = await freshServices();
-  t.mock.method(globalThis, 'fetch', fakeFetch([
-    { name: 'notes', label: 'Notes', clientMainUrl: '/apps/notes/dist/client.js' },
-  ]));
-  const container = document.createElement('div');
-  mount(container, { services: { favorites } });
+  const { qu, services, relayKp, relayPub } = await freshEnv();
+  await publishCatalogEntry(qu, relayKp, 'notes', { label: 'Notes' });
+  t.mock.method(globalThis, 'fetch', mockConfigFetch(relayPub));
+
+  const container = makeContainer();
+  mount(container, { qu, services });
   await waitFor(() => container.querySelector('button') !== null);
 
   const events = [];
   window.addEventListener('qu:flag-changed', (e) => events.push(e.detail));
 
   const toggle = container.querySelector('button');
-  assert.equal(toggle.textContent, '☆');
+  await waitFor(() => toggle.textContent === '☆');
   toggle.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   await waitFor(() => toggle.textContent === '★');
-  assert.deepEqual(await favorites.list(), ['notes']);
+  assert.equal(await services.favorites.isFavorite('notes'), true);
   assert.deepEqual(events, [{ flagType: 'favorite', entityKind: 'app', entityRef: 'notes', on: true }]);
 
   toggle.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   await waitFor(() => toggle.textContent === '☆');
-  assert.deepEqual(await favorites.list(), []);
+  assert.equal(await services.favorites.isFavorite('notes'), false);
 });
 
-test('a previously favorited app shows the active star on first render', async (t) => {
-  const { favorites } = await freshServices();
-  await favorites.add('notes');
-  t.mock.method(globalThis, 'fetch', fakeFetch([
-    { name: 'notes', label: 'Notes', clientMainUrl: '/apps/notes/dist/client.js' },
-  ]));
-  const container = document.createElement('div');
-  mount(container, { services: { favorites } });
+test('an already-favorited app shows the active star on first render', async (t) => {
+  const { qu, services, relayKp, relayPub } = await freshEnv();
+  await publishCatalogEntry(qu, relayKp, 'notes', { label: 'Notes' });
+  await services.favorites.add('notes');
+  t.mock.method(globalThis, 'fetch', mockConfigFetch(relayPub));
+
+  const container = makeContainer();
+  mount(container, { qu, services });
   await waitFor(() => container.querySelector('button') !== null);
-
-  assert.equal(container.querySelector('button').textContent, '★');
+  await waitFor(() => container.querySelector('button').textContent === '★');
 });
 
-test('the returned stop function prevents a late-resolving fetch from rendering into a torn-down container', async () => {
-  const { favorites } = await freshServices();
+test('the returned stop function prevents a late-resolving /config.json from rendering into a torn-down container', async (t) => {
+  const { qu, services } = await freshEnv();
   let resolveFetch;
   globalThis.fetch = () => new Promise((resolve) => { resolveFetch = resolve; });
-  const container = document.createElement('div');
-  const stop = mount(container, { services: { favorites } });
+  const container = makeContainer();
+  const stop = mount(container, { qu, services });
   stop();
-  resolveFetch({ ok: true, json: async () => [{ name: 'notes', label: 'Notes', clientMainUrl: '/x' }] });
+  resolveFetch({ ok: true, json: async () => ({ relayPub: 'whatever' }) });
   await new Promise((resolve) => setTimeout(resolve, 50));
 
-  assert.equal(container.children.length, 0);
+  assert.equal(container.querySelector('qu-list'), null); // stop() beat the fetch - the list never got built
 });

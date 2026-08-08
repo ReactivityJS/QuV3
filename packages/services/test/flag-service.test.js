@@ -2,9 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { QuStore, MemoryStoreAdapter, QuCrypto } from '@qu/core';
 import { QuIdentityEngine } from '@qu/identity';
-import { StarredService } from '../src/starred-service.js';
 import { ListService } from '../src/list-service.js';
 import { FlagService } from '../src/flag-service.js';
+import { privateFlagPath } from '../src/paths.js';
 
 async function identityOn(qu) {
   const identity = new QuIdentityEngine(qu);
@@ -16,18 +16,50 @@ async function freshFlagService() {
   const qu = new QuStore();
   qu.mount('store', new MemoryStoreAdapter());
   const identity = await identityOn(qu);
-  return { qu, identity, flags: new FlagService(qu, identity, new StarredService(qu, identity), new ListService(qu)) };
+  return { qu, identity, flags: new FlagService(qu, identity, new ListService(qu)) };
 }
 
 // ===== private mode ==============================================================
 
-test('setPrivate()/listPrivate()/hasPrivate() round-trip (delegates to StarredService)', async () => {
+test('setPrivate()/listPrivate()/hasPrivate() round-trip', async () => {
   const { flags } = await freshFlagService();
   await flags.setPrivate('favorite', 'app', 'forum', true);
 
   assert.equal(await flags.hasPrivate('favorite', 'app', 'forum'), true);
   const list = await flags.listPrivate('favorite', 'app');
   assert.deepEqual(list.map((i) => i.id), ['forum']);
+});
+
+// Regression: private mode used to route through StarredService, one
+// self-encrypted BLOB per (flagType, entityKind) containing the whole list
+// as an inline array - every mutation re-encrypted the ENTIRE list. The
+// redesign (docs/v3-technical-concept.md §4.2's derived-list shape, applied
+// to self-encrypted data) makes each flag its own path - this asserts that
+// shape directly: setPrivate() writes ONE new QuBit at its own path, not a
+// growing shared document.
+test('setPrivate() writes each flag at its OWN path, not a shared document', async () => {
+  const { qu, identity, flags } = await freshFlagService();
+  await flags.setPrivate('favorite', 'app', 'a', true);
+  await flags.setPrivate('favorite', 'app', 'b', true);
+
+  const mainPub = QuCrypto.toBase64Url((await identity.getMainKey()).publicKey);
+  const aBit = await qu.get(privateFlagPath(mainPub, 'favorite', 'app', 'a'));
+  const bBit = await qu.get(privateFlagPath(mainPub, 'favorite', 'app', 'b'));
+  assert.ok(aBit); // 'a' has its own QuBit...
+  assert.ok(bBit); // ...independent of 'b's, not entries inside one shared array
+});
+
+// Regression: a re-flag after unflagging must actually come back (not stay
+// stuck on a stale tombstone) - the exact "toggle on/off/on" cycle a UI
+// star button does.
+test('a flag can be toggled off then on again', async () => {
+  const { flags } = await freshFlagService();
+  await flags.setPrivate('favorite', 'app', 'forum', true);
+  await flags.setPrivate('favorite', 'app', 'forum', false);
+  await flags.setPrivate('favorite', 'app', 'forum', true);
+
+  assert.equal(await flags.hasPrivate('favorite', 'app', 'forum'), true);
+  assert.deepEqual((await flags.listPrivate('favorite', 'app')).map((i) => i.id), ['forum']);
 });
 
 test('setPrivate(..., false) unflags', async () => {
@@ -77,7 +109,7 @@ test('getPublicFlags() aggregates multiple DIFFERENT actors flagging the SAME en
   const qu = new QuStore();
   qu.mount('store', new MemoryStoreAdapter());
   const identity = await identityOn(qu); // one real identity, backing the FlagService instance itself
-  const flags = new FlagService(qu, identity, new StarredService(qu, identity), new ListService(qu));
+  const flags = new FlagService(qu, identity, new ListService(qu));
 
   await flags.setPublic('board', 'like', 'thread-message', 'm1', true); // flagger #1: the FlagService's own identity
 

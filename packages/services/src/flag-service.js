@@ -1,5 +1,6 @@
 import { QuCrypto } from '@qu/core';
-import { flagPath, flagParentPath } from './paths.js';
+import { flagPath, flagParentPath, privateFlagPath, privateFlagParentPath } from './paths.js';
+import { getPrivate, putPrivate, getPrivateChildren } from './private-storage.js';
 
 /**
  * FLAG SERVICE — the universal "mark this thing" mechanism (Drupal calls
@@ -10,31 +11,33 @@ import { flagPath, flagParentPath } from './paths.js';
  * what:
  *
  *   - PRIVATE (`setPrivate`/`listPrivate`/`hasPrivate`): "my own list of
- *     things I've flagged" - self-encrypted, only I can read it. Thin
- *     wrapper over the already-fully-generic `StarredService`
- *     (`namespace = flagType + ':' + entityKind`, `itemId = entityRef`).
- *     This is what `FavoritesService` (apps) and `ContactsService` (users)
- *     both are.
+ *     things I've flagged" - self-encrypted, only I can read it. This is
+ *     what `FavoritesService` (apps) and `ContactsService` (users) both are.
  *   - PUBLIC (`setPublic`/`getPublicFlags`/`hasPublicFlag`): a visible,
  *     shared count (Like) - each actor writes their OWN signed slot under
  *     `paths.flagPath()`, enumerable by anyone via
- *     `ListService.listDerived()` - no index document, exactly the same
- *     derived-list shape a future `ThreadService`'s reactions/pins will
- *     use (see docs/v3-technical-concept.md §4.2's migration table - public
- *     flags and reactions are the same storage shape). Trust comes ONLY
- *     from each QuBit's own verified `pub` (never from the path segment).
+ *     `ListService.listDerived()`. Trust comes ONLY from each QuBit's own
+ *     verified `pub` (never from the path segment).
+ *
+ * Both modes now share the SAME underlying shape (docs/v3-technical-concept.md
+ * §4.2's derived-list pattern) - one QuBit per (flag, entity) at its own
+ * path, enumerated via a shared parent, no index document either way. The
+ * only real difference is the crypto: PUBLIC signs-and-leaves-plaintext,
+ * PRIVATE additionally self-encrypts (`private-storage.js`'s
+ * `putPrivate()`/`getPrivate()`/`getPrivateChildren()`).
+ *
+ * REDESIGNED from an earlier V3 draft that routed private mode through a
+ * separate `StarredService` (one self-encrypted BLOB per namespace,
+ * containing the whole list as an inline array): that shape meant every
+ * add/remove had to read-modify-write-and-re-encrypt the ENTIRE list -
+ * O(n) per mutation, plus lock/retry contention, for data (Favorites/
+ * Contacts) that has no reason to share a single document at all. Verified
+ * before removing it: `StarredService` had zero callers besides this
+ * file's own private mode. Deleted, not deprecated - a fresh build has
+ * nothing depending on its shape.
  *
  * `entityRef` is always a flat, caller-defined string id (no structure
- * assumed) - same convention `StarredService`'s `itemId` already uses.
- *
- * No legacy namespace mapping (QuV2's `LEGACY_NAMESPACES`, routing
- * `favorite:app`/`favorite:user` onto `StarredService`'s pre-existing
- * `'apps'`/`'contacts'` namespaces to avoid stranding already-deployed
- * users' data): a fresh build has no deployed data predating this
- * convention to stay compatible with - same reasoning already applied to
- * `AccessEngine`/`ThreadEngine` (docs/v3-technical-concept.md §3.3,
- * principle 5: no migration-era complexity carried into a build that has
- * nothing to migrate from).
+ * assumed).
  */
 export class FlagService {
   static PUBLIC_SPACE = 'public';
@@ -42,36 +45,60 @@ export class FlagService {
   /**
    * @param {import('@qu/core').QuStore} qu
    * @param {import('@qu/identity').QuIdentityEngine} identityEngine
-   * @param {import('./starred-service.js').StarredService} starredService
-   * @param {import('./list-service.js').ListService} listService
+   * @param {import('./list-service.js').ListService} listService - Used by PUBLIC mode only (`getPublicFlags()`'s `listDerived()` call) - PRIVATE mode enumerates directly via `getPrivateChildren()`, which has no `@qu/services`-internal dependency of its own beyond `private-storage.js`.
    */
-  constructor(qu, identityEngine, starredService, listService) {
+  constructor(qu, identityEngine, listService) {
     this.qu = qu;
     this.identity = identityEngine;
-    this.starred = starredService;
     this.list = listService;
+  }
+
+  async #myActorPub() {
+    const mainKey = await this.identity.getMainKey();
+    return QuCrypto.toBase64Url(mainKey.publicKey);
   }
 
   // ===== private mode ======================================================
 
   /**
+   * Sets (or clears) this identity's own private flag on an entity - a
+   * single write, O(1) regardless of how many other entities this identity
+   * has flagged. Clearing writes a PLAIN (unencrypted) `null` tombstone -
+   * same convention every other derived list's clear-write already uses
+   * (`QuStore` has no `delete()`) - there's nothing sensitive in "absent",
+   * so encrypting a tombstone would cost cycles for no privacy benefit.
    * @param {string} flagType @param {string} entityKind @param {string} entityRef
    * @param {boolean} on @param {object} [data] - Extra fields to store alongside (e.g. a nickname).
-   * @returns {Promise<Array<object>>} The updated list.
+   * @returns {Promise<void>}
    */
   async setPrivate(flagType, entityKind, entityRef, on, data = {}) {
-    const namespace = `${flagType}:${entityKind}`;
-    return on ? this.starred.star(namespace, entityRef, data) : this.starred.unstar(namespace, entityRef);
+    const actorPub = await this.#myActorPub();
+    const path = privateFlagPath(actorPub, flagType, entityKind, entityRef);
+    if (!on) {
+      const mainKey = await this.identity.getMainKey();
+      await this.qu.put(path, null, { signWith: mainKey.privateKeyPkcs8, writerPub: mainKey.publicKey });
+      return;
+    }
+    await putPrivate(this.qu, this.identity, path, { starredAt: Date.now(), ...data });
   }
 
-  /** @param {string} flagType @param {string} entityKind @returns {Promise<Array<object>>} */
+  /**
+   * @param {string} flagType @param {string} entityKind
+   * @returns {Promise<Array<{id: string, starredAt: number, [key: string]: *}>>}
+   *   `id` is reconstructed from each entry's own path (its last segment) -
+   *   not stored redundantly inside the value.
+   */
   async listPrivate(flagType, entityKind) {
-    return this.starred.list(`${flagType}:${entityKind}`);
+    const actorPub = await this.#myActorPub();
+    const entries = await getPrivateChildren(this.qu, this.identity, privateFlagParentPath(actorPub, flagType, entityKind));
+    return entries.map(({ path, value }) => ({ id: path.slice(path.lastIndexOf('/') + 1), ...value }));
   }
 
   /** @param {string} flagType @param {string} entityKind @param {string} entityRef @returns {Promise<boolean>} */
   async hasPrivate(flagType, entityKind, entityRef) {
-    return this.starred.isStarred(`${flagType}:${entityKind}`, entityRef);
+    const actorPub = await this.#myActorPub();
+    const path = privateFlagPath(actorPub, flagType, entityKind, entityRef);
+    return !!(await getPrivate(this.qu, this.identity, path));
   }
 
   // ===== public mode ========================================================

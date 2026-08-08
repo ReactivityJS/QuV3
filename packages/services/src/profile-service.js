@@ -12,7 +12,7 @@ function privateExtraPath(actorPub) {
  * PROFILE SERVICE — the Entity API for "my editable profile", built on top
  * of @qu/identity's already-existing public profile (`publishMainProfile()`/
  * `getProfile()`) plus `private-storage.js`'s self-encryption, the same
- * mechanism `StarredService` uses for favorites/contacts.
+ * mechanism `FlagService`'s private mode uses for favorites/contacts.
  *
  * The split this adds beyond what `QuIdentityEngine` already does: a
  * profile here is `alias` + `avatar` (always public - Contacts/User List
