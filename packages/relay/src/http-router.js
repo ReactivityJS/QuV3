@@ -1,24 +1,28 @@
 import { getSettings } from './relay-settings.js';
+import { buildAppsCatalog } from './apps-catalog.js';
+import { serveApps } from './static-apps.js';
 
 /**
  * HTTP ROUTER — the relay's PUBLIC HTTP surface (liveness, public config,
- * VAPID public key) plus dispatch into `AdminHttp`'s privileged routes.
- * Split out of the relay's own composition root for the same
- * one-cross-cutting-concern-per-file reason `admin-http.js`'s own doc
- * comment states (docs/v3-technical-concept.md §2.1).
+ * VAPID public key, the apps catalog + static app serving) plus dispatch
+ * into `AdminHttp`'s privileged routes. Split out of the relay's own
+ * composition root for the same one-cross-cutting-concern-per-file reason
+ * `admin-http.js`'s own doc comment states (docs/v3-technical-concept.md §2.1).
  *
- * DELIBERATELY NOT WIRED HERE: `/apps.json`, static app serving
- * (`/apps/<name>/...`), and shell serving (`/`, `/shell-bundle.js`, PWA
- * files). Those all need `@qu/loader` (manifest discovery/integrity
- * checking) and a real `apps/shell` to serve - neither exists in V3 yet.
- * `handle()` falls through to a plain 404 for any of those paths today;
- * wiring them in is the Apps milestone's job, not a gap in this one.
+ * DELIBERATELY STILL NOT WIRED HERE: shell serving (`/`, `/shell-bundle.js`,
+ * PWA files) - needs a real `apps/shell` to serve, which doesn't exist in
+ * V3 yet. `handle()` falls through to a plain 404 for those paths today.
  */
 export class HttpRouter {
   /**
    * @param {import('@qu/core').QuStore} qu
    * @param {import('./admin-http.js').AdminHttp} adminHttp
-   * @param {{adminPubs: string[], state: {transport: object|null, vapidKeys: {publicKey: string}|null}}} options -
+   * @param {import('@qu/loader').QuLoader} loader - Source of truth for
+   *   `/apps.json` (see `apps-catalog.js`'s `buildAppsCatalog()`) - read
+   *   fresh on every request via `loader.listManifests()`, so apps loaded
+   *   partway through `boot()` (see `relay.js`) show up the moment they're
+   *   actually loaded, not just after `boot()` fully completes.
+   * @param {{adminPubs: string[], appsDir: string, state: {transport: object|null, vapidKeys: {publicKey: string}|null}}} options -
    *   `state` is a mutable, shared reference the caller keeps populating as
    *   the relay boots (`transport`/`vapidKeys` aren't known until partway
    *   through `boot()` - see `relay.js`) - read fresh on every request
@@ -27,10 +31,12 @@ export class HttpRouter {
    *   (`/healthz`'s own `peerId` field, `/push/vapid-public-key`'s
    *   `publicKey` field) instead of a stale/undefined value.
    */
-  constructor(qu, adminHttp, { adminPubs, state }) {
+  constructor(qu, adminHttp, loader, { adminPubs, appsDir, state }) {
     this.qu = qu;
     this.adminHttp = adminHttp;
+    this.loader = loader;
     this.adminPubs = adminPubs;
+    this.appsDir = appsDir;
     this.state = state;
   }
 
@@ -46,6 +52,17 @@ export class HttpRouter {
       // the problem is in front of the relay, not in it.
       if (req.url === '/healthz') {
         res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'ok', peerId: this.state.transport?.getPeerId() ?? null }));
+        return;
+      }
+
+      // The self-generating menu's data source, once a shell exists to read
+      // it (see apps-catalog.js's own doc comment) - every loaded app with a
+      // `clientMain`, filtered/annotated by this relay's current
+      // `disabledApps` setting.
+      if (req.url === '/apps.json') {
+        const settings = await getSettings(this.qu);
+        const body = JSON.stringify(buildAppsCatalog(this.loader, settings.disabledApps));
+        res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }).end(body);
         return;
       }
 
@@ -86,6 +103,12 @@ export class HttpRouter {
         res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }).end(JSON.stringify({ publicKey: this.state.vapidKeys?.publicKey ?? null }));
         return;
       }
+
+      // So OTHER relays can load the apps THIS one hosts (see
+      // static-apps.js's own doc comment) - checked last, right before the
+      // final 404 fallback, same position this had in the prototype this is
+      // rebuilt from (right before shell serving, which still isn't wired here).
+      if (await serveApps(req, res, this.appsDir)) return;
 
       res.writeHead(404).end('Not Found');
     } catch (err) {

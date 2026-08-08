@@ -7,3 +7,5 @@ export { setupVapidKeys, VAPID_PATH } from './vapid-key-store.js';
 export { PushDeliveryService } from './push-delivery.js';
 export { AdminHttp } from './admin-http.js';
 export { HttpRouter } from './http-router.js';
+export { buildAppsCatalog } from './apps-catalog.js';
+export { serveApps } from './static-apps.js';

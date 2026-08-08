@@ -1,18 +1,28 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { WebSocket } from 'ws';
 import { QuStore, MemoryStoreAdapter, QuCrypto } from '@qu/core';
 import { QuIdentityEngine } from '@qu/identity';
 import { QuRelay } from '../src/relay.js';
+
+const REPO_APPS_DIR = fileURLToPath(new URL('../../../apps', import.meta.url));
 
 async function freshRelay(options = {}) {
   const base = await mkdtemp(join(tmpdir(), 'qu-relay-'));
   const relay = await new QuRelay({
     storeDir: join(base, 'store'),
     blobDir: join(base, 'blob'),
+    // An empty, isolated directory by default - NOT QuRelay's own './apps'
+    // default, which resolves relative to the test runner's CWD and would
+    // silently pick up the real monorepo apps/ directory (apps/forum) when
+    // `node --test` runs from the repo root, making most of this file's
+    // tests depend on invocation directory instead of being hermetic. Tests
+    // that specifically want real app-loading behavior override this.
+    appsDir: join(base, 'apps'),
     port: 0,
     ...options,
   }).boot();
@@ -61,11 +71,11 @@ test('GET /push/vapid-public-key returns a real, resolved VAPID public key after
 test('the relay establishes and persists its own operational identity across a reboot', async () => {
   const base = await mkdtemp(join(tmpdir(), 'qu-relay-'));
   try {
-    const first = await new QuRelay({ storeDir: join(base, 'store'), blobDir: join(base, 'blob'), port: 0 }).boot();
+    const first = await new QuRelay({ storeDir: join(base, 'store'), blobDir: join(base, 'blob'), appsDir: join(base, 'apps'), port: 0 }).boot();
     const firstPub = QuCrypto.toBase64Url((await first.identity.getMainKey()).publicKey);
     await first.close();
 
-    const second = await new QuRelay({ storeDir: join(base, 'store'), blobDir: join(base, 'blob'), port: 0 }).boot();
+    const second = await new QuRelay({ storeDir: join(base, 'store'), blobDir: join(base, 'blob'), appsDir: join(base, 'apps'), port: 0 }).boot();
     const secondPub = QuCrypto.toBase64Url((await second.identity.getMainKey()).publicKey);
     await second.close();
 
@@ -85,7 +95,7 @@ test('identityMnemonic pins the relay\'s identity explicitly, independent of sto
     await scratchIdentity.importMnemonic(mnemonic);
     const expectedPub = QuCrypto.toBase64Url((await scratchIdentity.getMainKey()).publicKey);
 
-    const relay = await new QuRelay({ storeDir: join(base, 'store'), blobDir: join(base, 'blob'), port: 0, identityMnemonic: mnemonic }).boot();
+    const relay = await new QuRelay({ storeDir: join(base, 'store'), blobDir: join(base, 'blob'), appsDir: join(base, 'apps'), port: 0, identityMnemonic: mnemonic }).boot();
     try {
       const actualPub = QuCrypto.toBase64Url((await relay.identity.getMainKey()).publicKey);
       assert.equal(actualPub, expectedPub);
@@ -198,4 +208,220 @@ test('close() shuts down cleanly and releases the port', async () => {
   const port = relay.port;
   await teardown();
   await assert.rejects(() => fetch(`http://localhost:${port}/healthz`, { signal: AbortSignal.timeout(300) }));
+});
+
+// ===== @qu/loader integration: local app discovery, apps.json, static serving =====
+
+async function writeLocalApp(appsDir, name, { requires = [], serviceName = `${name}-service` } = {}) {
+  const dir = join(appsDir, name);
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, 'manifest.quapp'), JSON.stringify({ name, version: '1.0.0', main: './index.js', clientMain: './client.js', label: name, requires }));
+  await writeFile(join(dir, 'index.js'), `export async function register(qu, manifest, registry) { registry.registerService('${serviceName}', { registered: true, name: manifest.name }); }`);
+  await writeFile(join(dir, 'client.js'), `export function mount() { return () => {}; }`);
+  return dir;
+}
+
+test('a local app under appsDir is discovered and loaded at boot - its register() actually runs', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'qu-relay-'));
+  const appsDir = join(base, 'apps');
+  try {
+    await writeLocalApp(appsDir, 'greeter');
+    const relay = await new QuRelay({ storeDir: join(base, 'store'), blobDir: join(base, 'blob'), appsDir, port: 0 }).boot();
+    try {
+      assert.equal(relay.loader.isLoaded('greeter'), true);
+      assert.equal(relay.registry.getService('greeter-service').registered, true);
+    } finally {
+      await relay.close();
+    }
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('a local app that "requires" an already-registered relay service loads without needing a directory for it', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'qu-relay-'));
+  const appsDir = join(base, 'apps');
+  try {
+    // 'message-service' is already registered by QuRelay itself (see relay.js's constructor) -
+    // a real app depending on core relay infrastructure, not another loadable app.
+    await writeLocalApp(appsDir, 'forum', { requires: ['message-service'] });
+    const relay = await new QuRelay({ storeDir: join(base, 'store'), blobDir: join(base, 'blob'), appsDir, port: 0 }).boot();
+    try {
+      assert.equal(relay.loader.isLoaded('forum'), true);
+    } finally {
+      await relay.close();
+    }
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('GET /apps.json reflects a real locally-loaded app after boot', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'qu-relay-'));
+  const appsDir = join(base, 'apps');
+  try {
+    await writeLocalApp(appsDir, 'greeter');
+    const relay = await new QuRelay({ storeDir: join(base, 'store'), blobDir: join(base, 'blob'), appsDir, port: 0 }).boot();
+    try {
+      const res = await fetch(`http://localhost:${relay.port}/apps.json`);
+      const body = await res.json();
+      assert.equal(body.length, 1);
+      assert.equal(body[0].name, 'greeter');
+      assert.equal(body[0].clientMainUrl, '/apps/greeter/client.js');
+    } finally {
+      await relay.close();
+    }
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('GET /apps/<name>/client.js serves a real local app\'s client bundle', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'qu-relay-'));
+  const appsDir = join(base, 'apps');
+  try {
+    await writeLocalApp(appsDir, 'greeter');
+    const relay = await new QuRelay({ storeDir: join(base, 'store'), blobDir: join(base, 'blob'), appsDir, port: 0 }).boot();
+    try {
+      const res = await fetch(`http://localhost:${relay.port}/apps/greeter/client.js`);
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('content-type'), 'text/javascript');
+      assert.ok((await res.text()).includes('export function mount'));
+    } finally {
+      await relay.close();
+    }
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('a local app whose "requires" is genuinely missing fails boot() with a clear error', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'qu-relay-'));
+  const appsDir = join(base, 'apps');
+  try {
+    await writeLocalApp(appsDir, 'broken', { requires: ['nonexistent-service'] });
+    // App loading happens LAST in boot() (after the HTTP/WS server is
+    // already listening - see relay.js) - boot() itself tears down whatever
+    // it already started (via close()) before rethrowing, so this doesn't
+    // need its own cleanup to avoid leaking an open port past this test.
+    const relay = new QuRelay({ storeDir: join(base, 'store'), blobDir: join(base, 'blob'), appsDir, port: 0 });
+    await assert.rejects(() => relay.boot(), /requires "nonexistent-service"/);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('REGRESSION: a failed boot() does not leak an open port - the port is free to reuse immediately after', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'qu-relay-'));
+  const appsDir = join(base, 'apps');
+  try {
+    await writeLocalApp(appsDir, 'broken', { requires: ['nonexistent-service'] });
+    const firstOptions = { storeDir: join(base, 'store'), blobDir: join(base, 'blob'), appsDir, port: 0 };
+    await assert.rejects(() => new QuRelay(firstOptions).boot());
+
+    // If the failed boot() had left its HTTP/WS server open, a second
+    // relay booting cleanly right after would still be a distinct process
+    // resource (different port, since port: 0 picks a free one each time) -
+    // the real proof this doesn't leak is that node's test runner process
+    // itself exits promptly once every test finishes, not something a
+    // single assertion inside one test can observe directly. This test
+    // exists as a named marker for that regression (see relay.js's own
+    // boot()/close() doc comments) - the previous version of this test
+    // suite would hang the whole process at exit without it.
+    const base2 = await mkdtemp(join(tmpdir(), 'qu-relay-'));
+    try {
+      const relay = await new QuRelay({ storeDir: join(base2, 'store'), blobDir: join(base2, 'blob'), appsDir: join(base2, 'apps'), port: 0 }).boot();
+      await relay.close();
+    } finally {
+      await rm(base2, { recursive: true, force: true });
+    }
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('an appsDir that does not exist boots fine with zero apps loaded', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'qu-relay-'));
+  try {
+    const relay = await new QuRelay({ storeDir: join(base, 'store'), blobDir: join(base, 'blob'), appsDir: join(base, 'nonexistent-apps-dir'), port: 0 }).boot();
+    try {
+      assert.deepEqual(relay.loader.listLoaded(), []);
+    } finally {
+      await relay.close();
+    }
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('a diamond of local apps (forum requires message-service AND a shared "greeter") loads once, in dependency order', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'qu-relay-'));
+  const appsDir = join(base, 'apps');
+  try {
+    await writeLocalApp(appsDir, 'greeter');
+    await writeLocalApp(appsDir, 'forum', { requires: ['greeter', 'message-service'] });
+    const relay = await new QuRelay({ storeDir: join(base, 'store'), blobDir: join(base, 'blob'), appsDir, port: 0 }).boot();
+    try {
+      const order = relay.loader.listLoaded();
+      assert.deepEqual(order, ['greeter', 'forum']);
+    } finally {
+      await relay.close();
+    }
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('remoteApps loads an additional app from a (mocked) remote manifest URL at boot', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'qu-relay-'));
+  const manifestUrl = 'https://packages.example.com/notes/manifest.quapp';
+  const mainUrl = 'https://packages.example.com/notes/index.js';
+  const source = `export async function register(qu, manifest, registry) { registry.registerService('notes-service', { name: manifest.name }); }`;
+  const integrity = `sha256-${QuCrypto.toBase64(await QuCrypto.sha256(new TextEncoder().encode(source)))}`;
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (url === manifestUrl) return new Response(JSON.stringify({ name: 'notes', version: '1.0.0', main: './index.js', integrity }), { status: 200 });
+    if (url === mainUrl) return new Response(source, { status: 200 });
+    return originalFetch(url);
+  };
+
+  try {
+    const relay = await new QuRelay({
+      storeDir: join(base, 'store'),
+      blobDir: join(base, 'blob'),
+      appsDir: join(base, 'apps'),
+      port: 0,
+      remoteApps: [{ manifestUrl }],
+    }).boot();
+    try {
+      assert.equal(relay.loader.isLoaded('notes'), true);
+      assert.deepEqual(relay.loader.listLoaded(), ['notes']); // exactly the remote app, no unrelated local ones
+      assert.equal(relay.registry.getService('notes-service').name, 'notes');
+    } finally {
+      await relay.close();
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+// ===== the real, monorepo apps/ directory (apps/forum, the first real app) ========
+
+test('booting with the REAL repo apps/ directory loads apps/forum and creates the real public forum thread', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'qu-relay-'));
+  try {
+    const relay = await new QuRelay({ storeDir: join(base, 'store'), blobDir: join(base, 'blob'), appsDir: REPO_APPS_DIR, port: 0 }).boot();
+    try {
+      assert.equal(relay.loader.isLoaded('forum'), true);
+      const config = await relay.messages.getConfig('forum', 'general');
+      assert.ok(config, 'apps/forum\'s register() should have created the public forum thread');
+      assert.equal(config.writers, '*');
+    } finally {
+      await relay.close();
+    }
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
 });

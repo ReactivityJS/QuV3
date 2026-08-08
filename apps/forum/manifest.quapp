@@ -1,0 +1,14 @@
+{
+  "name": "forum",
+  "version": "1.0.0",
+  "kind": "app",
+  "main": "./index.js",
+  "label": "Forum",
+  "icon": "💬",
+  "navOrder": 10,
+  "requires": ["message-service"],
+  "pushActions": [
+    { "id": "newMessage", "label": "New posts", "type": "create" },
+    { "id": "mention", "label": "Mentions", "type": "mention" }
+  ]
+}

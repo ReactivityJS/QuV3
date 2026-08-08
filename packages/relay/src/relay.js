@@ -8,6 +8,7 @@ import { QuIdentityEngine } from '@qu/identity';
 import { SyncEngine } from '@qu/sync';
 import { AccessEngine, DocumentEngine, CollectionEngine, AssetEngine, ThreadEngine } from '@qu/engines';
 import { ListService, AccessService, MessageService, NotificationPrefsService, PushSubscriptionService } from '@qu/services';
+import { QuLoader, discoverLocalPackages } from '@qu/loader';
 
 import { WebSocketServerTransport } from './transports/websocket-server-transport.js';
 import { PresenceTracker } from './presence-tracker.js';
@@ -19,8 +20,9 @@ import { getSettings } from './relay-settings.js';
 
 /**
  * QU RELAY — a Node.js peer that persists to disk, syncs with other peers,
- * and delivers push notifications. This is the concrete "one server
- * process" composition root every other module in this package plugs into.
+ * delivers push notifications, and loads/serves Engines, Services and Apps
+ * via `@qu/loader`. This is the concrete "one server process" composition
+ * root every other module in this package plugs into.
  *
  * BUILT USING `RuntimeContainer` (docs/v3-technical-concept.md §2.1) FROM
  * DAY ONE — the exact fix that section's own "god object" finding
@@ -34,18 +36,24 @@ import { getSettings } from './relay-settings.js';
  * module's internals. `QuRelay` itself only ever does ONE thing: decide
  * what's registered, and call `boot()`/`close()`.
  *
- * DELIBERATELY OUT OF SCOPE for this milestone (no `@qu/loader`/`apps/`
- * exist in V3 yet - see `http-router.js`'s own doc comment for the exact
- * routes this omits): app discovery/loading, static app serving, shell
- * serving, and the `apps.json` catalog. This relay stores data, replicates
- * it, and delivers push notifications - a real, complete slice, not a
- * placeholder waiting for those pieces.
+ * `boot()` always loads this relay's own local `appsDir` (auto-discovered,
+ * dependency-ordered via `@qu/loader`'s `QuLoader`) and, if configured, any
+ * `remoteApps` from trusted manifest URLs - the exact "a relay always loads
+ * its own local apps, and optionally loads additional ones from remote
+ * manifest URLs" shape `@qu/loader`'s own doc comment describes. Shell
+ * serving (`/`, PWA files) is still not wired - no `apps/shell` exists in
+ * V3 yet (see `http-router.js`'s own doc comment for the one route this
+ * still omits).
  */
 export class QuRelay {
   /**
    * @param {object} [options]
    * @param {string} [options.storeDir='./relay-data/store']
    * @param {string} [options.blobDir='./relay-data/blob']
+   * @param {string} [options.appsDir='./apps'] - Local apps this relay hosts,
+   *   auto-loaded at boot (see `@qu/loader`'s `discoverLocalPackages()`/
+   *   `QuLoader.loadLocal()`) and served back out over HTTP (see
+   *   `static-apps.js`) for other relays to consume.
    * @param {number} [options.port=8080]
    * @param {string} [options.identityMnemonic] - Pin the relay's own operational identity
    *   across restarts. Without it, a fresh one is generated on first boot and then reused.
@@ -57,15 +65,21 @@ export class QuRelay {
    * @param {string} [options.vapidSubject='mailto:admin@example.com']
    * @param {(spaceId: string|number, threadId: string, context: object) => object|null} [options.resolveNotification] -
    *   See `push-delivery.js`'s own doc comment (docs/v3-technical-concept.md §6.2).
+   * @param {Array<{manifestUrl: string, trustedPublisherPubs?: string[]}>} [options.remoteApps=[]] -
+   *   Additional apps to load from remote manifest URLs at boot (see
+   *   `@qu/loader`'s `RemoteLoader.loadRemote()` for the integrity/signature
+   *   guarantees this goes through).
    */
   constructor(options = {}) {
     this.options = {
       storeDir: './relay-data/store',
       blobDir: './relay-data/blob',
+      appsDir: './apps',
       port: 8080,
       adminPubs: [],
       vapidSubject: 'mailto:admin@example.com',
       resolveNotification: null,
+      remoteApps: [],
       ...options,
     };
 
@@ -105,6 +119,11 @@ export class QuRelay {
     this.registry.registerService('notification-prefs-service', this.notificationPrefs);
     this.registry.registerService('push-subscription-service', this.pushSubscriptions);
 
+    // The one loader instance for this relay's whole lifetime - `boot()`
+    // drives its `loadLocal()`/`loadRemote()` calls; `httpRouter` (via
+    // `apps-catalog.js`) reads its live `listManifests()` for `/apps.json`.
+    this.loader = new QuLoader(this.qu, this.registry);
+
     // Shared, mutable state `AdminHttp`/`HttpRouter` read fresh on every
     // request - `transport`/`vapidKeys` aren't known until partway through
     // `boot()` (see below), and by construction time here neither module's
@@ -113,7 +132,7 @@ export class QuRelay {
 
     this.runtime.register('presence', () => new PresenceTracker());
     this.runtime.register('adminHttp', () => new AdminHttp(this.qu, { adminPubs: this.options.adminPubs, storeDir: this.options.storeDir, blobDir: this.options.blobDir }, this._state));
-    this.runtime.register('httpRouter', (rt) => new HttpRouter(this.qu, rt.resolve('adminHttp'), { adminPubs: this.options.adminPubs, state: this._state }));
+    this.runtime.register('httpRouter', (rt) => new HttpRouter(this.qu, rt.resolve('adminHttp'), this.loader, { adminPubs: this.options.adminPubs, appsDir: this.options.appsDir, state: this._state }));
     this.runtime.register('pushDelivery', (rt) => new PushDeliveryService({
       messages: this.messages,
       notificationPrefs: this.notificationPrefs,
@@ -139,8 +158,21 @@ export class QuRelay {
    * starts the HTTP/WebSocket server, and wires push delivery to every
    * thread message write this relay ever sees.
    * @returns {Promise<QuRelay>} this
+   * @throws {Error} If any step fails (most likely app loading - see the
+   *   `requires`-resolution error `@qu/loader` throws) - whatever was
+   *   already started (HTTP/WS server, ...) is torn down via `close()`
+   *   first, so a failed `boot()` never leaks an open port behind it.
    */
   async boot() {
+    try {
+      return await this.#bootInner();
+    } catch (err) {
+      await this.close();
+      throw err;
+    }
+  }
+
+  async #bootInner() {
     if (this.options.identityMnemonic) {
       await this.identity.importMnemonic(this.options.identityMnemonic);
     } else if (!(await this.identity.hasIdentity())) {
@@ -202,7 +234,21 @@ export class QuRelay {
       });
     });
 
+    // Local apps first (dependency-ordered against each other via
+    // discoverLocalPackages()'s pool - see QuLoader.loadLocal()), then any
+    // configured remote apps - same order @qu/loader's own doc comment
+    // describes ("a relay always loads its own local apps... and optionally
+    // loads additional apps from remote manifest URLs").
+    const localApps = await discoverLocalPackages(this.options.appsDir);
+    for (const app of localApps) {
+      await this.loader.loadLocal(app.dir, { availableManifests: localApps });
+    }
+    for (const remote of this.options.remoteApps) {
+      await this.loader.loadRemote(remote.manifestUrl, { trustedPublisherPubs: remote.trustedPublisherPubs ?? [] });
+    }
+
     console.log(`[QuRelay] listening on http://localhost:${this.port} (peer ${this.transport.getPeerId()})`);
+    console.log(`[QuRelay] loaded apps: ${this.loader.listLoaded().join(', ') || '(none)'}`);
     return this;
   }
 

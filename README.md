@@ -275,10 +275,46 @@ own tests, built bottom-up per the dependency order in
       round-trip against real files on disk; `RemoteLoader`'s tests mock
       `fetch()` (no real network) but exercise genuine `QuCrypto.sha256()`/
       `sign()`/`verify()` calls against real generated keypairs - full
-      suite (587 tests) green. Not yet wired into `@qu/relay` (local app
-      discovery at boot, `/apps.json` catalog, static app serving) or a
-      first real `apps/` package - that's the next step now that the
-      mechanism itself exists.
+      suite (587 tests) green. **Now wired into `@qu/relay`** - see the
+      next bullet.
+- [x] `@qu/loader` × `@qu/relay` integration, plus `apps/forum` — the
+      first real app. `boot()` now discovers and dependency-orders every
+      local app under `appsDir` (default `./apps`, auto-loaded via
+      `QuLoader.loadLocal()`) and, if configured, `remoteApps` from trusted
+      manifest URLs - the exact order `@qu/loader`'s own doc comment
+      describes. `HttpRouter` gained `/apps.json` (`apps-catalog.js`'s
+      `buildAppsCatalog()` - every loaded app with a `clientMain`, still
+      listed-but-`enabled:false` when an admin has disabled it) and static
+      app serving under `/apps/<name>/...` (`static-apps.js`, path-
+      traversal-protected) so other relays can `loadRemote()`/`loadLocal()`
+      what this one hosts. `apps/forum` is genuinely real, not a fixture:
+      `register()` idempotently ensures the shared public forum thread
+      exists (via `MessageService.createThread()` + `THREAD_PRESETS.forum()`,
+      both already-built infrastructure), verified end to end by booting an
+      actual `QuRelay` against the real repo `apps/` directory and reading
+      back the real thread config it created. Deliberately SERVER-ONLY (no
+      `clientMain`) - V3 has no browser UI framework yet (`@qu/reactive`/
+      `@qu/ui`, what QuV2's own `apps/forum/client.js` needed), and building
+      one just to give this app a UI would be exactly the kind of
+      speculative complexity this codebase's own principles warn against;
+      `buildAppsCatalog()` already correctly omits a `clientMain`-less app
+      from `/apps.json`, so this is real, complete infrastructure today,
+      not a placeholder. Found and fixed while writing the integration
+      tests: `boot()` starting the HTTP/WebSocket server BEFORE loading
+      apps means a genuine app-loading failure (e.g. a missing `requires`)
+      used to leave the server listening with no cleanup - `boot()` now
+      tears down whatever it already started via `close()` before
+      rethrowing, so a failed boot never leaks an open port. Also caught:
+      several existing relay tests implicitly relied on `QuRelay`'s
+      `./apps` default resolving to nothing, which broke the moment a real
+      `apps/` directory existed - fixed by giving every test an explicit,
+      isolated `appsDir` unless it specifically wants real app-loading
+      behavior. 40 new tests (`apps-catalog.test.js`, `static-apps.test.js`,
+      `http-router.test.js` additions, `relay.test.js` additions,
+      `apps/forum/test/index.test.js`) - full suite (627 tests) green.
+      Manual smoke test: boot a real relay against the real `apps/`
+      directory, confirm `/apps.json`/`/apps/forum/manifest.quapp` both
+      respond correctly and the real forum thread exists afterward.
 
 ## Development
 

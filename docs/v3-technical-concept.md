@@ -616,7 +616,17 @@ here, not "imperative is wrong."
 
 Manifest-declared apps, `actions[].slot` placement, `HookBus` extension — already the
 right shape (§2.4). V3 additionally wires `Registry.registerCapability()` (§2.2) as the
-mechanism behind context-menu generation, giving it the real caller it currently lacks.
+mechanism behind context-menu generation, giving it the real caller it currently lacks
+(still deferred - see registry.js's own doc comment - no context-menu consumer exists yet either).
+
+**Implemented**: `@qu/loader` (manifest discovery/dependency resolution/integrity-checked
+remote loading) is wired into `@qu/relay`'s `boot()` (local `appsDir` auto-discovery +
+optional `remoteApps`), and `apps/forum` is the first real, loaded app - proof the whole
+manifest → loader → registry pipeline works end to end, not just in isolation. Server-side
+only for now (no `clientMain`): a UI half needs `@qu/reactive`/`@qu/ui`, neither built in
+V3 yet - see the README's own status entry for the full account, including a real
+robustness fix this surfaced (a failed `boot()` used to leave the HTTP/WS server open;
+it now tears down whatever it started before rethrowing).
 
 ### 6.2 Push routing — simple declarative mapping, not a template DSL
 

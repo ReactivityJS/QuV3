@@ -27,6 +27,7 @@ const ENV_MAPPING = {
   QU_PORT: { key: 'port', parse: (raw) => Number.parseInt(raw, 10) },
   QU_STORE_DIR: { key: 'storeDir' },
   QU_BLOB_DIR: { key: 'blobDir' },
+  QU_APPS_DIR: { key: 'appsDir' },
   QU_IDENTITY_MNEMONIC: { key: 'identityMnemonic' },
   // Comma-separated base64url actor pubkeys - see http-router.js's
   // `/config.json` route for what this does (and does not) authorize.
@@ -36,6 +37,10 @@ const ENV_MAPPING = {
   QU_VAPID_PUBLIC_KEY: { key: 'vapidPublicKey' },
   QU_VAPID_PRIVATE_KEY: { key: 'vapidPrivateKey' },
   QU_VAPID_SUBJECT: { key: 'vapidSubject' },
+  // JSON array, same shape as relay.config.json's "remoteApps" field - the
+  // one option that doesn't reduce to a single scalar, so it's still JSON
+  // rather than getting its own ad-hoc mini-syntax.
+  QU_REMOTE_APPS_JSON: { key: 'remoteApps', parse: (raw) => JSON.parse(raw) },
 };
 
 async function loadFileConfig() {
