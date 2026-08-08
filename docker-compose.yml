@@ -1,0 +1,34 @@
+services:
+  quniverse-relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${QU_PORT:-8080}:8080"
+    environment:
+      QU_PORT: "8080"
+      QU_STORE_DIR: /data/store
+      QU_BLOB_DIR: /data/blob
+      # Comma-separated base64url actor pubkeys allowed to use the
+      # /admin/* HTTP routes (relay-settings, data import/export - see
+      # packages/relay/src/admin-http.js). Empty by default - no admin
+      # until you set this to your own identity's pubkey (see the
+      # README's "Running Quniverse" section for how to get one).
+      QU_ADMIN_PUBS: ""
+      # QU_APPS_DIR defaults to ./apps (baked into the image) - override
+      # only if you bind-mount a different apps/ directory, see below.
+      # QU_IDENTITY_MNEMONIC: "<24 words>"   # pin the relay's own identity explicitly;
+      #                                       # otherwise one is generated on first boot
+      #                                       # and persists as long as the volume does.
+      # QU_REMOTE_APPS_JSON: '[{"manifestUrl":"https://example.org/app/manifest.quapp","trustedPublisherPubs":["<base64url pubkey>"]}]'
+    volumes:
+      - quniverse-data:/data
+      # Uncomment to develop/add apps without rebuilding the image - mind
+      # that dist/ bundles still need `npm run build` to exist on the host
+      # first (see README's "Running Quniverse"), the container doesn't
+      # build them.
+      # - ./apps:/app/apps
+    restart: unless-stopped
+
+volumes:
+  quniverse-data:

@@ -509,3 +509,108 @@ own tests, built bottom-up per the dependency order in
 npm install
 npm test   # node --test (recursive auto-discovery of packages/*/test/*.test.js)
 ```
+
+## Running Quniverse (Relay + Docker)
+
+**What "Quniverse" means today**: the `@qu/relay` server (`QuRelay`) plus whatever
+apps it loads — `apps/forum` (server-only) and the three client apps built on
+`<qu-list>` (`apps/app-list`/`user-list`/`contact-list`, see the status entry above).
+**There is no `apps/shell` in V3 yet** — the one thing QuV2 had that actually renders
+a Quniverse platform page in a real browser (nav, app switching, mounting each app's
+`client.js` into a live page). That's a known, deliberate gap (see §5's revised
+verdict and §6.1 in `docs/v3-technical-concept.md`), not an oversight this section is
+covering up — it comes back with its own real caller, same "not speculatively" pattern
+every other deferred piece in this README follows. Concretely, that means:
+
+- **Testable today**: the relay's whole HTTP surface (`/healthz`, `/apps.json`,
+  `/config.json`, `/store/apps/catalog/*`, `/admin/*`, static app-bundle serving),
+  every package's own test suite (`npm test`), and each of the three client apps'
+  `mount()` functions — their own `apps/*/test/client.test.js` suites already exercise
+  real `@qu/services` instances end to end in jsdom, not mocks (see the status entry
+  above for how those tests are built).
+- **Not yet testable**: actually opening a browser tab and clicking around a live
+  Quniverse UI. That needs `apps/shell` to exist first.
+
+### Build
+
+```sh
+npm install
+npm run build   # bundles every app with a clientMain (esbuild) into apps/<name>/dist/client.js
+```
+
+`npm run build` is required before the relay can actually serve a working app bundle —
+`dist/` is gitignored build output, and `@qu/relay`'s static file serving
+(`packages/relay/src/static-apps.js`) just serves whatever bytes are on disk, it
+doesn't bundle anything itself.
+
+### Config
+
+Three layers, each overriding the one before (`packages/relay/src/server.js`):
+
+1. `QuRelay`'s own defaults.
+2. `relay.config.json` in the working directory, if present — copy
+   `relay.config.example.json` to get started.
+3. Environment variables (`QU_*`, see below) — the layer a container orchestrator
+   (docker-compose, Kubernetes, …) actually sets, so a deployment never needs to bake
+   or bind-mount a config file just to change a port or data directory.
+
+| Env var | Maps to | Notes |
+|---|---|---|
+| `QU_PORT` | `port` | default `8080` |
+| `QU_STORE_DIR` | `storeDir` | default `./relay-data/store` |
+| `QU_BLOB_DIR` | `blobDir` | default `./relay-data/blob` |
+| `QU_APPS_DIR` | `appsDir` | default `./apps` |
+| `QU_IDENTITY_MNEMONIC` | `identityMnemonic` | pins the relay's own signing identity across restarts; omit to generate-and-persist one on first boot |
+| `QU_ADMIN_PUBS` | `adminPubs` | comma-separated base64url actor pubkeys allowed to use `/admin/*` (settings, data import/export) |
+| `QU_VAPID_PUBLIC_KEY` / `QU_VAPID_PRIVATE_KEY` / `QU_VAPID_SUBJECT` | `vapidPublicKey`/`vapidPrivateKey`/`vapidSubject` | Web Push (`@qu/push`); omit the keys to generate-and-persist a pair on first boot |
+| `QU_REMOTE_APPS_JSON` | `remoteApps` | JSON array, same shape as `relay.config.json`'s `remoteApps` field |
+
+**Getting your own actor pubkey**, to put in `QU_ADMIN_PUBS` (there's no `apps/relay-admin`
+UI in V3 yet either — this is the Node equivalent for now):
+
+```sh
+node -e "
+import('@qu/core').then(async ({ QuStore, MemoryStoreAdapter, QuCrypto }) => {
+  const { QuIdentityEngine } = await import('@qu/identity');
+  const qu = new QuStore();
+  qu.mount('store', new MemoryStoreAdapter());
+  const identity = new QuIdentityEngine(qu);
+  const mnemonic = identity.generateMnemonic();
+  await identity.importMnemonic(mnemonic);
+  const { publicKey } = await identity.getMainKey();
+  console.log('mnemonic (save this - it is the only way back to this identity):', mnemonic);
+  console.log('pubkey (base64url, safe to share/put in QU_ADMIN_PUBS):', QuCrypto.toBase64Url(publicKey));
+});
+"
+```
+
+### Start — plain Node
+
+```sh
+npm run relay          # node packages/relay/src/server.js, uses relay.config.json + QU_* env if present
+```
+
+### Start — Docker
+
+```sh
+docker compose up --build
+```
+
+Uses the repo's `Dockerfile` (multi-stage: builds + `npm run build`s in a `builder`
+stage, ships only production deps + built output in the `runtime` stage) and
+`docker-compose.yml`. Config is env-var only in the container (see the table above) —
+`docker-compose.yml` sets `QU_STORE_DIR`/`QU_BLOB_DIR` under `/data`, backed by a named
+volume (`quniverse-data`), so identity/store/blob/VAPID keys all survive a
+`docker compose down && docker compose up`. Set `QU_ADMIN_PUBS` there to your own
+pubkey from above to unlock `/admin/*`. To iterate on apps without rebuilding the
+image, uncomment the `./apps:/app/apps` bind mount in `docker-compose.yml` — but
+`npm run build` still needs to have run on the *host* first, the container doesn't
+build bundles itself.
+
+### Verify it's alive
+
+```sh
+curl http://localhost:8080/healthz      # {"status":"ok","peerId":"relay-..."}
+curl http://localhost:8080/config.json  # relayPub, adminPubs, relay-wide settings
+curl http://localhost:8080/apps.json    # every loaded app with a clientMain
+```

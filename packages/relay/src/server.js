@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 /**
- * CLI entry point: `node server.js` (or a `qu-relay` bin, see package.json).
+ * CLI entry point: `node packages/relay/src/server.js` or `npm run relay`
+ * from the repo root.
  *
  * Config layering (each layer overrides the one before it):
  *   1. `QuRelay`'s own defaults (see relay.js).
- *   2. `relay.config.json` in the current working directory, if present.
+ *   2. `relay.config.json` in the current working directory, if present
+ *      (see relay.config.example.json at the repo root for the shape).
  *   3. Environment variables (see ENV_MAPPING below) - the layer a
  *      container orchestrator (docker-compose, Kubernetes, ...) actually
  *      configures, so a deployment never needs to bake a config FILE into
@@ -18,10 +20,12 @@ import { QuRelay } from './relay.js';
 
 /**
  * @type {Record<string, {key: string, parse?: (raw: string) => *}>}
- * Maps an environment variable to the `QuRelayOptions` field it overrides.
+ * Maps an environment variable to the QuRelayOptions field it overrides.
  * Kept as an explicit table (not "any QU_* var maps to camelCase") so an
  * unrelated QU_-prefixed variable set for some other reason can never
- * silently reconfigure the relay.
+ * silently reconfigure the relay. No `QU_SERVE_SHELL` here (unlike QuV2) -
+ * no `apps/shell` exists in V3 yet, see the README's own "Running
+ * Quniverse" section for what that means for testing today.
  */
 const ENV_MAPPING = {
   QU_PORT: { key: 'port', parse: (raw) => Number.parseInt(raw, 10) },
@@ -29,11 +33,11 @@ const ENV_MAPPING = {
   QU_BLOB_DIR: { key: 'blobDir' },
   QU_APPS_DIR: { key: 'appsDir' },
   QU_IDENTITY_MNEMONIC: { key: 'identityMnemonic' },
-  // Comma-separated base64url actor pubkeys - see http-router.js's
-  // `/config.json` route for what this does (and does not) authorize.
+  // Comma-separated base64url actor pubkeys - see relay.js's `/config.json`
+  // route for what this does (and does not) authorize.
   QU_ADMIN_PUBS: { key: 'adminPubs', parse: (raw) => raw.split(',').map((s) => s.trim()).filter(Boolean) },
   // Web Push (see @qu/push) - pin PUBLIC+PRIVATE together, or omit both to
-  // auto-generate-and-persist on first boot (see vapid-key-store.js).
+  // auto-generate-and-persist on first boot (see relay.js's `setupVapidKeys()`).
   QU_VAPID_PUBLIC_KEY: { key: 'vapidPublicKey' },
   QU_VAPID_PRIVATE_KEY: { key: 'vapidPrivateKey' },
   QU_VAPID_SUBJECT: { key: 'vapidSubject' },
