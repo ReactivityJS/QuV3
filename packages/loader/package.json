@@ -1,0 +1,16 @@
+{
+  "name": "@qu/loader",
+  "version": "0.1.0",
+  "description": "Loads Engines/Services/Apps from a manifest.quapp, resolving dependencies via @qu/foundation's DependencyResolver, and supporting both local directories (QuLoader.loadLocal(), Node-only) and integrity-checked, optionally signature-verified remote URLs (RemoteLoader.loadRemote(), isomorphic - also importable standalone from a browser via @qu/loader/remote).",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./remote": "./src/remote-loader.js"
+  },
+  "dependencies": {
+    "@qu/core": "^0.1.0",
+    "@qu/foundation": "^0.1.0"
+  },
+  "license": "MIT"
+}

@@ -248,7 +248,37 @@ own tests, built bottom-up per the dependency order in
       full suite (554 tests, up from 475) green, including a `relay.test.js`
       that boots a REAL relay (real disk, real HTTP, real WebSocket) and reproduces
       the §3.3 ACL-on-sync fix end-to-end against it.
-- [ ] Apps (needs `@qu/loader` first)
+- [x] `@qu/loader` — loads Engines/Services/Apps from a `manifest.quapp`,
+      resolving `requires` via `@qu/foundation`'s `DependencyResolver` (real
+      resolution now, not the "logs a warning and silently skips" QuV2
+      started from) in dependency-first order, deduplicating diamond
+      dependencies automatically (a package required by two others in the
+      same load only ever loads once). Two loading paths sharing one base
+      class: `RemoteLoader` (isomorphic - zero Node built-ins, only `fetch`/
+      `URL`/dynamic `import()` of a `data:` URL, so a future browser bundle
+      can import `@qu/loader/remote` standalone) does `loadRemote()` -
+      integrity (`sha256-<base64>` of the fetched bytes) is MANDATORY, never
+      optional, and an optional publisher signature is strictly enforced
+      once `trustedPublisherPubs` is given (unsigned, or signed-but-
+      unconfigured, loads with a visible warning; signed-and-wrong never
+      does). A remote package's `requires` is deliberately never
+      auto-resolved against other remote sources - it may only reference
+      names already loaded/registered locally, so loading ONE remote
+      package can never transitively pull in a chain of others with no
+      operator review. `QuLoader` (Node-only) extends it with
+      `loadLocal()` + `discoverLocalPackages()` (scans a directory's
+      immediate subdirectories for `manifest.quapp`, skipping - with a
+      warning, not a hard failure - anything that fails validation, so one
+      app's typo can't block every other app from being discovered). 33
+      tests including a diamond-dependency load-order check, a circular-
+      `requires` rejection, and a full discover+resolve+load+register
+      round-trip against real files on disk; `RemoteLoader`'s tests mock
+      `fetch()` (no real network) but exercise genuine `QuCrypto.sha256()`/
+      `sign()`/`verify()` calls against real generated keypairs - full
+      suite (587 tests) green. Not yet wired into `@qu/relay` (local app
+      discovery at boot, `/apps.json` catalog, static app serving) or a
+      first real `apps/` package - that's the next step now that the
+      mechanism itself exists.
 
 ## Development
 
