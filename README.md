@@ -691,6 +691,88 @@ own tests, built bottom-up per the dependency order in
       Settings and reloading actually renders the shell's home placeholder text in
       German — the identity-bound preference propagation path working end to end,
       not just in jsdom.
+- [x] **PWA installability + an update-available flow** — the user asked for the
+      smaller central-infrastructure pieces (PWA, updater) before the next big app
+      (a `apps/forum` client is the obvious next candidate — `MessageService`/
+      `ReactionService`/`PinService` exist fully tested but unused, still deferred).
+      `apps/shell/client.js`'s own doc comment already listed this as explicitly
+      deferred; QuV2 (reference, read-only) had it fully built, researched via an
+      Explore agent before designing this round's version.
+      **`apps/shell/manifest.webmanifest`** (new): standard web app manifest,
+      `display: "standalone"`, a single inline-SVG `data:` icon (`sizes: "any"`,
+      `purpose: "any maskable"`) — no real image asset needed, same approach QuV2
+      used. `index.html` links it + a `theme-color` meta tag.
+      **`apps/shell/sw.js`** (new): deliberately NOT an offline data cache —
+      Quniverse's real data lives in IndexedDB, synced over WebSocket
+      (`apps/shell/src/sync.js`), not a static asset worth intercepting; the `fetch`
+      handler is a pure pass-through, present only because some browsers require one
+      before offering "Add to Home Screen" at all. No automatic `skipWaiting()` on
+      install — it waits for an explicit `SKIP_WAITING` message from the page, which
+      is what makes an observable "update available" moment possible rather than
+      silently swapping code under a running page.
+      **`apps/shell/src/pwa.js`** (new): `registerServiceWorker()` distinguishes a
+      genuine update (a second worker installs while the page already has a
+      controller) from the very first install (nothing controls the page yet) — only
+      the former fires `onUpdateAvailable()`; `applyUpdate()` posts `SKIP_WAITING` to
+      the waiting worker; a `controllerchange` listener reloads the page exactly
+      once. `captureInstallPrompt()` captures `beforeinstallprompt` for a custom
+      "Install app" button instead of relying on browser-chrome-specific UI.
+      `mountPwaUi()` wires both into one small bar, hidden entirely until something
+      is actually actionable. Not ported from QuV2: the "install the current hash
+      route as its own shortcut" deep-link variant — a standalone feature beyond
+      what "PWA + updater" itself needs. Web Push's actual subscribe flow
+      (`packages/push`/`PushSubscriptionService` exist server-side already, no
+      client ever calls `PushManager.subscribe()`) stays a separate, explicitly
+      deferred feature — same "hook built, no caller wired up yet" pattern as
+      `ProfileService`'s own `syncFetch` parameter before `apps/shell` existed.
+      **`scripts/build-apps.mjs`**: `sw.js` has no bare `@qu/*` import (plain,
+      unbundled JS, runs in the separate ServiceWorkerGlobalScope) so it doesn't go
+      through esbuild — instead its one `__SW_VERSION__` placeholder gets replaced
+      with a short hash of the just-built `shell-bundle.js`'s own bytes
+      (`node:crypto`, no new dependency), written to `apps/shell/dist/sw.js`. Tying
+      the version to the bundle's actual content (not a hand-maintained counter, the
+      way QuV2 did it) means a browser reliably notices a real deploy and notices
+      nothing on a no-op rebuild — verified directly: an unrelated comment-only edit
+      (stripped by minification) left the hash unchanged, a real code edit changed
+      it, and reverting produced the original hash again.
+      **`@qu/relay`**: `static-shell.js`'s `ROUTES` gains `/manifest.webmanifest` and
+      `/sw.js` (both get the same `cache-control: no-cache` every other shell route
+      already had — the whole update flow depends on the browser never serving a
+      stale `sw.js`). `static-apps.js` (per-app bundles, previously served with NO
+      `cache-control` at all) gets the same treatment, so an app's own bundle can't
+      stay stuck stale even after the shell's own update-triggered reload — a small,
+      directly-related fix bundled into this round rather than a separate one.
+      **A real, pre-existing test bug found while running the full suite for this
+      round's verification** (not part of PWA/updater itself): `apps/profile/test/
+      client.test.js`'s five save-flash assertions (`waitFor(() => container.
+      querySelector('.qu-profile-status').textContent === 'Saved!')`) occasionally
+      threw `Cannot read properties of null` instead of failing cleanly or passing —
+      `render()` clears `root` synchronously before its async re-fetch on every
+      render, including the one a save's own write triggers via `watch()`, so a poll
+      can legitimately land in the gap where `.qu-profile-status` doesn't exist yet.
+      Fixed with `?.textContent` (keep polling on `undefined` instead of throwing) —
+      confirmed flaky beforehand (2-3 failures per 3 full-suite runs) and clean after
+      (15/15 isolated runs, 3/3 full-suite runs).
+      **A second real bug, found only by the manual Playwright check** (unit tests
+      never load a real service worker at all, so nothing else could have caught
+      this): `sw.js`'s own top doc comment originally referenced `apps/*/index.js`
+      as an example path - the literal substring `*/` inside that text PREMATURELY
+      closed the `/* ... */` block comment, corrupting everything after it into
+      invalid syntax. `node --check` on the file itself confirmed it
+      (`SyntaxError: Unexpected identifier '$'`, nowhere near the real problem) once
+      Chromium's own "ServiceWorker script evaluation failed" pointed at the file at
+      all - reworded to avoid the literal `*/` sequence.
+      Full suite green at 862 tests. Verification: `npm run build` produces a
+      correctly stamped `apps/shell/dist/sw.js`; a real, isolated `QuRelay` +
+      Playwright confirmed `GET /manifest.webmanifest`/`GET /sw.js` serve with the
+      right content-type and `cache-control: no-cache`; the FULL install-and-update
+      loop end to end in one continuous browser session - onboarding, a real page's
+      `navigator.serviceWorker.ready` resolves to an `activated` worker, the
+      manifest `<link>` is present, the update bar starts correctly hidden; a real
+      new version then gets built and deployed to the same running relay,
+      `registration.update()` detects it and installs a waiting worker, the update
+      bar becomes visible, clicking it posts `SKIP_WAITING` and reloads the page
+      exactly once, and the shell re-mounts cleanly under the new controller.
 
 ## Development
 

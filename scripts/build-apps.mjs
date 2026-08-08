@@ -25,8 +25,20 @@
  * it isn't a `@qu/loader`-discovered app at all) into
  * `apps/shell/dist/shell-bundle.js` - the fixed name `@qu/relay`'s
  * `static-shell.js` serves at `/shell-bundle.js`.
+ *
+ * `apps/shell/sw.js` (the PWA update-flow service worker, see that file's
+ * own doc comment) also gets stamped here: it's plain, unbundled JS (no
+ * `@qu/*` import for esbuild to resolve), so it doesn't go through
+ * `buildApp()` - instead its one `__SW_VERSION__` placeholder is replaced
+ * with a short hash of the JUST-BUILT `shell-bundle.js`'s own bytes, and
+ * the result is written to `apps/shell/dist/sw.js`. Tying the version to
+ * the shell bundle's actual content (not a hand-maintained counter, unlike
+ * the prototype this is rebuilt from) means a browser reliably notices a
+ * new service worker on every real deploy, and notices NOTHING on a build
+ * that changed nothing - no discipline required to remember bumping it.
  */
-import { readdir, readFile, access } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { readdir, readFile, writeFile, access } from 'node:fs/promises';
 import { join } from 'node:path';
 import esbuild from 'esbuild';
 
@@ -93,6 +105,21 @@ async function shellExists() {
   }
 }
 
+/** See this file's own doc comment on `apps/shell/sw.js`'s `__SW_VERSION__` stamping. */
+async function stampServiceWorker() {
+  let source;
+  try {
+    source = await readFile(join(SHELL_DIR, 'sw.js'), 'utf8');
+  } catch {
+    return; // no apps/shell/sw.js yet - nothing to stamp
+  }
+  const bundle = await readFile(join(SHELL_DIR, 'dist', 'shell-bundle.js'));
+  const version = createHash('sha256').update(bundle).digest('hex').slice(0, 16);
+  const outfile = join(SHELL_DIR, 'dist', 'sw.js');
+  await writeFile(outfile, source.replace('__SW_VERSION__', version));
+  console.log(`  sw.js -> ${outfile.replace(ROOT, '')} (${version})`);
+}
+
 console.log('Building apps...');
 const apps = await findClientApps();
 if (apps.length === 0) {
@@ -103,6 +130,7 @@ if (apps.length === 0) {
 
 if (await shellExists()) {
   await buildApp({ name: 'shell', dir: SHELL_DIR }, 'shell-bundle.js');
+  await stampServiceWorker();
 } else {
   console.log('  (no apps/shell/client.js yet - nothing to bundle)');
 }

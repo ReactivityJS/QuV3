@@ -21,10 +21,11 @@
  * temporarily unreachable relay, degrades to local-only rather than
  * crashing the whole shell) -> this identity's own device-agnostic
  * language/theme preference applied (best-effort, see the "IDENTITY-BOUND
- * PREFERENCES" note below) -> nav mounted (`./src/nav.js`) -> route
- * dispatched (`./src/router.js` - `#/<appId>` dynamically `import()`s the
- * app's `clientMainUrl` from `/apps.json` and calls its `mount()`; `#/~<pub>`
- * is a reserved sigil, matching the real Qu's own profile-link convention -
+ * PREFERENCES" note below) -> PWA install/update UI mounted (best-effort,
+ * see `./src/pwa.js`) -> nav mounted (`./src/nav.js`) -> route dispatched
+ * (`./src/router.js` - `#/<appId>` dynamically `import()`s the app's
+ * `clientMainUrl` from `/apps.json` and calls its `mount()`; `#/~<pub>` is a
+ * reserved sigil, matching the real Qu's own profile-link convention -
  * dispatches to the `profile` catalog entry regardless of the normal
  * by-name lookup, `segments` passed through UNCHANGED so `apps/profile`
  * re-derives the pub itself from `segments[0]`, exactly the convention
@@ -48,14 +49,24 @@
  * `DEFAULT_THEME` fallback applies exactly as before - no special-casing
  * needed for "fall back to default".
  *
+ * PWA/UPDATER (`./src/pwa.js`, `./sw.js`, `./manifest.webmanifest`):
+ * installable (a web app manifest + a service worker whose only job besides
+ * that is making an "update available" moment observable at all - it does
+ * NOT cache any app data, see `sw.js`'s own doc comment for why: Quniverse's
+ * real data already lives in IndexedDB, synced over WebSocket, not a static
+ * asset worth intercepting). Still deliberately NOT built: Web Push's
+ * actual subscribe flow (`packages/push`/`PushSubscriptionService` exist
+ * server-side already, but nothing here ever calls
+ * `PushManager.subscribe()` yet - a separate, larger feature needing its
+ * own permission UI, not something "PWA + updater" itself requires).
+ *
  * DELIBERATELY NOT BUILT THIS ROUND (see the README's own status entry for
- * the full account): PWA/service-worker/offline update flow, remote-app
- * integrity verification for `import()` (every app mounted here is loaded
- * from THIS SAME relay, which already decided to load it - see
- * `apps-catalog-store.js`'s signer-verification doc comment for why that's
- * an already-trusted origin, same trust level as any other same-origin
- * script this page loads), a Space switcher (no app built so far needs
- * one), `apps/relay-admin`.
+ * the full account): remote-app integrity verification for `import()`
+ * (every app mounted here is loaded from THIS SAME relay, which already
+ * decided to load it - see `apps-catalog-store.js`'s signer-verification
+ * doc comment for why that's an already-trusted origin, same trust level as
+ * any other same-origin script this page loads), a Space switcher (no app
+ * built so far needs one), `apps/relay-admin`.
  */
 import { QuStore } from '@qu/core';
 import { IndexedDBAdapter } from '@qu/runtime/indexeddb';
@@ -67,6 +78,7 @@ import { renderOnboarding } from './src/onboarding.js';
 import { createClientServices } from './src/services.js';
 import { connectToRelay } from './src/sync.js';
 import { mountNav } from './src/nav.js';
+import { mountPwaUi } from './src/pwa.js';
 import { parseHash } from './src/router.js';
 
 const log = createLogger('shell');
@@ -165,10 +177,19 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
     log.warn('could not read this identity\'s own language/theme preference:', err.message);
   }
 
+  const pwaRoot = document.createElement('div');
   const navRoot = document.createElement('div');
   const screen = document.createElement('div');
   screen.className = 'qu-shell-screen';
-  container.append(navRoot, screen);
+  container.append(pwaRoot, navRoot, screen);
+
+  // Best-effort, same as everything else optional in this boot sequence -
+  // see this file's own "PWA/UPDATER" doc comment above.
+  try {
+    mountPwaUi(pwaRoot);
+  } catch (err) {
+    log.warn('PWA install/update UI unavailable in this environment:', err.message);
+  }
 
   let relayPub = null;
   try {

@@ -114,7 +114,13 @@ test('editing and saving the own-profile form persists alias/avatar/template/sty
     const saveBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === 'Save');
     saveBtn.click();
 
-    await waitFor(() => container.querySelector('.qu-profile-status').textContent === 'Saved!');
+    // Optional chaining is load-bearing here, not defensive style: render()
+    // clears `root` synchronously before its async re-fetch on EVERY call
+    // (including the one this save triggers via watch()), so a poll can
+    // legitimately land in the gap where `.qu-profile-status` doesn't exist
+    // at all yet - `?.textContent` on that moment is `undefined` (falsy,
+    // keep polling), not a thrown TypeError.
+    await waitFor(() => container.querySelector('.qu-profile-status')?.textContent === 'Saved!');
     const own = await services.profile.getOwnProfile();
     assert.equal(own.alias, 'Ada Lovelace');
     assert.equal(own.template, 'compact');
@@ -147,7 +153,13 @@ test('adding a custom field (public and private) round-trips through saveProfile
 
     const saveBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === 'Save');
     saveBtn.click();
-    await waitFor(() => container.querySelector('.qu-profile-status').textContent === 'Saved!');
+    // Optional chaining is load-bearing here, not defensive style: render()
+    // clears `root` synchronously before its async re-fetch on EVERY call
+    // (including the one this save triggers via watch()), so a poll can
+    // legitimately land in the gap where `.qu-profile-status` doesn't exist
+    // at all yet - `?.textContent` on that moment is `undefined` (falsy,
+    // keep polling), not a thrown TypeError.
+    await waitFor(() => container.querySelector('.qu-profile-status')?.textContent === 'Saved!');
 
     const own = await services.profile.getOwnProfile();
     assert.deepEqual(
@@ -179,7 +191,13 @@ test('removing a custom field via its "Remove" button drops it on save', async (
 
     const saveBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === 'Save');
     saveBtn.click();
-    await waitFor(() => container.querySelector('.qu-profile-status').textContent === 'Saved!');
+    // Optional chaining is load-bearing here, not defensive style: render()
+    // clears `root` synchronously before its async re-fetch on EVERY call
+    // (including the one this save triggers via watch()), so a poll can
+    // legitimately land in the gap where `.qu-profile-status` doesn't exist
+    // at all yet - `?.textContent` on that moment is `undefined` (falsy,
+    // keep polling), not a thrown TypeError.
+    await waitFor(() => container.querySelector('.qu-profile-status')?.textContent === 'Saved!');
 
     const own = await services.profile.getOwnProfile();
     assert.deepEqual(own.fields, []);
@@ -307,7 +325,13 @@ test('own #/~<pub>/settings saves the preference AND applies it immediately via 
     const saveBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === 'Save');
     saveBtn.click();
 
-    await waitFor(() => container.querySelector('.qu-profile-status').textContent === 'Saved!');
+    // Optional chaining is load-bearing here, not defensive style: render()
+    // clears `root` synchronously before its async re-fetch on EVERY call
+    // (including the one this save triggers via watch()), so a poll can
+    // legitimately land in the gap where `.qu-profile-status` doesn't exist
+    // at all yet - `?.textContent` on that moment is `undefined` (falsy,
+    // keep polling), not a thrown TypeError.
+    await waitFor(() => container.querySelector('.qu-profile-status')?.textContent === 'Saved!');
     const own = await services.profile.getOwnProfile();
     assert.equal(own.preferredLocale, 'de');
     assert.equal(own.preferredTheme, 'sunset');
@@ -328,7 +352,13 @@ test('saving the own-profile edit form leaves an already-set language/theme pref
     await waitFor(() => container.querySelector('.qu-profile-own') !== null);
     const saveBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === 'Save');
     saveBtn.click();
-    await waitFor(() => container.querySelector('.qu-profile-status').textContent === 'Saved!');
+    // Optional chaining is load-bearing here, not defensive style: render()
+    // clears `root` synchronously before its async re-fetch on EVERY call
+    // (including the one this save triggers via watch()), so a poll can
+    // legitimately land in the gap where `.qu-profile-status` doesn't exist
+    // at all yet - `?.textContent` on that moment is `undefined` (falsy,
+    // keep polling), not a thrown TypeError.
+    await waitFor(() => container.querySelector('.qu-profile-status')?.textContent === 'Saved!');
 
     const own = await services.profile.getOwnProfile();
     assert.equal(own.preferredLocale, 'de');

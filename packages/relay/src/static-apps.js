@@ -16,6 +16,13 @@ const CONTENT_TYPES = { '.quapp': 'application/json', '.js': 'text/javascript', 
  * in a full HTTP framework for that would be more surface area than the
  * job requires.
  *
+ * `cache-control: no-cache` (revalidate every time) for the same reason
+ * `static-shell.js` sets it on the shell's own fixed routes: without it, a
+ * browser could keep serving a stale cached `dist/client.js` for whichever
+ * app is currently open even after `apps/shell`'s own update flow
+ * (`apps/shell/src/pwa.js`) reloads the page - the reload would fetch a
+ * fresh shell, but this app's own bundle could still come back stale.
+ *
  * @param {import('node:http').IncomingMessage} req
  * @param {import('node:http').ServerResponse} res
  * @param {string} appsDir
@@ -40,7 +47,7 @@ export async function serveApps(req, res, appsDir) {
 
   try {
     const body = await readFile(join(appsDir, relative));
-    res.writeHead(200, { 'content-type': contentType, 'access-control-allow-origin': '*' }).end(body);
+    res.writeHead(200, { 'content-type': contentType, 'access-control-allow-origin': '*', 'cache-control': 'no-cache' }).end(body);
   } catch (err) {
     if (err.code === 'ENOENT') res.writeHead(404).end('Not Found');
     else {

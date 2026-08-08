@@ -338,6 +338,38 @@ test('GET /shell-bundle.js serves the built bundle with the right content-type',
   }
 });
 
+test('GET /manifest.webmanifest serves the PWA manifest with the right content-type and cache-control', async () => {
+  const env = await freshEnvWithShell({
+    'index.html': '<html>shell</html>',
+    'manifest.webmanifest': '{"name":"Quniverse"}',
+  });
+  try {
+    const res = await fetch(`http://localhost:${env.port}/manifest.webmanifest`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-type'), 'application/manifest+json');
+    assert.equal(res.headers.get('cache-control'), 'no-cache');
+    assert.deepEqual(await res.json(), { name: 'Quniverse' });
+  } finally {
+    await env.teardown();
+  }
+});
+
+test('GET /sw.js serves the built (version-stamped) service worker with no-cache, so a browser never sits on a stale copy', async () => {
+  const env = await freshEnvWithShell({
+    'index.html': '<html>shell</html>',
+    'dist/sw.js': 'const SW_VERSION = "abc123";',
+  });
+  try {
+    const res = await fetch(`http://localhost:${env.port}/sw.js`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-type'), 'text/javascript');
+    assert.equal(res.headers.get('cache-control'), 'no-cache');
+    assert.equal(await res.text(), 'const SW_VERSION = "abc123";');
+  } finally {
+    await env.teardown();
+  }
+});
+
 test('a route not among the shell\'s fixed files still falls through to 404, even with serveShell on', async () => {
   const env = await freshEnvWithShell();
   try {

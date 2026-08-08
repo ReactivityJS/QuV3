@@ -53,6 +53,21 @@ test('serves a .js file with text/javascript content-type', async () => {
   }
 });
 
+// A stale cached app bundle would survive apps/shell's own update-flow
+// reload (that reload only guarantees a fresh SHELL, not a fresh copy of
+// whichever app is currently open) - see this file's own doc comment.
+test('serves every file with cache-control: no-cache', async () => {
+  const env = await freshServer();
+  try {
+    await mkdir(join(env.appsDir, 'forum'), { recursive: true });
+    await writeFile(join(env.appsDir, 'forum', 'index.js'), 'export const x = 1;');
+    const res = await fetch(`http://localhost:${env.port}/apps/forum/index.js`);
+    assert.equal(res.headers.get('cache-control'), 'no-cache');
+  } finally {
+    await env.teardown();
+  }
+});
+
 test('serves a nested .json file (e.g. a subdirectory asset)', async () => {
   const env = await freshServer();
   try {
