@@ -84,6 +84,54 @@ test('getPublicProfile() for an identity with no published profile returns null'
   assert.equal(await profiles.getPublicProfile(randomPub), null);
 });
 
+test('template/style round-trip and are PUBLIC (visible to anyone)', async () => {
+  const { profiles, actorPub } = await freshSetup();
+  await profiles.saveProfile({ alias: 'Ada', template: 'banner', style: 'ocean' });
+  const own = await profiles.getOwnProfile();
+  assert.equal(own.template, 'banner');
+  assert.equal(own.style, 'ocean');
+  const pub = await profiles.getPublicProfile(actorPub);
+  assert.equal(pub.template, 'banner');
+  assert.equal(pub.style, 'ocean');
+});
+
+test('preferredLocale/preferredTheme round-trip via getOwnProfile() and are NOT part of the public profile', async () => {
+  const { profiles, actorPub } = await freshSetup();
+  await profiles.saveProfile({ alias: 'Ada', preferredLocale: 'de', preferredTheme: 'sunset' });
+  const own = await profiles.getOwnProfile();
+  assert.equal(own.preferredLocale, 'de');
+  assert.equal(own.preferredTheme, 'sunset');
+  const pub = await profiles.getPublicProfile(actorPub);
+  assert.equal(pub.preferredLocale, undefined);
+  assert.equal(pub.preferredTheme, undefined);
+});
+
+test('preferredLocale/preferredTheme default to null when never set', async () => {
+  const { profiles } = await freshSetup();
+  await profiles.saveProfile({ alias: 'Ada' });
+  const own = await profiles.getOwnProfile();
+  assert.equal(own.preferredLocale, null);
+  assert.equal(own.preferredTheme, null);
+});
+
+// Regression: preferredLocale/preferredTheme are reserved, dedicated fields,
+// NOT part of the free-form private `fields` list - a user's own custom
+// field literally named "preferredLocale" must stay completely independent
+// (the private extra document is {customFields, preferredLocale,
+// preferredTheme}, never a flat merge of all three - see ProfileService's
+// own doc comment for why a flat merge would risk exactly this collision).
+test('a custom private field named "preferredLocale" never collides with the real preference', async () => {
+  const { profiles } = await freshSetup();
+  await profiles.saveProfile({
+    alias: 'Ada',
+    preferredLocale: 'de',
+    fields: [{ key: 'preferredLocale', value: 'this is just a note, not the real preference', visibility: 'private' }],
+  });
+  const own = await profiles.getOwnProfile();
+  assert.equal(own.preferredLocale, 'de');
+  assert.deepEqual(own.fields, [{ key: 'preferredLocale', value: 'this is just a note, not the real preference', visibility: 'private' }]);
+});
+
 test('a freshly imported identity with no local data backfills via syncFetch', async () => {
   const qu = new QuStore();
   qu.mount('store', new MemoryStoreAdapter());

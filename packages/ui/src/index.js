@@ -4,4 +4,4 @@ export { renderSubpage } from './subpage.js';
 export { renderAvatar } from './avatar.js';
 export { injectStyle } from './style.js';
 export { renderFlagToggle } from './flag-toggle.js';
-export { ensureTheme, DEFAULT_THEME } from './theme.js';
+export { ensureTheme, DEFAULT_THEME, THEME_PRESETS, getStoredTheme, setStoredTheme } from './theme.js';

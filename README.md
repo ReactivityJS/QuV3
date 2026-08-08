@@ -589,6 +589,108 @@ own tests, built bottom-up per the dependency order in
       against the same long-running relay process) showed apparent duplicates; a
       clean, single-shot run with an isolated temp store proved that was an artifact
       of the test method, not a real rendering bug.
+- [x] **`apps/profile`** — the last piece missing to make Quniverse's directory
+      genuinely usable: no app anywhere called `DirectoryService.setVisible()`, so
+      `user-list` stayed empty for any real identity. Closes that gap, and turns
+      `#/~<pub>` from a placeholder into a real editable-own/read-only-others profile
+      page, per the user's own explicit requirements (subpaths in the hash; `pub`/
+      `epub`/`alias` as the base identity fields, already exactly what
+      `ProfileService` returned; free-form custom fields with a public/private
+      toggle, likewise already there; **new, no QuV2 precedent**: identity-bound
+      language/theme preference with a fallback to default, and a profile's own
+      template/style for visitors).
+      **`ProfileService` extended** (`packages/services/src/profile-service.js`):
+      `template`/`style` (public, part of the same signed profile document as
+      `alias`/`avatar` — flow through `getPublicProfile()`'s `...rest` automatically)
+      and `preferredLocale`/`preferredTheme` (private, self-encrypted, but
+      deliberately NOT part of the free-form `fields` list — the private-extra
+      document's shape changed from a flat `{key: value}` merge to
+      `{customFields: {...}, preferredLocale, preferredTheme}`, so a user's own
+      custom field literally named `"preferredLocale"` can never collide with the
+      real, reserved one — a real risk under the old flat shape, covered by a new
+      regression test).
+      **Identity-bound language/theme, without breaking `@qu/i18n`'s existing
+      device-local design**: `createI18n()` is called synchronously at every app's
+      module top level, before `qu`/`identity` even exist — making it identity-aware
+      directly would mean rebuilding it (and every app that calls it) around an async
+      source. Instead, the identity's own private preference is the source of truth,
+      and gets PROPAGATED into the existing device-local mechanism
+      (`setLocale()`/new `setStoredTheme()`) once, at `apps/shell`'s own boot,
+      turning that device-local layer into a propagation TARGET rather than a
+      competing setting — an unset preference means neither function is ever called,
+      so the existing browser-detection/`DEFAULT_THEME` fallback applies completely
+      unchanged. Takes effect on next reload everywhere except the device that just
+      changed it, where `apps/profile`'s own Settings subpath calls `setLocale()`/
+      `setStoredTheme()` immediately for instant local feedback — consistent with
+      `@qu/i18n`'s own already-documented "next page load, not live" behavior for
+      locale.
+      **`@qu/ui`**: new `THEME_PRESETS` (`default`/`ocean`/`sunset`/`forest`/`rose`,
+      each only overriding `--qu-color-accent`, matching how narrow `DEFAULT_THEME`
+      already was) plus `getStoredTheme()`/`setStoredTheme()`, mirroring
+      `@qu/i18n`'s `getStoredLocale()`/`setLocale()` pattern exactly;
+      `ensureTheme()` now applies a stored preset before any explicit `overrides`
+      (an explicit override still wins). The SAME preset system is reused for a
+      profile's own public `style` — one shared palette system, not two.
+      **`apps/shell`**: `#/~<pub>` now dispatches to the `profile` catalog entry
+      (instead of a placeholder) regardless of the normal by-name lookup — QuV2's own
+      profile-link convention; `segments` (already parsed by `router.js`, never
+      actually passed to a mounted app before now) is threaded into every app's mount
+      context as a general shell capability, not something special-cased for
+      `apps/profile`; boot reads the identity's own `preferredLocale`/`preferredTheme`
+      once, right after `services` exists, and applies them best-effort.
+      **`apps/profile` itself**: `#/profile` (bare) redirects immediately to
+      `#/~<myPub>`; `#/~<pub>` is the editable own form for `pub === myPub`,
+      read-only for anyone else (including their own `template`/`style`, applied as a
+      scoped inline CSS custom property on the profile view itself, never globally);
+      `#/~<pub>/settings` is the language/theme picker, own-profile only (redirects
+      back to the plain view otherwise). Reactive via `watch(qu, actorPath(pub,
+      'profile'), ...)`, same as QuV2. Directory visibility is a plain checkbox over
+      `services.directory.isVisible()`/`setVisible()`. Avatar stays a text field
+      (URL or emoji, `renderAvatar()` already supports both) — no file upload/
+      `AssetEngine` this round, no QuV2 precedent, no current need. Deliberately NOT
+      ported from QuV2's `apps/profile`: the identity backup/export/QR section — a
+      separate device/identity-management concern, and no `@qu/qr` package exists in
+      V3 (same reasoning `apps/shell`'s onboarding screen already documents for
+      dropping QR entirely).
+      **A real bug found while wiring this up, unrelated to profile itself**: own
+      saves render-and-flash a "Saved!" status message, but `ProfileService.
+      saveProfile()` always republishes the same public profile document this same
+      component `watch()`es — so a save triggers its own re-render, which discards
+      the whole form (including the exact DOM node a save button's click handler
+      just set "Saved!" on) and rebuilds it from scratch. Fixed with a small
+      `saveState` flag shared by reference between `mount()`'s closure and
+      `renderOwnProfile()`/`renderSettings()`: the click handler sets it BEFORE
+      awaiting the save, and the next `render()` reads-then-clears it to decide
+      whether to show the flash — found and fixed via this round's own new
+      `apps/profile` tests, not the manual browser check (all 5 "does this save take
+      effect" tests failed identically until fixed).
+      **Also found while testing this round, real but pre-existing**: Node 22 ships a
+      native global `WebSocket` — unlike jsdom (which `installDom()` never copies
+      onto `globalThis`), so once `apps/shell`'s own tests gained a `localStorage`
+      fake (needed for the preference-propagation tests above),
+      `WebSocketClientTransport` started actually succeeding at construction and
+      attempting a REAL TCP connection to `ws://localhost/` (jsdom's configured
+      origin, nothing listening) — a slow (~10s) OS-level timeout per test instead of
+      the fast, synchronous failure these jsdom unit tests were always meant to have
+      (see `apps/shell/client.js`'s own try/catch around `connectToRelay()` — no real
+      sync is meant to happen in these tests at all). Fixed with an explicit
+      `delete globalThis.WebSocket` at the top of `apps/shell/test/client.test.js`,
+      restoring the original fast (~1s total), side-effect-free behavior.
+      Full suite green at 848 tests. Verification: `npm run build` bundles
+      `apps/profile` cleanly alongside the other three; a real, isolated `QuRelay` +
+      Playwright with two fully independent browser contexts (two separate
+      identities/devices) walked through the complete loop this round set out to
+      close — identity A edits alias/avatar/template/style, adds one public and one
+      private custom field, saves, toggles directory visibility on; identity B
+      (a completely separate browser context, own onboarding) sees A appear LIVE in
+      `user-list` with no manual reload, opens A's public profile and sees A's own
+      `banner` template and `sunset` accent applied (not B's), the public custom
+      field and its value, and confirms the private field never appears anywhere in
+      the page; B adds A as a contact via the same toggle `user-list` uses. Separately,
+      A's edits survive a reload, and setting a language + theme preference in
+      Settings and reloading actually renders the shell's home placeholder text in
+      German — the identity-bound preference propagation path working end to end,
+      not just in jsdom.
 
 ## Development
 
@@ -600,8 +702,9 @@ npm test   # node --test (recursive auto-discovery of packages/*/test/*.test.js)
 ## Running Quniverse (Relay + Docker)
 
 **What "Quniverse" means today**: the `@qu/relay` server (`QuRelay`) plus whatever
-apps it loads — `apps/forum` (server-only) and the three client apps built on
-`<qu-list>` (`apps/app-list`/`user-list`/`contact-list`), all reachable through
+apps it loads — `apps/forum` (server-only), the three client apps built on
+`<qu-list>` (`apps/app-list`/`user-list`/`contact-list`), and `apps/profile`
+(editable own profile, directory visibility, `#/~<pub>`), all reachable through
 **`apps/shell`**, the real browser entry point served at `/` (see the status entry
 above for the full account: onboarding, live sync, nav, per-route mounting). Opening a
 browser tab and actually clicking around a live Quniverse UI is real and testable

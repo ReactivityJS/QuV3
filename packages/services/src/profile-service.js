@@ -29,10 +29,29 @@ function privateExtraPath(actorPub) {
  *     in my own profile as a personal note/reminder, nobody else ever
  *     sees it", the simplest possible reading of "private toggle".
  *
- * Ported essentially unchanged from QuV2 - every piece it builds on
- * (`private-storage.js`, `sync-freshness.js`, `@qu/identity`'s
- * `publishMainProfile()`/`getProfile()`/`actorPath()`) already exists in V3
- * with an identical shape.
+ * Also public (visible to every visitor): `template`/`style` - which layout
+ * and accent palette `apps/profile` renders THIS identity's public page
+ * with (see `@qu/ui`'s `THEME_PRESETS` for `style`'s value space) - a
+ * genuinely new concept, no QuV2 precedent, requested directly by the user.
+ *
+ * Also PRIVATE, but NOT part of the free-form `fields` list -
+ * `preferredLocale`/`preferredTheme`: this identity's own device-agnostic
+ * language/theme preference, synced across ITS OWN devices via the same
+ * self-encryption every other private field uses, applied to a NEW device
+ * at `apps/shell` boot by writing it into `@qu/i18n`'s/`@qu/ui`'s existing
+ * device-local mechanisms (`setLocale()`/`setStoredTheme()`) - see
+ * `apps/shell/client.js`'s own doc comment for why this round deliberately
+ * does NOT make `createI18n()`/`ensureTheme()` themselves async or
+ * identity-aware. Kept as dedicated fields, not entries in the free-form
+ * `fields` list, so a user's own custom field literally named
+ * "preferredLocale" can never collide with this reserved one - the private
+ * extra document's shape is `{customFields: {key: value}, preferredLocale,
+ * preferredTheme}`, not a flat merge of all three.
+ *
+ * Ported essentially unchanged from QuV2 for the `alias`/`avatar`/`fields`
+ * core - every piece it builds on (`private-storage.js`, `sync-freshness.js`,
+ * `@qu/identity`'s `publishMainProfile()`/`getProfile()`/`actorPath()`)
+ * already exists in V3 with an identical shape.
  */
 export class ProfileService {
   #backgroundRefresh;
@@ -64,24 +83,27 @@ export class ProfileService {
 
   /**
    * Publishes (or replaces) this identity's whole profile - both the public
-   * document and the private extra-fields document. Replaces wholesale
-   * rather than patching, so removing a field is just not including it in
+   * document and the private extra document. Replaces wholesale rather
+   * than patching, so removing a field is just not including it in
    * `fields` - see `getOwnProfile()` for the read shape this mirrors.
    *
-   * @param {{alias?: string, avatar?: string, fields?: Array<{key: string, value: string, visibility: 'public'|'private'}>}} profile
+   * @param {{alias?: string, avatar?: string, template?: string, style?: string, fields?: Array<{key: string, value: string, visibility: 'public'|'private'}>, preferredLocale?: string|null, preferredTheme?: string|null}} profile
+   *   `template`/`style` are PUBLIC (part of the signed document, like
+   *   `alias`/`avatar`). `preferredLocale`/`preferredTheme` are PRIVATE and
+   *   deliberately NOT part of `fields` - see this class's own doc comment.
    * @returns {Promise<string>} This identity's actor pubkey (base64url).
    */
-  async saveProfile({ alias = '', avatar = '', fields = [] }) {
+  async saveProfile({ alias = '', avatar = '', template = '', style = '', fields = [], preferredLocale = null, preferredTheme = null }) {
     const publicExtra = {};
-    const privateExtra = {};
+    const customFields = {};
     for (const { key, value, visibility } of fields) {
       if (!key) continue;
-      if (visibility === 'private') privateExtra[key] = value;
+      if (visibility === 'private') customFields[key] = value;
       else publicExtra[key] = value;
     }
 
-    const actorPub = await this.identity.publishMainProfile({ alias, avatar, ...publicExtra });
-    await putPrivate(this.qu, this.identity, privateExtraPath(actorPub), privateExtra);
+    const actorPub = await this.identity.publishMainProfile({ alias, avatar, template, style, ...publicExtra });
+    await putPrivate(this.qu, this.identity, privateExtraPath(actorPub), { customFields, preferredLocale, preferredTheme });
     return actorPub;
   }
 
@@ -93,7 +115,7 @@ export class ProfileService {
    * meaningfully for itself; there is no "get someone else's private
    * fields" - see `getPublicProfile()` for what a THIRD PARTY sees instead.
    *
-   * @returns {Promise<{pub: string, epub: string, alias: string, avatar: string, fields: Array<{key: string, value: string, visibility: 'public'|'private'}>}>}
+   * @returns {Promise<{pub: string, epub: string, alias: string, avatar: string, template: string, style: string, fields: Array<{key: string, value: string, visibility: 'public'|'private'}>, preferredLocale: string|null, preferredTheme: string|null}>}
    */
   async getOwnProfile() {
     const actorPub = await this.#myActorPub();
@@ -113,14 +135,14 @@ export class ProfileService {
     if (localExtra) this.#backgroundRefresh(extraPath);
     else if (this.syncFetch) await this.syncFetch(extraPath).catch(() => {});
 
-    const { alias = '', avatar = '', xPublicKey = '', ...publicExtra } = (await this.identity.getProfile(actorPub)) ?? {};
-    const privateExtra = (await getPrivate(this.qu, this.identity, extraPath)) ?? {};
+    const { alias = '', avatar = '', template = '', style = '', xPublicKey = '', ...publicExtra } = (await this.identity.getProfile(actorPub)) ?? {};
+    const { customFields = {}, preferredLocale = null, preferredTheme = null } = (await getPrivate(this.qu, this.identity, extraPath)) ?? {};
 
     const fields = [
       ...Object.entries(publicExtra).map(([key, value]) => ({ key, value, visibility: 'public' })),
-      ...Object.entries(privateExtra).map(([key, value]) => ({ key, value, visibility: 'private' })),
+      ...Object.entries(customFields).map(([key, value]) => ({ key, value, visibility: 'private' })),
     ];
-    return { pub: actorPub, epub: xPublicKey, alias, avatar, fields };
+    return { pub: actorPub, epub: xPublicKey, alias, avatar, template, style, fields, preferredLocale, preferredTheme };
   }
 
   /**
@@ -132,8 +154,11 @@ export class ProfileService {
    * `crypto-envelope.js`). Both are shown in the public profile UI
    * per-request - a Qu identity IS its keypair, so hiding them serves no
    * one.
+   * `template`/`style` (see this class's own doc comment) flow through here
+   * automatically via `...rest` below - they're part of the same signed
+   * public document as `alias`/`avatar`, no separate handling needed.
    * @param {string} actorPub
-   * @returns {Promise<{pub: string, epub: string, alias: string, avatar: string, [key: string]: string}|null>}
+   * @returns {Promise<{pub: string, epub: string, alias: string, avatar: string, template: string, style: string, [key: string]: string}|null>}
    */
   async getPublicProfile(actorPub) {
     let profile = await this.identity.getProfile(actorPub);

@@ -2,10 +2,36 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { QuStore, MemoryStoreAdapter, QuCrypto } from '@qu/core';
 import { QuIdentityEngine } from '@qu/identity';
-import { paths } from '@qu/services';
+import { paths, ProfileService } from '@qu/services';
 import { installDom, waitFor } from '@qu/ui/testing';
+import { getStoredLocale, setLocale } from '@qu/i18n';
 
 installDom();
+// Node 22 ships a native global WebSocket - unlike a real browser missing
+// one, this would let WebSocketClientTransport actually attempt a REAL TCP
+// connection to ws://localhost/ (jsdom's configured origin), which nothing
+// is listening on - a slow (multi-second) OS-level connect timeout per
+// test, not a fast failure. These tests deliberately never exercise real
+// sync (see apps/shell/client.js's own try/catch around connectToRelay())
+// - hiding it here keeps that path fast and side-effect-free, exactly like
+// a real browser missing WebSocket would.
+delete globalThis.WebSocket;
+// installDom() doesn't copy localStorage onto globalThis - a plain in-memory
+// fake, needed once mount() starts reading/writing the identity-bound
+// language/theme preference via @qu/i18n's/@qu/ui's device-local mechanisms.
+globalThis.localStorage = (() => {
+  const store = new Map();
+  return {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, String(v)),
+    removeItem: (k) => store.delete(k),
+  };
+})();
+// @qu/ui's package root transitively evaluates components.js, which extends
+// HTMLElement at module-load time - must come AFTER installDom(), same
+// reason `mount` itself is loaded dynamically below (see @qu/ui/testing's
+// own doc comment).
+const { getStoredTheme, setStoredTheme } = await import('@qu/ui');
 const { mount } = await import('../client.js');
 
 function freshQu() {
@@ -141,7 +167,7 @@ test('navigating to a known route dynamically imports and mounts the target app 
     await waitFor(() => container.querySelector('.qu-shell-screen')?.textContent.startsWith('MOUNTED'));
 
     const text = container.querySelector('.qu-shell-screen').textContent;
-    for (const key of ['qu', 'identity', 'services', 'apps', 'subscribe', 'syncFetch']) {
+    for (const key of ['qu', 'identity', 'services', 'apps', 'segments', 'subscribe', 'syncFetch']) {
       assert.ok(text.includes(key), `expected context key "${key}" in ${text}`);
     }
   } finally {
@@ -197,11 +223,35 @@ test('an unknown appId renders a graceful "not found" placeholder, not a crash',
   }
 });
 
-test('#/~<pub> renders a graceful "profile not available" placeholder - no apps/profile exists in V3 yet', async (t) => {
+test('#/~<pub> dispatches to the "profile" catalog entry, with segments passed through unchanged', async (t) => {
   const qu = freshQu();
   const identity = new QuIdentityEngine(qu);
   await identity.importMnemonic(identity.generateMnemonic());
-  t.mock.method(globalThis, 'fetch', mockFetch({ apps: [] }));
+  const clientMainUrl = dataUrlModule(`
+    export function mount(container, ctx) {
+      container.textContent = 'PROFILE:' + JSON.stringify(ctx.segments);
+      return () => {};
+    }
+  `);
+  t.mock.method(globalThis, 'fetch', mockFetch({ apps: [{ name: 'profile', clientMainUrl }] }));
+
+  const container = makeContainer();
+  const stop = await mount(container, { qu, identity });
+  try {
+    window.location.hash = '#/~someactorpub';
+    window.dispatchEvent(new window.Event('hashchange'));
+    await waitFor(() => container.querySelector('.qu-shell-screen')?.textContent.startsWith('PROFILE'));
+    assert.equal(container.querySelector('.qu-shell-screen').textContent, 'PROFILE:["~someactorpub"]');
+  } finally {
+    stop();
+  }
+});
+
+test('#/~<pub> falls back to the same "app not found" placeholder when "profile" isn\'t in the catalog', async (t) => {
+  const qu = freshQu();
+  const identity = new QuIdentityEngine(qu);
+  await identity.importMnemonic(identity.generateMnemonic());
+  t.mock.method(globalThis, 'fetch', mockFetch({ apps: [] })); // no "profile" entry at all
 
   const container = makeContainer();
   const stop = await mount(container, { qu, identity });
@@ -209,7 +259,46 @@ test('#/~<pub> renders a graceful "profile not available" placeholder - no apps/
     window.location.hash = '#/~someactorpub';
     window.dispatchEvent(new window.Event('hashchange'));
     await waitFor(() => container.querySelector('.qu-shell-placeholder') !== null);
-    assert.match(container.querySelector('.qu-shell-placeholder').textContent, /not available/i);
+    assert.match(container.querySelector('.qu-shell-placeholder').textContent, /not found/i);
+  } finally {
+    stop();
+  }
+});
+
+test('boot applies this identity\'s own preferredLocale/preferredTheme to the device-local mechanisms', async (t) => {
+  const qu = freshQu();
+  const identity = new QuIdentityEngine(qu);
+  await identity.importMnemonic(identity.generateMnemonic());
+  await new ProfileService(qu, identity).saveProfile({ alias: 'Ada', preferredLocale: 'de', preferredTheme: 'ocean' });
+  setLocale(null);
+  setStoredTheme(null);
+  t.mock.method(globalThis, 'fetch', mockFetch({ apps: [] }));
+
+  const container = makeContainer();
+  const stop = await mount(container, { qu, identity });
+  try {
+    assert.equal(getStoredLocale(), 'de');
+    assert.equal(getStoredTheme(), 'ocean');
+  } finally {
+    stop();
+    setLocale(null);
+    setStoredTheme(null);
+  }
+});
+
+test('boot leaves the device-local mechanisms untouched when no preference was ever set', async (t) => {
+  const qu = freshQu();
+  const identity = new QuIdentityEngine(qu);
+  await identity.importMnemonic(identity.generateMnemonic());
+  setLocale(null);
+  setStoredTheme(null);
+  t.mock.method(globalThis, 'fetch', mockFetch({ apps: [] }));
+
+  const container = makeContainer();
+  const stop = await mount(container, { qu, identity });
+  try {
+    assert.equal(getStoredLocale(), null);
+    assert.equal(getStoredTheme(), null);
   } finally {
     stop();
   }

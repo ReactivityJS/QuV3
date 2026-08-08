@@ -19,11 +19,34 @@
  * -> own profile published (mirrors `@qu/relay`'s own `#bootInner()`) ->
  * sync connected (best-effort - a browser without WebSocket, or a
  * temporarily unreachable relay, degrades to local-only rather than
- * crashing the whole shell) -> nav mounted (`./src/nav.js`) -> route
+ * crashing the whole shell) -> this identity's own device-agnostic
+ * language/theme preference applied (best-effort, see the "IDENTITY-BOUND
+ * PREFERENCES" note below) -> nav mounted (`./src/nav.js`) -> route
  * dispatched (`./src/router.js` - `#/<appId>` dynamically `import()`s the
  * app's `clientMainUrl` from `/apps.json` and calls its `mount()`; `#/~<pub>`
- * is a reserved sigil for a future `apps/profile` that doesn't exist in V3
- * yet - a graceful placeholder, not a crash, same as an unknown `appId`).
+ * is a reserved sigil, matching the real Qu's own profile-link convention -
+ * dispatches to the `profile` catalog entry regardless of the normal
+ * by-name lookup, `segments` passed through UNCHANGED so `apps/profile`
+ * re-derives the pub itself from `segments[0]`, exactly the convention
+ * QuV2's own shell used).
+ *
+ * IDENTITY-BOUND PREFERENCES (language, theme): `@qu/i18n`'s locale and
+ * `@qu/ui`'s theme are both device-local by design (`setLocale()`/
+ * `setStoredTheme()`, `localStorage`) - `createI18n()` is called
+ * SYNCHRONOUSLY at every app's module top level, before `qu`/`identity`
+ * even exist, so neither can become identity-aware without breaking that.
+ * Instead, this identity's OWN private, self-encrypted preference (see
+ * `ProfileService`'s own doc comment) is the source of truth, and gets
+ * PROPAGATED into the existing device-local mechanism once, right here,
+ * every time this identity boots on a (possibly new) device - the
+ * device-local layer becomes this preference's propagation target, not a
+ * competing setting. `apps/profile`'s Settings subpath writes both
+ * (`saveProfile()` AND `setLocale()`/`setStoredTheme()` immediately, for
+ * instant effect on the device that just changed it) - see that app's own
+ * doc comment. Unset stays unset: if the profile never set a preference,
+ * neither function is called here, and the existing browser-detection/
+ * `DEFAULT_THEME` fallback applies exactly as before - no special-casing
+ * needed for "fall back to default".
  *
  * DELIBERATELY NOT BUILT THIS ROUND (see the README's own status entry for
  * the full account): PWA/service-worker/offline update flow, remote-app
@@ -37,8 +60,8 @@
 import { QuStore } from '@qu/core';
 import { IndexedDBAdapter } from '@qu/runtime/indexeddb';
 import { QuIdentityEngine } from '@qu/identity';
-import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme } from '@qu/ui';
+import { createI18n, setLocale } from '@qu/i18n';
+import { injectStyle, ensureTheme, setStoredTheme } from '@qu/ui';
 import { createLogger, setLogLevel, getLogLevel } from '@qu/log';
 import { renderOnboarding } from './src/onboarding.js';
 import { createClientServices } from './src/services.js';
@@ -54,8 +77,8 @@ const log = createLogger('shell');
 if (typeof window !== 'undefined') window.quLog = { setLevel: setLogLevel, getLevel: getLogLevel };
 
 const DICT = {
-  en: { home: 'Pick an app above to get started.', appNotFound: 'App not found (or not enabled on this relay).', profileNotAvailable: 'Profile viewing is not available in this build yet.' },
-  de: { home: 'Wähle oben eine App aus, um loszulegen.', appNotFound: 'App nicht gefunden (oder auf diesem Relay nicht aktiviert).', profileNotAvailable: 'Profilansicht ist in diesem Build noch nicht verfügbar.' },
+  en: { home: 'Pick an app above to get started.', appNotFound: 'App not found (or not enabled on this relay).' },
+  de: { home: 'Wähle oben eine App aus, um loszulegen.', appNotFound: 'App nicht gefunden (oder auf diesem Relay nicht aktiviert).' },
 };
 const { t } = createI18n(DICT);
 
@@ -128,6 +151,20 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
     await identity.publishMainProfile({});
   }
 
+  // Propagate this identity's own device-agnostic language/theme
+  // preference into the existing device-local mechanisms - see this file's
+  // own "IDENTITY-BOUND PREFERENCES" doc comment above for the full
+  // reasoning. Best-effort: a profile read failure degrades to "nothing
+  // applied this boot", not a crash - the existing browser-detection/
+  // DEFAULT_THEME fallback already covers that case correctly.
+  try {
+    const { preferredLocale, preferredTheme } = await services.profile.getOwnProfile();
+    if (preferredLocale) setLocale(preferredLocale);
+    if (preferredTheme) setStoredTheme(preferredTheme);
+  } catch (err) {
+    log.warn('could not read this identity\'s own language/theme preference:', err.message);
+  }
+
   const navRoot = document.createElement('div');
   const screen = document.createElement('div');
   screen.className = 'qu-shell-screen';
@@ -153,25 +190,29 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
     stopMountedApp = null;
     screen.textContent = '';
 
-    const { appId } = parseHash(window.location.hash);
+    const { appId, segments } = parseHash(window.location.hash);
     if (!appId) { renderPlaceholder(t('home')); return; }
     // #/~<pub> is a reserved sigil (matching the real Qu's own profile-link
-    // convention) meaning "show this identity's public profile" - no
-    // apps/profile exists in V3 yet, see this file's own doc comment.
-    if (appId.startsWith('~')) { renderPlaceholder(t('profileNotAvailable')); return; }
+    // convention) meaning "show this identity's public profile" - always
+    // dispatches to the `profile` catalog entry regardless of the normal
+    // by-name lookup below; `segments` is passed through UNCHANGED (still
+    // `['~<pub>']`) so apps/profile parses the pub back out of segments[0]
+    // itself - the shell doesn't need to know what a pub even looks like
+    // beyond this one prefix check.
+    const catalogName = appId.startsWith('~') ? 'profile' : appId;
 
     let apps = [];
     try {
       const res = await fetch('/apps.json');
       apps = res.ok ? await res.json() : [];
     } catch { /* transient fetch failure - treated the same as "app not found" below */ }
-    const app = apps.find((a) => a.name === appId);
+    const app = apps.find((a) => a.name === catalogName);
     if (!app?.clientMainUrl) { renderPlaceholder(t('appNotFound')); return; }
 
-    log.debug(`mounting app "${appId}"`);
+    log.debug(`mounting app "${catalogName}"`);
     const mod = await import(/* @vite-ignore */ app.clientMainUrl);
     if (stopped) return;
-    stopMountedApp = (await mod.mount(screen, { qu, identity, services, apps, subscribe, syncFetch })) ?? null;
+    stopMountedApp = (await mod.mount(screen, { qu, identity, services, apps, segments, subscribe, syncFetch })) ?? null;
   }
 
   window.addEventListener('hashchange', renderRoute);
