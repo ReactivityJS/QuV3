@@ -28,7 +28,8 @@
     "./profile-service": "./src/profile-service.js",
     "./directory-service": "./src/directory-service.js",
     "./actor-format": "./src/actor-format.js",
-    "./actor-service": "./src/actor-service.js"
+    "./actor-service": "./src/actor-service.js",
+    "./asset-service": "./src/asset-service.js"
   },
   "dependencies": {
     "@qu/core": "^0.1.0",

@@ -8,10 +8,11 @@
  * decomposition (§4.3): MessageService (+ THREAD_PRESETS), ReactionService,
  * PinService, PresenceService, NotificationPrefsService,
  * PushSubscriptionService, ProfileService, DirectoryService,
- * actor-format's formatActorLabel/matchesActorQuery, and
- * createTrustedCatalogStore (the signer-filtered `/store/apps/catalog`
- * facade shared by `apps/app-list` and `apps/shell`). See each file's own
- * doc comment.
+ * actor-format's formatActorLabel/matchesActorQuery, AssetService (the
+ * Entity API over `@qu/engines`' AssetEngine - file/image/video/audio
+ * attachments), and createTrustedCatalogStore (the signer-filtered
+ * `/store/apps/catalog` facade shared by `apps/app-list` and `apps/shell`).
+ * See each file's own doc comment.
  */
 export * as paths from './paths.js';
 export { unwrap, unwrapAll } from './unwrap.js';
@@ -36,3 +37,4 @@ export { DirectoryService } from './directory-service.js';
 export { formatActorLabel, matchesActorQuery } from './actor-format.js';
 export { ActorService } from './actor-service.js';
 export { createTrustedCatalogStore } from './apps-catalog-store.js';
+export { AssetService } from './asset-service.js';

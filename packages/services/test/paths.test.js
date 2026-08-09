@@ -11,6 +11,10 @@ test('documentPath()', () => {
   assert.equal(paths.documentPath('wiki', 'intro'), '/store/wiki/docs/intro');
 });
 
+test('assetPath()', () => {
+  assert.equal(paths.assetPath('gallery', 'photo1'), '/store/gallery/assets/photo1');
+});
+
 test('aclPath() puts kind before resourceId, as a sibling of the resource', () => {
   assert.equal(paths.aclPath('wiki', 'docs', 'intro'), '/store/wiki/acl/docs/intro');
   assert.equal(paths.aclPath('board', 'threads', 'general'), '/store/board/acl/threads/general');

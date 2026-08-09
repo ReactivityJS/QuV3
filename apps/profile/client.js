@@ -53,9 +53,32 @@
  * updates on every keystroke/select change, no save required for the
  * preview itself.
  *
- * Avatar stays a plain text field (URL or emoji) - `renderAvatar()` already
- * supports both fully; no file upload via an Asset/Blob engine this round
- * (no QuV2 precedent, no current need).
+ * AVATAR UPLOAD: the `avatar` field stays the SAME plain string it always
+ * was (an emoji, an `https://` image URL, or now a THIRD shape:
+ * `asset:<assetId>`, an uploaded file via `@qu/services`' `AssetService` -
+ * `@qu/engines`' `AssetEngine` doing the actual chunking/hashing/dedup/sync
+ * retry, see either's own doc comment). Uploaded via `@qu/ui`'s
+ * `<qu-asset-upload>` next to the existing text field (still directly
+ * editable too - clearing it or pasting a URL/emoji overrides an uploaded
+ * asset just as easily as it always could). Stored under THIS identity's
+ * OWN pub as the asset `spaceId` (`services.assets.upload(myPub, assetId,
+ * file)`) - a personal, always-unique-per-identity namespace, distinct from
+ * any app's own `manifest.spaceId` (see `@qu/foundation`'s manifest schema
+ * doc comment on why a space id must be collision-safe). `renderProfileHeader()`
+ * below branches on the `asset:` prefix and renders a `<qu-asset kind=
+ * "image">` instead, falling back to `@qu/ui`'s shared `renderAvatar()` for
+ * the URL/emoji/unset cases exactly as before - `root.assetService` is set
+ * once in `mount()` (same "set on an ancestor before children connect"
+ * discipline `.qu` already requires) so both this app's own preview AND a
+ * VISITOR's read-only view (`renderPublicProfile()`) can resolve it.
+ * SCOPE CUT, documented on purpose: `user-list`/`contact-list`/`forum`
+ * still only ever call `@qu/ui`'s plain `renderAvatar()` for OTHER actors'
+ * avatars - an actor who uploaded an asset avatar shows correctly on their
+ * OWN profile page, but falls back to the initials badge everywhere else
+ * this round. Propagating asset-avatar rendering to every OTHER avatar call
+ * site is real, straightforward follow-up work (each already has `services`
+ * in scope to read `.assets` off), just out of THIS round's explicit
+ * "Profile + test integration in Forum" scope.
  *
  * Deliberately NOT ported from QuV2's `apps/profile`: the identity backup/
  * export/QR section (seed code, camera scan) - a whole separate concern
@@ -143,6 +166,10 @@ const STYLE = `
   .qu-profile-preview { border: 1px dashed var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); padding: 0.8rem; }
   .qu-profile-preview .qu-profile-header h1 { font-size: 1.1em; }
   .qu-profile-settings-reload { display: flex; align-items: center; gap: 0.6rem; }
+  .qu-profile-avatar-row { display: flex; align-items: center; gap: 0.6rem; }
+  .qu-profile-avatar-asset { display: inline-flex; flex-shrink: 0; width: var(--qu-avatar-size, 2rem); height: var(--qu-avatar-size, 2rem); border-radius: 50%; overflow: hidden; }
+  .qu-profile-avatar-asset qu-asset { display: block; width: 100%; height: 100%; }
+  .qu-profile-avatar-asset img { width: 100%; height: 100%; object-fit: cover; display: block; }
 `;
 
 /** Shared by `renderPublicProfile()` (the real thing) and `renderOwnProfile()`'s own live preview - so the preview can never drift from what a visitor actually sees. */
@@ -153,11 +180,37 @@ function applyTemplateStyle(el, template, style) {
   for (const [prop, value] of Object.entries(stylePreset)) el.style.setProperty(prop, value);
 }
 
+const ASSET_AVATAR_PREFIX = 'asset:';
+
+/**
+ * The `avatar` field's THIRD possible shape (see this file's own top doc
+ * comment's "AVATAR UPLOAD" section) - `@qu/ui`'s shared `renderAvatar()`
+ * only knows URL/emoji/unset, so an uploaded asset is rendered here
+ * instead, deliberately kept local to this app rather than teaching the
+ * shared helper a Service-dependent, async rendering path every OTHER
+ * caller (`user-list`/`contact-list`/`forum`) would then have to support
+ * too.
+ */
+function renderAvatarOrAsset(pub, label, avatar, size) {
+  if (avatar && avatar.startsWith(ASSET_AVATAR_PREFIX)) {
+    const wrap = document.createElement('div');
+    wrap.className = 'qu-profile-avatar-asset';
+    wrap.style.setProperty('--qu-avatar-size', size);
+    const assetEl = document.createElement('qu-asset');
+    assetEl.setAttribute('space-id', pub);
+    assetEl.setAttribute('asset-id', avatar.slice(ASSET_AVATAR_PREFIX.length));
+    assetEl.setAttribute('kind', 'image');
+    wrap.appendChild(assetEl);
+    return wrap;
+  }
+  return renderAvatar(pub, label, avatar, { size });
+}
+
 /** Same sharing reason as `applyTemplateStyle()` above. */
 function renderProfileHeader(pub, label, avatar, avatarSize = '3rem') {
   const header = document.createElement('div');
   header.className = 'qu-profile-header';
-  header.appendChild(renderAvatar(pub, label, avatar, { size: avatarSize }));
+  header.appendChild(renderAvatarOrAsset(pub, label, avatar, avatarSize));
   const headingWrap = document.createElement('div');
   const heading = document.createElement('h1');
   heading.textContent = label;
@@ -173,6 +226,12 @@ export function mount(container, { qu, identity, services, segments = [] }) {
   let off = null;
 
   const root = document.createElement('div');
+  // Same "set on an ancestor before descendant Custom Elements connect"
+  // discipline `.qu` already requires elsewhere in `@qu/ui` - both
+  // `<qu-asset>` (avatar rendering, own AND visitor views) and
+  // `<qu-asset-upload>` (own edit form only) resolve this via
+  // `findAssetService()`'s ancestor walk.
+  root.assetService = services.assets;
   container.appendChild(root);
   // Own saves write to the SAME path this component `watch()`es below (see
   // ProfileService.saveProfile() - it always republishes the public profile
@@ -311,6 +370,11 @@ function renderOwnProfile(root, own, listed, services, myPub, saveState, justSav
 
   const aliasRow = labeledInput(t('alias'), own.alias, t('aliasPlaceholder'));
   const avatarRow = labeledInput(t('avatar'), own.avatar);
+  avatarRow.row.className = 'qu-profile-row qu-profile-avatar-row';
+  const avatarUpload = document.createElement('qu-asset-upload');
+  avatarUpload.setAttribute('space-id', myPub); // this identity's own pub - a personal, always-unique asset namespace, see this file's own top doc comment
+  avatarUpload.setAttribute('label', '📷');
+  avatarRow.row.appendChild(avatarUpload);
 
   const templateRow = document.createElement('div');
   templateRow.className = 'qu-profile-row';
@@ -366,6 +430,14 @@ function renderOwnProfile(root, own, listed, services, myPub, saveState, justSav
   avatarRow.input.addEventListener('input', updatePreview);
   templateSelect.addEventListener('change', updatePreview);
   styleSelect.addEventListener('change', updatePreview);
+  // A successful LOCAL upload (see `<qu-asset-upload>`'s own doc comment -
+  // this fires before sync-out verification even starts) updates the SAME
+  // `avatar` text field an upload is meant to replace, not a separate
+  // hidden field - Save still just reads `avatarRow.input.value`, unchanged.
+  avatarUpload.addEventListener('qu-asset-uploaded', (e) => {
+    avatarRow.input.value = `${ASSET_AVATAR_PREFIX}${e.detail.assetId}`;
+    updatePreview();
+  });
 
   const fieldsHeading = document.createElement('label');
   fieldsHeading.textContent = t('fields');

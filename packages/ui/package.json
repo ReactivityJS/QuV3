@@ -1,7 +1,7 @@
 {
   "name": "@qu/ui",
   "version": "0.1.0",
-  "description": "Qu-Components: declarative, reactive Custom Elements (<qu-view>, <qu-bind>, <qu-list>, <qu-key>, <qu-if>) over @qu/reactive's watch(), plus small shared DOM helpers (injectStyle, renderAvatar, renderSubpage, renderFlagToggle) and a shared design-token theme layer (ensureTheme). Browser-only.",
+  "description": "Qu-Components: declarative, reactive Custom Elements (<qu-view>, <qu-bind>, <qu-list>, <qu-key>, <qu-if>, <qu-asset-upload>, <qu-asset>) over @qu/reactive's watch() and @qu/services' AssetService, plus small shared DOM helpers (injectStyle, renderAvatar, renderSubpage, renderFlagToggle) and a shared design-token theme layer (ensureTheme). Browser-only.",
   "type": "module",
   "main": "src/index.js",
   "exports": {

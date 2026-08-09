@@ -1041,6 +1041,107 @@ own tests, built bottom-up per the dependency order in
       equivalents, plus a new explicit regression test that calling
       `renderSlot()` twice for the same point never double-registers
       contributors. Full suite green (892 tests), `npm run build` clean.
+- [x] **File/image/video/audio attachments — `apps/profile` (avatar) +
+      `apps/forum` (test integration)** — user: wants real chunked local
+      storage + chunked sync-out/sync-in WITH RETRIES, verified end to end
+      (locally stored, synced to the relay, remotely readable), with the
+      actual LOGIC living centrally in the Engine and apps only consuming
+      Qu Components (an upload/sync-progress widget, and image/video/audio/
+      file display widgets).
+      **What already existed, confirmed by research before writing anything**:
+      `@qu/engines`' `AssetEngine` (chunking, per-chunk SHA-256 hashing,
+      unencrypted-chunk dedup/resume, `getAsset()` reassembly+hash
+      verification+`syncFetch` backfill) was fully built and tested but had
+      ZERO real callers anywhere in V3 - `apps/forum`'s own doc comment used
+      to say so explicitly. `@qu/services`' `crypto-envelope.js` doc comment
+      had ALREADY anticipated `AssetService` "kept as-is" from QuV2, never
+      ported. Blob storage turned out to be NOT a separate mechanism at all -
+      the exact same `QuStore.put()`/`QuBit`/seal pipeline, just routed to a
+      second `/blob` mount (separate `FsAdapter` root on the relay, separate
+      IndexedDB database in the browser) - meaning `@qu/sync`'s existing
+      outbox+reconnect-replay pipeline ALREADY carries blob chunks out
+      transparently, with zero blob-specific code anywhere in `sync-engine.js`.
+      The one genuine gap: no per-write retry/backoff of any kind existed for
+      EITHER direction - sync-out relied purely on "resend everything
+      unacked on next reconnect", sync-in's backfill was a single attempt.
+      **`AssetEngine` gained two things, per the user's explicit "logic stays
+      in the Engine" instruction**: `verifySyncOut(storePath, syncFetch,
+      {decrypt?, putOptions?, maxRetries=3, retryDelayMs=1000,
+      onSyncProgress?})` - asks the relay (via `syncFetch`) whether it
+      actually has the meta doc + every chunk, and RE-`put()`s only what's
+      missing (re-derived from the local copy), with exponential backoff -
+      deliberately a genuine `put()`, never `putSealed()`, since a
+      `putSealed()` re-announce is tagged `origin: 'sync'`, which
+      `@qu/sync`'s own local-write listener explicitly ignores (confirmed by
+      reading `sync-engine.js` directly, not assumed) - only a real local
+      `put()` re-enters the outbox pipeline at all. `getAsset()` gained
+      optional `{maxRetries, retryDelayMs}` (default `maxRetries: 1` =
+      unchanged original single-attempt behavior) retrying the whole
+      backfill-then-refetch cycle for the "relay hasn't caught up yet" race.
+      Deliberately NOT part of `put()`'s own returned Promise - matches this
+      codebase's own established convention (QuV2's Chat precedent, and
+      `apps/forum`'s own composer below): an upload counts as "done" the
+      moment it's saved LOCALLY, sync confirmation is a separate, trackable
+      phase.
+      **New `AssetService`** (`@qu/services`) - the thin Entity-API facade
+      QuV2 had and V3 lacked, `upload()`/`download()`/`verifySyncOut()`,
+      resolving reader-list encryption exactly like `MessageService.
+      postMessage()` already does for message bodies (same `resolveReaderXKeys()`/
+      `decryptEnvelope()` from `crypto-envelope.js`) - never re-implementing
+      any chunking/retry logic itself, only key resolution + delegation.
+      New `paths.assetPath()` (the `aclPath()` `kind` union already listed
+      `'assets'` - this closes that anticipated-but-unbuilt gap).
+      **Two new `@qu/ui` Custom Elements** (`asset-components.js`):
+      `<qu-asset-upload space-id="...">` - file picker, two-phase progress
+      (local save, then sync verification), fires `qu-asset-uploaded`/
+      `qu-asset-synced` events; `<qu-asset space-id="..." asset-id="..."
+      kind="auto|image|video|audio|file">` - downloads once (an uploaded
+      asset's bytes never change), renders `<img>`/`<video controls>`/
+      `<audio controls>`/a download link by MIME type, with a shared,
+      ref-counted object-URL cache (revoked once the last referencing
+      element disconnects) so a `<qu-list>`-driven re-render never
+      redundantly re-downloads. A REAL bug caught by the forum integration
+      (not the isolated unit tests, which mount fresh elements with no
+      caller-set class): `<qu-asset>`'s `_mount()` did `this.className =
+      'qu-asset'`, silently OVERWRITING any class a caller had already set
+      (e.g. `apps/forum` marking one as `qu-forum-message-attachment`) -
+      fixed to `classList.add()`, with a new regression test.
+      `apps/shell`: `AssetEngine` is now constructed inside
+      `createClientServices()` (not `createDefaultQu()` - avoids a second,
+      redundant registration with no way to hand its instance to
+      `AssetService` otherwise), wired as `services.assets`.
+      **`apps/profile`**: the `avatar` field gains a third shape,
+      `asset:<assetId>` (stored under the identity's OWN pub as a personal
+      asset `spaceId`), alongside the existing URL/emoji ones - uploaded via
+      `<qu-asset-upload>` next to the existing text field, rendered via a
+      NEW local `renderAvatarOrAsset()` (deliberately NOT touching `@qu/ui`'s
+      shared `renderAvatar()` - documented scope cut: `user-list`/
+      `contact-list`/`forum` still only render OTHER actors' avatars via the
+      plain URL/emoji path this round).
+      **`apps/forum`** (the designated test integration): composer gets an
+      attach button; picking a file uploads immediately (not deferred to
+      Send, unlike QuV2's own Chat) so real upload/sync progress is visible
+      before commit; `attachment: {assetId, name, mime, size}` rides on
+      `postMessage()`'s existing `extra` param, no new Service field needed;
+      messages render their attachment via `<qu-asset>`.
+      **Verified live, with a real relay + two independent browser peers**
+      (Playwright): peer A uploads a forum attachment - confirmed rendered
+      locally as `<img>`, confirmed the relay's OWN `QU_BLOB_DIR` physically
+      has the chunk file on disk (not just "the test passed", the actual
+      bytes), confirmed peer B (a separate identity/session) downloads +
+      decrypts + renders the SAME attachment via sync; peer A uploads a
+      profile avatar - confirmed in the live preview, confirmed peer B sees
+      it on peer A's public profile view. Retry/backoff itself is unit-
+      tested (7 dedicated `AssetEngine` tests: verify-success, missing-piece
+      re-send exactly once, give-up-after-maxRetries reporting, sync-in
+      retry, unchanged default behavior) rather than live-network-simulated -
+      reproducing a real dropped connection mid-sync in a live browser test
+      is its own, separate undertaking.
+      Full suite green (931 tests: +6 `AssetEngine` retry/verify, +8 new
+      `AssetService`, +1 `paths.assetPath()`, +16 new `@qu/ui`
+      asset-components, +2 new `apps/shell` services wiring, +3
+      `apps/profile` avatar-asset, +3 `apps/forum` attachment), `npm run
+      build` clean.
 
 ## Development
 

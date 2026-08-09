@@ -26,12 +26,30 @@
  *     step, not a speculative bigger one.
  *   - No delete: `MessageService` has no delete primitive at all (only
  *     `editMessage()`, author-only) - nothing to expose.
- *   - No attachments: no client anywhere in V3 has an Asset/Blob upload
- *     flow wired yet, and QuV2's own Forum (unlike its separate Chat app)
- *     never had one either - no precedent, no current need.
  *   - No restricted-thread management UI: the one thread this app talks to
  *     is `THREAD_PRESETS.forum()` - `writers:'*', readers:'*'` - there is no
  *     reader list to manage.
+ *
+ * ATTACHMENTS (`@qu/ui`'s `<qu-asset-upload>`/`<qu-asset>`, over `@qu/services`'
+ * `AssetService`) - this app's designated TEST integration for the file/
+ * image/video/audio upload+sync+display mechanism (see `AssetEngine`'s own
+ * doc comment for where the actual chunking/hashing/dedup/retry LOGIC
+ * lives). `pendingAttachment` (mount()-closure state) holds the result of
+ * the LAST completed upload until Send is actually clicked - picking a file
+ * starts uploading it immediately (not deferred to Send, unlike QuV2's own
+ * Chat composer, whose `pendingFile` variable held a raw, not-yet-uploaded
+ * `File` until submit) so the composer can show real upload/sync PROGRESS
+ * before the message is even sent, at the cost of one edge case: uploading
+ * and never sending leaves an orphaned, unreferenced asset in this
+ * identity's own local+relay storage - acceptable for a public forum
+ * attachment (no delete primitive exists for messages either, see above),
+ * revisit if that stops being true. `attachment: {assetId, name, mime,
+ * size}` rides on `MessageService.postMessage()`'s existing `extra` param
+ * (merged into the stored message as-is, exactly like a relay-authored
+ * notification's `{title, url, appId, image}` already does) - no new
+ * Service-layer field needed. The public thread here (`readers: '*'`) never
+ * passes `readerPubs` to `upload()` - attachments stay unencrypted, matching
+ * the message bodies sitting next to them.
  *
  * REACTIONS/PINS UI - adapted from QuV2's Chat client (QuV2's own Forum
  * never had either), deliberately simplified: a fixed, always-visible row
@@ -85,6 +103,7 @@ const DICT = {
     edit: 'Edit', save: 'Save', cancel: 'Cancel',
     pin: 'Pin', unpin: 'Unpin',
     pinnedBar: 'Pinned', pinnedNone: '',
+    attachRemove: 'Remove attachment',
   },
   de: {
     title: 'Forum',
@@ -94,6 +113,7 @@ const DICT = {
     edit: 'Bearbeiten', save: 'Speichern', cancel: 'Abbrechen',
     pin: 'Anheften', unpin: 'Lösen',
     pinnedBar: 'Angeheftet', pinnedNone: '',
+    attachRemove: 'Anhang entfernen',
   },
 };
 const { t } = createI18n(DICT);
@@ -127,6 +147,10 @@ const STYLE = `
   .qu-forum-composer button { padding: 0 1rem; border-radius: var(--qu-radius-md, 0.4rem); border: none; background: var(--qu-color-accent, #5b5bd6); color: white; cursor: pointer; font: inherit; }
   .qu-forum-composer button:disabled { opacity: 0.6; cursor: default; }
   .qu-forum-empty { padding: 1.5rem; text-align: center; opacity: 0.7; }
+  .qu-forum-composer-wrap { display: flex; flex-direction: column; gap: 0.4rem; }
+  .qu-forum-pending-attachment { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85em; opacity: 0.85; }
+  .qu-forum-pending-attachment button { background: none; border: none; cursor: pointer; opacity: 0.7; font: inherit; padding: 0; }
+  .qu-forum-message-attachment { margin-top: 0.5rem; max-width: 18rem; }
 `;
 
 function formatTs(ts) {
@@ -141,26 +165,67 @@ export function mount(container, { qu, services, apps, subscribe, syncFetch }) {
   const SPACE_ID = apps?.find((a) => a.name === 'forum')?.spaceId;
   if (!SPACE_ID) throw new Error('[forum] no "spaceId" found in the apps catalog for "forum" - check manifest.quapp');
 
+  // Same "set on an ancestor before descendant Custom Elements connect"
+  // discipline `.qu` already requires elsewhere in `@qu/ui` - both the
+  // composer's `<qu-asset-upload>` and every message's `<qu-asset>`
+  // (attachment display) resolve this via `findAssetService()`'s ancestor
+  // walk.
+  container.assetService = services.assets;
+
   // Defense in depth - a future shell would already subscribe broadly
   // enough to cover this, but this app shouldn't silently depend on that
   // staying true (same reasoning as apps/user-list's own subscribe() call).
   subscribe?.(paths.spacePath(SPACE_ID));
+  subscribe?.(`/blob/${SPACE_ID}`); // attachment chunks live under a SEPARATE top-level mount - see AssetEngine's own doc comment
 
   const heading = document.createElement('h1');
   heading.textContent = t('title');
 
   const pinnedRoot = document.createElement('div');
   const messagesRoot = document.createElement('div');
+  const composerWrap = document.createElement('div');
+  composerWrap.className = 'qu-forum-composer-wrap';
   const composerRow = document.createElement('div');
   composerRow.className = 'qu-forum-composer';
   const composerInput = document.createElement('textarea');
   composerInput.placeholder = t('composerPlaceholder');
+  const attachUpload = document.createElement('qu-asset-upload');
+  attachUpload.setAttribute('space-id', SPACE_ID);
+  attachUpload.setAttribute('label', '📎');
   const sendBtn = document.createElement('button');
   sendBtn.type = 'button';
   sendBtn.textContent = t('send');
-  composerRow.append(composerInput, sendBtn);
+  composerRow.append(composerInput, attachUpload, sendBtn);
 
-  container.append(heading, pinnedRoot, messagesRoot, composerRow);
+  const pendingAttachmentEl = document.createElement('div');
+  pendingAttachmentEl.className = 'qu-forum-pending-attachment';
+  pendingAttachmentEl.hidden = true;
+  composerWrap.append(composerRow, pendingAttachmentEl);
+
+  container.append(heading, pinnedRoot, messagesRoot, composerWrap);
+
+  // Holds the LAST completed upload until Send is clicked - see this file's
+  // own top doc comment's "ATTACHMENTS" section for why uploading starts
+  // immediately on file-pick rather than being deferred to Send.
+  let pendingAttachment = null;
+  function clearPendingAttachment() {
+    pendingAttachment = null;
+    pendingAttachmentEl.hidden = true;
+    pendingAttachmentEl.textContent = '';
+  }
+  attachUpload.addEventListener('qu-asset-uploaded', (e) => {
+    pendingAttachment = { assetId: e.detail.assetId, ...e.detail.meta };
+    pendingAttachmentEl.textContent = '';
+    pendingAttachmentEl.hidden = false;
+    const label = document.createElement('span');
+    label.textContent = `📎 ${pendingAttachment.name}`;
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.textContent = '✕';
+    removeBtn.title = t('attachRemove');
+    removeBtn.addEventListener('click', clearPendingAttachment);
+    pendingAttachmentEl.append(label, removeBtn);
+  });
 
   const profileCache = new Map();
   async function resolveAuthor(pub) {
@@ -272,6 +337,13 @@ export function mount(container, { qu, services, apps, subscribe, syncFetch }) {
     p.className = 'qu-forum-message-text';
     p.innerHTML = message.formattedHtml; // see this file's own doc comment - escaped/whitelisted server-side, safe to insert
     root.appendChild(p);
+    if (message.attachment) {
+      const assetEl = document.createElement('qu-asset');
+      assetEl.className = 'qu-forum-message-attachment';
+      assetEl.setAttribute('space-id', SPACE_ID);
+      assetEl.setAttribute('asset-id', message.attachment.assetId);
+      root.appendChild(assetEl);
+    }
   }
 
   function renderMessageEdit(root, message) {
@@ -395,8 +467,10 @@ export function mount(container, { qu, services, apps, subscribe, syncFetch }) {
     if (!body) return;
     sendBtn.disabled = true;
     try {
-      await services.messages.postMessage(SPACE_ID, THREAD_ID, { body });
+      const extra = pendingAttachment ? { attachment: pendingAttachment } : {};
+      await services.messages.postMessage(SPACE_ID, THREAD_ID, { body, extra });
       composerInput.value = '';
+      clearPendingAttachment();
     } finally {
       sendBtn.disabled = false;
     }

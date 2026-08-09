@@ -40,6 +40,37 @@
  * roughly 7-8x larger on disk than the equivalent bytes and slower to
  * parse back. A base64 string round-trips through JSON as a single short
  * string instead.
+ *
+ * SYNC-OUT VERIFICATION + RETRY (`verifySyncOut()`): `put()` itself only
+ * guarantees the LOCAL chunked write is durable - whether it actually
+ * reached the relay is `@qu/sync`'s job, and `@qu/sync` has no per-write
+ * retry of its own beyond "resend everything unacknowledged on the next
+ * reconnect" (see its own doc comments). For a user-facing upload, "did it
+ * actually sync" deserves an explicit, retried answer, not just hope -
+ * `verifySyncOut()` asks the relay (via the SAME `syncFetch` every other
+ * Service already backfills through) whether it has the meta doc and every
+ * chunk, and if not, RE-`put()`s only what's missing (re-derived from the
+ * LOCAL copy, decrypting/re-encrypting if needed), with backoff, up to a
+ * bounded number of attempts. Deliberately NOT part of `put()`'s own
+ * returned Promise - this codebase's own established convention (see
+ * `apps/forum`'s attachment composer) is to consider an upload "done" the
+ * moment it's saved LOCALLY, not once a relay has confirmed it - a caller
+ * awaits the fast local `put()` first, then calls `verifySyncOut()`
+ * separately (awaited or not) to track/retry the slower confirmation.
+ * Re-sending deliberately always goes through a genuine `put()`, never
+ * `putSealed()` - a `putSealed()` re-announce is tagged `origin: 'sync'`,
+ * which `@qu/sync`'s own local-write listener explicitly ignores (see
+ * `sync-engine.js`'s own doc comment: avoiding bouncing a peer-originated
+ * write back forever) - only a REAL local `put()` re-enters the outbox/send
+ * pipeline at all.
+ *
+ * SYNC-IN RETRY (`getAsset()`'s new `maxRetries`/`retryDelayMs` options):
+ * the original single-attempt backfill (unchanged default behavior,
+ * `maxRetries` defaults to `1`) covers "the relay already has it, I just
+ * don't locally yet". A caller that wants to keep trying for a moment
+ * (e.g. the asset was JUST uploaded by a peer and sync hasn't caught up
+ * yet) can raise `maxRetries` - each retry re-attempts the exact same
+ * backfill-then-refetch cycle, with backoff between attempts.
  */
 import { QuCrypto, isEncryptedEnvelope } from '@qu/core';
 
@@ -156,12 +187,29 @@ export class AssetEngine {
    * peer) is treated exactly like a MISSING chunk: one `syncFetch` backfill
    * attempt, then given up on if still bad, rather than silently
    * reassembled into corrupted output.
+   * `maxRetries`/`retryDelayMs` (both new, both backward-compatible - the
+   * default `maxRetries: 1` is exactly the original single-attempt
+   * behavior): retries the WHOLE backfill-then-refetch cycle, with backoff
+   * between attempts, for the case a relay itself hasn't caught up to a
+   * just-uploaded asset yet (a real race, not corruption) - see this file's
+   * own top doc comment's "SYNC-IN RETRY" section.
    * @param {string} storePath - The original path passed to `put()`, e.g. `/store/gallery/assets/photo1`.
    * @param {(path: string) => Promise<object|null>} [syncFetch]
    * @param {(quBit: {val: *, pub: string|null}) => Promise<*|null>} [decrypt]
+   * @param {{maxRetries?: number, retryDelayMs?: number}} [options]
    * @returns {Promise<{meta: object, data: Uint8Array}|null>}
    */
-  async getAsset(storePath, syncFetch = null, decrypt = null) {
+  async getAsset(storePath, syncFetch = null, decrypt = null, { maxRetries = 1, retryDelayMs = 500 } = {}) {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      const asset = await this.#tryGetAsset(storePath, syncFetch, decrypt);
+      if (asset) return asset;
+      if (!syncFetch || attempt === maxRetries) return null; // nothing left to try differently on a retry
+      await sleep(retryDelayMs * 2 ** (attempt - 1));
+    }
+    return null;
+  }
+
+  async #tryGetAsset(storePath, syncFetch, decrypt) {
     let metaQuBit = await this.qu.get(`${storePath}/meta`);
     if (!metaQuBit && syncFetch) {
       await syncFetch(`${storePath}/meta`).catch(() => {});
@@ -215,11 +263,77 @@ export class AssetEngine {
     }
     return { meta, data };
   }
+
+  /**
+   * Verifies a LOCALLY already-uploaded asset actually reached the relay,
+   * re-sending only whatever's still missing there - see this file's own
+   * top doc comment's "SYNC-OUT VERIFICATION + RETRY" section for the full
+   * rationale (why this is separate from `put()`'s own Promise, and why
+   * re-sends use `put()`, never `putSealed()`).
+   *
+   * @param {string} storePath - The SAME path originally passed to `put()`.
+   * @param {(path: string) => Promise<object|null>} syncFetch - Asks the
+   *   relay for a path; resolving means the relay has it, rejecting means
+   *   it doesn't (or is unreachable) - either way, worth a retry.
+   * @param {{
+   *   decrypt?: (quBit: {val: *, pub: string|null}) => Promise<*|null>,
+   *   putOptions?: object,
+   *   maxRetries?: number,
+   *   retryDelayMs?: number,
+   *   onSyncProgress?: (fraction: number, status: {synced: boolean, missing: string[]}) => void,
+   * }} [options] - `decrypt`/`putOptions` are only needed for an ENCRYPTED
+   *   asset (to read the plaintext back before re-encrypting on retry) -
+   *   omit both for a public/unencrypted upload.
+   * @returns {Promise<{synced: boolean, missing: string[], attempts: number}>}
+   * @throws {Error} If there is no local asset at `storePath` at all - this
+   *   verifies an upload that already happened, it doesn't perform one.
+   */
+  async verifySyncOut(storePath, syncFetch, { decrypt = null, putOptions = {}, maxRetries = 3, retryDelayMs = 1000, onSyncProgress = null } = {}) {
+    const metaPath = `${storePath}/meta`;
+    const metaQuBit = await this.qu.get(metaPath);
+    if (!metaQuBit) throw new Error(`AssetEngine.verifySyncOut: no local asset at "${storePath}" - upload it first`);
+
+    let meta = metaQuBit.val;
+    if (decrypt && isEncryptedEnvelope(meta)) meta = await decrypt(metaQuBit);
+    if (!meta) throw new Error(`AssetEngine.verifySyncOut: local meta at "${storePath}" is undecryptable`);
+
+    const allPaths = [metaPath, ...Array.from({ length: meta.chunkCount }, (_, i) => `${meta.blobPath}/chunk_${i}`)];
+
+    for (let attempt = 1; ; attempt++) {
+      const missing = [];
+      for (const path of allPaths) {
+        const onRelay = await syncFetch(path).then(() => true).catch(() => false);
+        if (!onRelay) missing.push(path);
+      }
+      const status = { synced: missing.length === 0, missing, attempts: attempt };
+      onSyncProgress?.((allPaths.length - missing.length) / allPaths.length, status);
+      if (status.synced || attempt > maxRetries) return status;
+
+      await sleep(retryDelayMs * 2 ** (attempt - 1));
+      // Re-derive each missing piece from the LOCAL copy (never the relay,
+      // which is exactly what's missing it) and re-`put()` it fresh, so
+      // @qu/sync's local-write listener sees a genuine write to pick up
+      // again - see this file's own top doc comment for why `putSealed()`
+      // wouldn't work here.
+      await Promise.all(missing.map(async (path) => {
+        const localBit = await this.qu.get(path);
+        if (!localBit) return; // gone locally too - nothing to resend, shows up as still-missing next pass
+        let val = localBit.val;
+        if (decrypt && isEncryptedEnvelope(val)) val = await decrypt(localBit);
+        if (val == null) return;
+        await this.qu.put(path, val, putOptions);
+      }));
+    }
+  }
 }
 
 /** @param {Uint8Array} bytes @returns {Promise<string>} Hex SHA-256, used for chunk content-verification/dedup. */
 async function hashChunk(bytes) {
   return QuCrypto.toHex(await QuCrypto.sha256(bytes));
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**

@@ -32,6 +32,19 @@ export function documentPath(spaceId, docId) {
 }
 
 /**
+ * The path `AssetService`/`@qu/engines`' `AssetEngine` chunk/reassemble
+ * under - see `AssetEngine`'s own doc comment for why this stays under
+ * `/store` (the `assets` segment routes `put()` to it) even though the
+ * actual chunk bytes end up on the separate `blob` MOUNT, not here - this
+ * path only ever holds the small `{name, mime, size, blobPath, ...}` meta
+ * document, at `${assetPath(...)}/meta`.
+ * @param {string|number} spaceId @param {string} assetId @returns {string}
+ */
+export function assetPath(spaceId, assetId) {
+  return `/store/${spaceId}/assets/${assetId}`;
+}
+
+/**
  * The ACL descriptor path for a resource - deliberately a SIBLING of the
  * resource's own path (`acl/<kind>/<id>`), not nested inside it, so
  * `@qu/engines`' `AccessEngine` can gate a write without knowing anything

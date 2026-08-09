@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { QuStore, MemoryStoreAdapter } from '@qu/core';
-import { AccessEngine, ThreadEngine } from '@qu/engines';
+import { AccessEngine, ThreadEngine, AssetEngine } from '@qu/engines';
 import { QuIdentityEngine, actorPath } from '@qu/identity';
 import {
   ListService, AccessService, MessageService, ReactionService, PinService,
-  ActorService, ProfileService, THREAD_PRESETS, paths,
+  ActorService, ProfileService, AssetService, THREAD_PRESETS, paths,
 } from '@qu/services';
 import { installDom, waitFor } from '@qu/ui/testing';
 
@@ -15,6 +15,7 @@ const { mount } = await import('../client.js');
 function createQu() {
   const qu = new QuStore();
   qu.mount('store', new MemoryStoreAdapter());
+  qu.mount('blob', new MemoryStoreAdapter());
   // MessageService.postMessage()/editMessage() go through AccessEngine's
   // writer-ACL pipeline (see message-service.test.js's own freshSetup()) -
   // ReactionService/PinService need neither (see either's own doc comment:
@@ -44,6 +45,7 @@ async function freshEnv(alias) {
     messages: new MessageService(qu, identity, list, access),
     reactions: new ReactionService(qu, identity, list),
     pins: new PinService(qu, identity, list),
+    assets: new AssetService(qu, new AssetEngine(qu), identity),
   };
   const myPub = await services.actors.whoAmI();
   return { qu, identity, services, myPub };
@@ -65,6 +67,18 @@ async function mirrorThreadInto(fromEnv, intoQu, spaceId, threadId) {
   for (const { path, quBit } of entries) await intoQu.putSealed(path, quBit);
   const profile = await fromEnv.qu.get(actorPath(fromEnv.myPub, 'profile'));
   if (profile) await intoQu.putSealed(actorPath(fromEnv.myPub, 'profile'), profile);
+}
+
+/** Same "as if sync had already delivered it" technique as `mirrorThreadInto()`, for an uploaded asset (meta + every chunk). */
+async function mirrorAssetInto(fromEnv, intoQu, spaceId, assetId) {
+  const metaPath = paths.assetPath(spaceId, assetId) + '/meta';
+  const metaBit = await fromEnv.qu.get(metaPath);
+  if (!metaBit) return;
+  await intoQu.putSealed(metaPath, metaBit);
+  for (let i = 0; i < metaBit.val.chunkCount; i++) {
+    const chunkPath = `${metaBit.val.blobPath}/chunk_${i}`;
+    await intoQu.putSealed(chunkPath, await fromEnv.qu.get(chunkPath));
+  }
 }
 
 // The real UUID committed in apps/forum/manifest.quapp - client.js now reads
@@ -132,6 +146,76 @@ test('the composer posts a message and clears the input afterward', async () => 
     assert.equal(textarea.value, '');
     const { messages } = await a.services.messages.listMessages(FORUM_SPACE_ID, 'general');
     assert.equal(messages.length, 1);
+  } finally {
+    stop();
+  }
+});
+
+test('attaching a file via the composer\'s <qu-asset-upload> sends it along with the message and renders as <qu-asset>', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe });
+  try {
+    await waitFor(() => container.querySelector('qu-asset-upload') !== null);
+    const fileInput = container.querySelector('qu-asset-upload input[type=file]');
+    const file = new File(['fake image bytes'], 'photo.png', { type: 'image/png' });
+    Object.defineProperty(fileInput, 'files', { value: [file], configurable: true });
+    fileInput.dispatchEvent(new window.Event('change'));
+    // A real upload involves Ed25519 key derivation + per-chunk SHA-256
+    // hashing - comfortably under a second in isolation, but occasionally
+    // close to waitFor()'s default 1000ms under a loaded full-suite run
+    // (observed flaking at ~1040ms) - a longer timeout here is about REAL
+    // crypto work taking real time, not a bug being masked.
+    await waitFor(() => container.querySelector('.qu-forum-pending-attachment')?.hidden === false, { timeout: 5000 });
+
+    const textarea = container.querySelector('textarea');
+    textarea.value = 'Check out this photo';
+    const sendBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === 'Send');
+    sendBtn.click();
+
+    await waitFor(() => container.querySelector('.qu-forum-message-attachment') !== null, { timeout: 5000 });
+    const { messages } = await a.services.messages.listMessages(FORUM_SPACE_ID, 'general');
+    assert.equal(messages[0].attachment.name, 'photo.png');
+    assert.equal(messages[0].attachment.mime, 'image/png');
+    assert.equal(container.querySelector('.qu-forum-message-attachment').getAttribute('asset-id'), messages[0].attachment.assetId);
+    // The pending-attachment chip is cleared after a successful send.
+    assert.equal(container.querySelector('.qu-forum-pending-attachment').hidden, true);
+  } finally {
+    stop();
+  }
+});
+
+test('a message with no attachment never renders a <qu-asset>', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'plain text only' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-message-text') !== null);
+    assert.equal(container.querySelector('.qu-forum-message-attachment'), null);
+  } finally {
+    stop();
+  }
+});
+
+test('an attachment posted by one peer renders (downloads+decodes) for a second peer via a synced copy', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  const meta = await a.services.assets.upload(FORUM_SPACE_ID, 'photo1', { name: 'photo.png', mime: 'image/png', data: new TextEncoder().encode('real photo bytes') });
+  await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'shared photo', extra: { attachment: { assetId: 'photo1', ...meta } } });
+
+  const b = await freshEnv('Bob');
+  await mirrorThreadInto(a, b.qu, FORUM_SPACE_ID, 'general');
+  await mirrorAssetInto(a, b.qu, FORUM_SPACE_ID, 'photo1');
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: b.qu, services: b.services, apps: FORUM_APPS, subscribe: noopSubscribe });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-message-attachment img') !== null, { timeout: 5000 });
   } finally {
     stop();
   }

@@ -139,6 +139,101 @@ test('onProgress is called and reaches 1 by the end of a multi-chunk upload', as
   assert.equal(progressValues[progressValues.length - 1], 1);
 });
 
+test('getAsset() retries the whole backfill cycle when maxRetries > 1, succeeding once syncFetch starts finding it', async () => {
+  const { qu, engine } = storeWithAssets({ chunkSize: 1000 });
+  await qu.put('/store/gallery/assets/photo1', { name: 'x', mime: 'text/plain', data: new TextEncoder().encode('hello') });
+  const metaBit = await qu.get('/store/gallery/assets/photo1/meta');
+  const chunkBit = await qu.get('/blob/gallery/photo1/chunk_0');
+
+  // Simulate "relay doesn't have it YET" for the first two syncFetch calls,
+  // then "relay caught up" from the third call onward - a real race between
+  // an upload landing and a peer opening the asset before sync catches up.
+  const otherQu = new QuStore();
+  otherQu.mount('store', new MemoryStoreAdapter());
+  otherQu.mount('blob', new MemoryStoreAdapter());
+  const otherEngine = new AssetEngine(otherQu);
+  let syncFetchCalls = 0;
+  const syncFetch = async (path) => {
+    syncFetchCalls++;
+    if (syncFetchCalls <= 2) throw new Error('not on relay yet'); // fails for meta + chunk_0 on attempt 1
+    if (path === '/store/gallery/assets/photo1/meta') await otherQu.putSealed(path, metaBit);
+    else await otherQu.putSealed(path, chunkBit);
+  };
+
+  const asset = await otherEngine.getAsset('/store/gallery/assets/photo1', syncFetch, null, { maxRetries: 3, retryDelayMs: 1 });
+  assert.ok(asset);
+  assert.equal(new TextDecoder().decode(asset.data), 'hello');
+});
+
+test('getAsset() with the default maxRetries=1 behaves exactly as before (single attempt, no retry)', async () => {
+  const { engine } = storeWithAssets();
+  let calls = 0;
+  const syncFetch = async () => { calls++; throw new Error('unreachable'); };
+  const asset = await engine.getAsset('/store/gallery/assets/nope', syncFetch);
+  assert.equal(asset, null);
+  assert.equal(calls, 1); // only the meta fetch attempted once - never retried
+});
+
+test('verifySyncOut(): reports synced:true immediately when the relay already has everything', async () => {
+  const { qu, engine } = storeWithAssets({ chunkSize: 1000 });
+  await qu.put('/store/gallery/assets/photo1', { name: 'x', mime: 'text/plain', data: new TextEncoder().encode('hi') });
+
+  const status = await engine.verifySyncOut('/store/gallery/assets/photo1', async () => ({}), { maxRetries: 3, retryDelayMs: 1 });
+  assert.deepEqual(status, { synced: true, missing: [], attempts: 1 });
+});
+
+test('verifySyncOut(): re-puts exactly the pieces missing on the relay, retrying until synced', async () => {
+  const { qu, engine } = storeWithAssets({ chunkSize: 5 });
+  await qu.put('/store/gallery/assets/big', { name: 'x', mime: 'text/plain', data: new TextEncoder().encode('this is fifteen') }); // 3 chunks
+
+  // The relay is missing chunk_1 for the first 2 checks, then catches up
+  // (simulating the RE-PUT this method performs actually landing).
+  const relayHas = new Set(['/store/gallery/assets/big/meta', '/blob/gallery/big/chunk_0', '/blob/gallery/big/chunk_2']);
+  let putCallsForChunk1 = 0;
+  const syncFetch = async (path) => {
+    if (relayHas.has(path)) return {};
+    throw new Error('not on relay');
+  };
+  const originalPut = qu.put.bind(qu);
+  qu.put = async (path, val, options) => {
+    if (path === '/blob/gallery/big/chunk_1') { putCallsForChunk1++; relayHas.add(path); } // simulate this specific re-put reaching the relay
+    return originalPut(path, val, options);
+  };
+
+  const onSyncProgress = [];
+  const status = await engine.verifySyncOut('/store/gallery/assets/big', syncFetch, {
+    maxRetries: 3,
+    retryDelayMs: 1,
+    onSyncProgress: (fraction, s) => onSyncProgress.push({ fraction, missing: s.missing.length }),
+  });
+
+  assert.equal(status.synced, true);
+  assert.equal(putCallsForChunk1, 1); // exactly one re-send, not one per remaining attempt
+  assert.ok(onSyncProgress.length >= 2);
+  assert.equal(onSyncProgress[0].missing, 1); // chunk_1 missing on the first check
+  assert.equal(onSyncProgress[onSyncProgress.length - 1].fraction, 1);
+});
+
+test('verifySyncOut(): gives up after maxRetries, reporting the still-missing pieces', async () => {
+  const { qu, engine } = storeWithAssets({ chunkSize: 1000 });
+  await qu.put('/store/gallery/assets/photo1', { name: 'x', mime: 'text/plain', data: new TextEncoder().encode('hi') });
+
+  const syncFetch = async (path) => { throw new Error('relay never gets it'); };
+  const status = await engine.verifySyncOut('/store/gallery/assets/photo1', syncFetch, { maxRetries: 2, retryDelayMs: 1 });
+
+  assert.equal(status.synced, false);
+  assert.equal(status.attempts, 3); // 1 initial + 2 retries
+  assert.deepEqual(status.missing.sort(), ['/blob/gallery/photo1/chunk_0', '/store/gallery/assets/photo1/meta'].sort());
+});
+
+test('verifySyncOut(): throws for a path with no local asset at all', async () => {
+  const { engine } = storeWithAssets();
+  await assert.rejects(
+    () => engine.verifySyncOut('/store/gallery/assets/never-uploaded', async () => ({})),
+    /no local asset/
+  );
+});
+
 test('dispose() unregisters the engine - assets put() falls through to default seal/persist instead', async () => {
   const qu = new QuStore();
   qu.mount('store', new MemoryStoreAdapter());

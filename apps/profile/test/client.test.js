@@ -2,9 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { QuStore, MemoryStoreAdapter } from '@qu/core';
 import { QuIdentityEngine, actorPath } from '@qu/identity';
+import { AssetEngine } from '@qu/engines';
 import {
   ListService, DirectoryService, ProfileService, FlagService,
-  ContactsService, ActorService,
+  ContactsService, ActorService, AssetService,
 } from '@qu/services';
 import { installDom, waitFor } from '@qu/ui/testing';
 
@@ -31,6 +32,7 @@ const { mount } = await import('../client.js');
 async function freshEnv() {
   const qu = new QuStore();
   qu.mount('store', new MemoryStoreAdapter());
+  qu.mount('blob', new MemoryStoreAdapter());
   const identity = new QuIdentityEngine(qu);
   await identity.importMnemonic(identity.generateMnemonic());
 
@@ -40,9 +42,10 @@ async function freshEnv() {
   const flags = new FlagService(qu, identity, list);
   const contacts = new ContactsService(flags, identity);
   const actors = new ActorService(identity);
+  const assets = new AssetService(qu, new AssetEngine(qu), identity);
 
   const myPub = await actors.whoAmI();
-  return { qu, identity, services: { directory, profile, contacts, actors }, myPub };
+  return { qu, identity, services: { directory, profile, contacts, actors, assets }, myPub };
 }
 
 /** Publishes a SEPARATE identity's profile onto the shared `qu` store - simulating data already synced in from a peer. */
@@ -163,6 +166,88 @@ test('editing and saving the own-profile form persists alias/avatar/template/sty
     assert.equal(own.alias, 'Ada Lovelace');
     assert.equal(own.template, 'compact');
     assert.equal(own.style, 'ocean');
+  } finally {
+    stop();
+  }
+});
+
+test('uploading an avatar via <qu-asset-upload> fills the avatar field with "asset:<id>" and updates the live preview, without saving', async () => {
+  const { qu, identity, services, myPub } = await freshEnv();
+  await services.profile.saveProfile({ alias: 'Ada' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`] });
+  try {
+    await waitFor(() => container.querySelector('.qu-profile-own') !== null);
+    const avatarInput = container.querySelectorAll('input[type="text"]')[1]; // alias, THEN avatar
+    assert.equal(avatarInput.value, '');
+
+    const fileInput = container.querySelector('qu-asset-upload input[type=file]');
+    const file = new File(['fake image bytes'], 'me.png', { type: 'image/png' });
+    Object.defineProperty(fileInput, 'files', { value: [file], configurable: true });
+    fileInput.dispatchEvent(new window.Event('change'));
+
+    await waitFor(() => avatarInput.value.startsWith('asset:'));
+    await waitFor(() => container.querySelector('.qu-profile-preview qu-asset') !== null);
+
+    // Not saved yet - the profile document itself is untouched.
+    const own = await services.profile.getOwnProfile();
+    assert.equal(own.avatar, '');
+  } finally {
+    stop();
+  }
+});
+
+test('an "asset:<id>" avatar round-trips through saveProfile() and renders as <qu-asset> on the OWN profile\'s preview', async () => {
+  const { qu, identity, services, myPub } = await freshEnv();
+  await services.assets.upload(myPub, 'avatar1', new TextEncoder().encode('fake png bytes'));
+  await services.profile.saveProfile({ alias: 'Ada', avatar: 'asset:avatar1' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`] });
+  try {
+    await waitFor(() => container.querySelector('.qu-profile-preview qu-asset') !== null);
+    const assetEl = container.querySelector('.qu-profile-preview qu-asset');
+    assert.equal(assetEl.getAttribute('space-id'), myPub);
+    assert.equal(assetEl.getAttribute('asset-id'), 'avatar1');
+  } finally {
+    stop();
+  }
+});
+
+test('an "asset:<id>" avatar renders as <qu-asset> on a VISITOR\'s read-only public view too', async () => {
+  const { qu, identity, services, myPub } = await freshEnv();
+  await services.assets.upload(myPub, 'avatar1', new TextEncoder().encode('fake png bytes'));
+  await services.profile.saveProfile({ alias: 'Ada', avatar: 'asset:avatar1' });
+
+  const visitorQu = new QuStore();
+  visitorQu.mount('store', new MemoryStoreAdapter());
+  visitorQu.mount('blob', new MemoryStoreAdapter());
+  const visitorIdentity = new QuIdentityEngine(visitorQu);
+  await visitorIdentity.importMnemonic(visitorIdentity.generateMnemonic());
+  await visitorQu.putSealed(actorPath(myPub, 'profile'), await qu.get(actorPath(myPub, 'profile')));
+  // The visitor also needs the asset itself synced in (meta + chunk).
+  const metaBit = await qu.get(`/store/${myPub}/assets/avatar1/meta`);
+  await visitorQu.putSealed(`/store/${myPub}/assets/avatar1/meta`, metaBit);
+  await visitorQu.putSealed(`/blob/${myPub}/avatar1/chunk_0`, await qu.get(`/blob/${myPub}/avatar1/chunk_0`));
+
+  const visitorList = new ListService(visitorQu);
+  const visitorAssets = new AssetService(visitorQu, new AssetEngine(visitorQu), visitorIdentity);
+  const visitorServices = {
+    directory: new DirectoryService(visitorQu, visitorIdentity, visitorList),
+    profile: new ProfileService(visitorQu, visitorIdentity),
+    contacts: new ContactsService(new FlagService(visitorQu, visitorIdentity, visitorList), visitorIdentity),
+    actors: new ActorService(visitorIdentity),
+    assets: visitorAssets,
+  };
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: visitorQu, identity: visitorIdentity, services: visitorServices, segments: [`~${myPub}`] });
+  try {
+    await waitFor(() => container.querySelector('.qu-profile-view qu-asset') !== null);
+    const assetEl = container.querySelector('.qu-profile-view qu-asset');
+    assert.equal(assetEl.getAttribute('space-id'), myPub);
+    assert.equal(assetEl.getAttribute('asset-id'), 'avatar1');
   } finally {
     stop();
   }

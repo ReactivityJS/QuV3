@@ -1,4 +1,5 @@
-import { ListService, FlagService, ContactsService, FavoritesService, ProfileService, DirectoryService, ActorService, AccessService, MessageService, ReactionService, PinService } from '@qu/services';
+import { ListService, FlagService, ContactsService, FavoritesService, ProfileService, DirectoryService, ActorService, AccessService, MessageService, ReactionService, PinService, AssetService } from '@qu/services';
+import { AssetEngine } from '@qu/engines';
 
 /**
  * The fixed, known set of client-side Services every app under `apps/*`
@@ -33,6 +34,19 @@ export function createClientServices(qu, identity, { syncFetch = null, getGenera
   const list = new ListService(qu, syncFetch, getGeneration);
   const flags = new FlagService(qu, identity, list);
   const access = new AccessService(qu, identity, syncFetch);
+  // Unlike AccessEngine/ThreadEngine (never registered client-side - ACL
+  // enforcement and id/timestamp stamping are meaningfully exercised only
+  // server-side, see the relay's own composition), AssetEngine MUST be
+  // registered on THIS qu too: chunking is a WRITE-TIME behavior on the
+  // ORIGINATING side - a qu.put() to an "assets" path with no AssetEngine
+  // registered would just try to seal/persist a raw File/Blob directly,
+  // which is not what any caller wants. Constructed HERE (not in
+  // `client.js`'s `createDefaultQu()`) so there's exactly one instance per
+  // `qu`, with a real reference `AssetService` can hold onto directly -
+  // `AssetEngine.getAsset()`/`.verifySyncOut()` are plain method calls on
+  // this object, not something `qu.get()`'s engine-dispatch could resolve
+  // back out again once registered (only `put()` is ever intercepted).
+  const assetEngine = new AssetEngine(qu);
   return {
     contacts: new ContactsService(flags, identity),
     favorites: new FavoritesService(flags),
@@ -49,5 +63,9 @@ export function createClientServices(qu, identity, { syncFetch = null, getGenera
     messages: new MessageService(qu, identity, list, access, syncFetch, getGeneration),
     reactions: new ReactionService(qu, identity, list),
     pins: new PinService(qu, identity, list),
+    // First real client caller of AssetEngine (see its own doc comment) -
+    // same "backfill hook built, no caller yet" gap this file's doc comment
+    // already describes for syncFetch/getGeneration themselves.
+    assets: new AssetService(qu, assetEngine, identity, syncFetch),
   };
 }
