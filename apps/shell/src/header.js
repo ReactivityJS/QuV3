@@ -1,0 +1,317 @@
+/**
+ * SHELL HEADER — the fixed top bar: Home (the Quniverse logo, `/logo.svg`,
+ * linking to `#`), browser Back/Forward, a live unread-count Notification
+ * bell, and the signed-in identity's own avatar+name as the shell's one
+ * main menu. Replaces the old plain app-icon strip (`./nav.js`, removed) -
+ * browsing every app now lives at `#/app-list` (reachable from the menu),
+ * and the fast path back to an app is favoriting it there.
+ *
+ * HISTORY BACK/FORWARD: every route change in this app is a plain
+ * `location.hash = ...` assignment (see `client.js`/`router.js`), which the
+ * browser already turns into a real `History` entry on its own - so "Back"/
+ * "Forward" are exactly `history.back()`/`history.forward()`, no separate
+ * history stack to maintain here.
+ *
+ * BELL BADGE: the exact gap `apps/notifications/client.js`'s own top doc
+ * comment already flagged ("the underlying data already supports [a shell
+ * nav badge] ... a separate, nav-level concern this app doesn't own") -
+ * `MessageService.listMessages()` + `getLastReadAt()` over this identity's
+ * own notifications thread (`paths.notificationsSpaceId()`/
+ * `NOTIFICATIONS_THREAD_ID`), reactive via `watchChildren()`, the same
+ * shape that app's own `render()` already uses. Unlike that app, the bell
+ * never calls `markRead()` - only actually opening `#/notifications` counts
+ * as "seen it".
+ *
+ * MAIN MENU: opens on avatar/name click, closes on an outside click, Escape,
+ * or picking a link. Two groups, separated by one small divider:
+ *   1. This identity's own favorited apps (`services.favorites.list()`,
+ *      resolved against the same `/apps.json` catalog every other
+ *      app-picking UI in this codebase reads for icon/label) - re-rendered
+ *      live off the `qu:flag-changed` event `renderFlagToggle()` already
+ *      broadcasts on every toggle (see `@qu/ui/flag-toggle.js` and
+ *      `apps/app-list/client.js`, which is exactly where a favorite gets
+ *      toggled today).
+ *   2. Profile (`#/~<myPub>`), User Settings (`#/~<myPub>/settings` -
+ *      `apps/profile`'s existing Settings subpage, also the mount point for
+ *      that app's new `userSettings.contributions` extension point - see
+ *      its own doc comment for how another app, or a future relay-level
+ *      settings section, hooks a contribution in without this file knowing
+ *      anything about it), App List (`#/app-list` - browse/favorite/flag
+ *      every app), and Relay Admin (`#/relay-admin`, shown only when this
+ *      identity's pub is in `/config.json`'s `adminPubs` - the same check
+ *      `@qu/relay`'s `AdminHttp#verifyAdmin()` enforces server-side; this is
+ *      just "worth showing the link", never the real gate). `apps/relay-admin`
+ *      itself isn't built yet (see `apps/shell/client.js`'s own top doc
+ *      comment's "DELIBERATELY NOT BUILT" list) - the link degrades to the
+ *      same graceful "app not found" placeholder every other not-yet-loaded
+ *      catalog entry already does.
+ */
+import { watchChildren } from '@qu/reactive';
+import { paths, formatActorLabel } from '@qu/services';
+import { createI18n } from '@qu/i18n';
+import { injectStyle, ensureTheme, renderAvatarOrAsset } from '@qu/ui';
+
+const DICT = {
+  en: {
+    home: 'Home', back: 'Back', forward: 'Forward', notifications: 'Notifications',
+    menu: 'Main menu', noFavorites: 'No favorite apps yet.',
+    profile: 'Profile', settings: 'Settings', appList: 'App List', relayAdmin: 'Relay Admin',
+  },
+  de: {
+    home: 'Start', back: 'Zurück', forward: 'Vor', notifications: 'Benachrichtigungen',
+    menu: 'Hauptmenü', noFavorites: 'Noch keine favorisierten Apps.',
+    profile: 'Profil', settings: 'Einstellungen', appList: 'App-Liste', relayAdmin: 'Relay-Admin',
+  },
+};
+const { t } = createI18n(DICT);
+
+const STYLE_ID = 'qu-shell-header-style';
+const STYLE = `
+  body { padding-top: 3.25rem; }
+  .qu-shell-header { position: fixed; top: 0; left: 0; right: 0; z-index: 500; display: flex; align-items: center; gap: 0.4rem; height: 3.25rem; padding: 0 0.75rem; background: canvas; border-bottom: 1px solid var(--qu-color-border, #8884); }
+  .qu-shell-home { display: flex; align-items: center; padding: 0.2rem; border-radius: var(--qu-radius-sm, 0.3rem); }
+  .qu-shell-home:hover { background: var(--qu-color-surface, #8882); }
+  .qu-shell-home img { width: 1.9rem; height: 1.9rem; display: block; }
+  .qu-shell-histbtn { background: none; border: none; cursor: pointer; font-size: 1.15em; line-height: 1; padding: 0.4rem 0.5rem; border-radius: var(--qu-radius-sm, 0.3rem); color: inherit; opacity: 0.75; }
+  .qu-shell-histbtn:hover { background: var(--qu-color-surface, #8882); opacity: 1; }
+  .qu-shell-header-spacer { flex: 1; }
+  .qu-shell-bell { position: relative; display: inline-flex; background: none; border: none; cursor: pointer; text-decoration: none; color: inherit; font-size: 1.2em; padding: 0.35rem 0.55rem; border-radius: var(--qu-radius-sm, 0.3rem); }
+  .qu-shell-bell:hover { background: var(--qu-color-surface, #8882); }
+  .qu-shell-badge { position: absolute; top: 0.05rem; right: 0.05rem; min-width: 1rem; height: 1rem; padding: 0 0.2rem; border-radius: 999px; background: var(--qu-color-danger, #c00); color: #fff; font-size: 0.62rem; font-weight: 700; line-height: 1rem; text-align: center; }
+  .qu-shell-user { position: relative; }
+  .qu-shell-user-btn { display: flex; align-items: center; gap: 0.4rem; max-width: 11rem; background: none; border: none; cursor: pointer; padding: 0.25rem 0.6rem 0.25rem 0.25rem; border-radius: 999px; color: inherit; font: inherit; }
+  .qu-shell-user-btn:hover { background: var(--qu-color-surface, #8882); }
+  .qu-shell-user-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.88em; }
+  .qu-shell-menu { position: absolute; top: calc(100% + 0.4rem); right: 0; min-width: 14rem; background: canvas; color: canvastext; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); box-shadow: 0 0.5rem 1.4rem rgba(0,0,0,0.2); padding: 0.35rem; display: flex; flex-direction: column; gap: 0.05rem; }
+  /* [hidden] and .qu-shell-menu have EQUAL selector specificity - without
+     this, the browser's own [hidden] { display: none } UA rule loses the
+     cascade tie to this stylesheet's later display: flex (confirmed live:
+     a "closed" menu with .hidden === true stayed visually on top of the
+     page, intercepting clicks on whatever was underneath it). */
+  .qu-shell-menu[hidden] { display: none; }
+  .qu-shell-menu a, .qu-shell-menu-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.45rem 0.6rem; border-radius: var(--qu-radius-sm, 0.3rem); text-decoration: none; color: inherit; font: inherit; background: none; border: none; cursor: pointer; text-align: left; width: 100%; box-sizing: border-box; }
+  .qu-shell-menu a:hover, .qu-shell-menu-item:hover { background: var(--qu-color-surface, #8882); }
+  .qu-shell-menu-divider { height: 1px; margin: 0.3rem 0.2rem; background: var(--qu-color-border, #8884); }
+  .qu-shell-menu-empty { padding: 0.45rem 0.6rem; opacity: 0.6; font-size: 0.85em; }
+`;
+
+/**
+ * @param {HTMLElement} container
+ * @param {{qu: import('@qu/core').QuStore, services: object, adminPubs?: string[], subscribe?: (prefix: string) => void, syncFetch?: (prefix: string) => Promise<*>}} deps
+ * @returns {() => void} A stop function.
+ */
+export function mountHeader(container, { qu, services, adminPubs = [], subscribe, syncFetch }) {
+  ensureTheme();
+  injectStyle(STYLE_ID, STYLE);
+  let stopped = false;
+
+  const header = document.createElement('div');
+  header.className = 'qu-shell-header';
+
+  const home = document.createElement('a');
+  home.className = 'qu-shell-home';
+  home.href = '#';
+  home.title = t('home');
+  home.setAttribute('aria-label', t('home'));
+  const logoImg = document.createElement('img');
+  logoImg.src = '/logo.svg';
+  logoImg.alt = 'Quniverse';
+  home.appendChild(logoImg);
+
+  const backBtn = document.createElement('button');
+  backBtn.type = 'button';
+  backBtn.className = 'qu-shell-histbtn';
+  backBtn.textContent = '←';
+  backBtn.title = t('back');
+  backBtn.setAttribute('aria-label', t('back'));
+  backBtn.addEventListener('click', () => window.history.back());
+
+  const forwardBtn = document.createElement('button');
+  forwardBtn.type = 'button';
+  forwardBtn.className = 'qu-shell-histbtn';
+  forwardBtn.textContent = '→';
+  forwardBtn.title = t('forward');
+  forwardBtn.setAttribute('aria-label', t('forward'));
+  forwardBtn.addEventListener('click', () => window.history.forward());
+
+  const spacer = document.createElement('div');
+  spacer.className = 'qu-shell-header-spacer';
+
+  const bell = document.createElement('a');
+  bell.className = 'qu-shell-bell';
+  bell.href = '#/notifications';
+  bell.title = t('notifications');
+  bell.setAttribute('aria-label', t('notifications'));
+  bell.textContent = '🔔';
+  const badge = document.createElement('span');
+  badge.className = 'qu-shell-badge';
+  badge.hidden = true;
+  bell.appendChild(badge);
+
+  const userWrap = document.createElement('div');
+  userWrap.className = 'qu-shell-user';
+  // Ancestor `renderAvatarOrAsset()`'s `<qu-asset>` resolves via
+  // `findAssetService()` - same "set on an ancestor before descendant
+  // Custom Elements connect" discipline `apps/profile/client.js`'s own
+  // `root.assetService` already establishes.
+  userWrap.assetService = services.assets;
+
+  const userBtn = document.createElement('button');
+  userBtn.type = 'button';
+  userBtn.className = 'qu-shell-user-btn';
+  userBtn.setAttribute('aria-haspopup', 'true');
+  userBtn.setAttribute('aria-expanded', 'false');
+  const avatarSlot = document.createElement('span');
+  const nameSlot = document.createElement('span');
+  nameSlot.className = 'qu-shell-user-name';
+  userBtn.append(avatarSlot, nameSlot);
+
+  const menu = document.createElement('div');
+  menu.className = 'qu-shell-menu';
+  menu.hidden = true;
+
+  userWrap.append(userBtn, menu);
+  header.append(home, backBtn, forwardBtn, spacer, bell, userWrap);
+  container.appendChild(header);
+
+  function closeMenu() {
+    menu.hidden = true;
+    userBtn.setAttribute('aria-expanded', 'false');
+  }
+  function onDocClick(e) {
+    if (!userWrap.contains(e.target)) closeMenu();
+  }
+  function onKeydown(e) {
+    if (e.key === 'Escape') closeMenu();
+  }
+  document.addEventListener('click', onDocClick);
+  document.addEventListener('keydown', onKeydown);
+  // Any link click inside the menu should close it - simplest is a single
+  // delegated listener rather than one per rendered link (the menu's own
+  // content is rebuilt from scratch on every open, see renderMenu() below).
+  menu.addEventListener('click', (e) => {
+    if (e.target.closest('a')) closeMenu();
+  });
+
+  // A promise, not a plain resolved-later variable: `renderMenu()` can run
+  // from a click that happens BEFORE identity resolution below finishes
+  // (confirmed in testing - a click synchronous with mount() otherwise saw
+  // `myPub` still `null` and rendered nothing, with nothing left to ever
+  // retrigger it) - awaiting the SAME promise here means an early click
+  // still gets a fully populated menu, just a touch later, instead of a
+  // permanently empty one.
+  const myPubPromise = services.actors.whoAmI();
+  let myPub = null;
+  myPubPromise.then((pub) => { myPub = pub; });
+
+  /** Rebuilt from scratch on every open - favorites can have changed since the last time this was shown. */
+  async function renderMenu() {
+    if (stopped) return;
+    if (!myPub) myPub = await myPubPromise;
+    if (stopped) return;
+    menu.textContent = '';
+
+    let apps = [];
+    try {
+      const res = await fetch('/apps.json');
+      apps = res.ok ? await res.json() : [];
+    } catch { /* offline/unreachable - favorites just stay unresolved this open, the static links below are unaffected */ }
+    if (stopped) return;
+    const byName = new Map(apps.map((a) => [a.name, a]));
+
+    const favIds = await services.favorites.list();
+    if (stopped) return;
+    if (favIds.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'qu-shell-menu-empty';
+      empty.textContent = t('noFavorites');
+      menu.appendChild(empty);
+    } else {
+      for (const appId of favIds) {
+        const entry = byName.get(appId);
+        const link = document.createElement('a');
+        link.href = `#/${appId}`;
+        link.textContent = `${entry?.icon ?? '🧩'} ${entry?.label ?? appId}`;
+        menu.appendChild(link);
+      }
+    }
+
+    const divider = document.createElement('div');
+    divider.className = 'qu-shell-menu-divider';
+    menu.appendChild(divider);
+
+    const profileLink = document.createElement('a');
+    profileLink.href = `#/~${myPub}`;
+    profileLink.textContent = `👤 ${t('profile')}`;
+
+    const settingsLink = document.createElement('a');
+    settingsLink.href = `#/~${myPub}/settings`;
+    settingsLink.textContent = `⚙️ ${t('settings')}`;
+
+    const appListLink = document.createElement('a');
+    appListLink.href = '#/app-list';
+    appListLink.textContent = `🧰 ${t('appList')}`;
+
+    menu.append(profileLink, settingsLink, appListLink);
+
+    if (adminPubs.includes(myPub)) {
+      const adminLink = document.createElement('a');
+      adminLink.href = '#/relay-admin';
+      adminLink.textContent = `🛡️ ${t('relayAdmin')}`;
+      menu.appendChild(adminLink);
+    }
+  }
+
+  userBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const opening = menu.hidden;
+    menu.hidden = !opening;
+    userBtn.setAttribute('aria-expanded', String(opening));
+    if (opening) renderMenu();
+  });
+
+  function onFlagChanged(e) {
+    if (!menu.hidden && e.detail?.flagType === 'favorite' && e.detail?.entityKind === 'app') renderMenu();
+  }
+  window.addEventListener('qu:flag-changed', onFlagChanged);
+
+  let off = null;
+  let badgeToken = 0;
+  async function updateBadge(spaceId) {
+    const token = ++badgeToken;
+    const [{ messages }, lastReadAt] = await Promise.all([
+      services.messages.listMessages(spaceId, paths.NOTIFICATIONS_THREAD_ID, { order: 'desc' }),
+      services.messages.getLastReadAt(spaceId, paths.NOTIFICATIONS_THREAD_ID),
+    ]);
+    if (stopped || token !== badgeToken) return;
+    const unread = messages.filter((m) => m.ts > lastReadAt).length;
+    badge.hidden = unread === 0;
+    badge.textContent = unread > 9 ? '9+' : String(unread);
+  }
+
+  (async () => {
+    myPub = await myPubPromise;
+    if (stopped) return;
+
+    const profile = (await services.profile.getOwnProfile()) ?? {};
+    if (stopped) return;
+    const label = formatActorLabel(myPub, profile);
+    nameSlot.textContent = label;
+    userBtn.title = `${label} — ${t('menu')}`;
+    avatarSlot.replaceWith(renderAvatarOrAsset(myPub, label, profile.avatar, { size: '1.7rem' }));
+
+    const spaceId = paths.notificationsSpaceId(myPub);
+    // Defense in depth, same reasoning apps/notifications/client.js's own
+    // subscribe?.() call already documents.
+    subscribe?.(paths.spacePath(spaceId));
+    off = watchChildren(qu, paths.threadMessagesParentPath(spaceId, paths.NOTIFICATIONS_THREAD_ID), () => updateBadge(spaceId), { syncFetch });
+  })();
+
+  return () => {
+    stopped = true;
+    document.removeEventListener('click', onDocClick);
+    document.removeEventListener('keydown', onKeydown);
+    window.removeEventListener('qu:flag-changed', onFlagChanged);
+    off?.();
+  };
+}

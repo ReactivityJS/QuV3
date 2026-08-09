@@ -7,5 +7,12 @@
   "label": "Profile",
   "icon": "🪪",
   "navOrder": 9,
-  "requires": []
+  "requires": [],
+  "definesExtensionPoints": [
+    {
+      "point": "userSettings.contributions",
+      "kind": "ui",
+      "description": "Extra user-specific settings sections, rendered at the bottom of Settings (#/~<pub>/settings) - any app, or a future relay-level settings section, may contribute its own per-user preferences here without apps/profile needing to know about it."
+    }
+  ]
 }

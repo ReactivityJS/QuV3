@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { QuStore, MemoryStoreAdapter, QuCrypto } from '@qu/core';
 import { QuIdentityEngine } from '@qu/identity';
-import { paths, ProfileService } from '@qu/services';
+import { ProfileService } from '@qu/services';
 import { installDom, waitFor } from '@qu/ui/testing';
 import { getStoredLocale, setLocale } from '@qu/i18n';
 
@@ -57,20 +57,12 @@ function dataUrlModule(source) {
   return `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
 }
 
-function mockFetch({ relayPub = 'relay-pub-1', apps = [] } = {}) {
+function mockFetch({ relayPub = 'relay-pub-1', adminPubs = [], apps = [] } = {}) {
   return async (url) => {
-    if (url === '/config.json') return { ok: true, json: async () => ({ relayPub }) };
+    if (url === '/config.json') return { ok: true, json: async () => ({ relayPub, adminPubs }) };
     if (url === '/apps.json') return { ok: true, json: async () => apps };
     return { ok: false, json: async () => ({}) };
   };
-}
-
-/** Publishes a catalog entry directly, as @qu/relay's apps-catalog-store.js would - signed by relayKp. */
-async function publishCatalogEntry(qu, relayKp, name, fields = {}) {
-  await qu.put(paths.appCatalogEntryPath(name), { name, label: name, icon: '🧩', enabled: true, ...fields }, {
-    signWith: relayKp.privateKey,
-    writerPub: relayKp.publicKey,
-  });
 }
 
 test('a fresh identity (no hasIdentity()) shows onboarding instead of mounting the shell', async (t) => {
@@ -127,21 +119,19 @@ test('an identity that already exists skips onboarding entirely', async (t) => {
   }
 });
 
-test('the nav renders one entry per trusted, enabled catalog entry, live', async (t) => {
+test('mount() wires the fixed header with real Services and this relay\'s adminPubs (the Relay Admin link shows only for an admin)', async (t) => {
   const qu = freshQu();
   const identity = new QuIdentityEngine(qu);
   await identity.importMnemonic(identity.generateMnemonic());
-  const relayKp = await QuCrypto.generateKeypair();
-  const relayPub = QuCrypto.toBase64Url(relayKp.publicKey);
-  await publishCatalogEntry(qu, relayKp, 'notes', { label: 'Notes' });
-  t.mock.method(globalThis, 'fetch', mockFetch({ relayPub }));
+  const myPub = QuCrypto.toBase64Url((await identity.getMainKey()).publicKey);
+  t.mock.method(globalThis, 'fetch', mockFetch({ adminPubs: [myPub] }));
 
   const container = makeContainer();
   const stop = await mount(container, { qu, identity });
   try {
-    await waitFor(() => container.querySelector('.qu-shell-nav a') !== null);
-    assert.match(container.querySelector('.qu-shell-nav a').textContent, /Notes/);
-    assert.equal(container.querySelector('.qu-shell-nav a').getAttribute('href'), '#/notes');
+    await waitFor(() => container.querySelector('.qu-shell-header') !== null);
+    container.querySelector('.qu-shell-user-btn').click();
+    await waitFor(() => container.querySelector('a[href="#/relay-admin"]') !== null);
   } finally {
     stop();
   }
