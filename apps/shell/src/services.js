@@ -1,5 +1,5 @@
-import { ListService, FlagService, ContactsService, FavoritesService, ProfileService, DirectoryService, ActorService, AccessService, MessageService, ReactionService, PinService, AssetService, BookmarksService, NotificationPrefsService, PushSubscriptionService } from '@qu/services';
-import { AssetEngine } from '@qu/engines';
+import { ListService, FlagService, ContactsService, FavoritesService, ProfileService, DirectoryService, ActorService, AccessService, MessageService, ReactionService, PinService, AssetService, BookmarksService, NotificationPrefsService, PushSubscriptionService, ChannelService } from '@qu/services';
+import { AssetEngine, CollectionEngine } from '@qu/engines';
 
 /**
  * The fixed, known set of client-side Services every app under `apps/*`
@@ -47,6 +47,20 @@ export function createClientServices(qu, identity, { syncFetch = null, getGenera
   // this object, not something `qu.get()`'s engine-dispatch could resolve
   // back out again once registered (only `put()` is ever intercepted).
   const assetEngine = new AssetEngine(qu);
+  // First real client-side reader of a CURATED list (`ListService.
+  // listCurated()`/`ChannelService`, see its own doc comment) - every
+  // OTHER Service so far only ever reads DERIVED lists (`listDerived()`,
+  // no Engine needed - see `ListService`'s own class doc comment) or
+  // curated PRIVATE lists (`FlagService`'s private mode, resolved through
+  // `private-storage.js` directly, not through `CollectionEngine`).
+  // `CollectionEngine` resolves a curated list's `{$list: [path, ...]}`
+  // index into actual referenced values on READ (`qu.get()`'s TRANSFORM
+  // step) - without it registered here, `listCurated()` gets back the raw,
+  // unresolved index document instead of real channel/topic values. Same
+  // "write/read-time behavior needs the Engine on THIS qu too" reasoning
+  // `AssetEngine` above already documents.
+  new CollectionEngine(qu);
+  const messages = new MessageService(qu, identity, list, access, syncFetch, getGeneration);
   return {
     contacts: new ContactsService(flags, identity),
     favorites: new FavoritesService(flags),
@@ -60,9 +74,17 @@ export function createClientServices(qu, identity, { syncFetch = null, getGenera
     // until now, same "backfill hook built, no caller yet" gap this file's
     // own doc comment already describes for syncFetch/getGeneration
     // themselves.
-    messages: new MessageService(qu, identity, list, access, syncFetch, getGeneration),
+    messages,
     reactions: new ReactionService(qu, identity, list),
     pins: new PinService(qu, identity, list),
+    // apps/forum's Channel -> Topic -> per-Topic-Thread hierarchy (see its
+    // own doc comment) - shares this same `list`/`access`/`messages`
+    // instance. `syncFetch` matters here specifically (unlike most other
+    // Services sharing this file's own `list`/`access` instances): without
+    // it, a peer who opens the forum after a channel/topic was already
+    // created elsewhere never sees it - confirmed live, see
+    // ChannelService's own constructor doc comment for the full mechanism.
+    channels: new ChannelService(qu, identity, list, access, messages, syncFetch),
     // First real client caller of AssetEngine (see its own doc comment) -
     // same "backfill hook built, no caller yet" gap this file's doc comment
     // already describes for syncFetch/getGeneration themselves.

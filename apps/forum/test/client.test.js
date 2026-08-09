@@ -1,14 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { QuStore, MemoryStoreAdapter } from '@qu/core';
-import { AccessEngine, ThreadEngine, AssetEngine } from '@qu/engines';
+import { AccessEngine, ThreadEngine, AssetEngine, CollectionEngine } from '@qu/engines';
 import { QuIdentityEngine, actorPath } from '@qu/identity';
 import {
-  ListService, AccessService, MessageService, ReactionService, PinService,
-  ActorService, ProfileService, AssetService, FlagService, BookmarksService, THREAD_PRESETS, paths,
+  ListService, AccessService, MessageService, ReactionService, PinService, ChannelService,
+  ActorService, ProfileService, DirectoryService, ContactsService, AssetService, FlagService, BookmarksService, THREAD_PRESETS, paths,
 } from '@qu/services';
-import { ExtensionPointHost } from '@qu/foundation';
+import { ExtensionPointHost, Registry } from '@qu/foundation';
 import { installDom, waitFor } from '@qu/ui/testing';
+import { register as registerForum } from '../index.js';
 
 installDom();
 const { mount } = await import('../client.js');
@@ -20,18 +21,33 @@ function createQu() {
   // MessageService.postMessage()/editMessage() go through AccessEngine's
   // writer-ACL pipeline (see message-service.test.js's own freshSetup()) -
   // ReactionService/PinService need neither (see either's own doc comment:
-  // "not ACL-checked by AccessEngine").
+  // "not ACL-checked by AccessEngine"). CollectionEngine resolves
+  // ChannelService's curated {$list} documents (channels/topics) - see
+  // apps/shell/src/services.js's own doc comment on why this is needed on
+  // ANY qu that reads a curated list back, client-side included.
   new AccessEngine(qu);
   new ThreadEngine(qu);
+  new CollectionEngine(qu);
   return qu;
 }
+
+// Every existing test in this file predates Channels/Topics and talks
+// directly to a topic id of 'general' - matching `apps/forum/index.js`'s
+// own migration (a real "General" channel + "General" topic wrapping the
+// exact same thread id that used to be the whole forum). `segments`
+// routes `mount()` straight to that topic's view, same as a real
+// `#/forum/t/general` hash would - see client.js's own router doc comment.
+const TOPIC_SEGMENTS = ['forum', 't', 'general'];
 
 /**
  * One identity's full service set and OWN store, as apps/shell's
  * createClientServices() would build it for a real browser tab -
  * `QuIdentityEngine` holds exactly one identity PER store (see its own
  * `#storeSeed()` guard), so two independent identities always need two
- * independent stores, never one shared `qu.
+ * independent stores, never one shared `qu. Also runs `apps/forum/index.js`'s
+ * own `register()` against a real `Registry` - the same relay-boot seed
+ * every real deployment relies on for the "General" channel/topic to exist -
+ * exactly once per fresh store, exactly like a real relay boot would.
  */
 async function freshEnv(alias) {
   const qu = createQu();
@@ -40,15 +56,25 @@ async function freshEnv(alias) {
   await identity.publishMainProfile({ alias });
   const list = new ListService(qu);
   const access = new AccessService(qu, identity);
+  const messages = new MessageService(qu, identity, list, access);
   const services = {
     actors: new ActorService(identity),
     profile: new ProfileService(qu, identity),
-    messages: new MessageService(qu, identity, list, access),
+    messages,
     reactions: new ReactionService(qu, identity, list),
     pins: new PinService(qu, identity, list),
     assets: new AssetService(qu, new AssetEngine(qu), identity),
     bookmarks: new BookmarksService(new FlagService(qu, identity, list)),
+    directory: new DirectoryService(qu, identity, list),
+    contacts: new ContactsService(new FlagService(qu, identity, list), identity),
+    channels: new ChannelService(qu, identity, list, access, messages),
   };
+  const registry = new Registry();
+  registry.registerService('list-service', list);
+  registry.registerService('message-service', messages);
+  registry.registerService('channel-service', services.channels);
+  await registerForum(qu, { name: 'forum', version: '1.0.0', spaceId: FORUM_SPACE_ID }, registry);
+
   const myPub = await services.actors.whoAmI();
   return { qu, identity, services, myPub };
 }
@@ -113,7 +139,7 @@ test('renders the empty state when the thread has no messages yet', async () => 
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
 
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
   try {
     await waitFor(() => container.querySelector('.qu-forum-empty') !== null);
     assert.equal(container.querySelector('.qu-forum-message'), null);
@@ -128,7 +154,7 @@ test('renders a posted message with the author\'s alias, body, and a data-messag
   const posted = await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'Hello, forum!' });
 
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
   try {
     await waitFor(() => container.querySelector('.qu-forum-message') !== null);
     const li = container.querySelector('.qu-forum-message');
@@ -146,7 +172,7 @@ test('the composer posts a message and clears the input afterward', async () => 
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
 
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
   try {
     await waitFor(() => container.querySelector('textarea') !== null);
     const textarea = container.querySelector('textarea');
@@ -168,7 +194,7 @@ test('attaching a file via the composer\'s <qu-asset-upload> sends it along with
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
 
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
   try {
     await waitFor(() => container.querySelector('qu-asset-upload') !== null);
     const fileInput = container.querySelector('qu-asset-upload input[type=file]');
@@ -199,13 +225,81 @@ test('attaching a file via the composer\'s <qu-asset-upload> sends it along with
   }
 });
 
+test('the composer\'s emoji picker inserts the picked emoji at the caret', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => container.querySelector('textarea') !== null);
+    const textarea = container.querySelector('textarea');
+    textarea.value = 'hi ';
+    textarea.selectionStart = textarea.selectionEnd = 3;
+
+    const emojiTrigger = container.querySelector('.qu-thread-ui-emoji-picker button');
+    assert.ok(emojiTrigger, 'expected a thread-ui emoji picker in the composer row');
+    emojiTrigger.click();
+    const panelButton = container.querySelector('.qu-thread-ui-emoji-panel button');
+    assert.ok(panelButton);
+    const picked = panelButton.textContent;
+    panelButton.click();
+
+    assert.equal(textarea.value, `hi ${picked}`);
+  } finally {
+    stop();
+  }
+});
+
+test('the composer\'s @mention autocomplete inserts a full pub, and the posted message is recognized as a real mention', async () => {
+  const a = await freshEnv('Ada');
+  const b = await freshEnv('Bob');
+  // Ada shows up in the directory - the pool mountMentionAutocomplete() builds.
+  await a.services.directory.setVisible(true);
+
+  await b.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  // Bob's own client needs to be able to SEE Ada is visible AND resolve her
+  // alias - mirror both her directory entry and her public profile document
+  // into his store, the same "already synced in" technique every other
+  // cross-peer test in this file uses. Without the profile mirror,
+  // getPublicProfile() finds nothing locally, matchesActorQuery() has no
+  // alias to match "ad" against, and falls through to a pub-substring match
+  // that a random pub is very unlikely to satisfy - a real gap in THIS
+  // TEST's own setup, not a product bug.
+  await b.qu.putSealed(paths.directoryEntryPath(a.myPub), await a.qu.get(paths.directoryEntryPath(a.myPub)));
+  await b.qu.putSealed(actorPath(a.myPub, 'profile'), await a.qu.get(actorPath(a.myPub, 'profile')));
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: b.qu, services: b.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => container.querySelector('textarea') !== null);
+    const textarea = container.querySelector('textarea');
+    textarea.value = 'hey @ad';
+    textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+    textarea.dispatchEvent(new CustomEvent('input', { bubbles: true }));
+
+    await waitFor(() => container.querySelector('.qu-thread-ui-mention-item') !== null);
+    container.querySelector('.qu-thread-ui-mention-item').dispatchEvent(new CustomEvent('mousedown', { bubbles: true, cancelable: true }));
+    assert.equal(textarea.value, `hey @${a.myPub}`);
+
+    const sendBtn = [...container.querySelectorAll('button')].find((btn) => btn.textContent === 'Send');
+    sendBtn.click();
+    await waitFor(() => container.querySelector('.qu-forum-message-text') !== null);
+
+    const { messages } = await b.services.messages.listMessages(FORUM_SPACE_ID, 'general');
+    assert.deepEqual(messages[0].mentions, [a.myPub]);
+  } finally {
+    stop();
+  }
+});
+
 test('a message with no attachment never renders a <qu-asset>', async () => {
   const a = await freshEnv('Ada');
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
   await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'plain text only' });
 
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
   try {
     await waitFor(() => container.querySelector('.qu-forum-message-text') !== null);
     assert.equal(container.querySelector('.qu-forum-message-attachment'), null);
@@ -225,7 +319,7 @@ test('an attachment posted by one peer renders (downloads+decodes) for a second 
   await mirrorAssetInto(a, b.qu, FORUM_SPACE_ID, 'photo1');
 
   const container = makeContainer();
-  const stop = mount(container, { qu: b.qu, services: b.services, apps: FORUM_APPS, subscribe: noopSubscribe });
+  const stop = mount(container, { qu: b.qu, services: b.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
   try {
     await waitFor(() => container.querySelector('.qu-forum-message-attachment img') !== null, { timeout: 5000 });
   } finally {
@@ -238,11 +332,57 @@ test('a message posted elsewhere in the SAME store appears live in an already-mo
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
 
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
   try {
     await waitFor(() => container.querySelector('.qu-forum-empty') !== null);
     await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'Arrived live' });
     await waitFor(() => container.querySelector('.qu-forum-message-text')?.textContent.includes('Arrived live'));
+  } finally {
+    stop();
+  }
+});
+
+test('a slow, stale renderMessages() call resolving AFTER a newer one never overwrites the newer render (renderToken regression)', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+
+  // Wrap listMessages() so the FIRST call (triggered by mount()'s own
+  // initial watchChildren() fire, reading the still-empty thread) reads its
+  // real, current result immediately but has its RETURN held back until
+  // released below - simulating the exact race this fix targets: an older
+  // render's listMessages() resolving to the CALLER after a newer one's
+  // already has. Every later call (the second, triggered by postMessage()
+  // below) returns immediately, uncontrolled.
+  let releaseFirstCall;
+  const firstCallGate = new Promise((resolve) => { releaseFirstCall = resolve; });
+  let callCount = 0;
+  const realListMessages = a.services.messages.listMessages.bind(a.services.messages);
+  a.services.messages.listMessages = async (...args) => {
+    const isFirst = ++callCount === 1;
+    const result = await realListMessages(...args); // reads real state at the real call time
+    if (isFirst) await firstCallGate; // ...but only DELIVERS it to the caller once released
+    return result;
+  };
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    // The newer render (triggered by this post) must complete and show the
+    // real message BEFORE the older, gated call is ever released.
+    await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'Only message' });
+    await waitFor(() => container.querySelector('.qu-forum-message-text')?.textContent.includes('Only message'));
+
+    // Now let the stale FIRST call (which captured the thread as EMPTY)
+    // finally resolve. Without the renderToken guard, this would clear
+    // messagesRoot and re-render the empty state over the correct message -
+    // with the guard, this call must recognize it's no longer current and
+    // do nothing.
+    releaseFirstCall();
+    await new Promise((resolve) => setTimeout(resolve, 30)); // let the stale call's continuation actually run
+
+    assert.equal(container.querySelectorAll('.qu-forum-message').length, 1);
+    assert.ok(container.querySelector('.qu-forum-message-text')?.textContent.includes('Only message'));
+    assert.equal(container.querySelector('.qu-forum-empty'), null);
   } finally {
     stop();
   }
@@ -257,9 +397,9 @@ test('reaction toggle: clicking an emoji sets it, clicking the same one again cl
   // chain works across separate DOM instances, without needing a second
   // distinct identity for this particular assertion.
   const containerA = makeContainer();
-  const stopA = mount(containerA, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe });
+  const stopA = mount(containerA, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
   const containerB = makeContainer();
-  const stopB = mount(containerB, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe });
+  const stopB = mount(containerB, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
   try {
     await waitFor(() => containerA.querySelector('.qu-forum-reaction') !== null);
     const findThumbsUpA = () => [...containerA.querySelectorAll('.qu-forum-reaction')].find((btn) => btn.textContent.startsWith('👍'));
@@ -288,7 +428,7 @@ test('content.messageActions: the REAL apps/bookmarks app (not a fake) is dynami
 
   const container = makeContainer();
   const extensionPoints = new ExtensionPointHost(FORUM_APPS_WITH_BOOKMARKS);
-  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS_WITH_BOOKMARKS, subscribe: noopSubscribe, extensionPoints });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS_WITH_BOOKMARKS, subscribe: noopSubscribe, extensionPoints, segments: TOPIC_SEGMENTS });
   try {
     await waitFor(() => container.querySelector('.qu-forum-message-extensions button') !== null);
     const btn = container.querySelector('.qu-forum-message-extensions button');
@@ -313,7 +453,7 @@ test('content.messageActions: without extensionPoints/a contributing app, the sl
   await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'no bookmarks app loaded' });
 
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe }); // no extensionPoints at all
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS }); // no extensionPoints at all
   try {
     await waitFor(() => container.querySelector('.qu-forum-message') !== null);
     assert.equal(container.querySelector('.qu-forum-message-extensions').children.length, 0);
@@ -334,7 +474,7 @@ test('content.messageActions: a bookmark is private - a SECOND identity viewing 
 
   const container = makeContainer();
   const extensionPoints = new ExtensionPointHost(FORUM_APPS_WITH_BOOKMARKS);
-  const stop = mount(container, { qu: b.qu, services: b.services, apps: FORUM_APPS_WITH_BOOKMARKS, subscribe: noopSubscribe, extensionPoints });
+  const stop = mount(container, { qu: b.qu, services: b.services, apps: FORUM_APPS_WITH_BOOKMARKS, subscribe: noopSubscribe, extensionPoints, segments: TOPIC_SEGMENTS });
   try {
     await waitFor(() => container.querySelector('.qu-forum-message-extensions button') !== null);
     const btn = container.querySelector('.qu-forum-message-extensions button');
@@ -352,9 +492,9 @@ test('pinning shows the message in the pinned bar, live for a second independent
   await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'Pin this one' });
 
   const containerA = makeContainer();
-  const stopA = mount(containerA, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe });
+  const stopA = mount(containerA, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
   const containerB = makeContainer();
-  const stopB = mount(containerB, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe });
+  const stopB = mount(containerB, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
   try {
     await waitFor(() => containerA.querySelector('.qu-forum-message-actions button') !== null);
     const pinBtn = [...containerA.querySelectorAll('.qu-forum-message-actions button')].find((btn) => btn.textContent === 'Pin');
@@ -385,7 +525,7 @@ test('an in-progress, unsaved edit survives an unrelated message arriving in the
   const own = await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'Original body' });
 
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
   try {
     await waitFor(() => container.querySelector('.qu-forum-message') !== null);
     container.querySelector('.qu-forum-message-actions button').click(); // "Edit" - the only button own message has besides Pin
@@ -424,7 +564,7 @@ test('the edit button only appears on the viewer\'s own message - a genuinely se
   await mirrorThreadInto(b, a.qu, FORUM_SPACE_ID, 'general');
 
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
   try {
     await waitFor(() => container.querySelectorAll('.qu-forum-message').length === 2);
     const ownLi = container.querySelector(`[data-message-id="${own.id}"]`);
@@ -455,7 +595,7 @@ test('a message body containing a <script> tag renders as escaped text, never as
   await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: '<script>window.qu_xss_fired = true;</script>hello' });
 
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
   try {
     await waitFor(() => container.querySelector('.qu-forum-message-text') !== null);
     assert.equal(container.querySelector('.qu-forum-message-text script'), null);
@@ -472,7 +612,169 @@ test('the returned stop function tears down cleanly - no error thrown', async ()
   await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'Hi' });
 
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
   await waitFor(() => container.querySelector('.qu-forum-message') !== null);
   assert.doesNotThrow(() => stop());
+});
+
+// ===================================================================
+// BOARD VIEW - #/forum
+// ===================================================================
+
+test('board view (#/forum, no sub-segments) lists the migrated "General" channel and its topic in the recent-activity feed', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'first ever post' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-channel-row a') !== null);
+    assert.match(container.querySelector('.qu-forum-channel-row a').textContent, /General/);
+
+    await waitFor(() => container.querySelector('.qu-forum-topic-row a') !== null);
+    const topicLink = container.querySelector('.qu-forum-topic-row a');
+    assert.equal(topicLink.getAttribute('href'), '#/forum/t/general');
+    assert.match(topicLink.textContent, /General/); // topic title
+  } finally {
+    stop();
+  }
+});
+
+test('board view: creating a channel via the form adds it live to the sidebar', async () => {
+  const a = await freshEnv('Ada');
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-new-channel-form') !== null);
+    const titleInput = container.querySelector('.qu-forum-new-channel-form input[type="text"]');
+    titleInput.value = 'Off-topic';
+    const submit = container.querySelector('.qu-forum-new-channel-form button');
+    submit.click();
+
+    await waitFor(() => [...container.querySelectorAll('.qu-forum-channel-row a')].some((a2) => a2.textContent.includes('Off-topic')));
+    const channels = await a.services.channels.listChannels(FORUM_SPACE_ID);
+    assert.ok(channels.some((c) => c.title === 'Off-topic'));
+  } finally {
+    stop();
+  }
+});
+
+test('board view: double-clicking "Create channel" before the first call resolves creates only ONE channel (regression: QuV2\'s missing double-submit guard)', async () => {
+  const a = await freshEnv('Ada');
+  // Slow down createChannel() so the button is provably still mid-flight
+  // when the second click is attempted.
+  let releaseCreate;
+  const gate = new Promise((resolve) => { releaseCreate = resolve; });
+  const realCreateChannel = a.services.channels.createChannel.bind(a.services.channels);
+  a.services.channels.createChannel = async (...args) => {
+    await gate;
+    return realCreateChannel(...args);
+  };
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-new-channel-form') !== null);
+    const titleInput = container.querySelector('.qu-forum-new-channel-form input[type="text"]');
+    titleInput.value = 'Only Once';
+    const submit = container.querySelector('.qu-forum-new-channel-form button');
+    submit.click(); // first submit - synchronously disables the button before the gated await
+    assert.equal(submit.disabled, true);
+    submit.click(); // a disabled button does not dispatch a click-activated submit a second time
+
+    releaseCreate();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const channels = await a.services.channels.listChannels(FORUM_SPACE_ID);
+    assert.equal(channels.filter((c) => c.title === 'Only Once').length, 1);
+  } finally {
+    stop();
+  }
+});
+
+test('board view: a restricted channel shows a 🔒 badge in the sidebar', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Secret Stuff', restricted: true, memberPubs: [] });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
+  try {
+    await waitFor(() => [...container.querySelectorAll('.qu-forum-channel-row a')].some((a2) => a2.textContent.includes('Secret Stuff')));
+    const row = [...container.querySelectorAll('.qu-forum-channel-row a')].find((a2) => a2.textContent.includes('Secret Stuff'));
+    assert.match(row.textContent, /🔒/);
+  } finally {
+    stop();
+  }
+});
+
+// ===================================================================
+// CHANNEL VIEW - #/forum/c/<channelId>
+// ===================================================================
+
+test('channel view lists its topics with a live reply count, and a "new topic" form creates one', async () => {
+  const a = await freshEnv('Ada');
+  const channel = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Announcements' });
+  const topic = await a.services.channels.createTopic(FORUM_SPACE_ID, channel._id, { title: 'Welcome' });
+  await a.services.messages.postMessage(FORUM_SPACE_ID, topic._id, { body: 'hi there' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', channel._id] });
+  try {
+    await waitFor(() => container.querySelector('h1')?.textContent === 'Announcements');
+    await waitFor(() => container.querySelector('.qu-forum-topic-row a') !== null);
+    assert.match(container.querySelector('.qu-forum-topic-title').textContent, /Welcome/);
+    assert.match(container.querySelector('.qu-forum-topic-meta').textContent, /1/); // reply count
+
+    const titleInput = container.querySelector('.qu-forum-new-topic-form input[type="text"]');
+    titleInput.value = 'Second topic';
+    container.querySelector('.qu-forum-new-topic-form button').click();
+    await waitFor(() => [...container.querySelectorAll('.qu-forum-topic-title')].some((el) => el.textContent === 'Second topic'));
+  } finally {
+    stop();
+  }
+});
+
+test('channel view: an OPEN channel shows no invite form; a RESTRICTED one does, and inviting actually grows membership', async () => {
+  const a = await freshEnv('Ada');
+  const openChannel = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Open' });
+  const restrictedChannel = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Closed', restricted: true, memberPubs: [] });
+
+  const containerOpen = makeContainer();
+  const stopOpen = mount(containerOpen, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', openChannel._id] });
+  const containerRestricted = makeContainer();
+  const stopRestricted = mount(containerRestricted, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', restrictedChannel._id] });
+  try {
+    await waitFor(() => containerOpen.querySelector('h1')?.textContent === 'Open');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(containerOpen.querySelector('.qu-forum-invite-form'), null);
+
+    await waitFor(() => containerRestricted.querySelector('.qu-forum-invite-form') !== null);
+    const pubInput = containerRestricted.querySelector('.qu-forum-invite-form input[type="text"]');
+    pubInput.value = 'some-actor-pub-1234567890';
+    containerRestricted.querySelector('.qu-forum-invite-form button').click();
+
+    // waitFor()'s predicate is never awaited (see @qu/ui/testing's own
+    // doc comment - `while (!check())` runs it synchronously) - a real
+    // poll loop is needed for an async check like this one.
+    let invited = false;
+    for (let i = 0; i < 200 && !invited; i++) {
+      const channel = await a.services.channels.getChannel(FORUM_SPACE_ID, restrictedChannel._id);
+      invited = channel.memberPubs.includes('some-actor-pub-1234567890');
+      if (!invited) await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.ok(invited, 'expected addChannelMember() to have run by now');
+  } finally {
+    stopOpen();
+    stopRestricted();
+  }
+});
+
+test('a message posted in a RESTRICTED channel\'s topic never appears in the merged board activity feed as readable plaintext to a non-member - the topic IS genuinely gated (integration smoke test over ChannelService, already unit-tested for encryption directly)', async () => {
+  const a = await freshEnv('Ada');
+  const channel = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'VIP', restricted: true, memberPubs: [] });
+  const topic = await a.services.channels.createTopic(FORUM_SPACE_ID, channel._id, { title: 'Secret topic' });
+  const { id: messageId } = await a.services.messages.postMessage(FORUM_SPACE_ID, topic._id, { body: 'members only' });
+  const raw = await a.qu.get(paths.threadMessagePath(FORUM_SPACE_ID, topic._id, messageId));
+  assert.notEqual(raw.val, 'members only');
+  assert.equal(typeof raw.val.iv, 'string');
 });

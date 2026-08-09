@@ -30,6 +30,7 @@ export { isEncryptedEnvelope, resolveReaderXKeys, decryptEnvelope } from './cryp
 export { extractMentions, formatMarkdown, applyFormatting } from './thread-formatting.js';
 export { URL_RE_GLOBAL, detectLinks } from './link-detect.js';
 export { MessageService, THREAD_PRESETS } from './message-service.js';
+export { ChannelService } from './channel-service.js';
 export { ReactionService } from './reaction-service.js';
 export { PinService } from './pin-service.js';
 export { PresenceService } from './presence-service.js';

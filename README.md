@@ -1672,4 +1672,122 @@ own tests, built bottom-up per the dependency order in
       memory - one drift caught and fixed this way (`apps/bookmarks/client.js`'s
       real `renderBookmarkToggle()` uses a `snapshot` local + `t(...)`-sourced
       button titles; the first draft had simplified both away).
+- [x] Forum: Channels/Boards (esoTalk-styled, QuV2's own shape), restricted
+      boards with real encryption + a growable invite list, @mention
+      autocomplete, a shared emoji-picker/composer-toolbar widget
+      (`packages/thread-ui`, new package), and two confirmed duplicate-
+      content bug fixes - user-reported ("manchmal duplizieren... Inhalte
+      oder Boards - auch bereits bei QuV2!"), root-caused via source
+      reading, both fixed and regression-tested BEFORE any new feature work
+      started.
+      **Bug 1a - duplicate MESSAGES**: `apps/forum/client.js`'s
+      `renderMessages()`/`renderPinned()`/per-message reaction+pin `render()`
+      had no `renderToken`/generation guard (unlike `apps/notifications/
+      client.js`/`apps/profile/client.js`, which already established this
+      pattern) - two `watchChildren()` fires in quick succession (a local
+      write's own notify, then a live relay echo) could race, and an OLDER,
+      slower render finishing AFTER a newer one cleared the newer render's
+      correct output and appended stale/duplicate content on top. Fixed
+      with the same monotonic-token guard on every async render function in
+      the file; a new regression test artificially delays a `listMessages()`
+      call to prove the race is closed (confirmed it reproduces against the
+      pre-fix code, not just a test that happens to pass).
+      **Bug 1b - duplicate BOARDS (QuV2's own bug, confirmed in its source)**:
+      QuV2's `newChannelForm()` had no double-submit guard AND minted a
+      fresh random channel id on every submit - two submits before the
+      first finished created two genuinely different, both-valid channel
+      documents. The fix, now that V3 has boards at all: every create form
+      (`Create channel`, `Create topic`) disables its own submit button for
+      the duration of the create call, the same `sendBtn.disabled = true`
+      convention already used for posting a message - a regression test
+      double-clicks a real button in a real DOM and confirms exactly one
+      channel results.
+      **`packages/thread-ui`** (new package) - the answer to "Engine oder
+      Service?!": neither. A client-only UI widget belongs in the same
+      category as `@qu/ui`'s `renderFlagToggle()`/`renderAvatar()`, not the
+      storage-pipeline layer. Exports `insertAtCursor()` (caret-aware
+      textarea insertion - confirmed nothing like it existed anywhere in
+      this repo before now), `EMOJI_QUICK`/`EMOJI_EXTENDED`/
+      `renderEmojiPicker()` (8 quick picks + a "+"-expandable ~160-emoji
+      curated grid, ported verbatim from QuV2's own `apps/chat/client.js` -
+      plain Unicode codepoints render via whichever emoji font the OS
+      already provides, so "matches Android" is satisfied by construction,
+      no separate integration needed), and `mountMentionAutocomplete()`
+      (`@`-triggered completion by alias OR pub from the 2nd typed
+      character, over `DirectoryService`/`ContactsService`/`actor-format.js`
+      - the wire format is unchanged, purely a compose-time insert helper).
+      Built as small composable functions, not one opinionated mounted
+      component, specifically so a future `apps/chat` port can reuse them
+      without rework - the actual point of this round's own "Engine oder
+      Service?!" question. Wired into Forum's composer (emoji-insert
+      button + mention autocomplete) and its reaction row (existing 5-emoji
+      quick row + a new "+" expand, which V3's reactions never had before).
+      **Channels/Boards** (`@qu/services`' new `ChannelService`) - Channel
+      → Topic → per-Topic-Thread, same shape QuV2 shipped, rebuilt on V3's
+      already-hardened `ListService.createCurated()`/`addCurated()` instead
+      of QuV2's unprotected `DocumentService`/`CollectionService` pair (the
+      actual fix for Bug 1b's storage-layer half, on top of the UI-layer
+      double-submit guard above). `apps/forum/client.js` gained real
+      routing (`#/forum`, `#/forum/c/<channelId>`, `#/forum/t/<topicId>`),
+      a board view (channel sidebar + merged recent-activity feed), and a
+      channel view (topic list + "new topic" form). `apps/forum/index.js`'s
+      `register()` now also wraps the ORIGINAL flat public thread in a real
+      "General" channel/topic - same thread id, no data migration, existing
+      messages from before this round stay exactly where a visitor now
+      expects to find them.
+      **Restricted boards** - real end-to-end encryption for an explicit
+      member list, not a UI-level filter: a checkbox + comma-separated
+      pubkey list at creation (always includes the creator even if they
+      didn't type their own pub), a 🔒 badge everywhere a restricted
+      channel/topic shows up, and (per explicit ask this round, beyond what
+      QuV2 ever shipped) an "invite member" field on an already-restricted
+      channel - `ChannelService.addChannelMember()` grows the channel's own
+      ACL, then BOTH `writers` and `readers` on every existing topic's
+      thread config in one write each (not `MessageService.addReader()`
+      alone - that only grows `readers`, and a `THREAD_PRESETS.chat()`-
+      shaped thread needs the SAME list grown for `writers` too, or a new
+      member could read but never post). Same non-retroactive trade-off as
+      every other growable-membership feature in this codebase: new
+      members see topics going forward, nothing posted before they joined.
+      **Two more real bugs found via this round's own live, multi-peer
+      Playwright verification** (not hypothetical, not caught by any unit
+      test beforehand):
+      (1) a restricted topic's `createTopic()` originally used
+      `THREAD_PRESETS.chat(memberPubs)` verbatim - correct for encryption/
+      membership, but `chat()` only enables `'mentions'` formatting, not
+      `'markdown'`, so `formattedHtml` came back `null` for every message,
+      and `apps/forum/client.js`'s `p.innerHTML = message.formattedHtml`
+      rendered as a genuinely EMPTY body (`[LegacyNullToEmptyString]` turns
+      `innerHTML = null` into nothing at all, not even the word "null") -
+      confirmed live: Ada could post into her own restricted board, but the
+      message showed with no text at all. Fixed by building a topic config
+      with `chat()`'s own encryption/membership shape but `forum()`'s own
+      formatting, plus a defensive plain-text fallback in the renderer for
+      any thread config that ever lacks markdown again.
+      (2) A second peer's board view rendered genuinely empty - no crash,
+      no error - for boards that existed before that peer's own session
+      started. Root cause: `ChannelService` is the FIRST real client-side
+      reader of a CURATED list anywhere in this codebase; `ListService.
+      listCuratedRawPaths()` already backfills the LIST document itself on
+      a miss, but `@qu/engines`' `CollectionEngine` (which resolves each
+      `$list` entry to its actual value on read) only ever does a LOCAL
+      `qu.get()` per referenced path, with no network access of its own, by
+      design. Fixed by threading `syncFetch` into `ChannelService` and
+      having it do its own per-item backfill-and-retry, instead of
+      assuming `ListService`/`CollectionEngine` already covered it - also
+      newly required registering `CollectionEngine` on the CLIENT `qu`
+      itself (`apps/shell/src/services.js`), never needed there before
+      since no prior Service read a curated list client-side.
+      Verified: full suite green (1022 tests, stable across repeated runs),
+      `npm run build` bundles `packages/thread-ui` into `apps/forum`
+      cleanly. Live, real-relay, three-peer Playwright verification (17/17
+      checks): Peer A creates an open AND a restricted board (Bob invited
+      at creation), posts in both; Peer B sees the open board immediately
+      and the restricted one only because he's a member, and can genuinely
+      decrypt its content; Peer C (not invited) sees the restricted board
+      LISTED (metadata isn't hidden, documented limitation) but never its
+      plaintext; a real double-click on "Create channel" produces exactly
+      one board; Peer A types `@` in the composer, a real dropdown appears
+      and inserts a full pub on selection; the composer's emoji button and
+      a reaction row's "+" both open the real extended emoji panel.
 

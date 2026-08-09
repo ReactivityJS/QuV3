@@ -7,7 +7,7 @@ import { Registry, RuntimeContainer } from '@qu/foundation';
 import { QuIdentityEngine } from '@qu/identity';
 import { SyncEngine } from '@qu/sync';
 import { AccessEngine, DocumentEngine, CollectionEngine, AssetEngine, ThreadEngine } from '@qu/engines';
-import { ListService, AccessService, MessageService, NotificationPrefsService, PushSubscriptionService } from '@qu/services';
+import { ListService, AccessService, MessageService, NotificationPrefsService, PushSubscriptionService, ChannelService } from '@qu/services';
 import { QuLoader, discoverLocalPackages } from '@qu/loader';
 import { createLogger } from '@qu/log';
 
@@ -132,11 +132,13 @@ export class QuRelay {
     this.messages = new MessageService(this.qu, this.identity, list, access);
     this.notificationPrefs = new NotificationPrefsService(this.qu, this.identity);
     this.pushSubscriptions = new PushSubscriptionService(this.qu, this.identity, list);
+    this.channels = new ChannelService(this.qu, this.identity, list, access, this.messages);
     this.registry.registerService('list-service', list);
     this.registry.registerService('access-service', access);
     this.registry.registerService('message-service', this.messages);
     this.registry.registerService('notification-prefs-service', this.notificationPrefs);
     this.registry.registerService('push-subscription-service', this.pushSubscriptions);
+    this.registry.registerService('channel-service', this.channels);
 
     // The one loader instance for this relay's whole lifetime - `boot()`
     // drives its `loadLocal()`/`loadRemote()` calls; `httpRouter` (via

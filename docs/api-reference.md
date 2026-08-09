@@ -24,6 +24,7 @@ gives you.
 8. [Theming](#8-theming) — `ensureTheme()`, `THEME_PRESETS`
 9. [Styling](#9-styling) — `injectStyle()` convention
 10. [Templating](#10-templating) — `apps/profile`'s `template`/`style` system, worked example
+11. [`@qu/thread-ui`](#11-quthread-ui) — `insertAtCursor()`, `renderEmojiPicker()`, `mountMentionAutocomplete()`
 
 ---
 
@@ -349,6 +350,67 @@ differ only by config", all going through the same `createThread()`/
 | `group(memberPubs, name)` | Same as `chat` + `{kind:'group', name}` | Named multi-member room. Membership fixed at creation — no re-keying for add/remove. |
 | `mail(ownerPub)` | `{writers:'*', readers:[ownerPub], formatting:['markdown','mentions']}` | Personal inbox — anyone can send, only owner reads. |
 | `notifications(ownerPub)` | `{writers:'*', readers:[ownerPub], formatting:[]}` | System notices — see §5's `NotificationPrefsService`/`PushSubscriptionService` and `docs/building-an-app.md` §7. |
+
+### `ChannelService`
+
+`new ChannelService(qu, identityEngine, listService, accessService, messageService, syncFetch = null)`.
+`apps/forum`'s Channel → Topic → per-Topic-Thread hierarchy (esoTalk-styled)
+— a Channel and a Topic are both plain, unencrypted-metadata Documents; a
+Topic's content is a real `MessageService` Thread keyed by the Topic's own
+id ("a Topic **is** its Thread"). Two curated lists per space
+(`ListService.addCurated()` — the same hardened, retry-on-conflict
+primitive every other list uses, not an unprotected read-modify-write):
+`listPath(spaceId, 'channels')` and one `listPath(spaceId, 'topics-<channelId>')`
+per channel.
+
+- **`createChannel(spaceId, { title, description = '', color = '', restricted = false, memberPubs = [], channelId })`**
+  → `Promise<object>`. `channelId` is normally omitted (a fresh
+  `crypto.randomUUID()` is generated) — only ever passed for a fixed,
+  well-known id (see `apps/forum/index.js`'s own "General" channel
+  migration). If `restricted`, protects the channel document's own writer
+  ACL (`AccessService.protect(spaceId, 'docs', id, {writers: memberPubs})`)
+  and always includes the creator in `memberPubs`, even if they didn't type
+  their own pub in.
+- **`listChannels(spaceId)`** → `Promise<object[]>`. **`getChannel(spaceId, channelId)`**
+  → `Promise<object|null>`.
+- **`createTopic(spaceId, channelId, { title })`** → `Promise<object>`. Throws
+  if the channel doesn't exist. Creates the topic document, adds it to the
+  channel's own topics list, and calls `messageService.createThread()` for
+  it — `THREAD_PRESETS.forum()` for an open channel; for a restricted one, a
+  config with the SAME encryption/membership shape as `THREAD_PRESETS.chat()`
+  (`writers`/`readers` both `channel.memberPubs`) but `forum()`'s own
+  `formatting: ['markdown', 'mentions']`, not `chat()`'s `['mentions']`-only
+  — using `chat()` verbatim silently renders every message with an EMPTY
+  body (`formattedHtml` is `null` without `'markdown'`, and `.innerHTML =
+  null` renders as nothing at all under `[LegacyNullToEmptyString]`, not
+  even the word "null") — confirmed live, not hypothetical.
+- **`listTopics(spaceId, channelId)`** → `Promise<Array<object & {replyCount, lastActivityAt, lastAuthor}>>`,
+  newest activity first (one `listMessages()` per topic — fine at
+  community-forum scale, no pagination yet).
+- **`addChannelMember(spaceId, channelId, actorPub)`** → `Promise<object>`
+  (the updated channel). A no-op for an already-open channel or an
+  already-present member. Grows the channel document's own writer ACL, then
+  **both** `writers` and `readers` on every EXISTING topic's thread config
+  in one write each (not `MessageService.addReader()` alone — that only
+  grows `readers`, and `MessageService` has no `addWriter()`; a
+  `THREAD_PRESETS.chat()`-shaped thread uses the SAME list for both, so a
+  member added via `addReader()` alone could read future messages but
+  never POST any). Same non-retroactive trade-off as `MessageService.
+  addReader()` itself: a new member sees every topic going forward, nothing
+  posted before they joined.
+- **`syncFetch`** matters here specifically, more than for most other
+  Services sharing the same `qu`/`list`/`access` instances: without it, a
+  peer who opens the forum after a channel/topic was already created
+  elsewhere never sees it. `ListService.listCuratedRawPaths()` already
+  backfills the LIST document itself on a miss, but `@qu/engines`'
+  `CollectionEngine` (which resolves each `$list` entry to its actual value
+  on read) only ever does a LOCAL `qu.get()` per referenced path — it has
+  no network access of its own, by design. `ChannelService` does its own
+  per-item `syncFetch()`-and-retry instead of relying on `ListService`/
+  `CollectionEngine` to have already done it — confirmed live: a second
+  peer's board view rendered genuinely empty (no error — a `$list` entry
+  resolving to `null` for a not-yet-local document is indistinguishable
+  from "no such channel" without this) until this was wired up.
 
 ### `ReactionService`
 
@@ -769,6 +831,84 @@ An `invalid`/unset `template` value always falls back to `'default'` rather
 than throwing or rendering blank — the same "never trust a stored string
 blindly" discipline `NotificationPrefsService.getPrefsFor()` (§5) applies to
 a signature, applied here to a plain enum value instead.
+
+---
+
+## 11. `@qu/thread-ui`
+
+Small, composable browser-UI widgets shared by every Thread-backed message
+composer/reaction row — Forum today, Chat once it's ported (they're built
+this way specifically so a future `apps/chat` can reuse them without
+rework). No Custom Elements (unlike `@qu/ui`) — plain functions returning/
+mutating real DOM, matching this package's own small-composable-pieces
+philosophy rather than one opinionated mounted component. Browser-only.
+
+### `insertAtCursor(el, text, { start, end } = {})`
+
+Caret-aware text insertion into a `<textarea>`/`<input>` — confirmed
+missing anywhere else in this repo before this package (nothing else here
+ever needed to insert text mid-string at a live caret position). Inserts
+`text` at the given range (defaulting to the field's CURRENT selection — a
+collapsed selection is just the caret), moves the caret to the end of the
+inserted text via `el.setRangeText()`, and fires a real `input` event
+afterward so any listener already on the field (e.g.
+`mountMentionAutocomplete()`'s own detector) sees the change exactly as if
+the user had typed it.
+
+### `EMOJI_QUICK` / `EMOJI_EXTENDED` / `renderEmojiPicker({ onPick, quick = [], extended = EMOJI_EXTENDED, trigger = '+', triggerTitle })`
+
+A curated Unicode set (8 quick picks + ~160 extended — ported verbatim from
+QuV2's own `apps/chat/client.js`) plus one reusable "+"-style trigger that
+reveals a positioned panel of `extended` choices. Plain Unicode codepoints
+render via whatever emoji font the host OS/browser already provides — under
+Android that's Android's own system emoji font automatically, no separate
+integration needed. Two call shapes from the SAME function:
+
+- `quick` non-empty → a row of plain quick-pick buttons plus a trailing
+  trigger (e.g. a reaction row's own "+" expand, appended AFTER the host
+  app's own live-count reaction buttons — this function never draws counts
+  itself, that stays the caller's job).
+- `quick` omitted → just the trigger button alone (e.g. a composer's single
+  😀 "insert emoji" button).
+
+Clicking the trigger opens a small panel anchored to the trigger itself
+(not a single shared global popup singleton) — closes on a pick, an outside
+click, or Escape.
+
+### `mountMentionAutocomplete(textareaEl, { services, subscribe })`
+
+`@`-triggered actor completion, by alias OR pub, from the 2nd typed
+character onward (`@ab` already narrows). Purely a compose-time UX
+convenience — the wire format is unchanged, `@qu/services`' `thread-
+formatting.js`'s `MENTION_RE`/`extractMentions()` still only ever look for
+a full `@<pub>` token in a posted body; this only helps a user find and
+insert the right one instead of typing a 16–64 character pub blind.
+
+- **Candidate pool**: `services.directory.listVisible()` + `services.
+  contacts.listContacts()`, deduplicated by `actorPub`, resolved to a real
+  profile ONCE per mount (not per keystroke) via `services.profile.
+  getPublicProfile()`. Filtering then reuses that cached pool synchronously
+  via `matchesActorQuery()`/`formatActorLabel()` (`@qu/services`'
+  `actor-format.js`, unchanged).
+- **`subscribe`** (optional) — defense in depth: calls `subscribe?.('/store/directory')`
+  on mount, same reasoning `apps/user-list/client.js`'s own `subscribe?.
+  ('/store/directory')` call already documents. Does **not** backfill
+  anything that was ALREADY there before this identity's own session first
+  subscribed (`subscribe()` only ever covers future writes — see `@qu/sync`'s
+  `SyncEngine.subscribe()` own doc comment); `DirectoryService.listVisible()`
+  itself has no `syncFetch` backfill-on-miss (it's a DERIVED list, see its
+  own doc comment — "a caller subscribing already catches this up," which
+  assumes someone does). A contact (private, always locally available, no
+  subscribe needed) remains the more dependable candidate source either way.
+- Selecting a candidate (click, or Enter/Tab while the dropdown is open;
+  arrow keys navigate, Escape closes) replaces the typed `@ab…` fragment
+  with `@<fullPub>` via `insertAtCursor()`.
+- Positioning is a deliberate simplification: the dropdown anchors to the
+  textarea's own bottom-left corner (its `parentNode`, which needs `position:
+  relative`), not the exact pixel position of the caret — functionally
+  complete, not pixel-perfect (a precise caret-coordinate measurement needs
+  a hidden mirror-div technique this repo has no precedent for).
+- Returns a stop function — removes listeners, closes any open dropdown.
 
 ---
 

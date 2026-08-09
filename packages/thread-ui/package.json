@@ -1,0 +1,17 @@
+{
+  "name": "@qu/thread-ui",
+  "version": "0.1.0",
+  "description": "Small, composable browser-UI widgets shared by every Thread-backed message composer/reaction row (Forum today, Chat once it's ported - see each export's own doc comment): insertAtCursor() (caret-aware textarea insertion, the primitive nothing else in this repo has), renderEmojiPicker() (a quick row + '+'-expandable curated grid, reused for both reactions and composer emoji-insert), mountMentionAutocomplete() (@mention completion by alias or pub from the 2nd typed character, over @qu/services' DirectoryService/ContactsService/actor-format.js). No Custom Elements (unlike @qu/ui) - plain functions returning/mutating real DOM, matching this package's own small-composable-pieces philosophy rather than one opinionated mounted component. Browser-only.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "dependencies": {
+    "@qu/services": "^0.1.0"
+  },
+  "devDependencies": {
+    "@qu/ui": "^0.1.0"
+  },
+  "license": "MIT"
+}

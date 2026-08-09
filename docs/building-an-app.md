@@ -327,11 +327,16 @@ const extensionSlot = document.createElement('span');
 extensionSlot.className = 'qu-forum-message-extensions';
 if (extensionPoints) {
   await extensionPoints.renderSlot('content.messageActions', extensionSlot, {
-    services, messageId: message.id, spaceId: SPACE_ID, threadId: THREAD_ID, body: message.body, author: message.author,
+    services, messageId: message.id, spaceId: SPACE_ID, threadId: topicId, body: message.body, author: message.author,
   });
 }
 body.append(head, textWrap, actions, reactionsRoot, extensionSlot);
 ```
+
+(`topicId` — as of Forum's Channels/Topics redesign, a Topic **is** its own
+Thread, so `topicId` and `threadId` are literally the same value passed
+through; a single-thread app without that concept would just use its own
+fixed thread id here instead.)
 
 Note what's in the payload: **`services`**, not raw `qu`/`identity` — so a
 contributor never has to construct its own Service instances, it just reads

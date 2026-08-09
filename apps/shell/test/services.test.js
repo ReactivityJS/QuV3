@@ -39,6 +39,21 @@ test('createClientServices() wires a real, functional BookmarksService', async (
   assert.equal(await services.bookmarks.isBookmarked('msg1'), true);
 });
 
+test('createClientServices() wires a real, functional ChannelService (CollectionEngine registered on the SAME qu, so curated lists actually resolve)', async () => {
+  const { services } = await freshServices();
+  const channel = await services.channels.createChannel('forum-space', { title: 'General' });
+  const topic = await services.channels.createTopic('forum-space', channel._id, { title: 'Hello' });
+  await services.messages.postMessage('forum-space', topic._id, { body: 'first post' });
+
+  const channels = await services.channels.listChannels('forum-space');
+  assert.equal(channels.length, 1);
+  assert.equal(channels[0].title, 'General');
+
+  const topics = await services.channels.listTopics('forum-space', channel._id);
+  assert.equal(topics.length, 1);
+  assert.equal(topics[0].replyCount, 1);
+});
+
 test('createClientServices() wires a real, functional NotificationPrefsService and PushSubscriptionService', async () => {
   const { services } = await freshServices();
   await services.notificationPrefs.savePrefs({ enabled: true, mentions: false, apps: { forum: { enabled: false } } });
