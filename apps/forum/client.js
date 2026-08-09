@@ -85,6 +85,27 @@
  * of its own substitutions - there is no way a message body can smuggle
  * real markup through it. Covered by an explicit regression test anyway
  * (see this app's own test file).
+ *
+ * EXTENSION POINT (`content.messageActions`, declared in this app's own
+ * `manifest.quapp` under `definesExtensionPoints` - see `@qu/foundation`'s
+ * manifest schema doc comment for the full `contributes`/`definesExtensionPoints`
+ * vocabulary): per message, right after the built-in edit/pin actions, a
+ * small `<span>` is appended and handed to `ctx.extensionPoints.
+ * renderSlot('content.messageActions', slotEl, payload)` - ANY app whose
+ * OWN manifest declares `contributes: [{point: "content.messageActions",
+ * export: "..."}]` gets dynamically imported and rendered into it, with NO
+ * import of that app anywhere in this file (see `apps/bookmarks/client.js`,
+ * the first real one - this app has never heard of it, and vice versa).
+ * `payload` is `{services, messageId, spaceId, threadId, body, author}` -
+ * `services` (not `qu`/`identity` directly) is what a contributor needs to
+ * reach its own Service without constructing one itself; the rest describes
+ * THIS message, for whatever a contributor wants to do with it (e.g.
+ * Bookmarks' snapshot). This is genuinely a "reactions-with-extra-steps"
+ * DECLARATIVE point, not a live subscription of its own - a contributor's
+ * OWN rendered widget (e.g. Bookmarks' `renderFlagToggle()`-based button)
+ * is exactly as reactive as it makes itself; this app only ever calls
+ * `renderSlot()` once per message, at the same points messages themselves
+ * already re-render (see the REACTIVITY section above).
  */
 import { watchChildren } from '@qu/reactive';
 import { paths, formatActorLabel } from '@qu/services';
@@ -136,6 +157,7 @@ const STYLE = `
   .qu-forum-message-actions { display: flex; gap: 0.4rem; margin-top: 0.3rem; }
   .qu-forum-message-actions button { background: none; border: none; cursor: pointer; opacity: 0.6; font: inherit; font-size: 0.85em; padding: 0; }
   .qu-forum-message-actions button:hover { opacity: 1; }
+  .qu-forum-message-extensions { display: inline-flex; gap: 0.3rem; margin-top: 0.4rem; }
   .qu-forum-reactions { display: flex; gap: 0.3rem; margin-top: 0.4rem; flex-wrap: wrap; }
   .qu-forum-reaction { border: 1px solid var(--qu-color-border, #8884); border-radius: 999px; background: transparent; cursor: pointer; padding: 0.1rem 0.5rem; font-size: 0.9em; }
   .qu-forum-reaction.qu-forum-reaction-mine { background: color-mix(in srgb, var(--qu-color-accent, #5b5bd6) 20%, transparent); border-color: var(--qu-color-accent, #5b5bd6); }
@@ -157,7 +179,7 @@ function formatTs(ts) {
   return new Date(ts).toLocaleString();
 }
 
-export function mount(container, { qu, services, apps, subscribe, syncFetch }) {
+export function mount(container, { qu, services, apps, subscribe, syncFetch, extensionPoints }) {
   ensureTheme();
   injectStyle(STYLE_ID, STYLE);
   let stopped = false;
@@ -326,7 +348,15 @@ export function mount(container, { qu, services, apps, subscribe, syncFetch }) {
     const reactionsRoot = document.createElement('div');
     mountReactions(reactionsRoot, message.id, myPub);
 
-    body.append(head, textWrap, actions, reactionsRoot);
+    const extensionSlot = document.createElement('span');
+    extensionSlot.className = 'qu-forum-message-extensions';
+    if (extensionPoints) {
+      await extensionPoints.renderSlot('content.messageActions', extensionSlot, {
+        services, messageId: message.id, spaceId: SPACE_ID, threadId: THREAD_ID, body: message.body, author: message.author,
+      });
+    }
+
+    body.append(head, textWrap, actions, reactionsRoot, extensionSlot);
     li.appendChild(body);
     return li;
   }

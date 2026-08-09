@@ -12,5 +12,8 @@
   "pushActions": [
     { "id": "newMessage", "label": "New posts", "type": "create" },
     { "id": "mention", "label": "Mentions", "type": "mention" }
+  ],
+  "definesExtensionPoints": [
+    { "point": "content.messageActions", "kind": "ui", "description": "Extra action buttons per forum message - e.g. Bookmarks' toggle. Payload: {services, messageId, spaceId, threadId, body, author}." }
   ]
 }

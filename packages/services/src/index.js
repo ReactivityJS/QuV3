@@ -10,9 +10,11 @@
  * PushSubscriptionService, ProfileService, DirectoryService,
  * actor-format's formatActorLabel/matchesActorQuery, AssetService (the
  * Entity API over `@qu/engines`' AssetEngine - file/image/video/audio
- * attachments), and createTrustedCatalogStore (the signer-filtered
- * `/store/apps/catalog` facade shared by `apps/app-list` and `apps/shell`).
- * See each file's own doc comment.
+ * attachments), BookmarksService (a private per-identity list over forum
+ * messages, the same `FlagService`-wrapper shape as `FavoritesService`),
+ * and createTrustedCatalogStore (the signer-filtered `/store/apps/catalog`
+ * facade shared by `apps/app-list` and `apps/shell`). See each file's own
+ * doc comment.
  */
 export * as paths from './paths.js';
 export { unwrap, unwrapAll } from './unwrap.js';
@@ -21,6 +23,7 @@ export { ListService } from './list-service.js';
 export { getPrivate, putPrivate, getPrivateChildren, createPrivateStore } from './private-storage.js';
 export { FlagService } from './flag-service.js';
 export { FavoritesService } from './favorites-service.js';
+export { BookmarksService } from './bookmarks-service.js';
 export { ContactsService } from './contacts-service.js';
 export { AccessService } from './access-service.js';
 export { isEncryptedEnvelope, resolveReaderXKeys, decryptEnvelope } from './crypto-envelope.js';

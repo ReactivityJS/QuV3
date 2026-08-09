@@ -1197,6 +1197,71 @@ own tests, built bottom-up per the dependency order in
       still reaches the relay's `QU_BLOB_DIR` correctly with `AccessEngine`
       now actually enforcing something there. Full suite green (937 tests),
       `npm run build` clean.
+- [x] **`apps/bookmarks` — a genuine second `contributes` consumer, proving
+      the extension-point mechanism against real production code, not a
+      synthetic test fixture** — the other half of the two-part robustness
+      round above (user: "Ja, beides nacheinander umsetzen" - do both, one
+      after the other). `content.messageActions` is a new
+      `definesExtensionPoints` entry on `apps/forum/manifest.quapp`
+      (`{point, kind:'ui', description}`); `apps/forum/client.js`'s
+      `renderMessage()` now calls `extensionPoints.renderSlot('content.
+      messageActions', slotEl, {services, messageId, spaceId, threadId,
+      body, author})` per message, into a `.qu-forum-message-extensions`
+      span - `services` is passed straight through so a contributor never
+      needs to construct its own Service instances. `apps/bookmarks` is the
+      first (and, deliberately, only) app declaring a `contributes: [{point:
+      'content.messageActions', export: 'renderBookmarkToggle', kind: 'ui',
+      order: 10}]` entry - forum has never imported bookmarks, nor vice
+      versa; the only coupling is the shared point name and payload shape.
+      New `BookmarksService` (`@qu/services`) is a thin `FlagService` wrapper
+      exactly like `FavoritesService`'s own established template
+      (`FLAG_TYPE='bookmark'`, `ENTITY_KIND='forumMessage'`), storing a small
+      self-contained snapshot (`body`, `author`, `spaceId`, `threadId`)
+      alongside the flag - forum messages have no permalink/re-fetch-by-id
+      mechanism yet (a known, separate scope cut), so "My Bookmarks" renders
+      entirely from the stored snapshot, no re-fetch needed.
+      `renderBookmarkToggle()` builds a small inline `{hasPrivate,
+      setPrivate}` adapter around `services.bookmarks` and hands it to the
+      existing `renderFlagToggle()` (`@qu/ui`) - the same
+      duck-typed-adapter pattern `apps/app-list`'s own favorites toggle
+      already established, letting a narrower wrapper Service plug into a
+      shared widget without `renderFlagToggle()` itself needing to know
+      about `BookmarksService`. `apps/bookmarks`'s own `mount()` renders "My
+      Bookmarks": `watchChildren()` over the caller's private-flag parent
+      path, newest-first by `starredAt`, each row showing the stored
+      snapshot with an author link and a ✕ remove button - kept
+      deliberately simple (no pagination, no re-fetch), matching this
+      codebase's "minimal first, no speculative depth" convention.
+      Wired into `apps/shell/src/services.js`'s `createClientServices()`
+      unconditionally, same as every other Service.
+      Real (not synthetic) cross-app test technique: `apps/forum/test/
+      client.test.js` builds a `clientMainUrl` via `new URL('../../
+      bookmarks/client.js', import.meta.url).href` - a real `file://`
+      reference to the actual production `apps/bookmarks/client.js` - and
+      hands it to a real `ExtensionPointHost`, so `renderSlot()` dynamically
+      imports and runs genuine production code end to end, not a test
+      double. Three new tests cover: the real bookmark toggle renders and
+      round-trips per message (click → 📑, persisted, matches the stored
+      snapshot's `body`/`spaceId`/`threadId`); the slot stays empty with no
+      crash when no `extensionPoints`/contributing app is configured; and
+      privacy - a second identity viewing the SAME message via a mirrored
+      thread sees its own, independent, unbookmarked toggle state, proving
+      `FlagService`'s per-identity isolation holds through the extension
+      point too. Plus 4 `bookmarks-service.test.js` unit tests, 8
+      `apps/bookmarks/test/client.test.js` tests (mount rendering/removal/
+      live-add/sort/teardown, toggle behavior), and 1 new `apps/shell/test/
+      services.test.js` wiring test. `packages/relay/test/relay.test.js`'s
+      real-repo-apps-directory boot test updated to expect `bookmarks`
+      alongside the other client-bearing manifests in `/apps.json`.
+      Full suite green (953 tests), `npm run build` bundles `apps/bookmarks`
+      automatically (generic `apps/*` + `manifest.quapp` discovery, no
+      script change needed). Live Playwright verification against a real
+      relay with two independent browser identities: peer A posts a forum
+      message, peer B sees it live; the real `apps/bookmarks` toggle button
+      is dynamically imported and rendered for both; A bookmarks the
+      message (🔖 → 📑) while B's own toggle stays 🔖 (privacy confirmed
+      live, not just in unit tests); A's "My Bookmarks" page shows the
+      snapshot; removing it there resets A's forum toggle back to 🔖 live.
 
 ## Development
 

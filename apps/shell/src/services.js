@@ -1,4 +1,4 @@
-import { ListService, FlagService, ContactsService, FavoritesService, ProfileService, DirectoryService, ActorService, AccessService, MessageService, ReactionService, PinService, AssetService } from '@qu/services';
+import { ListService, FlagService, ContactsService, FavoritesService, ProfileService, DirectoryService, ActorService, AccessService, MessageService, ReactionService, PinService, AssetService, BookmarksService } from '@qu/services';
 import { AssetEngine } from '@qu/engines';
 
 /**
@@ -67,5 +67,11 @@ export function createClientServices(qu, identity, { syncFetch = null, getGenera
     // same "backfill hook built, no caller yet" gap this file's doc comment
     // already describes for syncFetch/getGeneration themselves.
     assets: new AssetService(qu, assetEngine, identity, syncFetch),
+    // apps/bookmarks reads/writes this directly (both as its own "My
+    // Bookmarks" page AND as a content.messageActions contributor rendered
+    // from WITHIN apps/forum - see either's own doc comment) - present here
+    // unconditionally, same as every other Service, regardless of which app
+    // happens to be mounted right now.
+    bookmarks: new BookmarksService(flags),
   };
 }

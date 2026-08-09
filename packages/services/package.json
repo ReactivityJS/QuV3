@@ -29,7 +29,8 @@
     "./directory-service": "./src/directory-service.js",
     "./actor-format": "./src/actor-format.js",
     "./actor-service": "./src/actor-service.js",
-    "./asset-service": "./src/asset-service.js"
+    "./asset-service": "./src/asset-service.js",
+    "./bookmarks-service": "./src/bookmarks-service.js"
   },
   "dependencies": {
     "@qu/core": "^0.1.0",

@@ -5,8 +5,9 @@ import { AccessEngine, ThreadEngine, AssetEngine } from '@qu/engines';
 import { QuIdentityEngine, actorPath } from '@qu/identity';
 import {
   ListService, AccessService, MessageService, ReactionService, PinService,
-  ActorService, ProfileService, AssetService, THREAD_PRESETS, paths,
+  ActorService, ProfileService, AssetService, FlagService, BookmarksService, THREAD_PRESETS, paths,
 } from '@qu/services';
+import { ExtensionPointHost } from '@qu/foundation';
 import { installDom, waitFor } from '@qu/ui/testing';
 
 installDom();
@@ -46,6 +47,7 @@ async function freshEnv(alias) {
     reactions: new ReactionService(qu, identity, list),
     pins: new PinService(qu, identity, list),
     assets: new AssetService(qu, new AssetEngine(qu), identity),
+    bookmarks: new BookmarksService(new FlagService(qu, identity, list)),
   };
   const myPub = await services.actors.whoAmI();
   return { qu, identity, services, myPub };
@@ -86,6 +88,16 @@ async function mirrorAssetInto(fromEnv, intoQu, spaceId, assetId) {
 // mount() call below needs a matching catalog entry.
 const FORUM_SPACE_ID = '4eb04aa2-4ca9-4c9a-aa7e-33ad3802edb1';
 const FORUM_APPS = [{ name: 'forum', spaceId: FORUM_SPACE_ID }];
+
+// The REAL apps/bookmarks/client.js (not a synthetic fake) - proves the
+// content.messageActions contribution end to end against actual production
+// code, the same way `ExtensionPointHost` would dynamically import it from
+// a real apps catalog's `clientMainUrl`.
+const BOOKMARKS_CLIENT_URL = new URL('../../bookmarks/client.js', import.meta.url).href;
+const FORUM_APPS_WITH_BOOKMARKS = [
+  { name: 'forum', spaceId: FORUM_SPACE_ID },
+  { name: 'bookmarks', clientMainUrl: BOOKMARKS_CLIENT_URL, contributes: [{ point: 'content.messageActions', export: 'renderBookmarkToggle' }] },
+];
 
 function noopSubscribe() {}
 
@@ -266,6 +278,71 @@ test('reaction toggle: clicking an emoji sets it, clicking the same one again cl
   } finally {
     stopA();
     stopB();
+  }
+});
+
+test('content.messageActions: the REAL apps/bookmarks app (not a fake) is dynamically imported and rendered per message via ExtensionPointHost.renderSlot()', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'bookmark me' });
+
+  const container = makeContainer();
+  const extensionPoints = new ExtensionPointHost(FORUM_APPS_WITH_BOOKMARKS);
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS_WITH_BOOKMARKS, subscribe: noopSubscribe, extensionPoints });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-message-extensions button') !== null);
+    const btn = container.querySelector('.qu-forum-message-extensions button');
+    await waitFor(() => btn.textContent === '🔖'); // resolved inactive state (apps/bookmarks' own hasPrivate() check)
+
+    btn.click();
+    await waitFor(() => btn.textContent === '📑');
+    assert.equal(await a.services.bookmarks.isBookmarked((await a.services.messages.listMessages(FORUM_SPACE_ID, 'general')).messages[0].id), true);
+
+    const [entry] = await a.services.bookmarks.list();
+    assert.equal(entry.body, 'bookmark me');
+    assert.equal(entry.spaceId, FORUM_SPACE_ID);
+    assert.equal(entry.threadId, 'general');
+  } finally {
+    stop();
+  }
+});
+
+test('content.messageActions: without extensionPoints/a contributing app, the slot stays empty - no crash', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'no bookmarks app loaded' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe }); // no extensionPoints at all
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-message') !== null);
+    assert.equal(container.querySelector('.qu-forum-message-extensions').children.length, 0);
+  } finally {
+    stop();
+  }
+});
+
+test('content.messageActions: a bookmark is private - a SECOND identity viewing the same message sees its own (unbookmarked) toggle state', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'shared message' });
+  const { messages } = await a.services.messages.listMessages(FORUM_SPACE_ID, 'general');
+  await a.services.bookmarks.add(messages[0].id, { body: 'shared message' }); // Ada bookmarks it
+
+  const b = await freshEnv('Bob');
+  await mirrorThreadInto(a, b.qu, FORUM_SPACE_ID, 'general');
+
+  const container = makeContainer();
+  const extensionPoints = new ExtensionPointHost(FORUM_APPS_WITH_BOOKMARKS);
+  const stop = mount(container, { qu: b.qu, services: b.services, apps: FORUM_APPS_WITH_BOOKMARKS, subscribe: noopSubscribe, extensionPoints });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-message-extensions button') !== null);
+    const btn = container.querySelector('.qu-forum-message-extensions button');
+    // Give the async hasPrivate() resolution a moment, then confirm it settles UNBOOKMARKED for Bob.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(btn.textContent, '🔖'); // Bob's own, independent, still-inactive state
+  } finally {
+    stop();
   }
 });
 

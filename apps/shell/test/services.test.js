@@ -32,3 +32,9 @@ test('createClientServices() returns exactly one AssetEngine registration - no a
   await services.assets.upload('gallery', 'photo1', { name: 'x.txt', mime: 'text/plain', data: new TextEncoder().encode('short') });
   assert.equal(putCalls, 1); // exactly one chunk written once, not twice by a duplicate engine registration
 });
+
+test('createClientServices() wires a real, functional BookmarksService', async () => {
+  const { services } = await freshServices();
+  await services.bookmarks.add('msg1', { body: 'hi' });
+  assert.equal(await services.bookmarks.isBookmarked('msg1'), true);
+});

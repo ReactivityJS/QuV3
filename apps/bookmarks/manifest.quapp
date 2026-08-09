@@ -1,0 +1,14 @@
+{
+  "name": "bookmarks",
+  "version": "1.0.0",
+  "kind": "app",
+  "main": "./index.js",
+  "clientMain": "./dist/client.js",
+  "label": "Bookmarks",
+  "icon": "🔖",
+  "navOrder": 11,
+  "requires": [],
+  "contributes": [
+    { "point": "content.messageActions", "export": "renderBookmarkToggle", "kind": "ui", "order": 10 }
+  ]
+}
