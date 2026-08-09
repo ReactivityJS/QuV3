@@ -18,6 +18,161 @@ Read these first, in order:
    API refinement (the `getChildren()` adapter contract), a cross-package
    dependency audit, and a positioning against GunDB/Drupal/ProcessWire.
 
+Building something on top of Quniverse? Start here instead:
+
+3. [`docs/building-an-app.md`](./docs/building-an-app.md) — a practical,
+   self-contained guide to writing a new app: the `manifest.quapp`/`index.js`/
+   `client.js` shape, the `mount()` context contract, subpages, appearing in
+   the nav automatically, hooking into extension points (defining your own
+   and contributing to someone else's - the real `apps/forum`/`apps/bookmarks`
+   pair, worked through end to end) and into notifications (`pushActions`),
+   plus the full Services catalog every app gets handed.
+4. [`docs/api-reference.md`](./docs/api-reference.md) — the complete API
+   reference: every `@qu/core`/`@qu/services`/`@qu/ui`/`@qu/foundation`/
+   `@qu/reactive`/`@qu/i18n` export, including theming, styling, and the
+   template system `apps/profile` uses as its own worked example.
+
+(The detailed per-round build log has moved to the bottom of this file, under
+[Status](#status) - skip it unless you want the "why" behind a specific
+piece; it's not needed to build an app.)
+
+## Development
+
+```sh
+npm install
+npm test   # node --test (recursive auto-discovery of packages/*/test/*.test.js)
+```
+
+## Running Quniverse (Relay + Docker)
+
+**What "Quniverse" means today**: the `@qu/relay` server (`QuRelay`) plus whatever
+apps it loads — the three client apps built on `<qu-list>` (`apps/app-list`/
+`user-list`/`contact-list`), `apps/profile` (editable own profile, directory
+visibility, `#/~<pub>`), and `apps/forum` (a real public message board - post,
+react, pin, edit, all live), all reachable through **`apps/shell`**, the real
+browser entry point served at `/` (see the status entry above for the full
+account: onboarding, live sync, nav, per-route mounting). Opening a
+browser tab and actually clicking around a live Quniverse UI is real and testable
+today, not a deferred gap anymore.
+
+- **Testable today**: everything above, end to end — the relay's whole HTTP surface
+  (`/healthz`, `/apps.json`, `/config.json`, `/store/apps/catalog/*`, `/admin/*`,
+  static app/shell serving), every package's own test suite (`npm test`), each of the
+  three client apps' `mount()` functions in isolation (jsdom, real `@qu/services`
+  instances, not mocks), `apps/shell` itself in isolation (jsdom, same rigor), AND a
+  real multi-browser session against a real relay (see the status entry above's
+  Playwright-verified account, including live cross-client sync between two real
+  identities).
+- **Still deliberately not built** (see the status entry above for the full list):
+  PWA/offline support, QR-code identity import, `apps/profile` (so `#/~<pub>` shows a
+  graceful placeholder rather than a real profile page), a Space switcher,
+  `apps/relay-admin`.
+
+### Build
+
+```sh
+npm install
+npm run build   # bundles every app with a clientMain (esbuild) into apps/<name>/dist/client.js
+```
+
+`npm run build` is required before the relay can actually serve a working app bundle —
+`dist/` is gitignored build output, and `@qu/relay`'s static file serving
+(`packages/relay/src/static-apps.js`) just serves whatever bytes are on disk, it
+doesn't bundle anything itself.
+
+### Config
+
+Three layers, each overriding the one before (`packages/relay/src/server.js`):
+
+1. `QuRelay`'s own defaults.
+2. `relay.config.json` in the working directory, if present — copy
+   `relay.config.example.json` to get started.
+3. Environment variables (`QU_*`, see below) — the layer a container orchestrator
+   (docker-compose, Kubernetes, …) actually sets, so a deployment never needs to bake
+   or bind-mount a config file just to change a port or data directory.
+
+| Env var | Maps to | Notes |
+|---|---|---|
+| `QU_PORT` | `port` | default `8080` |
+| `QU_STORE_DIR` | `storeDir` | default `./relay-data/store` |
+| `QU_BLOB_DIR` | `blobDir` | default `./relay-data/blob` |
+| `QU_APPS_DIR` | `appsDir` | default `./apps` |
+| `QU_SERVE_SHELL` | `serveShell` | default `true` — serves `apps/shell` at `/`, `/index.html`, `/shell-bundle.js`; `"0"`/`"false"`/`"no"` disables it |
+| `QU_SHELL_DIR` | `shellDir` | default `./apps/shell` |
+| `QU_IDENTITY_MNEMONIC` | `identityMnemonic` | pins the relay's own signing identity across restarts; omit to generate-and-persist one on first boot |
+| `QU_ADMIN_PUBS` | `adminPubs` | comma-separated base64url actor pubkeys allowed to use `/admin/*` (settings, data import/export) |
+| `QU_VAPID_PUBLIC_KEY` / `QU_VAPID_PRIVATE_KEY` / `QU_VAPID_SUBJECT` | `vapidPublicKey`/`vapidPrivateKey`/`vapidSubject` | Web Push (`@qu/push`); omit the keys to generate-and-persist a pair on first boot |
+| `QU_REMOTE_APPS_JSON` | `remoteApps` | JSON array, same shape as `relay.config.json`'s `remoteApps` field |
+| `QU_LOG_LEVEL` | *(not a `QuRelayOptions` field)* | `debug`/`info`(default)/`warn`/`error` — controls every `@qu/log` logger process-wide (see `packages/log`), read directly by `@qu/log` itself rather than through the config-layering table above |
+
+**Getting your own actor pubkey**, to put in `QU_ADMIN_PUBS` (there's no `apps/relay-admin`
+UI in V3 yet either — this is the Node equivalent for now):
+
+```sh
+node -e "
+import('@qu/core').then(async ({ QuStore, MemoryStoreAdapter, QuCrypto }) => {
+  const { QuIdentityEngine } = await import('@qu/identity');
+  const qu = new QuStore();
+  qu.mount('store', new MemoryStoreAdapter());
+  const identity = new QuIdentityEngine(qu);
+  const mnemonic = identity.generateMnemonic();
+  await identity.importMnemonic(mnemonic);
+  const { publicKey } = await identity.getMainKey();
+  console.log('mnemonic (save this - it is the only way back to this identity):', mnemonic);
+  console.log('pubkey (base64url, safe to share/put in QU_ADMIN_PUBS):', QuCrypto.toBase64Url(publicKey));
+});
+"
+```
+
+**Generated keys appear once in the logs.** If you don't pin `QU_IDENTITY_MNEMONIC`
+and/or `QU_VAPID_PUBLIC_KEY`/`QU_VAPID_PRIVATE_KEY`, the relay generates fresh ones on
+first boot and persists them under `QU_STORE_DIR` — that's enough for a single,
+persistent deployment, nothing further to do. But on that exact first boot, `relay.js`
+also logs them once, already formatted as ready-to-paste `QU_*="..."` lines (via
+`@qu/log`, at `warn` level so they show even at the default log level) — pin them from
+there into your environment if you want an explicit backup, or if you're running
+multiple relay replicas without a shared volume (each would otherwise generate its own,
+independent identity). A restart that just reuses an already-persisted or explicitly
+pinned identity/keys stays silent — this only ever fires on the boot that actually
+generated something. Treat your log stream accordingly until you've either pinned these
+or decided the volume-only persistence is enough — a mnemonic is as sensitive as any
+other seed phrase.
+
+### Start — plain Node
+
+```sh
+npm run relay          # node packages/relay/src/server.js, uses relay.config.json + QU_* env if present
+```
+
+### Start — Docker
+
+```sh
+docker compose up --build
+```
+
+Uses the repo's `Dockerfile` (multi-stage: builds + `npm run build`s in a `builder`
+stage, ships only production deps + built output in the `runtime` stage) and
+`docker-compose.yml`. Config is env-var only in the container (see the table above) —
+`docker-compose.yml` sets `QU_STORE_DIR`/`QU_BLOB_DIR` under `/data`, backed by a named
+volume (`quniverse-data`), so identity/store/blob/VAPID keys all survive a
+`docker compose down && docker compose up`. Set `QU_ADMIN_PUBS` there to your own
+pubkey from above to unlock `/admin/*`. To iterate on apps without rebuilding the
+image, uncomment the `./apps:/app/apps` bind mount in `docker-compose.yml` — but
+`npm run build` still needs to have run on the *host* first, the container doesn't
+build bundles itself.
+
+### Verify it's alive
+
+```sh
+curl http://localhost:8080/healthz      # {"status":"ok","peerId":"relay-..."}
+curl http://localhost:8080/config.json  # relayPub, adminPubs, relay-wide settings
+curl http://localhost:8080/apps.json    # every loaded app with a clientMain
+```
+
+Or just open `http://localhost:8080/` in a browser — that's `apps/shell` itself now, not
+a stub.
+
+
 ## Status
 
 Under active, incremental construction — one package at a time, each with its
@@ -1461,139 +1616,60 @@ own tests, built bottom-up per the dependency order in
       - the code path itself is proven correct up to exactly the boundary
       `@qu/push`'s own doc comment already honestly documents ("has NOT
       been verified end-to-end against a real push service").
+- [x] Docs: `docs/building-an-app.md` + `docs/api-reference.md` - the
+      "work correctly from a fresh repo checkout, not from AI chat context"
+      pass. Every previous round's README entry above is a *build log*
+      (chronological, "why", written for someone who already knows the
+      codebase); neither of these two new files is - both are written
+      assuming nothing from prior context, and every code excerpt in either
+      is either quoted verbatim from real, current source (spot-checked
+      against it after writing, not just at draft time) or explicitly
+      labeled "simplified from the real X."
+      **`docs/building-an-app.md`**: the two-file `manifest.quapp`/`index.js`/
+      `client.js` shape; the full manifest field reference (including
+      `spaceId` - why it's a hardcoded UUID generated once, never derived
+      from `name`, with `apps/forum`'s own original `'forum'`-as-spaceId
+      near-miss as the concrete reason); the `mount(container, ctx)` contract
+      field by field (`qu`/`identity`/`services`/`apps`/`segments`/`subscribe`/
+      `syncFetch`/`extensionPoints`); subpages via `segments[1..]`; why nothing
+      needs registering for nav appearance; both extension-point mechanisms
+      (`actions`/`actionsForSlot` for pure-data link slots vs.
+      `contributes`/`definesExtensionPoints`/`ExtensionPointHost` for live
+      code) walked through end to end on the real `apps/forum`
+      (defines `content.messageActions`) / `apps/bookmarks` (contributes to
+      it) pair, quoted directly from current source rather than reconstructed
+      pseudocode; notification hooks (`pushActions`, the manifest-driven
+      resolver, `MessageService.notify()`); building; and testing, including
+      the two real bugs this session found and fixed in its OWN test code
+      (`waitFor()` never awaiting an async predicate; the overlapping-render
+      race needing a monotonic `renderToken` guard) written up as documented
+      gotchas so the next app author doesn't re-discover them the hard way.
+      **`docs/api-reference.md`**: the complete method-by-method surface of
+      `@qu/core`/`@qu/identity`/`@qu/reactive`/`@qu/foundation`/`@qu/services`
+      (every Service class, all of `paths`)/`@qu/ui`/`@qu/i18n`, plus three
+      sections the two-file guide only points at: **Theming** (`ensureTheme()`/
+      `THEME_PRESETS`/`getStoredTheme()`/`setStoredTheme()`, and why the CSS
+      fallback value is always QuV2's own original literal - an app that
+      never calls `ensureTheme()` renders identically to before, the system
+      is a convenience, never a requirement); **Styling** (the `STYLE_ID`
+      + `injectStyle()` convention every app follows, and why the
+      `qu-<app>-` class prefix *is* the isolation mechanism in a codebase
+      with no CSS scoping); and **Templating** - `apps/profile`'s own
+      `template`/`style`/`applyTemplateStyle()` pattern (a fixed set of CSS
+      classes for layout + reusing `THEME_PRESETS` scoped to one element via
+      inline `style.setProperty()`, not a second palette system) written up
+      as a named, reusable convention with a "wiring it into your own app"
+      variant, not just described in place.
+      **README** restructured alongside these: the entire chronological
+      [Status](#status) log (this section) moved from right after the intro
+      to the very bottom of the file, and replaced up top with two new
+      "start here instead" links directly to the two new docs - so a reader
+      building an app never has to scroll past ~1600 lines of build history
+      to find the one page that's actually about building an app.
+      Verified: full suite still green (983 tests) after the restructure;
+      every quoted code excerpt in both new docs re-checked line-by-line
+      against its real source file after writing, not just recalled from
+      memory - one drift caught and fixed this way (`apps/bookmarks/client.js`'s
+      real `renderBookmarkToggle()` uses a `snapshot` local + `t(...)`-sourced
+      button titles; the first draft had simplified both away).
 
-## Development
-
-```sh
-npm install
-npm test   # node --test (recursive auto-discovery of packages/*/test/*.test.js)
-```
-
-## Running Quniverse (Relay + Docker)
-
-**What "Quniverse" means today**: the `@qu/relay` server (`QuRelay`) plus whatever
-apps it loads — the three client apps built on `<qu-list>` (`apps/app-list`/
-`user-list`/`contact-list`), `apps/profile` (editable own profile, directory
-visibility, `#/~<pub>`), and `apps/forum` (a real public message board - post,
-react, pin, edit, all live), all reachable through **`apps/shell`**, the real
-browser entry point served at `/` (see the status entry above for the full
-account: onboarding, live sync, nav, per-route mounting). Opening a
-browser tab and actually clicking around a live Quniverse UI is real and testable
-today, not a deferred gap anymore.
-
-- **Testable today**: everything above, end to end — the relay's whole HTTP surface
-  (`/healthz`, `/apps.json`, `/config.json`, `/store/apps/catalog/*`, `/admin/*`,
-  static app/shell serving), every package's own test suite (`npm test`), each of the
-  three client apps' `mount()` functions in isolation (jsdom, real `@qu/services`
-  instances, not mocks), `apps/shell` itself in isolation (jsdom, same rigor), AND a
-  real multi-browser session against a real relay (see the status entry above's
-  Playwright-verified account, including live cross-client sync between two real
-  identities).
-- **Still deliberately not built** (see the status entry above for the full list):
-  PWA/offline support, QR-code identity import, `apps/profile` (so `#/~<pub>` shows a
-  graceful placeholder rather than a real profile page), a Space switcher,
-  `apps/relay-admin`.
-
-### Build
-
-```sh
-npm install
-npm run build   # bundles every app with a clientMain (esbuild) into apps/<name>/dist/client.js
-```
-
-`npm run build` is required before the relay can actually serve a working app bundle —
-`dist/` is gitignored build output, and `@qu/relay`'s static file serving
-(`packages/relay/src/static-apps.js`) just serves whatever bytes are on disk, it
-doesn't bundle anything itself.
-
-### Config
-
-Three layers, each overriding the one before (`packages/relay/src/server.js`):
-
-1. `QuRelay`'s own defaults.
-2. `relay.config.json` in the working directory, if present — copy
-   `relay.config.example.json` to get started.
-3. Environment variables (`QU_*`, see below) — the layer a container orchestrator
-   (docker-compose, Kubernetes, …) actually sets, so a deployment never needs to bake
-   or bind-mount a config file just to change a port or data directory.
-
-| Env var | Maps to | Notes |
-|---|---|---|
-| `QU_PORT` | `port` | default `8080` |
-| `QU_STORE_DIR` | `storeDir` | default `./relay-data/store` |
-| `QU_BLOB_DIR` | `blobDir` | default `./relay-data/blob` |
-| `QU_APPS_DIR` | `appsDir` | default `./apps` |
-| `QU_SERVE_SHELL` | `serveShell` | default `true` — serves `apps/shell` at `/`, `/index.html`, `/shell-bundle.js`; `"0"`/`"false"`/`"no"` disables it |
-| `QU_SHELL_DIR` | `shellDir` | default `./apps/shell` |
-| `QU_IDENTITY_MNEMONIC` | `identityMnemonic` | pins the relay's own signing identity across restarts; omit to generate-and-persist one on first boot |
-| `QU_ADMIN_PUBS` | `adminPubs` | comma-separated base64url actor pubkeys allowed to use `/admin/*` (settings, data import/export) |
-| `QU_VAPID_PUBLIC_KEY` / `QU_VAPID_PRIVATE_KEY` / `QU_VAPID_SUBJECT` | `vapidPublicKey`/`vapidPrivateKey`/`vapidSubject` | Web Push (`@qu/push`); omit the keys to generate-and-persist a pair on first boot |
-| `QU_REMOTE_APPS_JSON` | `remoteApps` | JSON array, same shape as `relay.config.json`'s `remoteApps` field |
-| `QU_LOG_LEVEL` | *(not a `QuRelayOptions` field)* | `debug`/`info`(default)/`warn`/`error` — controls every `@qu/log` logger process-wide (see `packages/log`), read directly by `@qu/log` itself rather than through the config-layering table above |
-
-**Getting your own actor pubkey**, to put in `QU_ADMIN_PUBS` (there's no `apps/relay-admin`
-UI in V3 yet either — this is the Node equivalent for now):
-
-```sh
-node -e "
-import('@qu/core').then(async ({ QuStore, MemoryStoreAdapter, QuCrypto }) => {
-  const { QuIdentityEngine } = await import('@qu/identity');
-  const qu = new QuStore();
-  qu.mount('store', new MemoryStoreAdapter());
-  const identity = new QuIdentityEngine(qu);
-  const mnemonic = identity.generateMnemonic();
-  await identity.importMnemonic(mnemonic);
-  const { publicKey } = await identity.getMainKey();
-  console.log('mnemonic (save this - it is the only way back to this identity):', mnemonic);
-  console.log('pubkey (base64url, safe to share/put in QU_ADMIN_PUBS):', QuCrypto.toBase64Url(publicKey));
-});
-"
-```
-
-**Generated keys appear once in the logs.** If you don't pin `QU_IDENTITY_MNEMONIC`
-and/or `QU_VAPID_PUBLIC_KEY`/`QU_VAPID_PRIVATE_KEY`, the relay generates fresh ones on
-first boot and persists them under `QU_STORE_DIR` — that's enough for a single,
-persistent deployment, nothing further to do. But on that exact first boot, `relay.js`
-also logs them once, already formatted as ready-to-paste `QU_*="..."` lines (via
-`@qu/log`, at `warn` level so they show even at the default log level) — pin them from
-there into your environment if you want an explicit backup, or if you're running
-multiple relay replicas without a shared volume (each would otherwise generate its own,
-independent identity). A restart that just reuses an already-persisted or explicitly
-pinned identity/keys stays silent — this only ever fires on the boot that actually
-generated something. Treat your log stream accordingly until you've either pinned these
-or decided the volume-only persistence is enough — a mnemonic is as sensitive as any
-other seed phrase.
-
-### Start — plain Node
-
-```sh
-npm run relay          # node packages/relay/src/server.js, uses relay.config.json + QU_* env if present
-```
-
-### Start — Docker
-
-```sh
-docker compose up --build
-```
-
-Uses the repo's `Dockerfile` (multi-stage: builds + `npm run build`s in a `builder`
-stage, ships only production deps + built output in the `runtime` stage) and
-`docker-compose.yml`. Config is env-var only in the container (see the table above) —
-`docker-compose.yml` sets `QU_STORE_DIR`/`QU_BLOB_DIR` under `/data`, backed by a named
-volume (`quniverse-data`), so identity/store/blob/VAPID keys all survive a
-`docker compose down && docker compose up`. Set `QU_ADMIN_PUBS` there to your own
-pubkey from above to unlock `/admin/*`. To iterate on apps without rebuilding the
-image, uncomment the `./apps:/app/apps` bind mount in `docker-compose.yml` — but
-`npm run build` still needs to have run on the *host* first, the container doesn't
-build bundles itself.
-
-### Verify it's alive
-
-```sh
-curl http://localhost:8080/healthz      # {"status":"ok","peerId":"relay-..."}
-curl http://localhost:8080/config.json  # relayPub, adminPubs, relay-wide settings
-curl http://localhost:8080/apps.json    # every loaded app with a clientMain
-```
-
-Or just open `http://localhost:8080/` in a browser — that's `apps/shell` itself now, not
-a stub.
