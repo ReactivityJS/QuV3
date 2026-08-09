@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { ExtensionPointHost, listDefinedPoints } from '../src/extension-points.js';
-import { HookBus } from '../src/hooks.js';
+import { QuEvents } from '@qu/core';
 
 // renderSlot() calls document.createElement - a minimal DOM is enough here,
 // unlike @qu/ui's own installDom() this doesn't need HTMLElement/
@@ -84,45 +84,41 @@ test('collect(): a throwing contributor is skipped, others still contribute', as
   assert.deepEqual(items, [{ id: 'like', label: 'Like msg1', appId: 'likes' }]);
 });
 
-test('run(): manifest-declared contributors are lazily registered onto the underlying HookBus and run with its sequential+patching semantics', async () => {
+test('renderSlot(): calling the same point twice does not double-register contributors (no duplicate DOM per call)', async () => {
   const host = new ExtensionPointHost(apps(
-    { name: 'likes', clientMainUrl: PLUGIN_A_URL, contributes: [{ point: 'thread.beforePostMessage', export: 'onBeforeSave', order: 0 }] },
-    { name: 'bookmarks', clientMainUrl: PLUGIN_B_URL, contributes: [{ point: 'thread.beforePostMessage', export: 'onBeforeSave', order: 1 }] },
+    { name: 'likes', clientMainUrl: PLUGIN_A_URL, contributes: [{ point: 'content.actions', export: 'renderLike' }] },
   ));
-  const result = await host.run('thread.beforePostMessage', { body: 'hi', order: [] });
+  const containerFirst = document.createElement('div');
+  await host.renderSlot('content.actions', containerFirst, { id: 'msg1' });
+  const containerSecond = document.createElement('div');
+  await host.renderSlot('content.actions', containerSecond, { id: 'msg2' });
 
-  assert.equal(result.seenByA, true);
-  assert.equal(result.seenByB, true);
-  assert.deepEqual(result.order, ['a', 'b']); // order 0 (likes) ran before order 1 (bookmarks)
-  assert.equal(result.body, 'hi'); // untouched fields survive the merge
+  assert.equal(containerFirst.children.length, 1);
+  assert.equal(containerSecond.children.length, 1);
+  assert.equal(containerSecond.querySelector('button').textContent, 'like:msg2');
 });
 
-test('run(): a point with no contributors returns the payload unchanged', async () => {
-  const host = new ExtensionPointHost(apps());
-  const result = await host.run('nothing.registered', { a: 1 });
-  assert.deepEqual(result, { a: 1 });
+test('a local host.events.on() handler runs alongside manifest-declared contributors for the same point - same shape as Core\'s QuEvents', async () => {
+  const host = new ExtensionPointHost(apps(
+    { name: 'likes', clientMainUrl: PLUGIN_A_URL, contributes: [{ point: 'content.actions', export: 'renderLike', order: 5 }] },
+  ));
+  host.events.on('content.actions', ({ container }) => {
+    const span = document.createElement('span');
+    span.textContent = 'local-addition';
+    container.appendChild(span);
+  }, { order: 0 });
+
+  const container = document.createElement('div');
+  await host.renderSlot('content.actions', container, { id: 'msg1' });
+
+  assert.equal(container.children.length, 2);
+  assert.equal(container.children[0].textContent, 'local-addition'); // order 0 before the contributor's order 5
 });
 
-test('notify(): manifest-declared contributors run as side effects; calling twice runs them exactly twice (no duplicate registration)', async () => {
-  globalThis.__pluginASideEffects = 0;
-  const host = new ExtensionPointHost(apps(
-    { name: 'likes', clientMainUrl: PLUGIN_A_URL, contributes: [{ point: 'notification.dispatch', export: 'sideEffect' }] },
-  ));
-  await host.notify('notification.dispatch', {});
-  await host.notify('notification.dispatch', {});
-  assert.equal(globalThis.__pluginASideEffects, 2);
-});
-
-test('a local host.hooks.on() handler runs alongside manifest-declared contributors for the same point', async () => {
-  const host = new ExtensionPointHost(apps(
-    { name: 'likes', clientMainUrl: PLUGIN_A_URL, contributes: [{ point: 'thread.beforePostMessage', export: 'onBeforeSave', order: 5 }] },
-  ));
-  host.hooks.on('thread.beforePostMessage', (payload) => ({ seenLocally: true, order: [...(payload.order ?? []), 'local'] }), { order: 0 });
-
-  const result = await host.run('thread.beforePostMessage', { order: [] });
-  assert.equal(result.seenLocally, true);
-  assert.equal(result.seenByA, true);
-  assert.deepEqual(result.order, ['local', 'a']);
+test('a caller-supplied shared QuEvents instance is used instead of a private one', () => {
+  const shared = new QuEvents();
+  const host = new ExtensionPointHost(apps(), { events: shared });
+  assert.equal(host.events, shared);
 });
 
 test('listDefinedPoints(): discovers every declared point across the catalog, tagged with who defined it', () => {
@@ -141,14 +137,4 @@ test('listDefinedPoints(): discovers every declared point across the catalog, ta
 test('listDefinedPoints(): an empty/omitted catalog yields an empty list', () => {
   assert.deepEqual(listDefinedPoints(undefined), []);
   assert.deepEqual(listDefinedPoints([]), []);
-});
-
-test('a caller-supplied shared HookBus is used instead of a private one', async () => {
-  const shared = new HookBus();
-  shared.on('x', () => ({ fromShared: true }));
-  const host = new ExtensionPointHost(apps(), { hooks: shared });
-  assert.equal(host.hooks, shared);
-
-  const result = await host.run('x', {});
-  assert.equal(result.fromShared, true);
 });

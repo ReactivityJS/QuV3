@@ -8,7 +8,3 @@ export function renderBookmark(container, payload) {
 export function getMenuItems(payload) {
   return [{ id: 'bookmark', label: `Bookmark ${payload.id}` }];
 }
-
-export async function onBeforeSave(payload) {
-  return { seenByB: true, order: [...(payload.order ?? []), 'b'] };
-}

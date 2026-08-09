@@ -15,6 +15,7 @@
     "./extension-points": "./src/extension-points.js"
   },
   "dependencies": {
+    "@qu/core": "^0.1.0",
     "@qu/log": "^0.1.0"
   },
   "devDependencies": {

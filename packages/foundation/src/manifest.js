@@ -115,24 +115,27 @@ export const CONTRIBUTION_KINDS = Object.freeze(['ui', 'hook', 'menu']);
  *   lower first (defaults to 0). An app with nothing to contribute to any
  *   slot simply omits this field.
  *
- * @property {Array<{point: string, export: string, kind?: 'ui'|'hook'|'menu', order?: number}>} [contributes] -
- *   UNIVERSAL, Drupal-hooks-inspired extension points THIS app contributes
- *   code to, resolved by `@qu/foundation`'s `ExtensionPointHost` (see
- *   extension-points.js's own doc comment for the runtime mechanism). Unlike
- *   `actions` above (pure DATA - a label/href template, because a slot
- *   consumer never runs the contributing app's code), a `contributes` entry
- *   names a real, LIVE function: `export` is the name of a function this
- *   app's OWN `clientMain` module exports (alongside `mount`), and
- *   `ExtensionPointHost` dynamically `import()`s that already-integrity/
- *   signature-pinned module URL (the SAME one the shell would import to
- *   mount this app - no new trust surface) and calls the named export - this
- *   is what makes cross-app UI plugins possible at all despite only ONE
- *   app's `clientMain` ever being mounted in-place at a time (see actions.js's
- *   doc comment on that constraint - `contributes` is the mechanism that
- *   actually crosses it, `actions` deliberately doesn't try to). `point` is a
- *   dot-namespaced id a HOST app defines and reads contributors for (e.g.
- *   `"content.messageActions"`, `"thread.beforePostMessage"`,
- *   `"contextMenu.forumMessage"`) - three usage shapes share this one
+ * @property {Array<{point: string, export: string, kind?: 'ui'|'menu', order?: number}>} [contributes] -
+ *   Drupal-hooks-inspired extension points THIS app contributes CODE to,
+ *   resolved by `@qu/foundation`'s `ExtensionPointHost` (see
+ *   extension-points.js's own doc comment for the runtime mechanism and for
+ *   why a THIRD, storage-triggered "hook" kind deliberately does NOT belong
+ *   here - `qu.onStorageChange()`/`watch()`/`watchChildren()`, Qu Core's own
+ *   already-existing listener mechanism, cover that case directly, with no
+ *   `contributes` entry needed at all). Unlike `actions` above (pure DATA - a
+ *   label/href template, because a slot consumer never runs the contributing
+ *   app's code), a `contributes` entry names a real, LIVE function: `export`
+ *   is the name of a function this app's OWN `clientMain` module exports
+ *   (alongside `mount`), and `ExtensionPointHost` dynamically `import()`s
+ *   that already-integrity/signature-pinned module URL (the SAME one the
+ *   shell would import to mount this app - no new trust surface) and calls
+ *   the named export - this is what makes cross-app UI plugins possible at
+ *   all despite only ONE app's `clientMain` ever being mounted in-place at a
+ *   time (see actions.js's doc comment on that constraint - `contributes` is
+ *   the mechanism that actually crosses it, `actions` deliberately doesn't
+ *   try to). `point` is a dot-namespaced id a HOST app defines and reads
+ *   contributors for (e.g. `"content.messageActions"`,
+ *   `"contextMenu.forumMessage"`) - two usage shapes share this one
  *   mechanism, distinguished purely by which `ExtensionPointHost` method the
  *   host calls for its own point id (`kind` below is an optional, purely
  *   descriptive label for tooling - never enforced, exactly like
@@ -140,16 +143,10 @@ export const CONTRIBUTION_KINDS = Object.freeze(['ui', 'hook', 'menu']);
  *     - UI slot / content plugin (`kind: 'ui'`, `ExtensionPointHost.
  *       renderSlot(point, container, payload)`): `export`'s function is
  *       `(container, payload) -> void|Promise<void>`, expected to mount its
- *       own DOM into `container` - e.g. a future Likes app contributing a
- *       render function to a `"content.messageActions"` point Forum defines,
- *       so a Like button appears next to Forum's own reactions without
- *       Forum ever importing Likes.
- *     - Callback hook (`kind: 'hook'`, `ExtensionPointHost.run()`/`notify()`)
- *       - identical semantics to `HookBus.run()`/`.notify()` (see hooks.js -
- *       `run` sequential+payload-patching, `notify` parallel+side-effect-only)
- *       - `ExtensionPointHost` lazily registers every manifest-declared
- *       contributor onto its own internal `HookBus` the first time a given
- *       `point` is actually asked for, so nothing loads until needed.
+ *       own DOM into `container` - e.g. a future Likes/Bookmarks/Share app
+ *       contributing a render function to a `"content.messageActions"` point
+ *       Forum defines, so those buttons appear next to Forum's own reactions
+ *       without Forum ever importing Likes/Bookmarks/Share.
  *     - Context menu extension (`kind: 'menu'`, `ExtensionPointHost.
  *       collect(point, payload)`): `export`'s function is `(payload) ->
  *       Array<{id, label, icon?, onClick}> | Promise<...>`, results from every
@@ -167,26 +164,30 @@ export const CONTRIBUTION_KINDS = Object.freeze(['ui', 'hook', 'menu']);
  *   `actions`: additive, never enforced, a package with nothing to declare
  *   simply omits it), letting anyone reading the manifest catalog discover
  *   every extension point the system currently has WITHOUT grepping source
- *   for every `renderSlot()`/`run()`/`notify()`/`collect()` call site.
+ *   for every `renderSlot()`/`collect()`/`qu.onStorageChange()` call site.
  *   Available to ANY manifest `kind` (`engine`/`service`/`app`), not just
- *   apps - a server-side Engine/Service can equally define a point (e.g.
- *   ThreadEngine defining `"thread.beforePostMessage"`) even though ITS
- *   actual contributors register a real handler a different way: via
- *   `Registry.hooks` directly in their own `register(qu, manifest, registry)`
- *   (see registry.js's doc comment) rather than `ExtensionPointHost`, since
- *   server-side Engines/Services are already all loaded together in one
- *   process - there's no "only one mounted at a time" boundary to cross the
- *   way client apps have, so no dynamic-import mechanism is needed there,
- *   just a plain, already-existing `HookBus`. Client-side apps, meanwhile,
- *   both DEFINE (`definesExtensionPoints`, descriptive) and are read FOR
- *   contributions (`contributes` on ANOTHER app, executable via
- *   `ExtensionPointHost`) - e.g. Forum's own manifest would declare
- *   `{point: "content.messageActions", kind: "ui", description: "extra
- *   action buttons per forum message"}`, and a future Likes app's manifest
- *   declares `{point: "content.messageActions", export: "renderLikeButton"}`
- *   under ITS `contributes` - Forum never imports Likes, Likes never imports
- *   Forum, both merely agree on the same `point` string, discoverable by
- *   anyone reading the catalog.
+ *   apps. `kind` here allows a THIRD value `'hook'`, deliberately absent from
+ *   `contributes` above: a `'hook'` point is one that fires via Qu Core's OWN
+ *   `qu.onStorageChange()` (typically filtered to one path prefix, exactly
+ *   like `watch()`/`watchChildren()`/`@qu/sync` already do) - e.g. ThreadEngine
+ *   declaring `{point: "thread.messagePosted", kind: "hook", description:
+ *   "fires via qu.onStorageChange() on writes under a thread's messages path
+ *   - see paths.threadMessagesParentPath()"}`. There is deliberately NO
+ *   `export`/`contributes` entry for a `'hook'`-kind point and no
+ *   `ExtensionPointHost` method backs it - a contributor just calls
+ *   `qu.onStorageChange()` directly wherever its own code already runs, the
+ *   same established mechanism `@qu/reactive`/`@qu/sync`/`@qu/relay` all
+ *   already use, needing no cross-app dynamic-import at all (unlike `'ui'`/
+ *   `'menu'` points, a storage write needs no help finding code that isn't
+ *   there - the listener registers itself, wherever it happens to run).
+ *   `'ui'`/`'menu'`-kind points, by contrast, DO get real `contributes`
+ *   entries elsewhere in the catalog, resolved through `ExtensionPointHost` -
+ *   e.g. Forum's own manifest declares `{point: "content.messageActions",
+ *   kind: "ui", description: "extra action buttons per forum message"}`, and
+ *   a future Likes app's manifest declares `{point: "content.messageActions",
+ *   export: "renderLikeButton"}` under ITS `contributes` - Forum never
+ *   imports Likes, Likes never imports Forum, both merely agree on the same
+ *   `point` string, discoverable by anyone reading the catalog.
  *
  * @property {string} [spaceId] - This app's OWN permanent storage space id
  *   (see @qu/services' `paths.js`'s `spacePath()`/`documentPath()`/

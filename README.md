@@ -992,6 +992,55 @@ own tests, built bottom-up per the dependency order in
       dynamic `import()` across two independent, unrelated modules, not
       mocked. Full monorepo suite green at 894 tests (covering both this and
       the `spaceId` change above), `npm run build` clean.
+- [x] **`ExtensionPointHost` corrected: no new pub/sub duplicating Qu Core's
+      OWN event system** — immediately after the round above, user feedback:
+      "save hooks" probably shouldn't be their own implementation at all,
+      since Qu Core's `on()` listener system already covers that; UI
+      extensions (Share/Bookmark-style) should hook into a slot the same way,
+      realized similarly to Core's own listeners - explicitly: **no new
+      functionality in Qu**.
+      Investigated before changing anything: `@qu/core/events.js`'s `QuEvents`
+      (`on(topic, handler, {order})`/`emit(topic, payload, ctx)`, ordered,
+      fault-isolated, listener errors caught per-handler) is EXACTLY the
+      primitive `ExtensionPointHost`'s removed `run()`/`notify()` had been
+      re-implementing via a private `HookBus` - and `QuStore.
+      onStorageChange()` (built on that same `QuEvents`, already what
+      `@qu/reactive`'s `watch()`/`watchChildren()`, `@qu/sync`, and
+      `@qu/relay` all subscribe through) is ALREADY the established, correct
+      way to react to a save/write, filtered by path - no named "hook point"
+      string or manifest `contributes` entry was ever needed for that case at
+      all, a contributor just calls `qu.onStorageChange()` directly wherever
+      its own code runs.
+      **Removed**: `ExtensionPointHost.run()`/`.notify()` and its private
+      `HookBus` entirely, and the `'hook'` case from `manifest.quapp`'s
+      `contributes` field (a `contributes` entry now only makes sense for
+      `'ui'`/`'menu'`, since only THOSE need cross-app dynamic-import - a
+      storage listener doesn't need help finding code that isn't there, it
+      registers itself wherever it already lives). `'hook'` stays a legal
+      `definesExtensionPoints` value FOR DISCOVERY ONLY (e.g. ThreadEngine
+      documenting "`thread.messagePosted` fires via `qu.onStorageChange()`
+      under this path prefix") - deliberately with no `export`/`contributes`
+      counterpart and no `ExtensionPointHost` method backing it.
+      **Rebuilt**: `renderSlot()` now registers each loaded contributor's
+      function directly onto a real `@qu/core` `QuEvents` instance (`
+      ExtensionPointHost`'s new `events` getter, replacing the old `hooks`
+      getter) and fires it via `QuEvents.emit()` - reusing Core's own
+      ordering/fault-isolation rather than a bespoke re-implementation, "the
+      realization modeled like Core's own listeners" taken literally.
+      `collect()` (context menu) deliberately stayed a small custom loop -
+      `QuEvents.emit()` is documented fire-and-forget fan-out that discards
+      return values on purpose, and gathering menu items back is a genuinely
+      different primitive that forcing onto `QuEvents` would only distort.
+      `@qu/foundation` gained a real (not phantom) `@qu/core` dependency for
+      this - the declared package DAG already listed `foundation → core` as
+      legal (`docs/v3-technical-concept.md`'s own dependency audit had
+      previously found and removed that exact dependency as UNUSED dead
+      weight; this is that direction's first genuine caller).
+      Test suite updated to match: the `run()`/`notify()`/shared-`HookBus`
+      tests replaced with `events`-getter/local-`.on()`/shared-`QuEvents`
+      equivalents, plus a new explicit regression test that calling
+      `renderSlot()` twice for the same point never double-registers
+      contributors. Full suite green (892 tests), `npm run build` clean.
 
 ## Development
 

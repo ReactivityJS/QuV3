@@ -1,55 +1,73 @@
-import { HookBus } from './hooks.js';
+import { QuEvents } from '@qu/core';
 import { createLogger } from '@qu/log';
 
 const log = createLogger('extension-points');
 
 /**
- * EXTENSION POINTS — the Drupal-hooks-inspired, universal mechanism behind
- * manifest.js's `contributes` field (see that field's own doc comment for
- * the full rationale/vocabulary). One `ExtensionPointHost` is built from the
- * SAME apps catalog every mounted app already receives as `ctx.apps` (see
- * `apps/shell/client.js`'s `renderRoute()`, which now also constructs one
- * per route and hands it to the mounted app as `ctx.extensionPoints`).
+ * EXTENSION POINTS — the Drupal-hooks-inspired mechanism behind manifest.js's
+ * `contributes` field (see that field's own doc comment for the full
+ * rationale/vocabulary). One `ExtensionPointHost` is built from the SAME
+ * apps catalog every mounted app already receives as `ctx.apps` (see
+ * `apps/shell/client.js`'s `renderRoute()`, which constructs one per route
+ * and hands it to the mounted app as `ctx.extensionPoints`).
  *
- * THE CORE TRICK: only ONE app's `clientMain` is ever mounted in-place at a
- * time (see `actions.js`'s own doc comment on that constraint) - but nothing
- * stops a DIFFERENT app's already-catalog-known, already-integrity/signature
- * -pinned `clientMainUrl` from being dynamically `import()`-ed just to grab
- * one of its OTHER named exports, without ever calling `mount()` on it or
- * putting it in charge of the screen. That's exactly what a shell already
- * does for the ACTIVE app (`await import(app.clientMainUrl)`); this class
- * does the same thing for any number of BACKGROUND contributor apps, caches
- * each module after its first import (a contributor invoked from many rows
- * of a `<qu-list>`, e.g. a Like button per message, must not re-fetch/re-eval
- * its module once per row), and exposes three thin, purpose-shaped callers
- * over that one mechanism - matching `contributes[].kind`'s three cases:
+ * SCOPE, NARROWED ON PURPOSE: an earlier version of this class also had
+ * `run()`/`notify()` "callback hook" methods wrapping a private `HookBus`,
+ * covering e.g. "before/after a message is saved". That was REMOVED - Qu
+ * Core already has exactly that mechanism, `QuStore.onStorageChange()` (see
+ * `@qu/core/store.js`), which `@qu/reactive`'s `watch()`/`watchChildren()`,
+ * `@qu/sync`, and `@qu/relay` all already build on. A save/storage-triggered
+ * reaction needs NO indirection through a named "point" string at all - a
+ * contributor just calls `qu.onStorageChange(({path, quBit}) => {...})`
+ * directly, filtering by path, exactly like every other place in this
+ * codebase already does. Duplicating that as a second, parallel hook bus
+ * here would be new functionality Qu doesn't need - this class stays scoped
+ * to the ONE problem Core genuinely can't solve on its own: Core has no
+ * concept of "apps", "manifests", or "only one app's UI is mounted at a
+ * time", so it can't know how to go find and load another app's contributed
+ * UI. That crossing is what's actually built here. A point that's really
+ * just "notify me when X is written" belongs in `definesExtensionPoints`
+ * with `kind: 'hook'` for DISCOVERABILITY only (documenting that the point
+ * exists and how to actually subscribe to it) - it has no `ExtensionPointHost`
+ * method backing it, on purpose.
  *
- *   - `renderSlot(point, container, payload)` - UI slot / content plugin.
- *     Every contributor's `export`ed function is called as
- *     `(itemContainer, payload) -> void|Promise<void>` and expected to mount
- *     its own DOM into `itemContainer` (a fresh child element this method
- *     creates and appends per contributor, so contributors can't stomp each
- *     other's DOM). Contributors run in `order` (lower first).
- *   - `run(point, payload)` / `notify(point, payload)` - callback hooks.
- *     Delegates to an internal `HookBus` with EXACTLY that class's own
- *     `run`/`notify` semantics (sequential+payload-patching vs.
- *     parallel+side-effect-only, see hooks.js) - manifest-declared
- *     contributors for `point` are lazily registered onto the bus the FIRST
- *     time this point is asked for (nothing loads until actually needed),
- *     then every later call for the same `point` just reuses the bus.
- *   - `collect(point, payload)` - context menu / data-returning extension.
- *     Every contributor's function is called as `(payload) ->
- *     Array<object>|object|Promise<...>`; results are flattened into one
- *     array (each item tagged with `appId` so a caller can attribute/dedupe),
- *     sorted by `order`.
+ * THE CORE TRICK (what's actually left, and why it's still needed): only ONE
+ * app's `clientMain` is ever mounted in-place at a time (see `actions.js`'s
+ * own doc comment on that constraint) - but nothing stops a DIFFERENT app's
+ * already-catalog-known, already-integrity/signature-pinned `clientMainUrl`
+ * from being dynamically `import()`-ed just to grab one of its OTHER named
+ * exports, without ever calling `mount()` on it or putting it in charge of
+ * the screen. That's exactly what a shell already does for the ACTIVE app
+ * (`await import(app.clientMainUrl)`); this class does the same thing for
+ * any number of BACKGROUND contributor apps, caching each module after its
+ * first import (a contributor invoked from many rows of a `<qu-list>`, e.g.
+ * a Like button per message, must not re-fetch/re-eval its module once per
+ * row).
  *
- * ERROR ISOLATION: one contributor throwing (a bad module, a bug in someone
- * else's app) never breaks another contributor or the host app itself -
- * `renderSlot`/`collect` skip the failing contributor (removing its
- * already-appended container for `renderSlot`); `run`/`notify` inherit
- * `HookBus`'s own isolation (`notify` swallows per-handler, `run` still lets
- * a throw propagate - transformations legitimately need to be able to abort
- * the chain, exactly as documented on `HookBus.run` itself).
+ * "The realization should be modeled like Core's own listeners" - so once a
+ * manifest-declared contributor is actually loaded, REGISTERING and FIRING
+ * it reuses `@qu/core`'s own `QuEvents` (the exact class `QuStore` itself
+ * uses internally for its `storage:put` notify bus) instead of a bespoke
+ * re-implementation - same `on(topic, handler, {order})` shape, same
+ * ordering/fault-isolation guarantees, imported directly from `@qu/core`,
+ * not reinvented here:
+ *
+ *   - `renderSlot(point, container, payload)` - UI slot / content plugin,
+ *     e.g. Share/Bookmark buttons on a forum message. Every contributor's
+ *     `export`ed function is registered onto an internal `QuEvents` instance
+ *     as `(itemContainer, payload) -> void|Promise<void>`, called via
+ *     `QuEvents.emit()` and expected to mount its own DOM into `itemContainer`
+ *     (a fresh child element created per contributor, so contributors can't
+ *     stomp each other's DOM). `QuEvents` itself provides the ordering
+ *     (`contributes[].order`) and per-listener fault isolation.
+ *   - `collect(point, payload)` - context menu / data-returning extension:
+ *     `export`'s function is `(payload) -> Array<{id, label, icon?, onClick}>
+ *     | Promise<...>`, results from every contributor concatenated and
+ *     returned. Deliberately NOT built on `QuEvents.emit()` - `QuEvents`
+ *     is fire-and-forget fan-out by design (return values are documented as
+ *     "simply ignored, not chained"), and gathering answers back is a
+ *     genuinely different primitive, so this one case keeps its own small
+ *     loop rather than forcing a shape that doesn't fit.
  *
  * NOT this class's job: WHICH apps get dynamically imported here is entirely
  * a function of the trusted apps catalog (`ctx.apps`, already vetted the
@@ -60,31 +78,31 @@ const log = createLogger('extension-points');
 export class ExtensionPointHost {
   /** @type {Array<object>} */
   #apps;
-  /** @type {HookBus} */
-  #hooks;
+  /** @type {QuEvents} */
+  #events;
   /** @type {Map<string, Promise<object>>} */
   #moduleCache = new Map();
   /** @type {Set<string>} */
-  #registeredHookPoints = new Set();
+  #registeredPoints = new Set();
 
   /**
    * @param {Array<object>} apps - The manifest catalog (e.g. `ctx.apps`) -
    *   each entry as `buildAppsCatalog()` shapes it (`name`, `clientMainUrl`,
    *   `contributes`, ...).
-   * @param {{hooks?: HookBus}} [options] - `hooks` lets a caller share one
-   *   `HookBus` across several `ExtensionPointHost`s (e.g. so a LOCAL,
-   *   in-memory `.on()` registration from the currently mounted app's own
-   *   code and manifest-declared cross-app contributors both fire together
-   *   for the same `point`) - defaults to a fresh, private bus.
+   * @param {{events?: QuEvents}} [options] - `events` lets a caller share one
+   *   `QuEvents` instance across several `ExtensionPointHost`s, or register
+   *   its own LOCAL, in-memory `.on()` handlers (e.g. from the currently
+   *   mounted app's own code) alongside manifest-declared contributors for
+   *   the same `point` - defaults to a fresh, private instance.
    */
-  constructor(apps, { hooks } = {}) {
+  constructor(apps, { events } = {}) {
     this.#apps = apps ?? [];
-    this.#hooks = hooks ?? new HookBus();
+    this.#events = events ?? new QuEvents();
   }
 
-  /** The underlying `HookBus` - exposed so a mounted app can `.on()` its own local, in-memory handlers alongside manifest-declared contributors. */
-  get hooks() {
-    return this.#hooks;
+  /** The underlying `QuEvents` bus - exposed so a mounted app can `.on()` its own local handlers alongside manifest-declared contributors. */
+  get events() {
+    return this.#events;
   }
 
   /**
@@ -93,20 +111,8 @@ export class ExtensionPointHost {
    * @param {*} payload
    */
   async renderSlot(point, container, payload) {
-    for (const contributor of this.#contributorsFor(point)) {
-      const fn = await this.#load(contributor);
-      if (!fn) continue;
-      const itemEl = document.createElement('div');
-      itemEl.className = 'qu-ext-slot-item';
-      itemEl.dataset.contributorApp = contributor.appId;
-      container.appendChild(itemEl);
-      try {
-        await fn(itemEl, payload);
-      } catch (err) {
-        itemEl.remove();
-        log.error(`contributor "${contributor.appId}" failed rendering slot "${point}":`, err);
-      }
-    }
+    await this.#ensureRegistered(point);
+    await this.#events.emit(point, { container, payload });
   }
 
   /**
@@ -127,18 +133,6 @@ export class ExtensionPointHost {
       }
     }
     return out;
-  }
-
-  /** @param {string} point @param {object} payload @returns {Promise<object>} */
-  async run(point, payload) {
-    await this.#ensureRegistered(point);
-    return this.#hooks.run(point, payload);
-  }
-
-  /** @param {string} point @param {object} payload */
-  async notify(point, payload) {
-    await this.#ensureRegistered(point);
-    return this.#hooks.notify(point, payload);
   }
 
   #contributorsFor(point) {
@@ -168,13 +162,24 @@ export class ExtensionPointHost {
     }
   }
 
+  /** Lazily registers every manifest-declared contributor for `point` onto `#events`, once - repeat calls (many rows of a list, several renderSlot()s for the same point) reuse the same registration. */
   async #ensureRegistered(point) {
-    if (this.#registeredHookPoints.has(point)) return;
-    this.#registeredHookPoints.add(point);
+    if (this.#registeredPoints.has(point)) return;
+    this.#registeredPoints.add(point);
     for (const contributor of this.#contributorsFor(point)) {
-      this.#hooks.on(point, async (payload) => {
+      this.#events.on(point, async ({ container, payload }) => {
         const fn = await this.#load(contributor);
-        return fn ? fn(payload) : undefined;
+        if (!fn) return;
+        const itemEl = document.createElement('div');
+        itemEl.className = 'qu-ext-slot-item';
+        itemEl.dataset.contributorApp = contributor.appId;
+        container.appendChild(itemEl);
+        try {
+          await fn(itemEl, payload);
+        } catch (err) {
+          itemEl.remove();
+          log.error(`contributor "${contributor.appId}" failed rendering slot "${point}":`, err);
+        }
       }, { order: contributor.order });
     }
   }
@@ -184,15 +189,12 @@ export class ExtensionPointHost {
  * Pure query over the catalog's `definesExtensionPoints` declarations (see
  * manifest.js's own doc comment) - the CODE-level counterpart to reading
  * that field as static JSON: lets a caller discover every extension point
- * the currently loaded system defines, and what defined it, without
- * grepping source. Deliberately a standalone function, not a method (same
- * reasoning as `actionsForSlot()` - it's a pure read over data a caller
- * already has, no instance state needed) - a future "what extension points
- * exist" admin/dev view can call this directly, and `ExtensionPointHost`
- * doesn't need it for its own operation (a `point` id needs no prior
- * definition to be usable, exactly like a `HookBus` name - `contributes`
- * targeting an undeclared `point` still works, `definesExtensionPoints` is
- * discovery, never a gate).
+ * the currently loaded system defines (including plain `kind: 'hook'`
+ * points that are really just a `qu.onStorageChange()`/`watch()` path, not
+ * something this class renders), and what defined it, without grepping
+ * source. Deliberately a standalone function, not a method (same reasoning
+ * as `actionsForSlot()` - it's a pure read over data a caller already has,
+ * no instance state needed).
  * @param {Array<object>} apps - The manifest catalog (e.g. `ctx.apps`).
  * @returns {Array<{point: string, kind: string|null, description: string|null, definedBy: string}>}
  */
