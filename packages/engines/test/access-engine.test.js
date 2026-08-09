@@ -6,6 +6,7 @@ import { AccessEngine, assertWriteAuthorized } from '../src/access-engine.js';
 function storeWithAccess() {
   const qu = new QuStore();
   qu.mount('store', new MemoryStoreAdapter());
+  qu.mount('blob', new MemoryStoreAdapter());
   new AccessEngine(qu);
   return qu;
 }
@@ -143,6 +144,67 @@ test('assertWriteAuthorized() with a base64 (not base64url) decoded writerPub st
   const quBitPubField = QuCrypto.toBase64(alice.publicKey); // what a real QuBit.pub looks like
   const rawBytes = QuCrypto.fromBase64(quBitPubField);
   await assert.doesNotReject(() => assertWriteAuthorized(qu, '/store/wiki/docs/1', rawBytes));
+});
+
+// ===== blob chunks (asset attachments) ==================================
+
+test('a blob chunk write is open when no asset meta doc exists yet - first writer bootstraps the asset, same as any other kind', async () => {
+  const qu = storeWithAccess();
+  const eve = await actor();
+  await assert.doesNotReject(() =>
+    qu.put('/blob/gallery/photo1/chunk_0', 'AAAA', { signWith: eve.privateKey, writerPub: eve.publicKey })
+  );
+});
+
+test('once an asset\'s meta doc is established, only its OWN signer may write its chunks', async () => {
+  const qu = storeWithAccess();
+  const alice = await actor();
+  const eve = await actor();
+  await qu.put('/store/gallery/assets/photo1/meta', { name: 'x' }, { signWith: alice.privateKey, writerPub: alice.publicKey });
+
+  await assert.rejects(
+    () => qu.put('/blob/gallery/photo1/chunk_0', 'AAAA', { signWith: eve.privateKey, writerPub: eve.publicKey }),
+    /writer not authorized to write chunks for asset "photo1" - does not match its established owner/
+  );
+  await assert.doesNotReject(() =>
+    qu.put('/blob/gallery/photo1/chunk_0', 'AAAA', { signWith: alice.privateKey, writerPub: alice.publicKey })
+  );
+});
+
+test('an UNSIGNED chunk write is rejected once an asset has an established (signed) owner', async () => {
+  const qu = storeWithAccess();
+  const alice = await actor();
+  await qu.put('/store/gallery/assets/photo1/meta', { name: 'x' }, { signWith: alice.privateKey, writerPub: alice.publicKey });
+
+  await assert.rejects(() => qu.put('/blob/gallery/photo1/chunk_0', 'AAAA')); // no signWith/writerPub at all
+});
+
+test('an explicit "assets" ACL doc takes precedence over the meta-signer fallback', async () => {
+  const qu = storeWithAccess();
+  const alice = await actor(); // uploaded the asset (meta signer)
+  const eve = await actor(); // NOT the uploader, but IS listed on the ACL doc
+  await qu.put('/store/gallery/assets/photo1/meta', { name: 'x' }, { signWith: alice.privateKey, writerPub: alice.publicKey });
+  await qu.put('/store/gallery/acl/assets/photo1', { writers: [eve.pubB64Url] });
+
+  // The ACL doc, not the meta signer, now decides - alice (the original
+  // uploader) is REJECTED because the ACL doc doesn't list her.
+  await assert.rejects(() =>
+    qu.put('/blob/gallery/photo1/chunk_0', 'AAAA', { signWith: alice.privateKey, writerPub: alice.publicKey })
+  );
+  await assert.doesNotReject(() =>
+    qu.put('/blob/gallery/photo1/chunk_0', 'AAAA', { signWith: eve.privateKey, writerPub: eve.publicKey })
+  );
+});
+
+test('every kind other than assets stays fully open with no ACL doc - the meta-signer fallback is blob-chunk-specific, not a general default change', async () => {
+  const qu = storeWithAccess();
+  const eve = await actor();
+  await qu.put('/store/wiki/docs/1', { title: 'first' }, { signWith: eve.privateKey, writerPub: eve.publicKey });
+
+  const mallory = await actor();
+  await assert.doesNotReject(() =>
+    qu.put('/store/wiki/docs/1', { title: 'overwritten' }, { signWith: mallory.privateKey, writerPub: mallory.publicKey })
+  );
 });
 
 test('dispose() unregisters the engine - ACL enforcement stops happening', async () => {

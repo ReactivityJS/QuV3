@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { QuStore, MemoryStoreAdapter, QuCrypto } from '@qu/core';
 import { AssetEngine } from '../src/asset-engine.js';
+import { AccessEngine } from '../src/access-engine.js';
 
 function storeWithAssets(options) {
   const qu = new QuStore();
@@ -231,6 +232,51 @@ test('verifySyncOut(): throws for a path with no local asset at all', async () =
   await assert.rejects(
     () => engine.verifySyncOut('/store/gallery/assets/never-uploaded', async () => ({})),
     /no local asset/
+  );
+});
+
+// ===== real cross-Engine integration with AccessEngine ====================
+
+test('INTEGRATION: with AccessEngine also registered, a hostile second uploader cannot hijack an already-uploaded asset id', async () => {
+  const qu = new QuStore();
+  qu.mount('store', new MemoryStoreAdapter());
+  qu.mount('blob', new MemoryStoreAdapter());
+  new AccessEngine(qu); // global, order 0 - runs before AssetEngine (order 10) on every chunk/meta put()
+  const engine = new AssetEngine(qu, { chunkSize: 1000 });
+  const alice = await QuCrypto.generateKeypair();
+  const mallory = await QuCrypto.generateKeypair();
+
+  await qu.put(
+    '/store/gallery/assets/photo1',
+    { name: 'alice.png', mime: 'image/png', data: new TextEncoder().encode('alices real photo') },
+    { signWith: alice.privateKey, writerPub: alice.publicKey }
+  );
+
+  // Mallory tries to overwrite the SAME assetId with her own content, signed
+  // as herself - AssetEngine writes chunks CONCURRENTLY before the meta
+  // write, so this must fail on the very first chunk, before any of her
+  // bytes land.
+  await assert.rejects(
+    () =>
+      qu.put(
+        '/store/gallery/assets/photo1',
+        { name: 'mallory.png', mime: 'image/png', data: new TextEncoder().encode('mallory hijack attempt') },
+        { signWith: mallory.privateKey, writerPub: mallory.publicKey }
+      ),
+    /writer not authorized/
+  );
+
+  // Alice's original upload is untouched.
+  const asset = await engine.getAsset('/store/gallery/assets/photo1');
+  assert.equal(new TextDecoder().decode(asset.data), 'alices real photo');
+
+  // Alice herself can still legitimately re-upload (e.g. resume/retry).
+  await assert.doesNotReject(() =>
+    qu.put(
+      '/store/gallery/assets/photo1',
+      { name: 'alice.png', mime: 'image/png', data: new TextEncoder().encode('alices updated photo') },
+      { signWith: alice.privateKey, writerPub: alice.publicKey }
+    )
   );
 });
 

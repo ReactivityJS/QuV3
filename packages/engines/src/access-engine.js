@@ -40,6 +40,23 @@
  * IDENTICAL check to an incoming synced write before persisting it, using
  * the same decision this Engine's own pipeline hook makes, not a second,
  * divergent copy of it.
+ *
+ * BLOB CHUNKS ARE GATED TOO, under the SAME `assets` ACL as their asset's
+ * `/store/.../assets/<id>` meta document - found and closed as a real gap:
+ * `AssetEngine` writes each chunk via a genuine `qu.put()` (see its own doc
+ * comment), which this Engine is global (`segment: null`) and therefore
+ * already ran on - but `/blob/<space>/<id>/chunk_N` never matched any of
+ * the `/store/...`-only patterns below, so every chunk write (local AND
+ * via `@qu/sync`, same "runs on literally every put()" as everything else
+ * here) sailed through completely ungated, unlike every other entity kind.
+ * `BLOB_RE` below maps a blob chunk path back to the exact same
+ * `{spaceId, kind: 'assets', resourceId}` triple `toBlobPath()`
+ * (asset-engine.js) derived it FROM, so it resolves to the SAME ACL
+ * document - no new ACL kind, no asset-specific special case beyond
+ * recognizing where its bytes physically live. Still fully open by
+ * default (no ACL doc = unrestricted), so this changes nothing for the
+ * common case (a public thread's attachments, a personal avatar) - it only
+ * matters once something actually writes `/store/<space>/acl/assets/<id>`.
  */
 import { QuCrypto } from '@qu/core';
 
@@ -47,6 +64,7 @@ const DOC_RE = /^\/store\/([^/]+)\/docs\/([^/]+)$/;
 const COLLECTION_RE = /^\/store\/([^/]+)\/collections\/([^/]+)$/;
 const ASSET_RE = /^\/store\/([^/]+)\/assets\/([^/]+)(?:\/meta)?$/;
 const THREAD_RE = /^\/store\/([^/]+)\/threads\/([^/]+)\/(?:meta|msgs\/[^/]+)$/;
+const BLOB_RE = /^\/blob\/([^/]+)\/([^/]+)\/chunk_\d+$/;
 const ACL_RE = /^\/store\/([^/]+)\/acl\/([^/]+)\/([^/]+)$/;
 
 /** @param {string} path @returns {{spaceId: string, kind: 'docs'|'collections'|'assets'|'threads', resourceId: string}|null} */
@@ -59,6 +77,8 @@ function resolveResource(path) {
   if (match) return { spaceId: match[1], kind: 'assets', resourceId: match[2] };
   match = path.match(THREAD_RE);
   if (match) return { spaceId: match[1], kind: 'threads', resourceId: match[2] };
+  match = path.match(BLOB_RE);
+  if (match) return { spaceId: match[1], kind: 'assets', resourceId: match[2] };
   return null;
 }
 
@@ -111,8 +131,36 @@ export async function assertWriteAuthorized(qu, path, writerPub) {
 
   const { spaceId, kind, resourceId } = resource;
   const aclBit = await qu.get(`/store/${spaceId}/acl/${kind}/${resourceId}`);
-  if (!writerAllowed(aclBit?.val ?? null, writerPub)) {
-    throw new Error(`AccessEngine: writer not authorized to write to ${kind} "${resourceId}"`);
+  if (aclBit) {
+    if (!writerAllowed(aclBit.val, writerPub)) {
+      throw new Error(`AccessEngine: writer not authorized to write to ${kind} "${resourceId}"`);
+    }
+    return;
+  }
+
+  // No explicit ACL doc - every OTHER kind stays fully open here (documented,
+  // additive-only design). A blob chunk gets one extra, resource-specific
+  // fallback instead: nothing today ever creates an `assets` ACL doc (see
+  // this file's own "BLOB CHUNKS" doc comment), so "open unless an ACL doc
+  // exists" would in practice mean "chunks are ALWAYS open, forever" - a
+  // real gap an ACL doc alone doesn't close. Instead, once an asset's OWN
+  // meta document exists (i.e. the asset has an established owner - the
+  // signer of that FIRST, otherwise-unrestricted write, exactly the same
+  // "first writer establishes it" bootstrap the ACL doc case above already
+  // uses), only that SAME signer may write its chunks - a self-consistency
+  // check against the sibling meta document's own `pub`, not a new ACL
+  // mechanism. Before the meta doc exists yet (the very first upload, whose
+  // chunks are written concurrently with, before, its own meta write - see
+  // AssetEngine's `#handlePut()`), there is no owner to check against yet,
+  // so this stays open too, same as the bootstrap case.
+  if (BLOB_RE.test(path)) {
+    const metaBit = await qu.get(`/store/${spaceId}/assets/${resourceId}/meta`);
+    if (!metaBit) return; // no established owner yet - first writer's upload bootstraps it
+    const ownerPubB64Url = metaBit.pub ? QuCrypto.toBase64Url(QuCrypto.fromBase64(metaBit.pub)) : null;
+    const writerPubB64Url = writerPub ? QuCrypto.toBase64Url(writerPub) : null;
+    if (!ownerPubB64Url || ownerPubB64Url !== writerPubB64Url) {
+      throw new Error(`AccessEngine: writer not authorized to write chunks for asset "${resourceId}" - does not match its established owner`);
+    }
   }
 }
 

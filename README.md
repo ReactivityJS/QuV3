@@ -1142,6 +1142,61 @@ own tests, built bottom-up per the dependency order in
       asset-components, +2 new `apps/shell` services wiring, +3
       `apps/profile` avatar-asset, +3 `apps/forum` attachment), `npm run
       build` clean.
+- [x] **Blob-chunk ACL gap closed in `AccessEngine`** — user asked for the
+      next robustness step; found by directly reading `access-engine.js`'s
+      own path regexes while implementing attachments above:
+      `resolveResource()` only ever matched `/store/...` paths (`DOC_RE`/
+      `COLLECTION_RE`/`ASSET_RE`/`THREAD_RE`) - a blob chunk
+      (`/blob/<space>/<id>/chunk_N`) never matched ANY of them, so every
+      chunk write (local AND via `@qu/sync`'s incoming-write check, both
+      call the exact same `assertWriteAuthorized()`) sailed through
+      completely UNGATED - unlike every other entity kind, which is at
+      least protected once someone bothers to create an ACL doc.
+      **First pass** (this round's own initial fix, then sharpened by user
+      feedback before landing): a new `BLOB_RE` maps a chunk path back to
+      the SAME `{spaceId, kind: 'assets', resourceId}` its `toBlobPath()`
+      (asset-engine.js) conversion came FROM, so it resolves to the same
+      optional `/store/<space>/acl/assets/<id>` ACL doc every other kind
+      already uses - parity, zero new ACL machinery.
+      **User's sharper catch**: an optional ACL doc gives ZERO real
+      protection today, because nothing in `AssetService`/`AssetEngine`
+      ever CREATES one - "open unless an ACL doc exists" would in practice
+      mean chunks stay open forever. Asked for a real check: does the
+      chunk's writer actually match the signer already established for
+      that asset (its meta document's own `pub`)?
+      **Landed design**: once an asset's meta document exists (i.e. it has
+      an established owner - the signer of that first, still-unrestricted
+      write, same "first writer establishes it" bootstrap the ACL-doc case
+      already documents), only that SAME signer may write its chunks - an
+      ownership self-consistency check against the sibling meta doc,
+      re-derived fresh every time, no new ACL doc or auto-created
+      restriction needed. Before the meta doc exists yet (chunks are
+      written CONCURRENTLY with, before, their own meta write - see
+      `AssetEngine#handlePut()`), there's no owner to check against, so
+      the very first upload still bootstraps normally. An explicit ACL doc,
+      if one is ever created, still takes precedence over this fallback
+      (checked first, unchanged from the original fix) - the meta-signer
+      check only fires in its absence. Every OTHER kind (docs/collections/
+      threads) is deliberately UNCHANGED - still fully open with no ACL doc,
+      exactly as designed; this is a blob-chunk-specific fallback, not a
+      general default-openness change.
+      Verified: 5 new unit tests (`access-engine.test.js` - bootstrap-open,
+      owner-mismatch rejected, unsigned rejected once an owner exists,
+      explicit ACL doc still takes precedence, every other kind unaffected)
+      + 1 real cross-Engine integration test (`asset-engine.test.js` -
+      `AssetEngine` + `AccessEngine` registered together: a hostile second
+      uploader signed as a DIFFERENT identity cannot hijack an
+      already-uploaded asset id, the original upload is left untouched, the
+      real owner can still legitimately re-upload/retry). `SyncEngine`
+      needed ZERO changes - its existing `assertWriteAuthorized()` call
+      site (confirmed by reading `sync-engine.js` directly) is already
+      path-unfiltered, so the fix closes both the local AND the sync-bypass
+      gap uniformly for free. Re-ran the exact same live relay + Playwright
+      scenario from the round above (forum attachment upload) as a sanity
+      check post-fix - confirmed a legitimate single-uploader chunk write
+      still reaches the relay's `QU_BLOB_DIR` correctly with `AccessEngine`
+      now actually enforcing something there. Full suite green (937 tests),
+      `npm run build` clean.
 
 ## Development
 
