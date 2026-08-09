@@ -11,7 +11,14 @@
     "./dependency-resolver": "./src/dependency-resolver.js",
     "./manifest": "./src/manifest.js",
     "./actions": "./src/actions.js",
-    "./runtime-container": "./src/runtime-container.js"
+    "./runtime-container": "./src/runtime-container.js",
+    "./extension-points": "./src/extension-points.js"
+  },
+  "dependencies": {
+    "@qu/log": "^0.1.0"
+  },
+  "devDependencies": {
+    "jsdom": "^25.0.1"
   },
   "license": "MIT"
 }

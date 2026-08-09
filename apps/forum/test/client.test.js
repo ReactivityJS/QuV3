@@ -67,6 +67,12 @@ async function mirrorThreadInto(fromEnv, intoQu, spaceId, threadId) {
   if (profile) await intoQu.putSealed(actorPath(fromEnv.myPub, 'profile'), profile);
 }
 
+// The real UUID committed in apps/forum/manifest.quapp - client.js now reads
+// its spaceId off the apps catalog (`ctx.apps`), never a literal, so every
+// mount() call below needs a matching catalog entry.
+const FORUM_SPACE_ID = '4eb04aa2-4ca9-4c9a-aa7e-33ad3802edb1';
+const FORUM_APPS = [{ name: 'forum', spaceId: FORUM_SPACE_ID }];
+
 function noopSubscribe() {}
 
 /** Must be attached to document.body - reactive rendering only matters once actually part of the document. */
@@ -78,10 +84,10 @@ function makeContainer() {
 
 test('renders the empty state when the thread has no messages yet', async () => {
   const a = await freshEnv('Ada');
-  await a.services.messages.createThread('forum', 'general', THREAD_PRESETS.forum());
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
 
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, subscribe: noopSubscribe });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe });
   try {
     await waitFor(() => container.querySelector('.qu-forum-empty') !== null);
     assert.equal(container.querySelector('.qu-forum-message'), null);
@@ -92,11 +98,11 @@ test('renders the empty state when the thread has no messages yet', async () => 
 
 test('renders a posted message with the author\'s alias, body, and a data-message-id', async () => {
   const a = await freshEnv('Ada');
-  await a.services.messages.createThread('forum', 'general', THREAD_PRESETS.forum());
-  const posted = await a.services.messages.postMessage('forum', 'general', { body: 'Hello, forum!' });
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  const posted = await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'Hello, forum!' });
 
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, subscribe: noopSubscribe });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe });
   try {
     await waitFor(() => container.querySelector('.qu-forum-message') !== null);
     const li = container.querySelector('.qu-forum-message');
@@ -111,10 +117,10 @@ test('renders a posted message with the author\'s alias, body, and a data-messag
 
 test('the composer posts a message and clears the input afterward', async () => {
   const a = await freshEnv('Ada');
-  await a.services.messages.createThread('forum', 'general', THREAD_PRESETS.forum());
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
 
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, subscribe: noopSubscribe });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe });
   try {
     await waitFor(() => container.querySelector('textarea') !== null);
     const textarea = container.querySelector('textarea');
@@ -124,7 +130,7 @@ test('the composer posts a message and clears the input afterward', async () => 
 
     await waitFor(() => container.querySelector('.qu-forum-message-text')?.textContent.includes('Posted from the composer'));
     assert.equal(textarea.value, '');
-    const { messages } = await a.services.messages.listMessages('forum', 'general');
+    const { messages } = await a.services.messages.listMessages(FORUM_SPACE_ID, 'general');
     assert.equal(messages.length, 1);
   } finally {
     stop();
@@ -133,13 +139,13 @@ test('the composer posts a message and clears the input afterward', async () => 
 
 test('a message posted elsewhere in the SAME store appears live in an already-mounted view, no reload', async () => {
   const a = await freshEnv('Ada');
-  await a.services.messages.createThread('forum', 'general', THREAD_PRESETS.forum());
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
 
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, subscribe: noopSubscribe });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe });
   try {
     await waitFor(() => container.querySelector('.qu-forum-empty') !== null);
-    await a.services.messages.postMessage('forum', 'general', { body: 'Arrived live' });
+    await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'Arrived live' });
     await waitFor(() => container.querySelector('.qu-forum-message-text')?.textContent.includes('Arrived live'));
   } finally {
     stop();
@@ -148,16 +154,16 @@ test('a message posted elsewhere in the SAME store appears live in an already-mo
 
 test('reaction toggle: clicking an emoji sets it, clicking the same one again clears it, live for a second independent mount', async () => {
   const a = await freshEnv('Ada');
-  await a.services.messages.createThread('forum', 'general', THREAD_PRESETS.forum());
-  await a.services.messages.postMessage('forum', 'general', { body: 'React to me' });
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'React to me' });
 
   // Two independent mounts of the SAME store - proves the reactive watch
   // chain works across separate DOM instances, without needing a second
   // distinct identity for this particular assertion.
   const containerA = makeContainer();
-  const stopA = mount(containerA, { qu: a.qu, services: a.services, subscribe: noopSubscribe });
+  const stopA = mount(containerA, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe });
   const containerB = makeContainer();
-  const stopB = mount(containerB, { qu: a.qu, services: a.services, subscribe: noopSubscribe });
+  const stopB = mount(containerB, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe });
   try {
     await waitFor(() => containerA.querySelector('.qu-forum-reaction') !== null);
     const findThumbsUpA = () => [...containerA.querySelectorAll('.qu-forum-reaction')].find((btn) => btn.textContent.startsWith('👍'));
@@ -181,13 +187,13 @@ test('reaction toggle: clicking an emoji sets it, clicking the same one again cl
 
 test('pinning shows the message in the pinned bar, live for a second independent mount; unpinning removes it', async () => {
   const a = await freshEnv('Ada');
-  await a.services.messages.createThread('forum', 'general', THREAD_PRESETS.forum());
-  await a.services.messages.postMessage('forum', 'general', { body: 'Pin this one' });
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'Pin this one' });
 
   const containerA = makeContainer();
-  const stopA = mount(containerA, { qu: a.qu, services: a.services, subscribe: noopSubscribe });
+  const stopA = mount(containerA, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe });
   const containerB = makeContainer();
-  const stopB = mount(containerB, { qu: a.qu, services: a.services, subscribe: noopSubscribe });
+  const stopB = mount(containerB, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe });
   try {
     await waitFor(() => containerA.querySelector('.qu-forum-message-actions button') !== null);
     const pinBtn = [...containerA.querySelectorAll('.qu-forum-message-actions button')].find((btn) => btn.textContent === 'Pin');
@@ -214,11 +220,11 @@ test('pinning shows the message in the pinned bar, live for a second independent
 // completely UNRELATED message arrives.
 test('an in-progress, unsaved edit survives an unrelated message arriving in the thread', async () => {
   const a = await freshEnv('Ada');
-  await a.services.messages.createThread('forum', 'general', THREAD_PRESETS.forum());
-  const own = await a.services.messages.postMessage('forum', 'general', { body: 'Original body' });
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  const own = await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'Original body' });
 
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, subscribe: noopSubscribe });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe });
   try {
     await waitFor(() => container.querySelector('.qu-forum-message') !== null);
     container.querySelector('.qu-forum-message-actions button').click(); // "Edit" - the only button own message has besides Pin
@@ -229,7 +235,7 @@ test('an in-progress, unsaved edit survives an unrelated message arriving in the
 
     // An unrelated write to a DIFFERENT message in the same thread - not a
     // save, not touching the message being edited at all.
-    await a.services.messages.postMessage('forum', 'general', { body: 'A completely unrelated message' });
+    await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'A completely unrelated message' });
     await waitFor(() => container.querySelectorAll('.qu-forum-message').length === 2);
 
     const stillOpenTextarea = container.querySelector(`[data-message-id="${own.id}"] .qu-forum-edit-row textarea`);
@@ -243,21 +249,21 @@ test('an in-progress, unsaved edit survives an unrelated message arriving in the
 test('the edit button only appears on the viewer\'s own message - a genuinely separate author never gets one', async () => {
   const a = await freshEnv('Ada');
   const b = await freshEnv('Bob');
-  await a.services.messages.createThread('forum', 'general', THREAD_PRESETS.forum());
-  const own = await a.services.messages.postMessage('forum', 'general', { body: 'My own message' });
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  const own = await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'My own message' });
 
   // Bob needs the SAME thread config on his own store before he can post
   // into it (postMessage() reads config locally) - simulate that arriving
   // via sync exactly like mirrorThreadInto() does for the reverse direction.
-  await mirrorThreadInto(a, b.qu, 'forum', 'general');
+  await mirrorThreadInto(a, b.qu, FORUM_SPACE_ID, 'general');
   await new Promise((r) => setTimeout(r, 3)); // distinct ts - see message-service.test.js's own tick() convention
-  await b.services.messages.postMessage('forum', 'general', { body: 'Someone else\'s message' });
+  await b.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'Someone else\'s message' });
   // Now mirror Bob's own message (and profile) back into Ada's store, as
   // sync would - Ada's single mount below needs to see both authors.
-  await mirrorThreadInto(b, a.qu, 'forum', 'general');
+  await mirrorThreadInto(b, a.qu, FORUM_SPACE_ID, 'general');
 
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, subscribe: noopSubscribe });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe });
   try {
     await waitFor(() => container.querySelectorAll('.qu-forum-message').length === 2);
     const ownLi = container.querySelector(`[data-message-id="${own.id}"]`);
@@ -284,11 +290,11 @@ test('the edit button only appears on the viewer\'s own message - a genuinely se
 // thread-formatting.js's escape-first design already guarantees this).
 test('a message body containing a <script> tag renders as escaped text, never as a real element', async () => {
   const a = await freshEnv('Ada');
-  await a.services.messages.createThread('forum', 'general', THREAD_PRESETS.forum());
-  await a.services.messages.postMessage('forum', 'general', { body: '<script>window.qu_xss_fired = true;</script>hello' });
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: '<script>window.qu_xss_fired = true;</script>hello' });
 
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, subscribe: noopSubscribe });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe });
   try {
     await waitFor(() => container.querySelector('.qu-forum-message-text') !== null);
     assert.equal(container.querySelector('.qu-forum-message-text script'), null);
@@ -301,11 +307,11 @@ test('a message body containing a <script> tag renders as escaped text, never as
 
 test('the returned stop function tears down cleanly - no error thrown', async () => {
   const a = await freshEnv('Ada');
-  await a.services.messages.createThread('forum', 'general', THREAD_PRESETS.forum());
-  await a.services.messages.postMessage('forum', 'general', { body: 'Hi' });
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'Hi' });
 
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, subscribe: noopSubscribe });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe });
   await waitFor(() => container.querySelector('.qu-forum-message') !== null);
   assert.doesNotThrow(() => stop());
 });

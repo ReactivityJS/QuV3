@@ -48,6 +48,9 @@ export const MANIFEST_KINDS = Object.freeze(['engine', 'service', 'app']);
 /** The small shared vocabulary a `pushActions` entry's optional `type` may use - see that field's own doc comment below for why. */
 export const PUSH_ACTION_TYPES = Object.freeze(['create', 'update', 'delete', 'mention', 'custom']);
 
+/** The small shared vocabulary a `contributes` entry's optional `kind` may use - see that field's own doc comment below for why. */
+export const CONTRIBUTION_KINDS = Object.freeze(['ui', 'hook', 'menu']);
+
 /**
  * @typedef {Object} Manifest
  * @property {string} name - Unique registry name, e.g. "thread-engine".
@@ -112,12 +115,110 @@ export const PUSH_ACTION_TYPES = Object.freeze(['create', 'update', 'delete', 'm
  *   lower first (defaults to 0). An app with nothing to contribute to any
  *   slot simply omits this field.
  *
- * DEFERRED: a `capabilities` field (action names a package contributes for
- * runtime dispatch, e.g. building a context menu from "what actions exist
- * for this entity kind") existed in the QuV2 prototype alongside a
- * `Registry.registerCapability()` API, but was never wired to a real
- * caller - see registry.js's doc comment. Neither is part of this schema
- * yet; both return together, paired with their first real consumer.
+ * @property {Array<{point: string, export: string, kind?: 'ui'|'hook'|'menu', order?: number}>} [contributes] -
+ *   UNIVERSAL, Drupal-hooks-inspired extension points THIS app contributes
+ *   code to, resolved by `@qu/foundation`'s `ExtensionPointHost` (see
+ *   extension-points.js's own doc comment for the runtime mechanism). Unlike
+ *   `actions` above (pure DATA - a label/href template, because a slot
+ *   consumer never runs the contributing app's code), a `contributes` entry
+ *   names a real, LIVE function: `export` is the name of a function this
+ *   app's OWN `clientMain` module exports (alongside `mount`), and
+ *   `ExtensionPointHost` dynamically `import()`s that already-integrity/
+ *   signature-pinned module URL (the SAME one the shell would import to
+ *   mount this app - no new trust surface) and calls the named export - this
+ *   is what makes cross-app UI plugins possible at all despite only ONE
+ *   app's `clientMain` ever being mounted in-place at a time (see actions.js's
+ *   doc comment on that constraint - `contributes` is the mechanism that
+ *   actually crosses it, `actions` deliberately doesn't try to). `point` is a
+ *   dot-namespaced id a HOST app defines and reads contributors for (e.g.
+ *   `"content.messageActions"`, `"thread.beforePostMessage"`,
+ *   `"contextMenu.forumMessage"`) - three usage shapes share this one
+ *   mechanism, distinguished purely by which `ExtensionPointHost` method the
+ *   host calls for its own point id (`kind` below is an optional, purely
+ *   descriptive label for tooling - never enforced, exactly like
+ *   `pushActions[].type`):
+ *     - UI slot / content plugin (`kind: 'ui'`, `ExtensionPointHost.
+ *       renderSlot(point, container, payload)`): `export`'s function is
+ *       `(container, payload) -> void|Promise<void>`, expected to mount its
+ *       own DOM into `container` - e.g. a future Likes app contributing a
+ *       render function to a `"content.messageActions"` point Forum defines,
+ *       so a Like button appears next to Forum's own reactions without
+ *       Forum ever importing Likes.
+ *     - Callback hook (`kind: 'hook'`, `ExtensionPointHost.run()`/`notify()`)
+ *       - identical semantics to `HookBus.run()`/`.notify()` (see hooks.js -
+ *       `run` sequential+payload-patching, `notify` parallel+side-effect-only)
+ *       - `ExtensionPointHost` lazily registers every manifest-declared
+ *       contributor onto its own internal `HookBus` the first time a given
+ *       `point` is actually asked for, so nothing loads until needed.
+ *     - Context menu extension (`kind: 'menu'`, `ExtensionPointHost.
+ *       collect(point, payload)`): `export`'s function is `(payload) ->
+ *       Array<{id, label, icon?, onClick}> | Promise<...>`, results from every
+ *       contributor concatenated and returned - e.g. a host app's "..." menu
+ *       on one of its own items, extended with entries other apps
+ *       contribute (Reply/Forward/Share).
+ *   `order` sorts contributors within one `point` (lower first, default 0),
+ *   same convention as `actions[].order`. An app with nothing to contribute
+ *   simply omits this field - additive, non-breaking, exactly like `actions`.
+ *
+ * @property {Array<{point: string, kind?: 'ui'|'hook'|'menu', description?: string}>} [definesExtensionPoints] -
+ *   The other half of the `contributes` picture: where `contributes` says
+ *   "I implement point X", this says "point X exists, and here's what it
+ *   means" - PURE, non-executable documentation (exactly like `pushActions`/
+ *   `actions`: additive, never enforced, a package with nothing to declare
+ *   simply omits it), letting anyone reading the manifest catalog discover
+ *   every extension point the system currently has WITHOUT grepping source
+ *   for every `renderSlot()`/`run()`/`notify()`/`collect()` call site.
+ *   Available to ANY manifest `kind` (`engine`/`service`/`app`), not just
+ *   apps - a server-side Engine/Service can equally define a point (e.g.
+ *   ThreadEngine defining `"thread.beforePostMessage"`) even though ITS
+ *   actual contributors register a real handler a different way: via
+ *   `Registry.hooks` directly in their own `register(qu, manifest, registry)`
+ *   (see registry.js's doc comment) rather than `ExtensionPointHost`, since
+ *   server-side Engines/Services are already all loaded together in one
+ *   process - there's no "only one mounted at a time" boundary to cross the
+ *   way client apps have, so no dynamic-import mechanism is needed there,
+ *   just a plain, already-existing `HookBus`. Client-side apps, meanwhile,
+ *   both DEFINE (`definesExtensionPoints`, descriptive) and are read FOR
+ *   contributions (`contributes` on ANOTHER app, executable via
+ *   `ExtensionPointHost`) - e.g. Forum's own manifest would declare
+ *   `{point: "content.messageActions", kind: "ui", description: "extra
+ *   action buttons per forum message"}`, and a future Likes app's manifest
+ *   declares `{point: "content.messageActions", export: "renderLikeButton"}`
+ *   under ITS `contributes` - Forum never imports Likes, Likes never imports
+ *   Forum, both merely agree on the same `point` string, discoverable by
+ *   anyone reading the catalog.
+ *
+ * @property {string} [spaceId] - This app's OWN permanent storage space id
+ *   (see @qu/services' `paths.js`'s `spacePath()`/`documentPath()`/
+ *   `threadMetaPath()` etc. - every one of them takes a `spaceId` as their
+ *   first segment). A UUID, generated ONCE per app and committed here
+ *   alongside `name`/`label` - deliberately NOT auto-generated per relay
+ *   deployment (that would give every independent relay running "the same"
+ *   app its OWN isolated space, defeating the actual point): any relay that
+ *   deploys this exact app source shares the SAME `spaceId`, so its data is
+ *   addressable/mergeable the same way regardless of which relay it landed
+ *   on first - `name`/`label` stay human-friendly display metadata only,
+ *   never used as a storage key (see `apps/forum`'s own history: it used to
+ *   pass the literal string `'forum'` as its spaceId, which is exactly the
+ *   collision risk a human-readable name creates once more than one
+ *   independent deployment/app could plausibly pick the same word).
+ *   Optional: an app with no `ThreadService`/space-scoped storage of its own
+ *   (e.g. `app-list`, which only ever reads shared catalog/directory paths
+ *   that aren't "a space" in this sense) simply omits it.
+ *
+ * DEFERRED: an optional, analogous `spaceId`-style UUID for a RELAY itself
+ * (as opposed to a single app's space) - for a future "this relay is part of
+ * a named, globally-shared network" concept - is anticipated but
+ * deliberately NOT designed or built here; nothing in this field's shape
+ * blocks adding it later as its own separate, relay-level concept alongside
+ * (not replacing) an app's own `spaceId`.
+ *
+ * NOTE: QuV2's prototype had a separate, never-wired `capabilities` field +
+ * `Registry.registerCapability()` API for "what actions exist for this
+ * entity kind" runtime dispatch (see registry.js's doc comment) - `contributes`
+ * above is that idea's real, actually-wired successor (the `kind: 'menu'`
+ * usage shape covers the same "context menu for an entity" case), so the old
+ * field name is retired rather than resurrected.
  */
 
 /**
@@ -161,6 +262,9 @@ export function validateManifest(manifest) {
   if (manifest.clientIntegrity !== undefined && !/^sha256-[A-Za-z0-9+/]+=*$/.test(manifest.clientIntegrity)) {
     throw new Error('Invalid manifest: "clientIntegrity" must look like "sha256-<base64>"');
   }
+  if (manifest.spaceId !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(manifest.spaceId)) {
+    throw new Error('Invalid manifest: "spaceId" must be a UUID');
+  }
   if (manifest.pushActions !== undefined) {
     const valid = Array.isArray(manifest.pushActions) && manifest.pushActions.every(
       (a) => a && typeof a === 'object' && typeof a.id === 'string' && typeof a.label === 'string'
@@ -176,6 +280,24 @@ export function validateManifest(manifest) {
         && (a.order === undefined || typeof a.order === 'number')
     );
     if (!valid) throw new Error('Invalid manifest: "actions" must be an array of {slot, id, label, hrefTemplate, icon?, order?}');
+  }
+  if (manifest.contributes !== undefined) {
+    const valid = Array.isArray(manifest.contributes) && manifest.contributes.every(
+      (c) => c && typeof c === 'object'
+        && typeof c.point === 'string' && typeof c.export === 'string'
+        && (c.kind === undefined || CONTRIBUTION_KINDS.includes(c.kind))
+        && (c.order === undefined || typeof c.order === 'number')
+    );
+    if (!valid) throw new Error(`Invalid manifest: "contributes" must be an array of {point, export, kind?, order?} where kind is one of ${CONTRIBUTION_KINDS.join(', ')}`);
+  }
+  if (manifest.definesExtensionPoints !== undefined) {
+    const valid = Array.isArray(manifest.definesExtensionPoints) && manifest.definesExtensionPoints.every(
+      (d) => d && typeof d === 'object'
+        && typeof d.point === 'string'
+        && (d.kind === undefined || CONTRIBUTION_KINDS.includes(d.kind))
+        && (d.description === undefined || typeof d.description === 'string')
+    );
+    if (!valid) throw new Error(`Invalid manifest: "definesExtensionPoints" must be an array of {point, kind?, description?} where kind is one of ${CONTRIBUTION_KINDS.join(', ')}`);
   }
   return manifest;
 }

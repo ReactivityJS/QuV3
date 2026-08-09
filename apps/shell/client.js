@@ -5,8 +5,14 @@
  * exports `mount(container, ctx)` to be embedded by SOMETHING ELSE; this
  * file IS that something else - the one composition root that constructs
  * `QuStore`/`QuIdentityEngine`/the client Services/the sync connection from
- * scratch, then hands the resulting `{qu, identity, services, apps,
- * subscribe, syncFetch}` context to whichever app the current route selects.
+ * scratch, then hands the resulting `{qu, identity, services, apps, segments,
+ * subscribe, syncFetch, extensionPoints}` context to whichever app the
+ * current route selects. `extensionPoints` (`@qu/foundation`'s
+ * `ExtensionPointHost`, see that file's own doc comment) is rebuilt fresh
+ * every route dispatch from the SAME `apps` catalog fetch already happening
+ * here - cheap (it does no work itself until a mounted app actually asks for
+ * a `point`) and keeps it as current as the catalog itself, same freshness
+ * the `apps` array handed to `mount()` already has.
  *
  * `createClientServices()` (`./src/services.js`) is this round's actual,
  * scoped-down `bootClientRuntime()` (docs/v3-technical-concept.md §7
@@ -74,6 +80,7 @@ import { QuIdentityEngine } from '@qu/identity';
 import { createI18n, setLocale } from '@qu/i18n';
 import { injectStyle, ensureTheme, setStoredTheme } from '@qu/ui';
 import { createLogger, setLogLevel, getLogLevel } from '@qu/log';
+import { ExtensionPointHost } from '@qu/foundation';
 import { renderOnboarding } from './src/onboarding.js';
 import { createClientServices } from './src/services.js';
 import { connectToRelay } from './src/sync.js';
@@ -233,7 +240,8 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
     log.debug(`mounting app "${catalogName}"`);
     const mod = await import(/* @vite-ignore */ app.clientMainUrl);
     if (stopped) return;
-    stopMountedApp = (await mod.mount(screen, { qu, identity, services, apps, segments, subscribe, syncFetch })) ?? null;
+    const extensionPoints = new ExtensionPointHost(apps);
+    stopMountedApp = (await mod.mount(screen, { qu, identity, services, apps, segments, subscribe, syncFetch, extensionPoints })) ?? null;
   }
 
   window.addEventListener('hashchange', renderRoute);

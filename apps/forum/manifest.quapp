@@ -7,6 +7,7 @@
   "label": "Forum",
   "icon": "💬",
   "navOrder": 10,
+  "spaceId": "4eb04aa2-4ca9-4c9a-aa7e-33ad3802edb1",
   "requires": ["message-service"],
   "pushActions": [
     { "id": "newMessage", "label": "New posts", "type": "create" },

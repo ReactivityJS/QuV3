@@ -899,6 +899,99 @@ own tests, built bottom-up per the dependency order in
       clicking "Reload now" itself applies German text + the sunset accent; the
       live preview updates instantly on every field change and is confirmed
       NOT persisted until "Save" is actually clicked.
+- [x] **`apps/forum`'s space id is now a real UUID, not the literal string
+      `"forum"`** — user flagged: apps may have human-readable names/labels,
+      but the underlying storage SPACE must be a UUID, or two independent
+      apps/deployments that both happen to pick the same word collide.
+      `manifest.quapp` gained a new `spaceId` field (`@qu/foundation`'s
+      manifest schema, with format validation - must look like a UUID),
+      generated ONCE and committed there (`4eb04aa2-4ca9-4c9a-aa7e-33ad3802edb1`)
+      rather than generated per relay deployment - a per-deployment UUID would
+      isolate the "same" app's data across independent relays instead of
+      keeping it addressable the same way everywhere, defeating the actual
+      point. `apps/forum/index.js`'s `register()` now reads `manifest.spaceId`
+      (throws a clear error if a manifest ever omits it) instead of a
+      hardcoded constant; `apps/forum/client.js` reads its own `spaceId` off
+      its own entry in the apps catalog (`ctx.apps`) at mount time, same
+      place every other catalog field already comes from - `name`/`label`
+      stay purely human-friendly display metadata, never a storage key.
+      `packages/relay/src/apps-catalog.js`'s `buildAppsCatalog()` now
+      publishes `spaceId` in every catalog entry. `npm run build` clean,
+      `packages/relay/test/relay.test.js`'s real-repo-`apps/`-directory boot
+      test updated to assert against the real UUID (full suite count below,
+      alongside this round's other change).
+- [x] **A universal, Drupal-hooks-inspired extension-point mechanism** — user:
+      app UIs should be "as reactive as possible", with content-level features
+      (Likes, Bookmarks, Reply, Share, context menus) built as generic,
+      reusable, cross-app contributions rather than forum-specific code, and
+      explicitly wanted three extension kinds covered "universally": UI
+      extension (content plugins that render themselves, e.g. a Like button),
+      callback hooks (e.g. extending what happens on save, or notification
+      dispatch), and context-menu extension for an app - plus, in a follow-up
+      message, Engines/Services/Apps alike should be able to **define** an
+      extension point (not just contribute to one), "at least in the
+      manifest, maybe also by code".
+      **`manifest.quapp` gained two new fields** (`@qu/foundation`'s manifest
+      schema, both structurally validated, both optional/additive/non-breaking
+      like every other nav/UI field): `contributes` (`{point, export, kind?,
+      order?}[]`) says "my OWN `clientMain` module exports a named function
+      that implements extension point X"; `definesExtensionPoints`
+      (`{point, kind?, description?}[]`) is the new, purely descriptive
+      counterpart - "extension point X exists, here's what it means" -
+      available to ANY manifest `kind` (engine/service/app alike), since it's
+      just documentation, never enforced (same convention as `pushActions`/
+      `actions`).
+      **The actual runtime mechanism**, `@qu/foundation/extension-points.js`'s
+      new `ExtensionPointHost`: the key trick making cross-app UI plugins
+      possible at all despite only ONE app's `clientMain` ever being mounted
+      in-place at a time (see `actions.js`'s own doc comment on that
+      constraint, which is exactly why `actions`/`actionsForSlot()` stayed
+      pure link-DATA and never tried to cross it) - nothing stops a
+      DIFFERENT, already-catalog-known, already-integrity/signature-pinned
+      app's `clientMainUrl` from being dynamically `import()`-ed just to grab
+      one of its OTHER named exports, without ever calling `mount()` on it or
+      putting it in charge of the screen (exactly what a shell already does
+      for the ACTIVE app). Three thin, purpose-shaped callers share that one
+      mechanism, matching the three usage kinds: `renderSlot(point,
+      container, payload)` (UI/content plugin - mounts real DOM),
+      `run()`/`notify()` (callback hooks - delegates to an internal `HookBus`
+      with EXACTLY that class's existing `run`/`notify` semantics, manifest
+      contributors lazily registered onto it the first time a `point` is
+      asked for), `collect(point, payload)` (context menu / data-returning
+      extension - flattens every contributor's returned items). One
+      contributor throwing never breaks another or the host app. Each
+      contributor module is fetched/evaluated at most once (cached by URL) -
+      important since a contributor like a per-message Like button could be
+      invoked from many rows.
+      **`listDefinedPoints(apps)`** (a pure function, same style as
+      `actionsForSlot()`): the CODE-level counterpart to reading
+      `definesExtensionPoints` as static JSON - discovers every declared
+      point across a catalog, tagged with what defined it, without grepping
+      source.
+      **Server-side Engines/Services** don't need `ExtensionPointHost` at all
+      for their OWN contributions - they're already all loaded together in
+      one process (no "only one mounted at a time" boundary to cross), so the
+      already-existing `Registry.hooks` (`HookBus`) stays the right "by code"
+      mechanism there; they CAN still declare `definesExtensionPoints` in
+      their manifest purely for discoverability, documented in `registry.js`'s
+      own doc comment now.
+      `apps/shell/client.js` builds one `ExtensionPointHost` per route
+      dispatch (from the same `apps` catalog fetch already happening there)
+      and hands it to the mounted app as `ctx.extensionPoints`.
+      `Registry`'s old "DEFERRED: a `capabilities` field..." note is retired -
+      `contributes`/`definesExtensionPoints` is that idea's real, actually-wired
+      successor.
+      No real production consumer wired in yet (forum's reactions/pins stay
+      as they are this round) - this round is deliberately just the
+      mechanism, proven correct with 15 new `@qu/foundation` unit tests
+      (rendering, order, error isolation, module-cache reuse, hook
+      registration exactly-once, a caller-supplied shared `HookBus`,
+      `listDefinedPoints()`) plus a real end-to-end `apps/shell` test that
+      mounts one fake app which calls `ctx.extensionPoints.renderSlot()`,
+      backed by a SECOND fake catalog app's contributed export - a genuine
+      dynamic `import()` across two independent, unrelated modules, not
+      mocked. Full monorepo suite green at 894 tests (covering both this and
+      the `spaceId` change above), `npm run build` clean.
 
 ## Development
 

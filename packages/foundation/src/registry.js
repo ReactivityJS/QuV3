@@ -20,16 +20,27 @@ import { HookBus } from './hooks.js';
  * Also carries one `hooks` field (see hooks.js's `HookBus`) - for
  * server-side `register(qu, manifest, registry)` calls that want to
  * run/transform at a specific moment (e.g.
- * `registry.hooks.on('cms.beforeSavePage', ...)`).
+ * `registry.hooks.on('cms.beforeSavePage', ...)`). An Engine/Service that
+ * wants this point DISCOVERABLE, not just usable, additionally declares it
+ * in its OWN `manifest.quapp`'s `definesExtensionPoints` field (see
+ * manifest.js's own doc comment) - purely descriptive, changes nothing about
+ * how `registry.hooks.on/run/notify` actually behave, just lets someone
+ * reading the loaded-package catalog find every hook point that exists
+ * without grepping source.
  *
- * DEFERRED, on purpose: a declarative "Capability" registration
- * (`registerCapability(entityKind, action, handler)` / `capabilitiesFor
- * (entityKind)`) existed in the QuV2 prototype this is built from, framed as
- * "what actions exist for this entity kind" for building context menus
- * without hardcoding them. It was never actually wired to a caller there -
- * dead API surface. It is deliberately NOT ported here yet; it comes back
- * paired with its first real consumer (a context-menu builder in the
- * Quniverse/app layer), not before. See docs/v3-technical-concept.md §2.2/§7.
+ * NOTE: a declarative "Capability" registration (`registerCapability
+ * (entityKind, action, handler)` / `capabilitiesFor(entityKind)`) existed in
+ * the QuV2 prototype this is built from, framed as "what actions exist for
+ * this entity kind" for building context menus without hardcoding them - but
+ * was never actually wired to a caller there. That idea's real, CLIENT-side
+ * successor is `manifest.contributes` + `extension-points.js`'s
+ * `ExtensionPointHost` (see either's own doc comment) - deliberately a
+ * client-side/manifest-driven mechanism, not a Registry method, because a
+ * contribution crosses APP boundaries (only one app's `clientMain` mounted
+ * at a time), which server-side Engines/Services registered together in one
+ * process never need to cross. This server-side `Registry.hooks` above stays
+ * the SERVER-side analogue for the same "let registered code run at a
+ * moment" idea, just scoped to packages loaded together in one relay process.
  */
 export class Registry {
   /** @type {Map<string, {instance: object, manifest: object|null}>} */

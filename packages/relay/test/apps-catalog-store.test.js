@@ -77,6 +77,7 @@ test('publishAppsCatalog() returns the same catalog shape buildAppsCatalog() pro
 
   const [entry] = await publishAppsCatalog(qu, identity, loader, { disabledApps: [] });
   assert.deepEqual(Object.keys(entry).sort(), [
-    'actions', 'clientIntegrity', 'clientMainUrl', 'clientSignature', 'enabled', 'icon', 'label', 'name', 'navOrder', 'pushActions',
+    'actions', 'clientIntegrity', 'clientMainUrl', 'clientSignature', 'contributes', 'definesExtensionPoints',
+    'enabled', 'icon', 'label', 'name', 'navOrder', 'pushActions', 'spaceId',
   ].sort());
 });

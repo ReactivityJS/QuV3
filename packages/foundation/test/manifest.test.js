@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { validateManifest, REQUIRED_FIELDS, MANIFEST_KINDS, PUSH_ACTION_TYPES } from '../src/manifest.js';
+import { validateManifest, REQUIRED_FIELDS, MANIFEST_KINDS, PUSH_ACTION_TYPES, CONTRIBUTION_KINDS } from '../src/manifest.js';
 
 function minimal(overrides = {}) {
   return { name: 'thing', version: '1.0.0', main: './index.js', ...overrides };
@@ -89,6 +89,48 @@ test('`actions` validates the {slot, id, label, hrefTemplate, icon?, order?} sha
     () => validateManifest(minimal({ actions: [{ slot: 'x', id: 'y', label: 'Y' }] })), // missing hrefTemplate
     /"actions" must be an array/
   );
+});
+
+test('`spaceId` must be a UUID', () => {
+  assert.doesNotThrow(() => validateManifest(minimal({ spaceId: '4eb04aa2-4ca9-4c9a-aa7e-33ad3802edb1' })));
+  assert.throws(() => validateManifest(minimal({ spaceId: 'forum' })), /"spaceId" must be a UUID/);
+  assert.throws(() => validateManifest(minimal({ spaceId: 'not-a-uuid-at-all' })), /"spaceId" must be a UUID/);
+});
+
+test('`contributes` validates the {point, export, kind?, order?} shape', () => {
+  assert.doesNotThrow(() =>
+    validateManifest(minimal({ contributes: [{ point: 'content.messageActions', export: 'renderLikeButton' }] }))
+  );
+  for (const kind of CONTRIBUTION_KINDS) {
+    assert.doesNotThrow(() => validateManifest(minimal({ contributes: [{ point: 'x', export: 'y', kind, order: 5 }] })));
+  }
+  assert.throws(
+    () => validateManifest(minimal({ contributes: [{ point: 'x', export: 'y', kind: 'not-a-kind' }] })),
+    /"contributes" must be an array/
+  );
+  assert.throws(
+    () => validateManifest(minimal({ contributes: [{ point: 'x' }] })), // missing export
+    /"contributes" must be an array/
+  );
+  assert.throws(() => validateManifest(minimal({ contributes: 'nope' })), /"contributes" must be an array/);
+});
+
+test('`definesExtensionPoints` validates the {point, kind?, description?} shape', () => {
+  assert.doesNotThrow(() => validateManifest(minimal({ definesExtensionPoints: [{ point: 'content.messageActions' }] })));
+  for (const kind of CONTRIBUTION_KINDS) {
+    assert.doesNotThrow(() =>
+      validateManifest(minimal({ definesExtensionPoints: [{ point: 'x', kind, description: 'what it means' }] }))
+    );
+  }
+  assert.throws(
+    () => validateManifest(minimal({ definesExtensionPoints: [{ point: 'x', kind: 'not-a-kind' }] })),
+    /"definesExtensionPoints" must be an array/
+  );
+  assert.throws(
+    () => validateManifest(minimal({ definesExtensionPoints: [{ description: 'missing point' }] })),
+    /"definesExtensionPoints" must be an array/
+  );
+  assert.throws(() => validateManifest(minimal({ definesExtensionPoints: 'nope' })), /"definesExtensionPoints" must be an array/);
 });
 
 test('omitting every optional field is valid', () => {

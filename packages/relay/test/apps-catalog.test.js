@@ -23,6 +23,16 @@ test('a loaded local app with a clientMain gets a full catalog entry', () => {
   assert.equal(entry.enabled, true);
 });
 
+test('spaceId is passed through when the manifest declares one; undefined otherwise', () => {
+  const loader = fakeLoader([
+    { manifest: { name: 'forum', version: '1.0.0', main: './index.js', clientMain: './client.js', spaceId: '4eb04aa2-4ca9-4c9a-aa7e-33ad3802edb1' }, originUrl: null },
+    { manifest: { name: 'app-list', version: '1.0.0', main: './index.js', clientMain: './client.js' }, originUrl: null },
+  ]);
+  const [forum, appList] = buildAppsCatalog(loader);
+  assert.equal(forum.spaceId, '4eb04aa2-4ca9-4c9a-aa7e-33ad3802edb1');
+  assert.equal(appList.spaceId, undefined);
+});
+
 test('label defaults to name when the manifest omits it', () => {
   const loader = fakeLoader([{ manifest: { name: 'forum', version: '1.0.0', main: './index.js', clientMain: './client.js' }, originUrl: null }]);
   assert.equal(buildAppsCatalog(loader)[0].label, 'forum');
@@ -66,6 +76,20 @@ test('pushActions and actions are passed through verbatim when present', () => {
   const [entry] = buildAppsCatalog(loader);
   assert.deepEqual(entry.pushActions, pushActions);
   assert.deepEqual(entry.actions, actions);
+});
+
+test('contributes and definesExtensionPoints default to empty arrays when the manifest omits them; passed through verbatim when present', () => {
+  const loader = fakeLoader([{ manifest: { name: 'forum', version: '1.0.0', main: './index.js', clientMain: './client.js' }, originUrl: null }]);
+  const [empty] = buildAppsCatalog(loader);
+  assert.deepEqual(empty.contributes, []);
+  assert.deepEqual(empty.definesExtensionPoints, []);
+
+  const contributes = [{ point: 'content.messageActions', export: 'renderLikeButton' }];
+  const definesExtensionPoints = [{ point: 'content.messageActions', kind: 'ui' }];
+  const loader2 = fakeLoader([{ manifest: { name: 'forum', version: '1.0.0', main: './index.js', clientMain: './client.js', contributes, definesExtensionPoints }, originUrl: null }]);
+  const [entry] = buildAppsCatalog(loader2);
+  assert.deepEqual(entry.contributes, contributes);
+  assert.deepEqual(entry.definesExtensionPoints, definesExtensionPoints);
 });
 
 test('clientIntegrity/clientSignature are passed through for a signed remote app', () => {

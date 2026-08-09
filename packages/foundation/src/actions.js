@@ -15,14 +15,16 @@
  * native Web Components term for the same idea and collides with nothing
  * else here.
  *
- * This is deliberately NOT the same mechanism as a runtime capability
- * handler would be (see registry.js's doc comment on why that's deferred) -
- * that shape only makes sense between packages ACTUALLY loaded together in
- * the same process (Engines/Services, server-side). A UI slot here crosses
- * app boundaries where only ONE app's `clientMain` is ever mounted at a time
- * (the previous app is unmounted before the next one's module is even
- * imported), so an action can only ever be DATA (a label/icon/href
- * template), never a live function reference to code that isn't there.
+ * This is deliberately NOT the same mechanism `extension-points.js`'s
+ * `ExtensionPointHost`/manifest's `contributes` field is - that one crosses
+ * the "only ONE app's `clientMain` is ever mounted at a time" boundary via
+ * dynamic `import()` of a NAMED export from another app's already-pinned
+ * module, so a contribution CAN be live, running code (a render function, a
+ * hook handler). An `actions` entry here stays pure DATA (a label/icon/href
+ * template) on purpose - most slot consumers (e.g. `contact-list`'s
+ * `contact-row`) only ever need a link, and a link costs nothing to resolve
+ * (no fetch, no module eval) - reach for `contributes` only once a slot
+ * genuinely needs to run someone else's code, not just link to it.
  */
 
 /**

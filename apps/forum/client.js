@@ -1,9 +1,14 @@
 /**
  * FORUM — a real browser client for the single public thread `apps/forum/
  * index.js`'s `register()` already ensures exists on every relay
- * (`SPACE_ID='forum'`, `THREAD_ID='general'`, redeclared locally below - see
- * that file's own doc comment for why this bundle never imports them from
- * there). `MessageService`/`ReactionService`/`PinService` (`@qu/services`)
+ * (`THREAD_ID='general'`, redeclared locally below - see that file's own doc
+ * comment for why this bundle never imports it from there). `SPACE_ID` is
+ * NOT a local literal - it's read at mount time off this app's own entry in
+ * `ctx.apps` (the manifest catalog every mounted app already receives), i.e.
+ * `manifest.quapp`'s fixed `spaceId` UUID, never a human-readable name (see
+ * `@qu/foundation`'s manifest schema doc comment on why: a name/label like
+ * "forum" is display metadata, not a collision-safe storage key).
+ * `MessageService`/`ReactionService`/`PinService` (`@qu/services`)
  * have existed fully built and tested since early in this project, with
  * nothing wiring them to a real client until this file - the same
  * "backfill hook built, no real caller yet" gap earlier rounds already
@@ -68,7 +73,6 @@ import { paths, formatActorLabel } from '@qu/services';
 import { createI18n } from '@qu/i18n';
 import { injectStyle, ensureTheme, renderAvatar } from '@qu/ui';
 
-const SPACE_ID = 'forum';
 const THREAD_ID = 'general';
 const REACTION_CHOICES = ['👍', '❤️', '😂', '😮', '🔥'];
 
@@ -129,10 +133,13 @@ function formatTs(ts) {
   return new Date(ts).toLocaleString();
 }
 
-export function mount(container, { qu, services, subscribe, syncFetch }) {
+export function mount(container, { qu, services, apps, subscribe, syncFetch }) {
   ensureTheme();
   injectStyle(STYLE_ID, STYLE);
   let stopped = false;
+
+  const SPACE_ID = apps?.find((a) => a.name === 'forum')?.spaceId;
+  if (!SPACE_ID) throw new Error('[forum] no "spaceId" found in the apps catalog for "forum" - check manifest.quapp');
 
   // Defense in depth - a future shell would already subscribe broadly
   // enough to cover this, but this app shouldn't silently depend on that

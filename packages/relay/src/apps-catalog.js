@@ -33,6 +33,10 @@ export function buildAppsCatalog(loader, disabledAppNames = []) {
       label: manifest.label ?? manifest.name,
       icon: manifest.icon,
       navOrder: manifest.navOrder,
+      // See `@qu/foundation`'s manifest schema doc comment on `spaceId` - an
+      // app's own fixed storage-space UUID, `undefined` for apps with no
+      // space-scoped storage of their own.
+      spaceId: manifest.spaceId,
       clientMainUrl: resolveClientMainUrl(manifest, originUrl),
       clientIntegrity: manifest.clientIntegrity,
       clientSignature: manifest.clientSignature,
@@ -41,6 +45,15 @@ export function buildAppsCatalog(loader, disabledAppNames = []) {
       // See `@qu/foundation/actions.js`'s `actionsForSlot()` - this is the
       // catalog entries it reads `.actions` off of.
       actions: manifest.actions ?? [],
+      // See `@qu/foundation/extension-points.js`'s `ExtensionPointHost` -
+      // `contributes` is what it dynamically imports/calls; `definesExtensionPoints`
+      // is pure discovery metadata (its own `listDefinedPoints()` reads this).
+      // A server-only Engine/Service (no `clientMain`, filtered out above)
+      // can ALSO declare `definesExtensionPoints` - that's discoverable
+      // directly off `loader.listManifests()` server-side, this catalog
+      // being client-facing only doesn't need to carry it.
+      contributes: manifest.contributes ?? [],
+      definesExtensionPoints: manifest.definesExtensionPoints ?? [],
     });
   }
   return out;

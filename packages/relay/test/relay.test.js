@@ -444,7 +444,9 @@ test('booting with the REAL repo apps/ directory loads apps/forum and creates th
     const relay = await new QuRelay({ storeDir: join(base, 'store'), blobDir: join(base, 'blob'), appsDir: REPO_APPS_DIR, port: 0 }).boot();
     try {
       assert.equal(relay.loader.isLoaded('forum'), true);
-      const config = await relay.messages.getConfig('forum', 'general');
+      // apps/forum's spaceId is its manifest's fixed UUID (see @qu/foundation
+      // manifest.js), never the human-readable app name.
+      const config = await relay.messages.getConfig('4eb04aa2-4ca9-4c9a-aa7e-33ad3802edb1', 'general');
       assert.ok(config, 'apps/forum\'s register() should have created the public forum thread');
       assert.equal(config.writers, '*');
     } finally {

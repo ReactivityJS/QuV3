@@ -167,9 +167,46 @@ test('navigating to a known route dynamically imports and mounts the target app 
     await waitFor(() => container.querySelector('.qu-shell-screen')?.textContent.startsWith('MOUNTED'));
 
     const text = container.querySelector('.qu-shell-screen').textContent;
-    for (const key of ['qu', 'identity', 'services', 'apps', 'segments', 'subscribe', 'syncFetch']) {
+    for (const key of ['qu', 'identity', 'services', 'apps', 'segments', 'subscribe', 'syncFetch', 'extensionPoints']) {
       assert.ok(text.includes(key), `expected context key "${key}" in ${text}`);
     }
+  } finally {
+    stop();
+  }
+});
+
+test('ctx.extensionPoints.renderSlot() actually dynamically imports a DIFFERENT catalog app\'s contributed export and mounts its DOM', async (t) => {
+  const qu = freshQu();
+  const identity = new QuIdentityEngine(qu);
+  await identity.importMnemonic(identity.generateMnemonic());
+
+  const pluginUrl = dataUrlModule(`
+    export function renderLike(container, payload) {
+      const btn = document.createElement('button');
+      btn.textContent = 'like:' + payload.id;
+      container.appendChild(btn);
+    }
+  `);
+  const hostUrl = dataUrlModule(`
+    export async function mount(container, ctx) {
+      await ctx.extensionPoints.renderSlot('content.actions', container, { id: 'msg1' });
+      return () => {};
+    }
+  `);
+  t.mock.method(globalThis, 'fetch', mockFetch({
+    apps: [
+      { name: 'host', clientMainUrl: hostUrl },
+      { name: 'likes', clientMainUrl: pluginUrl, contributes: [{ point: 'content.actions', export: 'renderLike' }] },
+    ],
+  }));
+
+  const container = makeContainer();
+  const stop = await mount(container, { qu, identity });
+  try {
+    window.location.hash = '#/host';
+    window.dispatchEvent(new window.Event('hashchange'));
+    await waitFor(() => container.querySelector('.qu-shell-screen button') !== null);
+    assert.equal(container.querySelector('.qu-shell-screen button').textContent, 'like:msg1');
   } finally {
     stop();
   }
