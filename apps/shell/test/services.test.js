@@ -38,3 +38,12 @@ test('createClientServices() wires a real, functional BookmarksService', async (
   await services.bookmarks.add('msg1', { body: 'hi' });
   assert.equal(await services.bookmarks.isBookmarked('msg1'), true);
 });
+
+test('createClientServices() wires a real, functional NotificationPrefsService and PushSubscriptionService', async () => {
+  const { services } = await freshServices();
+  await services.notificationPrefs.savePrefs({ enabled: true, mentions: false, apps: { forum: { enabled: false } } });
+  assert.deepEqual(await services.notificationPrefs.getOwnPrefs(), { enabled: true, mentions: false, apps: { forum: { enabled: false } } });
+
+  await services.pushSubscriptions.subscribe({ endpoint: 'https://push.example.com/x', keys: { p256dh: 'a', auth: 'b' } });
+  assert.deepEqual(await services.pushSubscriptions.listOwnSubscriptions(), [{ endpoint: 'https://push.example.com/x', keys: { p256dh: 'a', auth: 'b' } }]);
+});

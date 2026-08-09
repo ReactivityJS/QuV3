@@ -117,6 +117,19 @@ const DICT = {
     savedReloadHint: 'Saved! Reload the page to see the new language/theme.',
     reloadNow: 'Reload now',
     preview: 'Preview (how visitors see your profile)',
+    notifications: 'Notifications',
+    notifEnabled: 'Enable notifications',
+    notifMentions: 'Notify me on @mentions',
+    notifPerApp: 'Per app',
+    notifSave: 'Save notification settings',
+    notifSaved: 'Saved!',
+    pushTitle: 'Push notifications',
+    pushEnableDevice: 'Enable on this device',
+    pushEnabled: 'Enabled on this device',
+    pushUnsupported: 'Push notifications are not supported in this browser.',
+    pushNoVapid: 'This relay has not configured push notifications.',
+    pushDenied: 'Notification permission was denied.',
+    pushFailed: 'Could not enable push notifications: {message}',
   },
   de: {
     title: 'Profil',
@@ -139,6 +152,19 @@ const DICT = {
     savedReloadHint: 'Gespeichert! Lade die Seite neu, um Sprache/Theme zu sehen.',
     reloadNow: 'Jetzt neu laden',
     preview: 'Vorschau (so sehen dich Besucher)',
+    notifications: 'Benachrichtigungen',
+    notifEnabled: 'Benachrichtigungen aktivieren',
+    notifMentions: 'Bei @Erwähnungen benachrichtigen',
+    notifPerApp: 'Pro App',
+    notifSave: 'Benachrichtigungseinstellungen speichern',
+    notifSaved: 'Gespeichert!',
+    pushTitle: 'Push-Benachrichtigungen',
+    pushEnableDevice: 'Auf diesem Gerät aktivieren',
+    pushEnabled: 'Auf diesem Gerät aktiviert',
+    pushUnsupported: 'Push-Benachrichtigungen werden von diesem Browser nicht unterstützt.',
+    pushNoVapid: 'Dieses Relay hat keine Push-Benachrichtigungen konfiguriert.',
+    pushDenied: 'Berechtigung für Benachrichtigungen wurde verweigert.',
+    pushFailed: 'Push-Benachrichtigungen konnten nicht aktiviert werden: {message}',
   },
 };
 const { t } = createI18n(DICT);
@@ -170,6 +196,10 @@ const STYLE = `
   .qu-profile-preview .qu-profile-header h1 { font-size: 1.1em; }
   .qu-profile-settings-reload { display: flex; align-items: center; gap: 0.6rem; }
   .qu-profile-avatar-row { display: flex; align-items: center; gap: 0.6rem; }
+  .qu-profile-notif-section { border-top: 1px solid var(--qu-color-border, #8884); padding-top: 0.8rem; display: flex; flex-direction: column; gap: 0.6rem; }
+  .qu-profile-notif-check-row { display: flex; align-items: center; gap: 0.5rem; }
+  .qu-profile-notif-apps { display: flex; flex-direction: column; gap: 0.4rem; padding-left: 1rem; }
+  .qu-profile-push-row { display: flex; align-items: center; gap: 0.6rem; }
 `;
 
 /** Shared by `renderPublicProfile()` (the real thing) and `renderOwnProfile()`'s own live preview - so the preview can never drift from what a visitor actually sees. */
@@ -191,6 +221,62 @@ function renderProfileHeader(pub, label, avatar, avatarSize = '3rem') {
   headingWrap.appendChild(heading);
   header.appendChild(headingWrap);
   return header;
+}
+
+/**
+ * A VAPID public key (`@qu/push`'s `generateVapidKeys()`, served at
+ * `/push/vapid-public-key`) is base64url-encoded raw EC point bytes - the
+ * standard, widely-used conversion `PushManager.subscribe()`'s
+ * `applicationServerKey` needs (it wants an actual `Uint8Array`/
+ * `BufferSource`, not a string).
+ * @param {string} base64Url @returns {Uint8Array}
+ */
+function urlBase64ToUint8Array(base64Url) {
+  const padding = '='.repeat((4 - (base64Url.length % 4)) % 4);
+  const base64 = (base64Url + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
+}
+
+/**
+ * The real `PushManager.subscribe()` flow this codebase's own `apps/shell`/
+ * `sw.js` doc comments have long deferred as "a separate, larger feature
+ * needing its own permission UI" - this IS that UI (Profile Settings, next
+ * to every other identity-bound preference). Requests Notification
+ * permission (a real user-gesture-gated browser prompt), waits for the
+ * ALREADY-registered service worker (`apps/shell`'s own `registerServiceWorker()`
+ * already did this at boot - `navigator.serviceWorker.ready` just resolves
+ * to that same registration, no new one needed here), fetches this relay's
+ * VAPID public key, subscribes, and stores the result via
+ * `services.pushSubscriptions` so `@qu/relay`'s `PushDeliveryService` knows
+ * where to reach this device.
+ * @param {object} services
+ * @returns {Promise<PushSubscription>}
+ * @throws {Error} If unsupported, permission is denied, or this relay has
+ *   no VAPID keys configured - the caller shows the message to the user,
+ *   nothing here is silently swallowed (unlike most of this codebase's
+ *   OTHER browser-feature-detection, e.g. `pwa.js`'s own - this is a real
+ *   user-initiated action with an explicit "did it work?" button, not a
+ *   passive background enhancement).
+ */
+async function subscribeToPush(services) {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+    throw new Error(t('pushUnsupported'));
+  }
+  const permission = await Notification.requestPermission();
+  if (permission !== 'granted') throw new Error(t('pushDenied'));
+
+  const registration = await navigator.serviceWorker.ready;
+  const res = await fetch('/push/vapid-public-key');
+  const { publicKey } = res.ok ? await res.json() : { publicKey: null };
+  if (!publicKey) throw new Error(t('pushNoVapid'));
+
+  const subscription = await registration.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: urlBase64ToUint8Array(publicKey),
+  });
+  await services.pushSubscriptions.subscribe(subscription.toJSON());
+  return subscription;
 }
 
 export function mount(container, { qu, identity, services, segments = [] }) {
@@ -261,11 +347,22 @@ export function mount(container, { qu, identity, services, segments = [] }) {
       if (stopped) return;
       if (isSettings) {
         const own = await services.profile.getOwnProfile();
+        const notifPrefs = await services.notificationPrefs.getOwnPrefs();
+        // Only apps that can actually SEND a notification are worth a
+        // toggle - filtered here (not left for renderNotifications() to
+        // filter) so an empty result means "no per-app row", not "no data
+        // yet" from the caller's perspective.
+        let installedApps = [];
+        try {
+          const res = await fetch('/apps.json');
+          const all = res.ok ? await res.json() : [];
+          installedApps = all.filter((a) => Array.isArray(a.pushActions) && a.pushActions.length > 0);
+        } catch { /* offline/unreachable - the per-app section just stays empty, everything else still works */ }
         if (stopped || token !== renderToken) return;
         const justSaved = saveState.justSaved;
         saveState.justSaved = false;
         root.textContent = '';
-        renderSettings(root, own, services, myPub, saveState, justSaved);
+        renderSettings(root, own, services, myPub, saveState, justSaved, notifPrefs, installedApps);
         return;
       }
       if (isOwn) {
@@ -493,7 +590,7 @@ function labeledInput(label, value, placeholder = '') {
   return { row, input };
 }
 
-function renderSettings(root, own, services, myPub, saveState, justSaved) {
+function renderSettings(root, own, services, myPub, saveState, justSaved, notifPrefs, installedApps) {
   const view = document.createElement('div');
   view.className = 'qu-profile qu-profile-settings';
 
@@ -583,12 +680,133 @@ function renderSettings(root, own, services, myPub, saveState, justSaved) {
     setStoredTheme(preferredTheme);
   });
 
+  const notifSection = renderNotificationsSection(services, notifPrefs, installedApps);
+
   const backLink = document.createElement('a');
   backLink.href = `#/~${myPub}`;
   backLink.textContent = t('backToProfile');
 
-  view.append(heading, localeRow, themeRow, saveBtn, reloadRow, backLink);
+  view.append(heading, localeRow, themeRow, saveBtn, reloadRow, notifSection, backLink);
   root.appendChild(view);
+}
+
+/**
+ * The granular "diverse apps" notification preferences (`@qu/services`'
+ * `NotificationPrefsService` - see its own doc comment for why it's
+ * public/signed, not encrypted) plus the real `PushManager.subscribe()`
+ * flow (`subscribeToPush()` above). Self-contained on purpose: unlike
+ * `renderSettings()`'s language/theme fields, saving here does NOT
+ * re-trigger this component's own `watch()`-driven re-render (notification
+ * prefs live at a different path than the profile document that `watch()`
+ * actually watches - see `mount()`'s own `watch()` call), so there is no
+ * "the DOM I'm about to flash a status on is already gone" race to guard
+ * against the way `renderOwnProfile()`/`renderSettings()`'s own shared
+ * `saveState` trick does for profile saves. A plain local "Saved!" flash
+ * suffices.
+ * @param {object} services
+ * @param {{enabled: boolean, mentions: boolean, apps: Record<string, {enabled?: boolean}>}} notifPrefs
+ * @param {Array<{name: string, label?: string}>} installedApps - Every
+ *   catalog entry that declares at least one `pushActions` entry (already
+ *   filtered by the caller - see `render()`'s own doc comment on why).
+ * @returns {HTMLElement}
+ */
+function renderNotificationsSection(services, notifPrefs, installedApps) {
+  const section = document.createElement('div');
+  section.className = 'qu-profile-notif-section';
+
+  const heading = document.createElement('h2');
+  heading.textContent = t('notifications');
+
+  const enabledLabel = document.createElement('label');
+  enabledLabel.className = 'qu-profile-notif-check-row';
+  const enabledCheckbox = document.createElement('input');
+  enabledCheckbox.type = 'checkbox';
+  enabledCheckbox.checked = notifPrefs.enabled;
+  enabledLabel.append(enabledCheckbox, document.createTextNode(t('notifEnabled')));
+
+  const mentionsLabel = document.createElement('label');
+  mentionsLabel.className = 'qu-profile-notif-check-row';
+  const mentionsCheckbox = document.createElement('input');
+  mentionsCheckbox.type = 'checkbox';
+  mentionsCheckbox.checked = notifPrefs.mentions;
+  mentionsLabel.append(mentionsCheckbox, document.createTextNode(t('notifMentions')));
+
+  const appsHeading = document.createElement('label');
+  appsHeading.textContent = t('notifPerApp');
+  const appsList = document.createElement('div');
+  appsList.className = 'qu-profile-notif-apps';
+  /** @type {Array<{name: string, checkbox: HTMLInputElement}>} */
+  const appCheckboxes = [];
+  for (const app of installedApps) {
+    const label = document.createElement('label');
+    label.className = 'qu-profile-notif-check-row';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    // Default true (no entry yet, or `enabled` unset) - matches
+    // NotificationPrefsService.shouldNotify()'s own default-open reading
+    // of a per-app override (`appPrefs?.enabled === false` is the only
+    // thing that turns it off).
+    checkbox.checked = notifPrefs.apps?.[app.name]?.enabled !== false;
+    label.append(checkbox, document.createTextNode(app.label ?? app.name));
+    appsList.appendChild(label);
+    appCheckboxes.push({ name: app.name, checkbox });
+  }
+
+  const notifStatus = document.createElement('span');
+  notifStatus.className = 'qu-profile-status qu-profile-notif-status';
+  const notifSaveBtn = document.createElement('button');
+  notifSaveBtn.type = 'button';
+  notifSaveBtn.textContent = t('notifSave');
+  notifSaveBtn.addEventListener('click', async () => {
+    const apps = {};
+    for (const { name, checkbox } of appCheckboxes) apps[name] = { enabled: checkbox.checked };
+    await services.notificationPrefs.savePrefs({ enabled: enabledCheckbox.checked, mentions: mentionsCheckbox.checked, apps });
+    notifStatus.textContent = t('notifSaved');
+    setTimeout(() => { notifStatus.textContent = ''; }, 1500);
+  });
+
+  const pushHeading = document.createElement('label');
+  pushHeading.textContent = t('pushTitle');
+  const pushRow = document.createElement('div');
+  pushRow.className = 'qu-profile-push-row';
+  const pushBtn = document.createElement('button');
+  pushBtn.type = 'button';
+  pushBtn.textContent = t('pushEnableDevice');
+  const pushStatus = document.createElement('span');
+  pushStatus.className = 'qu-profile-status';
+  pushRow.append(pushBtn, pushStatus);
+
+  // Best-effort, matching this codebase's own "an optional browser
+  // feature degrades gracefully" convention (see e.g. pwa.js) - checking
+  // for an ALREADY-active subscription on THIS device is read-only and
+  // needs no user gesture, unlike subscribing itself.
+  (async () => {
+    try {
+      if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+      const registration = await navigator.serviceWorker.ready;
+      const existing = await registration.pushManager.getSubscription();
+      if (existing) {
+        pushBtn.hidden = true;
+        pushStatus.textContent = t('pushEnabled');
+      }
+    } catch { /* ignore - the button just stays in its default "not yet enabled" state */ }
+  })();
+
+  pushBtn.addEventListener('click', async () => {
+    pushBtn.disabled = true;
+    pushStatus.textContent = '';
+    try {
+      await subscribeToPush(services);
+      pushBtn.hidden = true;
+      pushStatus.textContent = t('pushEnabled');
+    } catch (err) {
+      pushStatus.textContent = t('pushFailed', { message: err.message });
+      pushBtn.disabled = false;
+    }
+  });
+
+  section.append(heading, enabledLabel, mentionsLabel, appsHeading, appsList, notifSaveBtn, notifStatus, pushHeading, pushRow);
+  return section;
 }
 
 function renderPublicProfile(root, pub, profile, services) {

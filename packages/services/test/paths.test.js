@@ -38,3 +38,10 @@ test('threadMessagesParentPath() is exactly one level above threadMessagePath()'
   assert.equal(parent, '/store/board/threads/general/msgs');
   assert.equal(message, `${parent}/m1`);
 });
+
+test('notificationsSpaceId() is prefixed with NOTIFICATIONS_SPACE_PREFIX, and NOTIFICATIONS_THREAD_ID is fixed', () => {
+  const spaceId = paths.notificationsSpaceId('abc123');
+  assert.equal(spaceId, 'notifications-abc123');
+  assert.ok(spaceId.startsWith(paths.NOTIFICATIONS_SPACE_PREFIX));
+  assert.equal(paths.NOTIFICATIONS_THREAD_ID, 'notifications');
+});

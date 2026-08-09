@@ -5,7 +5,7 @@ import { QuIdentityEngine, actorPath } from '@qu/identity';
 import { AssetEngine } from '@qu/engines';
 import {
   ListService, DirectoryService, ProfileService, FlagService,
-  ContactsService, ActorService, AssetService,
+  ContactsService, ActorService, AssetService, NotificationPrefsService, PushSubscriptionService,
 } from '@qu/services';
 import { installDom, waitFor } from '@qu/ui/testing';
 
@@ -43,9 +43,11 @@ async function freshEnv() {
   const contacts = new ContactsService(flags, identity);
   const actors = new ActorService(identity);
   const assets = new AssetService(qu, new AssetEngine(qu), identity);
+  const notificationPrefs = new NotificationPrefsService(qu, identity);
+  const pushSubscriptions = new PushSubscriptionService(qu, identity, list);
 
   const myPub = await actors.whoAmI();
-  return { qu, identity, services: { directory, profile, contacts, actors, assets }, myPub };
+  return { qu, identity, services: { directory, profile, contacts, actors, assets, notificationPrefs, pushSubscriptions }, myPub };
 }
 
 /** Publishes a SEPARATE identity's profile onto the shared `qu` store - simulating data already synced in from a peer. */
@@ -495,6 +497,155 @@ test('clicking "Reload now" actually reloads the page', async () => {
       globalThis.window = realWindow;
     }
     assert.equal(reloaded, true);
+  } finally {
+    stop();
+  }
+});
+
+test.afterEach(() => {
+  delete navigator.serviceWorker;
+  delete window.PushManager;
+  delete globalThis.Notification;
+  delete globalThis.fetch;
+});
+
+/** Stubs the browser globals subscribeToPush()/the "already enabled?" check in renderNotificationsSection() read - see either's own doc comment for exactly which global each piece reads. */
+function installFakePush({ existingSubscription = null, vapidPublicKey = 'ABC123', permission = 'granted' } = {}) {
+  const subscribeCalls = [];
+  const registration = {
+    pushManager: {
+      getSubscription: async () => existingSubscription,
+      subscribe: async (options) => {
+        subscribeCalls.push(options);
+        return { toJSON: () => ({ endpoint: 'https://push.example.com/new', keys: { p256dh: 'p', auth: 'a' } }) };
+      },
+    },
+  };
+  navigator.serviceWorker = { ready: Promise.resolve(registration) };
+  window.PushManager = class {};
+  globalThis.Notification = { requestPermission: async () => permission };
+  globalThis.fetch = async (url) => {
+    if (url === '/push/vapid-public-key') return { ok: true, json: async () => ({ publicKey: vapidPublicKey }) };
+    if (url === '/apps.json') return { ok: true, json: async () => [] };
+    throw new Error(`unexpected fetch(${url})`);
+  };
+  return { subscribeCalls };
+}
+
+test('Notifications section: global enabled/mentions checkboxes round-trip through savePrefs()', async () => {
+  const { qu, identity, services, myPub } = await freshEnv();
+  await services.profile.saveProfile({ alias: 'Ada' });
+  installFakePush();
+
+  const container = makeContainer();
+  const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`, 'settings'] });
+  try {
+    await waitFor(() => container.querySelector('.qu-profile-notif-section') !== null);
+    const checkboxes = container.querySelectorAll('.qu-profile-notif-check-row input[type=checkbox]');
+    checkboxes[0].checked = false; // global enabled
+    checkboxes[1].checked = false; // mentions
+    [...container.querySelectorAll('button')].find((b) => b.textContent === 'Save notification settings').click();
+    await waitFor(() => container.querySelector('.qu-profile-notif-status')?.textContent === 'Saved!');
+
+    const saved = await services.notificationPrefs.getOwnPrefs();
+    assert.equal(saved.enabled, false);
+    assert.equal(saved.mentions, false);
+  } finally {
+    stop();
+  }
+});
+
+test('Notifications section: per-app toggles list only apps that declare pushActions, and save with the right appId keys', async () => {
+  const { qu, identity, services, myPub } = await freshEnv();
+  await services.profile.saveProfile({ alias: 'Ada' });
+  installFakePush();
+  globalThis.fetch = async (url) => {
+    if (url === '/apps.json') {
+      return {
+        ok: true,
+        json: async () => [
+          { name: 'forum', label: 'Forum', pushActions: [{ id: 'mention', label: 'Mentions', type: 'mention' }] },
+          { name: 'app-list', label: 'App List', pushActions: [] }, // no pushActions - never listed
+        ],
+      };
+    }
+    return { ok: true, json: async () => ({ publicKey: 'ABC123' }) };
+  };
+
+  const container = makeContainer();
+  const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`, 'settings'] });
+  try {
+    await waitFor(() => container.querySelector('.qu-profile-notif-apps') !== null);
+    const appRows = container.querySelectorAll('.qu-profile-notif-apps label');
+    assert.equal(appRows.length, 1); // app-list excluded - no pushActions
+    assert.ok(appRows[0].textContent.includes('Forum'));
+
+    appRows[0].querySelector('input').checked = false;
+    [...container.querySelectorAll('button')].find((b) => b.textContent === 'Save notification settings').click();
+    await waitFor(() => container.querySelector('.qu-profile-notif-status')?.textContent === 'Saved!');
+
+    const saved = await services.notificationPrefs.getOwnPrefs();
+    assert.deepEqual(saved.apps, { forum: { enabled: false } });
+  } finally {
+    stop();
+  }
+});
+
+test('Notifications section: shows "Enabled on this device" immediately when a subscription already exists - no button, no gesture needed', async () => {
+  const { qu, identity, services, myPub } = await freshEnv();
+  await services.profile.saveProfile({ alias: 'Ada' });
+  installFakePush({ existingSubscription: { endpoint: 'https://push.example.com/already' } });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`, 'settings'] });
+  try {
+    await waitFor(() => container.querySelector('.qu-profile-push-row')?.textContent.includes('Enabled on this device'));
+    const pushBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === 'Enable on this device');
+    assert.equal(pushBtn.hidden, true);
+  } finally {
+    stop();
+  }
+});
+
+test('Notifications section: clicking "Enable on this device" runs the real PushManager.subscribe() flow and stores the result via pushSubscriptions', async () => {
+  const { qu, identity, services, myPub } = await freshEnv();
+  await services.profile.saveProfile({ alias: 'Ada' });
+  const { subscribeCalls } = installFakePush({ vapidPublicKey: 'ABC123' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`, 'settings'] });
+  try {
+    await waitFor(() => container.querySelector('.qu-profile-push-row') !== null);
+    const pushBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === 'Enable on this device');
+    pushBtn.click();
+    await waitFor(() => [...container.querySelectorAll('button')].find((b) => b.textContent === 'Enable on this device')?.hidden === true);
+
+    assert.equal(subscribeCalls.length, 1);
+    assert.equal(subscribeCalls[0].userVisibleOnly, true);
+    assert.ok(subscribeCalls[0].applicationServerKey instanceof Uint8Array);
+
+    const stored = await services.pushSubscriptions.listOwnSubscriptions();
+    assert.deepEqual(stored, [{ endpoint: 'https://push.example.com/new', keys: { p256dh: 'p', auth: 'a' } }]);
+  } finally {
+    stop();
+  }
+});
+
+test('Notifications section: a denied Notification permission shows the error, never crashes, and the button stays clickable to retry', async () => {
+  const { qu, identity, services, myPub } = await freshEnv();
+  await services.profile.saveProfile({ alias: 'Ada' });
+  installFakePush({ permission: 'denied' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`, 'settings'] });
+  try {
+    await waitFor(() => container.querySelector('.qu-profile-push-row') !== null);
+    const pushBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === 'Enable on this device');
+    pushBtn.click();
+    await waitFor(() => container.querySelector('.qu-profile-push-row').textContent.includes('denied'));
+
+    assert.equal(pushBtn.hidden, false);
+    assert.equal(pushBtn.disabled, false);
   } finally {
     stop();
   }

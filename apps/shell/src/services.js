@@ -1,4 +1,4 @@
-import { ListService, FlagService, ContactsService, FavoritesService, ProfileService, DirectoryService, ActorService, AccessService, MessageService, ReactionService, PinService, AssetService, BookmarksService } from '@qu/services';
+import { ListService, FlagService, ContactsService, FavoritesService, ProfileService, DirectoryService, ActorService, AccessService, MessageService, ReactionService, PinService, AssetService, BookmarksService, NotificationPrefsService, PushSubscriptionService } from '@qu/services';
 import { AssetEngine } from '@qu/engines';
 
 /**
@@ -73,5 +73,15 @@ export function createClientServices(qu, identity, { syncFetch = null, getGenera
     // unconditionally, same as every other Service, regardless of which app
     // happens to be mounted right now.
     bookmarks: new BookmarksService(flags),
+    // First real client callers of either (see either's own doc comment) -
+    // same "backfill hook built, no caller yet" gap this file's doc comment
+    // already describes for syncFetch/getGeneration themselves.
+    // apps/profile's Settings subpage reads/writes notificationPrefs (the
+    // granular enabled/mentions/per-app toggles) and drives
+    // pushSubscriptions.subscribe() from a real PushManager.subscribe()
+    // call; apps/notifications only ever reads the resulting in-app
+    // notifications Thread, never either of these two directly.
+    notificationPrefs: new NotificationPrefsService(qu, identity),
+    pushSubscriptions: new PushSubscriptionService(qu, identity, list),
   };
 }

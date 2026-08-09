@@ -457,21 +457,21 @@ test('booting with the REAL repo apps/ directory loads apps/forum and creates th
   }
 });
 
-test('booting with the REAL repo apps/ directory also loads app-list/user-list/contact-list/profile/forum/bookmarks, and /apps.json lists exactly their (client-bearing) manifests', async () => {
+test('booting with the REAL repo apps/ directory also loads app-list/user-list/contact-list/profile/forum/bookmarks/notifications, and /apps.json lists exactly their (client-bearing) manifests', async () => {
   const base = await mkdtemp(join(tmpdir(), 'qu-relay-'));
   try {
     const relay = await new QuRelay({ storeDir: join(base, 'store'), blobDir: join(base, 'blob'), appsDir: REPO_APPS_DIR, port: 0 }).boot();
     try {
-      for (const name of ['app-list', 'user-list', 'contact-list', 'profile', 'forum', 'bookmarks']) assert.equal(relay.loader.isLoaded(name), true);
+      for (const name of ['app-list', 'user-list', 'contact-list', 'profile', 'forum', 'bookmarks', 'notifications']) assert.equal(relay.loader.isLoaded(name), true);
 
       const res = await fetch(`http://localhost:${relay.port}/apps.json`);
       const catalog = await res.json();
       const names = catalog.map((a) => a.name).sort();
       // apps/forum now has a clientMain too (see apps/forum/client.js), and
-      // apps/bookmarks (new this round) does from the start - both are
-      // client-bearing manifests, so buildAppsCatalog() lists them alongside
-      // the others.
-      assert.deepEqual(names, ['app-list', 'bookmarks', 'contact-list', 'forum', 'profile', 'user-list']);
+      // apps/bookmarks/apps/notifications (new this round) do from the
+      // start - all are client-bearing manifests, so buildAppsCatalog()
+      // lists them alongside the others.
+      assert.deepEqual(names, ['app-list', 'bookmarks', 'contact-list', 'forum', 'notifications', 'profile', 'user-list']);
       for (const app of catalog) assert.equal(app.clientMainUrl, `/apps/${app.name}/dist/client.js`);
     } finally {
       await relay.close();

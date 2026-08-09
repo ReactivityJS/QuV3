@@ -5,7 +5,7 @@ import { AccessEngine, ThreadEngine } from '@qu/engines';
 import { QuIdentityEngine } from '@qu/identity';
 import { ListService, AccessService, MessageService, THREAD_PRESETS, NotificationPrefsService, PushSubscriptionService, paths } from '@qu/services';
 import { PresenceTracker } from '../src/presence-tracker.js';
-import { PushDeliveryService } from '../src/push-delivery.js';
+import { PushDeliveryService, createManifestNotificationResolver } from '../src/push-delivery.js';
 
 const VAPID_KEYS = { publicKey: 'pub', privateKey: 'priv', subject: 'mailto:a@b.com' };
 
@@ -307,4 +307,85 @@ test('resolveNotification() can disable notifications for an appId via a custom 
   await postAndDeliver(env, delivery, 'board', 'general', { body: `hi @${recipient.pub}`, extra: { mentions: [recipient.pub] } });
 
   assert.equal(await inAppNotificationCount(env, recipient.pub), 0);
+});
+
+/** A stub `@qu/loader` QuLoader - only `listManifests()` is ever called by createManifestNotificationResolver(). */
+function fakeLoader(manifests) {
+  return { listManifests: () => manifests.map((manifest) => ({ manifest, originUrl: null })) };
+}
+
+const FORUM_MANIFEST = {
+  name: 'forum',
+  label: 'Forum',
+  spaceId: 'forum-space-uuid',
+  pushActions: [
+    { id: 'newMessage', label: 'New posts', type: 'create' },
+    { id: 'mention', label: 'Mentions', type: 'mention' },
+  ],
+};
+
+test('createManifestNotificationResolver(): matches a loaded app by spaceId and picks the "mention" pushAction', () => {
+  const resolve = createManifestNotificationResolver(fakeLoader([FORUM_MANIFEST]));
+  const result = resolve('forum-space-uuid', 'general', { authorPub: 'AliceAliceAliceAliceAlice', mention: true, mentions: [] });
+
+  assert.equal(result.appId, 'forum');
+  assert.equal(result.functionName, 'mention');
+  assert.equal(result.title, 'Mentions — Forum');
+  // Real, routable app name, NOT the (possibly UUID) spaceId - the exact
+  // bug #genericNotification()'s own url: `#/${spaceId}` fallback has for
+  // any app whose spaceId differs from its name (forum is exactly that).
+  assert.equal(result.url, '#/forum');
+  assert.ok(result.body.includes('AliceAlice'));
+});
+
+test('createManifestNotificationResolver(): picks the "create" pushAction for a non-mention', () => {
+  const resolve = createManifestNotificationResolver(fakeLoader([FORUM_MANIFEST]));
+  const result = resolve('forum-space-uuid', 'general', { authorPub: 'Alice', mention: false, mentions: [] });
+
+  assert.equal(result.functionName, 'newMessage');
+  assert.equal(result.title, 'New posts — Forum');
+});
+
+test('createManifestNotificationResolver(): returns null (falls through to the generic default) when no loaded app declares this spaceId', () => {
+  const resolve = createManifestNotificationResolver(fakeLoader([FORUM_MANIFEST]));
+  assert.equal(resolve('some-other-space', 'general', { authorPub: 'Alice', mention: true, mentions: [] }), null);
+});
+
+test('createManifestNotificationResolver(): returns null when the matching app has no pushActions entry of the needed type', () => {
+  const noMentionAction = { name: 'diary', spaceId: 'diary-space', pushActions: [{ id: 'newEntry', label: 'New entry', type: 'create' }] };
+  const resolve = createManifestNotificationResolver(fakeLoader([noMentionAction]));
+  assert.equal(resolve('diary-space', 'general', { authorPub: 'Alice', mention: true, mentions: [] }), null);
+});
+
+test('createManifestNotificationResolver(): sees apps loaded AFTER the resolver function was created (reads loader.listManifests() at call time, not creation time)', () => {
+  const manifests = [];
+  const resolve = createManifestNotificationResolver(fakeLoader(manifests));
+  assert.equal(resolve('forum-space-uuid', 'general', { authorPub: 'Alice', mention: true, mentions: [] }), null);
+
+  manifests.push(FORUM_MANIFEST);
+  const result = resolve('forum-space-uuid', 'general', { authorPub: 'Alice', mention: true, mentions: [] });
+  assert.equal(result.functionName, 'mention');
+});
+
+test('INTEGRATION: PushDeliveryService, with the manifest-driven resolver as its resolveNotification, sends a push using the app\'s OWN pushActions wording (not the generic fallback)', async () => {
+  const env = await freshEnv();
+  const recipient = await freshRecipient(env);
+  await recipient.pushSubscriptions.subscribe({ endpoint: 'https://push.example.com/x', keys: { p256dh: 'a', auth: 'b' } });
+  const send = fakeSendWebPush();
+  const resolveNotification = createManifestNotificationResolver(fakeLoader([FORUM_MANIFEST]));
+  const delivery = pushDeliveryFor(env, recipient, { sendWebPush: send, resolveNotification });
+  await env.messages.createThread('forum-space-uuid', 'general', THREAD_PRESETS.forum());
+  const authorPub = QuCrypto.toBase64Url((await env.identity.getMainKey()).publicKey);
+
+  await postAndDeliver(env, delivery, 'forum-space-uuid', 'general', { body: `hi @${recipient.pub}`, extra: { mentions: [recipient.pub] } });
+
+  assert.deepEqual(send.calls[0].payload, {
+    title: 'Mentions — Forum',
+    body: `~${authorPub.slice(0, 10)}… sent a message`,
+    appId: 'forum',
+    url: '#/forum',
+  });
+  // Also confirms the write itself happened (see inAppNotificationCount()'s
+  // own doc comment for why its content can't be decrypted from here).
+  assert.equal(await inAppNotificationCount(env, recipient.pub), 1);
 });

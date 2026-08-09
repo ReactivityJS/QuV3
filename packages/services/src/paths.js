@@ -268,6 +268,33 @@ export function notificationPrefsPath(actorPub) {
 }
 
 /**
+ * The space id `@qu/relay`'s `PushDeliveryService` writes an in-app
+ * notification into, and `apps/notifications` reads back - one PRIVATE
+ * Thread (`readers: [actorPub]`, see `THREAD_PRESETS.notifications()`) per
+ * identity, always thread id `NOTIFICATIONS_THREAD_ID`. Shared here (not a
+ * string literal re-typed in both places) so the writer and the reader can
+ * never drift apart on the exact convention.
+ * @param {string} actorPub @returns {string}
+ */
+export function notificationsSpaceId(actorPub) {
+  return `${NOTIFICATIONS_SPACE_PREFIX}${actorPub}`;
+}
+
+/**
+ * The fixed prefix every `notificationsSpaceId()` starts with - what
+ * `PushDeliveryService` checks an INCOMING message's own spaceId against to
+ * recognise (and skip) a notifications thread as a delivery TARGET, never a
+ * delivery SOURCE (a relay-authored notice about a message in a
+ * notifications thread would otherwise loop forever). Exported so that
+ * check never has to re-type the literal `notificationsSpaceId()` itself
+ * already uses.
+ */
+export const NOTIFICATIONS_SPACE_PREFIX = 'notifications-';
+
+/** The fixed (single, per-identity) thread id under `notificationsSpaceId()` - see that function's own doc comment. */
+export const NOTIFICATIONS_THREAD_ID = 'notifications';
+
+/**
  * One of an actor's registered Web Push subscriptions (one per device/
  * browser) - `PushSubscriptionService`. A DERIVED list
  * (docs/v3-technical-concept.md §4.2): each subscription already lives at

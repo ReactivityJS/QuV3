@@ -14,7 +14,7 @@ import { createLogger } from '@qu/log';
 import { WebSocketServerTransport } from './transports/websocket-server-transport.js';
 import { PresenceTracker } from './presence-tracker.js';
 import { setupVapidKeys } from './vapid-key-store.js';
-import { PushDeliveryService } from './push-delivery.js';
+import { PushDeliveryService, createManifestNotificationResolver } from './push-delivery.js';
 import { AdminHttp } from './admin-http.js';
 import { HttpRouter } from './http-router.js';
 import { getSettings } from './relay-settings.js';
@@ -76,7 +76,12 @@ export class QuRelay {
    * @param {string} [options.vapidPrivateKey]
    * @param {string} [options.vapidSubject='mailto:admin@example.com']
    * @param {(spaceId: string|number, threadId: string, context: object) => object|null} [options.resolveNotification] -
-   *   See `push-delivery.js`'s own doc comment (docs/v3-technical-concept.md §6.2).
+   *   See `push-delivery.js`'s own doc comment (docs/v3-technical-concept.md
+   *   §6.2). Defaults to `createManifestNotificationResolver(this.loader)`
+   *   (also `push-delivery.js`) - an app's own `pushActions` manifest
+   *   entries already drive real notification wording/routing with NO
+   *   operator configuration needed; only set this explicitly to override
+   *   that convention with something manifests can't express.
    * @param {Array<{manifestUrl: string, trustedPublisherPubs?: string[]}>} [options.remoteApps=[]] -
    *   Additional apps to load from remote manifest URLs at boot (see
    *   `@qu/loader`'s `RemoteLoader.loadRemote()` for the integrity/signature
@@ -160,7 +165,15 @@ export class QuRelay {
       pushSubscriptions: this.pushSubscriptions,
       presence: rt.resolve('presence'),
       vapidKeys: this._state.vapidKeys, // resolved lazily, AFTER boot()'s #setupVapidKeys() - see boot()'s own resolve() ordering
-      resolveNotification: this.options.resolveNotification,
+      // Falls back to the manifest-driven default (see this class's own
+      // constructor doc comment on `options.resolveNotification`) - reads
+      // `this.loader.listManifests()` fresh on every call, so it's safe to
+      // capture here even though apps haven't loaded yet at THIS exact
+      // line (this factory only actually RUNS once `pushDelivery` is first
+      // resolved, in #bootInner(), and the returned resolver function
+      // itself defers every loader read to call time, well after boot()'s
+      // own app-loading step below has completed).
+      resolveNotification: this.options.resolveNotification ?? createManifestNotificationResolver(this.loader),
     }));
 
     this._httpServer = null;

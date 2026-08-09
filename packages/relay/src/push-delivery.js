@@ -1,6 +1,6 @@
 import { QuCrypto } from '@qu/core';
 import { sendWebPush as defaultSendWebPush } from '@qu/push';
-import { THREAD_PRESETS, NotificationPrefsService } from '@qu/services';
+import { THREAD_PRESETS, NotificationPrefsService, paths } from '@qu/services';
 import { createLogger } from '@qu/log';
 
 const log = createLogger('PushDelivery');
@@ -18,17 +18,20 @@ const log = createLogger('PushDelivery');
  * ROUTING IS PLUGGABLE (docs/v3-technical-concept.md §6.2: "simple
  * declarative mapping, not a template DSL"), not hardcoded per app the way
  * the prototype this is rebuilt from had it (an if/else chain naming
- * specific spaces like `calendar-<id>`/`geochase-<id>`/`chat` by string) -
- * V3 has no apps built yet to hardcode against, and hardcoding non-existent
- * app names would be exactly the kind of speculative complexity this
- * codebase's own principles warn against. `resolveNotification` (optional)
- * is that extension point: given `{spaceId, threadId, authorPub, mention,
- * mentions}`, it may return a specific `{appId, functionName, title, body,
- * url}` for a space it recognizes, or `null`/`undefined` to fall through to
- * the generic default below. A real per-app routing table (driven by
- * manifest `pushRouting` data, per §6.2) is exactly the kind of resolver
- * this hook is designed to plug in once apps exist - this class doesn't
- * need to change when that happens.
+ * specific spaces like `calendar-<id>`/`geochase-<id>`/`chat` by string).
+ * `resolveNotification` (optional) is that extension point: given
+ * `{spaceId, threadId, authorPub, mention, mentions}`, it may return a
+ * specific `{appId, functionName, title, body, url}` for a space it
+ * recognizes, or `null`/`undefined` to fall through to the generic default
+ * below.
+ *
+ * NOW HAS A REAL IMPLEMENTATION: `createManifestNotificationResolver()`
+ * (this file, below) is the "real per-app routing table" this doc comment
+ * used to describe only hypothetically, before any app declared
+ * `pushActions` for real - `relay.js` passes it as the DEFAULT
+ * `resolveNotification` (an explicit `options.resolveNotification` still
+ * overrides it). This class itself needed ZERO changes for that to work -
+ * exactly the point of the hook existing as a plain function parameter.
  */
 export class PushDeliveryService {
   /**
@@ -65,7 +68,7 @@ export class PushDeliveryService {
     // would loop forever (deliver -> write notice -> deliver -> ...) -
     // notifications threads are a delivery TARGET, never a delivery SOURCE.
     // Checked first, before any other work.
-    if (String(spaceId).startsWith('notifications-')) return;
+    if (String(spaceId).startsWith(paths.NOTIFICATIONS_SPACE_PREFIX)) return;
 
     const config = await this.messages.getConfig(spaceId, threadId);
     if (!config) return;
@@ -149,11 +152,66 @@ export class PushDeliveryService {
    * @param {{title: string, body: string, appId: string, url: string}} payload
    */
   async #writeInAppNotification(actorPub, payload) {
-    const spaceId = `notifications-${actorPub}`;
-    await this.messages.createThread(spaceId, 'notifications', THREAD_PRESETS.notifications(actorPub));
-    await this.messages.postMessage(spaceId, 'notifications', {
+    const spaceId = paths.notificationsSpaceId(actorPub);
+    await this.messages.createThread(spaceId, paths.NOTIFICATIONS_THREAD_ID, THREAD_PRESETS.notifications(actorPub));
+    await this.messages.postMessage(spaceId, paths.NOTIFICATIONS_THREAD_ID, {
       body: payload.body,
       extra: { title: payload.title, url: payload.url, appId: payload.appId },
     });
   }
+}
+
+/**
+ * The "real per-app routing table (driven by manifest `pushRouting` data...)"
+ * the class doc comment above names as `resolveNotification`'s intended real
+ * caller, now that apps exist. Matches a message's `spaceId` against every
+ * loaded app's own `manifest.spaceId` (already published in the apps
+ * catalog - see `apps-catalog.js`), then picks the `pushActions` entry whose
+ * `type` matches (`'mention'` or `'create'`) - `apps/forum/manifest.quapp`'s
+ * own `{id: 'mention', label: 'Mentions', type: 'mention'}` /
+ * `{id: 'newMessage', label: 'New posts', type: 'create'}` is exactly the
+ * shape this reads. Returns `null` (falls through to the class's own
+ * generic wording) when no loaded app declares this spaceId, or the
+ * matching app has no `pushActions` entry of the right type - "an app CAN
+ * define its own notification actions" was always optional, never assumed.
+ *
+ * Deliberately narrow: body text NEVER includes actual message content
+ * (see the class doc comment - "generic, never-the-actual-content Web
+ * Push"), only the TITLE and click-through URL are app-specific here - a
+ * pushAction's own `label` (e.g. "Mentions", "New posts") replaces the
+ * hardcoded "Mentioned in .../New message in ..." wording, and the URL
+ * uses the app's real, routable `name` instead of blindly reflecting
+ * `spaceId` back (`#genericNotification()`'s own `url: '#/${spaceId}'`
+ * fallback is flat-out WRONG for any app whose spaceId isn't also its own
+ * name - `apps/forum` is exactly that case, a real UUID `spaceId` - a
+ * click on one of ITS notifications would land on a hash the shell's
+ * router can never resolve to anything).
+ *
+ * This is what `relay.js` passes as the DEFAULT `resolveNotification` -
+ * `options.resolveNotification`, if a relay operator explicitly sets one,
+ * still always wins (see `relay.js`'s own wiring), for a case this
+ * manifest-driven convention genuinely can't express.
+ *
+ * @param {import('@qu/loader').QuLoader} loader
+ * @returns {(spaceId: string|number, threadId: string, context: {authorPub: string|null, mention: boolean, mentions: string[]}) => ({appId: string, functionName: string, title: string, body: string, url: string}|null)}
+ */
+export function createManifestNotificationResolver(loader) {
+  return function resolveNotification(spaceId, _threadId, { authorPub, mention }) {
+    const wantType = mention ? 'mention' : 'create';
+    for (const { manifest } of loader.listManifests()) {
+      if (manifest.spaceId !== spaceId) continue;
+      const action = (manifest.pushActions ?? []).find((a) => a.type === wantType);
+      if (!action) return null;
+      const appLabel = manifest.label ?? manifest.name;
+      const who = (authorPub ?? 'someone').slice(0, 10);
+      return {
+        appId: manifest.name,
+        functionName: action.id,
+        title: `${action.label} — ${appLabel}`,
+        body: `~${who}… sent a message`,
+        url: `#/${manifest.name}`,
+      };
+    }
+    return null;
+  };
 }

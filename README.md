@@ -1356,6 +1356,111 @@ own tests, built bottom-up per the dependency order in
       each verified with its own dedicated live Playwright repro against a
       real relay - not just unit tests - both to confirm the bug existed
       before touching code and to confirm the fix afterward.
+- [x] **Notifications, finished** — user asked for a review of the
+      Notifications/Push implementation (granular per-app, apps hooking in
+      their own notification actions) and Sharing (to/from Quniverse), plus
+      floated an "app skeleton" idea; review found `@qu/push`/
+      `NotificationPrefsService`/`PushSubscriptionService`/
+      `PushDeliveryService` already solidly built and wired into `relay.js`'s
+      boot (fires on every thread message write), but with THREE real gaps:
+      no client ever called `PushManager.subscribe()`, no UI ever read the
+      in-app notifications Thread `PushDeliveryService` already writes, and
+      `pushActions` (already a manifest field, already published in the apps
+      catalog) never actually drove `resolveNotification`'s wording/routing -
+      every notification used the generic fallback regardless. Sharing turned
+      out to be completely unimplemented (no `navigator.share()`, no
+      `share_target`, no extension-point contribution - though the original
+      extension-point README entry named "Share" as a planned example
+      alongside Bookmarks). User picked "finish Notifications" as the next
+      concrete round; Sharing and an app-skeleton reference stay open follow-
+      ups.
+      **`packages/services/src/paths.js`**: new `notificationsSpaceId(actorPub)`/
+      `NOTIFICATIONS_SPACE_PREFIX`/`NOTIFICATIONS_THREAD_ID` - `@qu/relay`'s
+      `push-delivery.js` used to hand-type the `"notifications-" + actorPub`
+      convention in two separate places; now both server AND the new client
+      app share one definition.
+      **`packages/relay/src/push-delivery.js`**: new exported
+      `createManifestNotificationResolver(loader)` - the "real per-app
+      routing table" the class's own doc comment had described only
+      hypothetically since before any app existed to drive it. Matches an
+      incoming message's `spaceId` against every loaded app's own
+      `manifest.spaceId`, then picks the `pushActions` entry whose `type`
+      matches (`'mention'`/`'create'`) - `apps/forum`'s own `{id: 'mention',
+      label: 'Mentions', type: 'mention'}` is exactly the shape this reads.
+      Returns a title built from the app's OWN declared wording (`"Mentions
+      — Forum"` instead of the generic `"Mentioned in 4eb04aa2-..."` - a
+      real, user-visible improvement: forum's spaceId is a UUID, so the
+      generic fallback's `url: '#/${spaceId}'` was ALSO flat-out broken,
+      pointing at a hash the shell's router could never resolve - the new
+      resolver uses the app's real, routable `name` instead) or `null` to
+      fall through to the existing generic wording when no app/pushAction
+      matches. `relay.js` now passes this as the DEFAULT `resolveNotification`
+      (an explicit `options.resolveNotification` still overrides it) - zero
+      changes needed to `PushDeliveryService` itself, exactly the point of
+      the hook already being a plain function parameter.
+      **`apps/shell/src/services.js`**: wired `NotificationPrefsService`/
+      `PushSubscriptionService` into `createClientServices()` - the same
+      "hook built, no client caller yet" gap this file's own doc comment
+      already names for `syncFetch`/`getGeneration` before this session,
+      just for these two Services instead.
+      **`apps/profile/client.js`** (Settings subpage, next to language/theme):
+      a real `PushManager.subscribe()` flow (`subscribeToPush()`) - requests
+      Notification permission, waits for the ALREADY-registered service
+      worker (`navigator.serviceWorker.ready` - no new registration needed,
+      `apps/shell`'s own `registerServiceWorker()` already did that at boot),
+      fetches this relay's VAPID public key from `/push/vapid-public-key`,
+      subscribes, and stores the result via `services.pushSubscriptions`.
+      Plus the granular prefs UI itself: global enabled/@mentions checkboxes,
+      and a per-app checkbox for every installed app that declares at least
+      one `pushActions` entry (fetched from `/apps.json`, filtered) - exactly
+      the "granular... diverse apps" shape asked for, visibly wired to real
+      per-app manifest data, not a hardcoded list.
+      **`apps/notifications`** (new app, 🔔, navOrder 12): a live feed over
+      the viewer's own notifications Thread, `watchChildren()`-reactive, each
+      item clickable straight to its real in-app route. Uses `MessageService`'s
+      existing generic per-thread `markRead()`/`getLastReadAt()` read-marker
+      (built earlier, never had a caller) for an unread highlight - "opened
+      the feed" is this round's whole definition of "seen it", a per-item
+      dismiss is real, straightforward follow-up work, not this round's ask.
+      Deliberately NOT built this round: an unread-count badge on the
+      shell's own nav entry (the data already supports it - `apps/shell/src/nav.js`
+      itself would need to grow that, a separate nav-level concern this app
+      doesn't own) and per-item dismiss/delete (`QuStore` itself has no
+      `delete()`, matching every other Thread in this codebase).
+      **Two real races found and fixed while building this, both the same
+      class of bug `apps/profile/client.js`/`apps/user-list/client.js` had
+      already independently discovered and fixed for THEIR OWN re-render
+      logic earlier this session**: (1) `apps/notifications/client.js`'s
+      `render()` had no monotonic-token guard against `watchChildren()`
+      firing twice in quick succession - confirmed via a genuinely flaky
+      test (an item correctly marked read by a NEWER render could still show
+      the "unread" highlight, because an OLDER, now-stale render finished
+      LAST and won the DOM). Fixed with the same `renderToken` pattern
+      `apps/profile/client.js` already established. (2) Two of my OWN new
+      tests used `waitFor(async () => ...)` - `@qu/ui/testing.js`'s
+      `waitFor()` never awaits its predicate (`while (!check())`), so an
+      async predicate is always truthy on the FIRST call regardless of what
+      it resolves to; both tests looked like they were waiting for an
+      async write to land but weren't. Fixed with real poll loops instead.
+      Verified: full suite green (980 tests, stable across repeated runs -
+      confirmed the two races above were genuinely gone, not just
+      coincidentally passing once), `npm run build` bundles `apps/notifications`
+      automatically. Live two-peer Playwright verification against a real
+      relay: peer A mentions peer B in the forum; B's Notifications feed
+      shows it live with the REAL manifest-driven title ("Mentions — Forum",
+      not the generic fallback) and a working click-through URL (`#/forum`,
+      not a broken UUID hash); B disables Forum notifications in Profile
+      Settings; a second mention from A produces NO new notification
+      (per-app opt-out confirmed suppressing delivery, live, not just via
+      `NotificationPrefsService.shouldNotify()`'s own unit tests); B's real
+      `PushManager.subscribe()` flow was exercised in a real Chromium
+      (correctly rejected in an incognito-style context - "Push API does
+      not support incognito mode", a genuine Chrome limitation - and,
+      separately, timed out reaching an actual push service from a
+      persistent context, since this sandbox has no outbound route to one)
+      - the code path itself is proven correct up to exactly the boundary
+      `@qu/push`'s own doc comment already honestly documents ("has NOT
+      been verified end-to-end against a real push service").
 
 ## Development
 
