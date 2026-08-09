@@ -1790,4 +1790,47 @@ own tests, built bottom-up per the dependency order in
       one board; Peer A types `@` in the composer, a real dropdown appears
       and inserts a full pub on selection; the composer's emoji button and
       a reaction row's "+" both open the real extended emoji panel.
+- [x] **Shell header redesign** - `apps/shell`'s old plain app-icon strip
+      (`./src/nav.js`) is replaced by a fixed, always-visible top bar
+      (`./src/header.js`): the Quniverse logo doubles as the Home button
+      (`#`), Back/Forward buttons next to it (plain `history.back()`/
+      `.forward()` - every route change already pushes a real History entry
+      via `location.hash = ...`, nothing extra to track), a live
+      unread-count Notification bell (`#/notifications` - the exact gap
+      `apps/notifications/client.js`'s own doc comment had flagged as
+      "a separate, nav-level concern this app doesn't own"), and the signed-in
+      identity's own avatar+name as the shell's one main menu. The menu:
+      favorited apps as quick links (live off the same `qu:flag-changed`
+      event `apps/app-list`'s star toggle already broadcasts), a small
+      divider, then Profile, User Settings, App List (browse/favorite/flag
+      every app), and a Relay Admin link shown only when this identity's pub
+      is in `/config.json`'s `adminPubs` (`apps/relay-admin` itself still
+      isn't built - the link degrades to the same graceful "app not found"
+      placeholder every other forward-declared route already gets).
+      **Brand mark**: a real `logo.svg`/`favicon.svg` (the same purple-circle
+      "Q" mark the PWA manifest always embedded as inline base64, now one
+      external file `@qu/relay`'s `serveShell()` serves at both `/logo.svg`
+      and `/favicon.svg`, referenced from `index.html`'s `<link rel="icon">`
+      and from `manifest.webmanifest`'s own icon entry instead of duplicating
+      the artwork inline).
+      **User Settings extension point**: `apps/profile` now declares
+      `userSettings.contributions` in its own manifest's
+      `definesExtensionPoints` and renders it (via `ctx.extensionPoints`,
+      newly threaded into this app's `mount()`) at the bottom of Settings
+      (`#/~<pub>/settings`) - any app, or a future relay-level settings
+      section, can hook its own per-user preferences in there without
+      `apps/profile` ever importing it, the same `ExtensionPointHost`
+      mechanism Forum's `content.messageActions` point already proved out,
+      just profile as a HOST for the first time instead of a contributor.
+      **A real bug found via live Playwright verification, not caught by any
+      unit test beforehand**: `.qu-shell-menu[hidden]` and the plain
+      `.qu-shell-menu { display: flex }` rule have EQUAL CSS specificity -
+      the browser's own `[hidden] { display: none }` UA rule lost the
+      cascade tie to this stylesheet's later rule, so a "closed" menu
+      (`.hidden === true`) stayed visually on top of the page, intercepting
+      clicks on whatever was underneath it (confirmed live: favoriting an
+      app from the still-"closed" menu's own App List link, then trying to
+      star a different app, hit the invisible-but-present menu instead).
+      Fixed with an explicit `.qu-shell-menu[hidden] { display: none; }`
+      override.
 

@@ -502,6 +502,34 @@ test('clicking "Reload now" actually reloads the page', async () => {
   }
 });
 
+test('#/~<pub>/settings renders the userSettings.contributions extension point into an empty container after its own sections', async () => {
+  const { qu, identity, services, myPub } = await freshEnv();
+
+  const calls = [];
+  const extensionPoints = {
+    async renderSlot(point, container, payload) {
+      calls.push({ point, payload });
+      const marker = document.createElement('div');
+      marker.className = 'contributed-marker';
+      container.appendChild(marker);
+    },
+  };
+
+  const container = makeContainer();
+  const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`, 'settings'], extensionPoints });
+  try {
+    await waitFor(() => container.querySelector('.contributed-marker') !== null);
+    assert.deepEqual(calls, [{ point: 'userSettings.contributions', payload: { myPub, services } }]);
+    // Rendered inside profile's own `.qu-profile-ext-settings` mount point, after every one of its own settings sections.
+    const extRoot = container.querySelector('.qu-profile-ext-settings');
+    assert.ok(extRoot.contains(container.querySelector('.contributed-marker')));
+    const backLink = [...container.querySelectorAll('a')].find((a) => a.textContent === 'Back to profile');
+    assert.ok(extRoot.compareDocumentPosition(backLink) & Node.DOCUMENT_POSITION_FOLLOWING, 'the extension slot renders before the back link');
+  } finally {
+    stop();
+  }
+});
+
 test.afterEach(() => {
   delete navigator.serviceWorker;
   delete window.PushManager;

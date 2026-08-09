@@ -83,6 +83,23 @@
  * wired into all three other call sites too - this file now imports the
  * SAME shared function instead of keeping its own copy.
  *
+ * USER SETTINGS EXTENSION POINT: Settings (`#/~<pub>/settings`) declares
+ * `userSettings.contributions` in its own manifest's `definesExtensionPoints`
+ * - the Drupal-hooks mechanism `@qu/foundation`'s `ExtensionPointHost` already
+ * provides (see that file's own doc comment), used here for the first time
+ * by a HOST rather than a contributor. `renderSettings()` below returns an
+ * empty `.qu-profile-ext-settings` container; `mount()`'s own `render()`
+ * then calls `extensionPoints.renderSlot('userSettings.contributions',
+ * extRoot, {myPub, services})` on it - any OTHER app (a per-app preference
+ * screen, or a future relay-level settings section) contributes its own
+ * user-specific settings UI there via its OWN manifest's `contributes`
+ * entry, without this file ever importing it, exactly like Forum's
+ * `content.messageActions` point already works for content plugins. This
+ * app defines the point but never contributes to it itself - the
+ * language/theme/notifications/push sections above stay hard-coded here
+ * because they're intrinsic to what "profile settings" already means, not
+ * because the mechanism couldn't cover them too.
+ *
  * Deliberately NOT ported from QuV2's `apps/profile`: the identity backup/
  * export/QR section (seed code, camera scan) - a whole separate concern
  * (device/identity management, not profile DATA), and no `@qu/qr` package
@@ -279,7 +296,7 @@ async function subscribeToPush(services) {
   return subscription;
 }
 
-export function mount(container, { qu, identity, services, segments = [] }) {
+export function mount(container, { qu, identity, services, segments = [], extensionPoints }) {
   ensureTheme();
   injectStyle(STYLE_ID, STYLE);
   let stopped = false;
@@ -362,7 +379,16 @@ export function mount(container, { qu, identity, services, segments = [] }) {
         const justSaved = saveState.justSaved;
         saveState.justSaved = false;
         root.textContent = '';
-        renderSettings(root, own, services, myPub, saveState, justSaved, notifPrefs, installedApps);
+        const extRoot = renderSettings(root, own, services, myPub, saveState, justSaved, notifPrefs, installedApps);
+        // The `userSettings.contributions` extension point (see this file's
+        // own top doc comment) - any OTHER app (or a future relay-level
+        // settings section) may render its own per-user preferences here,
+        // without this file ever importing it. Best-effort: `extensionPoints`
+        // is undefined in a context that doesn't provide one (e.g. this
+        // app's own unit tests calling mount() directly with a partial ctx),
+        // same "optional dependency, no crash" treatment every other
+        // best-effort ctx field in this codebase already gets.
+        if (extensionPoints) await extensionPoints.renderSlot('userSettings.contributions', extRoot, { myPub, services });
         return;
       }
       if (isOwn) {
@@ -682,12 +708,22 @@ function renderSettings(root, own, services, myPub, saveState, justSaved, notifP
 
   const notifSection = renderNotificationsSection(services, notifPrefs, installedApps);
 
+  // The `userSettings.contributions` extension point's mount container -
+  // left empty here on purpose, filled (if at all) by the caller's own
+  // `extensionPoints.renderSlot()` call once this function returns (see
+  // `mount()`'s own doc comment on why that stays a caller concern: this
+  // function has no `extensionPoints` of its own, and shouldn't need one
+  // just to know WHERE a contribution belongs).
+  const extRoot = document.createElement('div');
+  extRoot.className = 'qu-profile-ext-settings';
+
   const backLink = document.createElement('a');
   backLink.href = `#/~${myPub}`;
   backLink.textContent = t('backToProfile');
 
-  view.append(heading, localeRow, themeRow, saveBtn, reloadRow, notifSection, backLink);
+  view.append(heading, localeRow, themeRow, saveBtn, reloadRow, notifSection, extRoot, backLink);
   root.appendChild(view);
+  return extRoot;
 }
 
 /**

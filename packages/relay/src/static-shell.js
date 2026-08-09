@@ -10,11 +10,15 @@ const log = createLogger('serveShell');
  * build-apps.mjs` produces unconditionally, unlike every other app's
  * `dist/client.js`, which only builds when a `manifest.quapp` declares a
  * `clientMain` - see that script's own doc comment), `/manifest.webmanifest`
- * (PWA installability) and `/sw.js` (the update-flow service worker, also
+ * (PWA installability), `/sw.js` (the update-flow service worker, also
  * stamped by `build-apps.mjs` - see that script's and `apps/shell/sw.js`'s
- * own doc comments). Unlike `serveApps()`, this is a FIXED small set of
- * exact routes, not a prefix-scanned directory tree - no path-traversal
- * surface to guard against, nothing to normalize.
+ * own doc comments), and `/logo.svg`/`/favicon.svg` (the brand mark - one
+ * plain SVG source, served both as the header's Home logo AND, via
+ * `index.html`'s `<link rel="icon">`, as the browser tab favicon; also what
+ * `manifest.webmanifest`'s own icon entry now points at instead of
+ * duplicating the same artwork inline as base64). Unlike `serveApps()`,
+ * this is a FIXED small set of exact routes, not a prefix-scanned directory
+ * tree - no path-traversal surface to guard against, nothing to normalize.
  *
  * `cache-control: no-cache` (revalidate every time, never serve a stale
  * cached copy silently) on all of them - this is what makes the update flow
@@ -51,4 +55,6 @@ const ROUTES = {
   '/shell-bundle.js.map': { file: 'dist/shell-bundle.js.map', contentType: 'application/json' },
   '/manifest.webmanifest': { file: 'manifest.webmanifest', contentType: 'application/manifest+json' },
   '/sw.js': { file: 'dist/sw.js', contentType: 'text/javascript' },
+  '/logo.svg': { file: 'logo.svg', contentType: 'image/svg+xml' },
+  '/favicon.svg': { file: 'favicon.svg', contentType: 'image/svg+xml' },
 };

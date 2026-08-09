@@ -28,7 +28,8 @@
  * crashing the whole shell) -> this identity's own device-agnostic
  * language/theme preference applied (best-effort, see the "IDENTITY-BOUND
  * PREFERENCES" note below) -> PWA install/update UI mounted (best-effort,
- * see `./src/pwa.js`) -> nav mounted (`./src/nav.js`) -> route dispatched
+ * see `./src/pwa.js`) -> fixed header mounted (`./src/header.js` - Home
+ * logo, Back/Forward, notification bell, user menu) -> route dispatched
  * (`./src/router.js` - `#/<appId>` dynamically `import()`s the app's
  * `clientMainUrl` from `/apps.json` and calls its `mount()`; `#/~<pub>` is a
  * reserved sigil, matching the real Qu's own profile-link convention -
@@ -84,7 +85,7 @@ import { ExtensionPointHost } from '@qu/foundation';
 import { renderOnboarding } from './src/onboarding.js';
 import { createClientServices } from './src/services.js';
 import { connectToRelay } from './src/sync.js';
-import { mountNav } from './src/nav.js';
+import { mountHeader } from './src/header.js';
 import { mountPwaUi } from './src/pwa.js';
 import { parseHash } from './src/router.js';
 
@@ -96,8 +97,8 @@ const log = createLogger('shell');
 if (typeof window !== 'undefined') window.quLog = { setLevel: setLogLevel, getLevel: getLogLevel };
 
 const DICT = {
-  en: { home: 'Pick an app above to get started.', appNotFound: 'App not found (or not enabled on this relay).' },
-  de: { home: 'Wähle oben eine App aus, um loszulegen.', appNotFound: 'App nicht gefunden (oder auf diesem Relay nicht aktiviert).' },
+  en: { home: 'Pick an app from the menu to get started.', appNotFound: 'App not found (or not enabled on this relay).' },
+  de: { home: 'Wähle über das Menü eine App aus, um loszulegen.', appNotFound: 'App nicht gefunden (oder auf diesem Relay nicht aktiviert).' },
 };
 const { t } = createI18n(DICT);
 
@@ -184,11 +185,11 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
     log.warn('could not read this identity\'s own language/theme preference:', err.message);
   }
 
+  const headerRoot = document.createElement('div');
   const pwaRoot = document.createElement('div');
-  const navRoot = document.createElement('div');
   const screen = document.createElement('div');
   screen.className = 'qu-shell-screen';
-  container.append(pwaRoot, navRoot, screen);
+  container.append(headerRoot, pwaRoot, screen);
 
   // Best-effort, same as everything else optional in this boot sequence -
   // see this file's own "PWA/UPDATER" doc comment above.
@@ -198,12 +199,21 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
     log.warn('PWA install/update UI unavailable in this environment:', err.message);
   }
 
-  let relayPub = null;
+  // `adminPubs` is this relay's own operator allowlist (see
+  // `@qu/relay`'s `AdminHttp#verifyAdmin()`) - fetched here only so the
+  // header's user menu knows whether to SHOW a Relay Admin link at all;
+  // the real, enforced gate stays entirely server-side.
+  let adminPubs = [];
   try {
     const res = await fetch('/config.json');
-    relayPub = res.ok ? (await res.json()).relayPub : null;
-  } catch { /* offline/unreachable - nav just stays empty, everything else still works */ }
-  if (relayPub) mountNav(navRoot, { qu, relayPub, syncFetch });
+    adminPubs = res.ok ? ((await res.json()).adminPubs ?? []) : [];
+  } catch { /* offline/unreachable - header just shows no admin link, everything else still works */ }
+  let stopHeader = null;
+  try {
+    stopHeader = mountHeader(headerRoot, { qu, services, adminPubs, subscribe, syncFetch });
+  } catch (err) {
+    log.warn('shell header unavailable in this environment:', err.message);
+  }
 
   function renderPlaceholder(message) {
     screen.textContent = '';
@@ -251,6 +261,7 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
     stopped = true;
     window.removeEventListener('hashchange', renderRoute);
     stopMountedApp?.();
+    stopHeader?.();
     transport?.close();
   };
 }
