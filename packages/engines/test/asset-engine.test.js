@@ -227,6 +227,28 @@ test('verifySyncOut(): gives up after maxRetries, reporting the still-missing pi
   assert.deepEqual(status.missing.sort(), ['/blob/gallery/photo1/chunk_0', '/store/gallery/assets/photo1/meta'].sort());
 });
 
+test('verifySyncOut(): a syncFetch that RESOLVES null (peer confirms "not found", the real SyncEngine.fetch() contract) is treated as missing, not found', async () => {
+  // Regression test: `syncFetch(path).then(() => true)` used to ignore the
+  // resolved VALUE entirely - any settled promise, including a legitimate
+  // `null` ("relay confirms it doesn't have this yet", not an error) was
+  // counted as "found". That made a fresh upload's very first
+  // verifySyncOut() call report synced:true on attempt 1 regardless of
+  // whether the relay actually had anything yet, since SyncEngine.fetch()
+  // only REJECTS on an actual timeout, never for a normal "not found" -
+  // confirmed live: the uploader's own progress UI jumped straight to
+  // "Syncing 100%" instantly, before the relay could possibly have
+  // received the chunk yet.
+  const { qu, engine } = storeWithAssets({ chunkSize: 1000 });
+  await qu.put('/store/gallery/assets/photo1', { name: 'x', mime: 'text/plain', data: new TextEncoder().encode('hi') });
+
+  const relayHas = new Set(['/store/gallery/assets/photo1/meta']); // chunk_0 legitimately not there yet
+  const syncFetch = async (path) => (relayHas.has(path) ? {} : null); // resolves null, never rejects/throws
+
+  const status = await engine.verifySyncOut('/store/gallery/assets/photo1', syncFetch, { maxRetries: 0, retryDelayMs: 1 });
+  assert.equal(status.synced, false);
+  assert.deepEqual(status.missing, ['/blob/gallery/photo1/chunk_0']);
+});
+
 test('verifySyncOut(): throws for a path with no local asset at all', async () => {
   const { engine } = storeWithAssets();
   await assert.rejects(

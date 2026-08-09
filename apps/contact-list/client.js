@@ -23,14 +23,14 @@
  * Avatar/name resolution and the action-slot links stay imperative in
  * `onItemStamped`, same reasoning as `apps/user-list`: a profile document
  * is a signed, wrapped envelope only `services.profile.getPublicProfile()`
- * can safely unwrap, and `renderAvatar()` composes a DOM subtree a
+ * can safely unwrap, and `renderAvatarOrAsset()` composes a DOM subtree a
  * `<qu-view>` can't mirror. Search is a plain post-render visibility
  * toggle over the rendered rows' own text.
  */
 import { createI18n } from '@qu/i18n';
 import { formatActorLabel, paths, createPrivateStore } from '@qu/services';
 import { actionsForSlot, resolveActionHref } from '@qu/foundation';
-import { renderAvatar, injectStyle, ensureTheme } from '@qu/ui';
+import { renderAvatarOrAsset, injectStyle, ensureTheme } from '@qu/ui';
 import { QuCrypto } from '@qu/core';
 
 const DICT = {
@@ -44,6 +44,11 @@ const STYLE = `
   .qu-contact-search { width: 100%; box-sizing: border-box; margin: 0 0 0.6rem; padding: 0.5rem 0.7rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); font: inherit; }
   .qu-contact-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
   .qu-contact-list li { display: flex; align-items: center; gap: 0.6rem; padding: 0.5rem 0.7rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); }
+  /* Without this, search filtering below (\`li.hidden = ...\`) would have no
+     visual effect - a plain author-stylesheet class selector beats the UA's
+     own [hidden] rule at equal specificity, so every row would stay
+     visible regardless of the search query. */
+  .qu-contact-list li[hidden] { display: none; }
   .qu-contact-name { flex: 1; font-family: var(--qu-font-mono, ui-monospace, monospace); text-decoration: none; color: inherit; }
   .qu-contact-name:hover { text-decoration: underline; }
   .qu-contact-list button { background: none; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-sm, 0.3rem); cursor: pointer; padding: 0.2rem 0.5rem; }
@@ -56,6 +61,12 @@ export function mount(container, { qu, identity, services, apps, syncFetch }) {
   ensureTheme();
   injectStyle(STYLE_ID, STYLE);
   let stopped = false;
+  // Same "set on an ancestor before descendant Custom Elements connect"
+  // discipline `.qu` already requires elsewhere in `@qu/ui` -
+  // `renderAvatarOrAsset()` below resolves this via `<qu-asset>`'s own
+  // `findAssetService()` ancestor walk, for any actor who uploaded a real
+  // image avatar (see @qu/ui/avatar.js's own doc comment).
+  container.assetService = services.assets;
   const rowActions = actionsForSlot(apps, CONTACT_ROW_SLOT);
 
   const heading = document.createElement('h1');
@@ -109,7 +120,7 @@ export function mount(container, { qu, identity, services, apps, syncFetch }) {
         const profile = await services.profile.getPublicProfile(contactPub);
         if (stopped) return;
         const alias = formatActorLabel(contactPub, profile);
-        li.querySelector('.qu-contact-avatar-slot').replaceChildren(renderAvatar(contactPub, alias, profile?.avatar, { size: '2.2rem' }));
+        li.querySelector('.qu-contact-avatar-slot').replaceChildren(renderAvatarOrAsset(contactPub, alias, profile?.avatar, { size: '2.2rem' }));
         li.querySelector('.qu-contact-name').textContent = alias;
         applyFilter(search.value);
       })();

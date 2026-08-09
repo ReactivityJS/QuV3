@@ -302,7 +302,16 @@ export class AssetEngine {
     for (let attempt = 1; ; attempt++) {
       const missing = [];
       for (const path of allPaths) {
-        const onRelay = await syncFetch(path).then(() => true).catch(() => false);
+        // `syncFetch(path)` (-> SyncEngine.fetch()) resolves to the QuBit
+        // OR `null` if the peer confirms it does NOT have this path yet -
+        // only a timeout actually REJECTS. Checking the resolved VALUE
+        // (not just "did it resolve") matters: a fresh upload's relay-side
+        // write can easily still be in flight when this runs, so a fast
+        // `null` resolution is a common, legitimate "not there yet", not
+        // an error - treating any settled promise as "found" would make
+        // this whole retry loop report `synced: true` on the very first
+        // pass regardless of whether the relay actually has it.
+        const onRelay = await syncFetch(path).then((v) => v != null).catch(() => false);
         if (!onRelay) missing.push(path);
       }
       const status = { synced: missing.length === 0, missing, attempts: attempt };

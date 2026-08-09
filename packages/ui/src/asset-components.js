@@ -65,6 +65,12 @@ const STYLE_ID = 'qu-asset-components-style';
 const STYLE = `
   .qu-asset-upload-picker { display: inline-flex; align-items: center; gap: 0.5rem; }
   .qu-asset-upload-progress { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.85em; opacity: 0.85; }
+  /* Without this, the [hidden] attribute this file sets via \`status.hidden = true\`
+     (a plain author-stylesheet class selector beats the UA's own [hidden]
+     rule at equal specificity) would never actually hide anything - the
+     "Syncing..." status would stay visibly stuck at 100% forever once sync
+     finishes, confirmed live. */
+  .qu-asset-upload-progress[hidden] { display: none; }
   .qu-asset-upload-bar { width: 8rem; height: 0.35rem; border-radius: 999px; background: var(--qu-color-border, #8884); overflow: hidden; }
   .qu-asset-upload-fill { height: 100%; background: var(--qu-color-accent, #5b5bd6); transition: width 0.15s ease; }
   .qu-asset-upload-fill.qu-asset-upload-fill-sync { background: var(--qu-color-success, #3fb950); }

@@ -65,20 +65,23 @@
  * file)`) - a personal, always-unique-per-identity namespace, distinct from
  * any app's own `manifest.spaceId` (see `@qu/foundation`'s manifest schema
  * doc comment on why a space id must be collision-safe). `renderProfileHeader()`
- * below branches on the `asset:` prefix and renders a `<qu-asset kind=
- * "image">` instead, falling back to `@qu/ui`'s shared `renderAvatar()` for
- * the URL/emoji/unset cases exactly as before - `root.assetService` is set
- * once in `mount()` (same "set on an ancestor before children connect"
- * discipline `.qu` already requires) so both this app's own preview AND a
- * VISITOR's read-only view (`renderPublicProfile()`) can resolve it.
- * SCOPE CUT, documented on purpose: `user-list`/`contact-list`/`forum`
- * still only ever call `@qu/ui`'s plain `renderAvatar()` for OTHER actors'
- * avatars - an actor who uploaded an asset avatar shows correctly on their
- * OWN profile page, but falls back to the initials badge everywhere else
- * this round. Propagating asset-avatar rendering to every OTHER avatar call
- * site is real, straightforward follow-up work (each already has `services`
- * in scope to read `.assets` off), just out of THIS round's explicit
- * "Profile + test integration in Forum" scope.
+ * below renders it via `@qu/ui`'s `renderAvatarOrAsset()`, which branches on
+ * the `asset:` prefix and renders a `<qu-asset kind="image">` instead,
+ * falling back to the plain URL/emoji/unset `renderAvatar()` otherwise -
+ * `root.assetService` is set once in `mount()` (same "set on an ancestor
+ * before children connect" discipline `.qu` already requires) so both this
+ * app's own preview AND a VISITOR's read-only view
+ * (`renderPublicProfile()`) can resolve it.
+ * FIXED (was a documented scope cut for one round): `renderAvatarOrAsset()`
+ * used to be a private helper local to this file - `user-list`/
+ * `contact-list`/`forum` still only called `@qu/ui`'s plain `renderAvatar()`
+ * for OTHER actors' avatars, so an actor who uploaded an asset avatar
+ * showed correctly on their OWN profile page but fell back to the initials
+ * badge everywhere else (a real user report: an unlisted user found via
+ * FP/pub search showed no avatar, even though the SAME profile page showed
+ * it fine). Promoted into `@qu/ui/avatar.js` (see its own doc comment) and
+ * wired into all three other call sites too - this file now imports the
+ * SAME shared function instead of keeping its own copy.
  *
  * Deliberately NOT ported from QuV2's `apps/profile`: the identity backup/
  * export/QR section (seed code, camera scan) - a whole separate concern
@@ -89,7 +92,7 @@
 import { watch } from '@qu/reactive';
 import { actorPath } from '@qu/identity';
 import { createI18n, AVAILABLE_LOCALES, setLocale } from '@qu/i18n';
-import { injectStyle, ensureTheme, renderAvatar, renderFlagToggle, THEME_PRESETS, setStoredTheme } from '@qu/ui';
+import { injectStyle, ensureTheme, renderAvatarOrAsset, ASSET_AVATAR_PREFIX, renderFlagToggle, THEME_PRESETS, setStoredTheme } from '@qu/ui';
 import { formatActorLabel } from '@qu/services';
 
 const DICT = {
@@ -167,9 +170,6 @@ const STYLE = `
   .qu-profile-preview .qu-profile-header h1 { font-size: 1.1em; }
   .qu-profile-settings-reload { display: flex; align-items: center; gap: 0.6rem; }
   .qu-profile-avatar-row { display: flex; align-items: center; gap: 0.6rem; }
-  .qu-profile-avatar-asset { display: inline-flex; flex-shrink: 0; width: var(--qu-avatar-size, 2rem); height: var(--qu-avatar-size, 2rem); border-radius: 50%; overflow: hidden; }
-  .qu-profile-avatar-asset qu-asset { display: block; width: 100%; height: 100%; }
-  .qu-profile-avatar-asset img { width: 100%; height: 100%; object-fit: cover; display: block; }
 `;
 
 /** Shared by `renderPublicProfile()` (the real thing) and `renderOwnProfile()`'s own live preview - so the preview can never drift from what a visitor actually sees. */
@@ -180,37 +180,11 @@ function applyTemplateStyle(el, template, style) {
   for (const [prop, value] of Object.entries(stylePreset)) el.style.setProperty(prop, value);
 }
 
-const ASSET_AVATAR_PREFIX = 'asset:';
-
-/**
- * The `avatar` field's THIRD possible shape (see this file's own top doc
- * comment's "AVATAR UPLOAD" section) - `@qu/ui`'s shared `renderAvatar()`
- * only knows URL/emoji/unset, so an uploaded asset is rendered here
- * instead, deliberately kept local to this app rather than teaching the
- * shared helper a Service-dependent, async rendering path every OTHER
- * caller (`user-list`/`contact-list`/`forum`) would then have to support
- * too.
- */
-function renderAvatarOrAsset(pub, label, avatar, size) {
-  if (avatar && avatar.startsWith(ASSET_AVATAR_PREFIX)) {
-    const wrap = document.createElement('div');
-    wrap.className = 'qu-profile-avatar-asset';
-    wrap.style.setProperty('--qu-avatar-size', size);
-    const assetEl = document.createElement('qu-asset');
-    assetEl.setAttribute('space-id', pub);
-    assetEl.setAttribute('asset-id', avatar.slice(ASSET_AVATAR_PREFIX.length));
-    assetEl.setAttribute('kind', 'image');
-    wrap.appendChild(assetEl);
-    return wrap;
-  }
-  return renderAvatar(pub, label, avatar, { size });
-}
-
 /** Same sharing reason as `applyTemplateStyle()` above. */
 function renderProfileHeader(pub, label, avatar, avatarSize = '3rem') {
   const header = document.createElement('div');
   header.className = 'qu-profile-header';
-  header.appendChild(renderAvatarOrAsset(pub, label, avatar, avatarSize));
+  header.appendChild(renderAvatarOrAsset(pub, label, avatar, { size: avatarSize }));
   const headingWrap = document.createElement('div');
   const heading = document.createElement('h1');
   heading.textContent = label;

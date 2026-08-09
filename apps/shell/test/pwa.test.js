@@ -108,9 +108,10 @@ test('applyUpdate() posts SKIP_WAITING to the waiting worker, and tolerates no r
   assert.doesNotThrow(() => applyUpdate(registration)); // no .waiting this time - already applied
 });
 
-test('controllerchange reloads the page exactly once, even if it fires twice', async () => {
+test('controllerchange reloads the page exactly once, even if it fires twice - for a GENUINE update (a controller already existed at boot)', async () => {
   const registration = new FakeRegistration();
   const container = installFakeServiceWorker(registration);
+  container.controller = {}; // this page was already controlled - a real update handoff, not a first claim
   // jsdom's real Location.reload is entirely locked down (neither
   // reassignable nor redefinable, so neither a plain assignment nor
   // node:test's Object.defineProperty-based t.mock.method can touch it) -
@@ -127,6 +128,34 @@ test('controllerchange reloads the page exactly once, even if it fires twice', a
     container.dispatchEvent(new Event('controllerchange'));
 
     assert.equal(calls, 1);
+  } finally {
+    globalThis.window = realWindow;
+  }
+});
+
+test('controllerchange from the very FIRST ever service worker claim (no controller at boot) never reloads', async () => {
+  // Regression test: `Clients.claim()` (sw.js's own `activate` handler)
+  // fires `controllerchange` even the very first time a page goes from
+  // "no controller" to "controlled" - confirmed live, this used to trigger
+  // an unconditional, surprise `location.reload()` moments after every
+  // fresh onboarding, with no code update having actually happened. If
+  // that landed while the page was ALREADY reloading for an unrelated
+  // reason (e.g. apps/profile's own theme "Reload now"), the boot sequence
+  // could restart before it ever finished, surfacing as a page that
+  // appears to hang.
+  const registration = new FakeRegistration();
+  const container = installFakeServiceWorker(registration);
+  // container.controller stays null - no controller at boot, a first claim.
+  const realWindow = globalThis.window;
+  let calls = 0;
+  globalThis.window = { location: { reload: () => { calls += 1; } } };
+  try {
+    registerServiceWorker({});
+    await new Promise((r) => setTimeout(r, 10));
+
+    container.dispatchEvent(new Event('controllerchange'));
+
+    assert.equal(calls, 0);
   } finally {
     globalThis.window = realWindow;
   }

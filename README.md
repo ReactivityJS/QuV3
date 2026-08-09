@@ -1262,6 +1262,100 @@ own tests, built bottom-up per the dependency order in
       message (🔖 → 📑) while B's own toggle stays 🔖 (privacy confirmed
       live, not just in unit tests); A's "My Bookmarks" page shows the
       snapshot; removing it there resets A's forum toggle back to 🔖 live.
+- [x] **Three live user-reported bugs fixed** — all three found and
+      confirmed via real Playwright repros against a real relay before
+      touching any code, not from reading alone (root causes turned out to
+      be genuinely different from the first plausible guess in every case):
+      1. **PWA update flow reloaded the page unprompted, right after a
+         totally normal theme-change reload** — user: changing the theme
+         and reloading showed `"[sw ...] installed, waiting for
+         SKIP_WAITING"` and the page hung. Root cause: `Clients.claim()`
+         (`sw.js`'s own `activate` handler) fires a `controllerchange`
+         event even the very FIRST time a page goes from "no controller" to
+         "controlled" - `apps/shell/src/pwa.js`'s `registerServiceWorker()`
+         treated ANY `controllerchange` as a genuine update and called
+         `window.location.reload()` unconditionally. Confirmed live via a
+         repro with no user interaction at all: onboarding alone triggered
+         one unprompted extra navigation shortly after the first service
+         worker activated. If that landed while the page was ALREADY
+         reloading for an unrelated reason (the theme "Reload now" click),
+         the boot sequence could restart before finishing, surfacing as a
+         hang. Fixed by snapshotting `navigator.serviceWorker.controller`
+         at the START of `registerServiceWorker()`, before `.register()`
+         even runs, and only reloading on `controllerchange` if a
+         controller already existed then - mirrors the exact same
+         first-install-vs-genuine-update check `onUpdateAvailable`'s own
+         `statechange` handler already used. Verified: the exact same
+         zero-interaction repro now shows 0 unexpected navigations (was 1);
+         2 new/updated unit tests in `pwa.test.js`.
+      2. **A file upload's own "Syncing..." status got stuck at 100%
+         forever** — user: local upload worked and synced correctly (a
+         second peer saw it fine), but the UPLOADER's own composer widget
+         stayed on `"Syncing · matrix.avif (314.0 KB) · 100%"` until a
+         manual reload. TWO independent bugs, both found via a live repro
+         with console instrumentation, not guessing: (a) **CSS
+         specificity**: `.qu-asset-upload-progress { display: flex; ...}`
+         (an author-stylesheet class rule) silently beat the browser's own
+         `[hidden] { display: none }` UA rule at equal specificity, so
+         `status.hidden = true` was being set correctly (confirmed via
+         `getComputedStyle` in a real browser: `hiddenAttr: true, display:
+         'flex'`) but had ZERO visual effect - the SAME anti-pattern was
+         found (via a codebase-wide sweep once the first instance was
+         confirmed) and fixed in FIVE total places: `qu-asset-upload`'s own
+         progress row, `apps/shell`'s PWA update/install bar, `apps/forum`'s
+         pending-attachment row, and `apps/user-list`'s/`apps/contact-list`'s
+         live search-filter rows (search was silently never actually hiding
+         non-matching rows either - same bug, different symptom, caught
+         opportunistically). Fixed with a `.classname[hidden] { display:
+         none; }` override per class (higher specificity, wins regardless
+         of source order). (b) **A real logic bug in `AssetEngine
+         .verifySyncOut()`**, found while instrumenting: `syncFetch(path)
+         .then(() => true)` ignored the RESOLVED VALUE entirely - a
+         legitimate `null` (`SyncEngine.fetch()`'s own documented "the peer
+         confirms it does NOT have this yet" result, not an error) was
+         counted as "found", so the very first verification pass could
+         falsely report `synced: true` before the relay genuinely had
+         anything. Fixed by checking `v != null` instead of "did it
+         resolve at all". Verified live: the SAME repro now shows an honest
+         `"Syncing 0%"` first, then correctly resolves and hides once
+         actually synced (previously: instant false "100%", stuck
+         forever). 1 new engine-level regression test (a `syncFetch` that
+         resolves `null`, never throws) + jsdom can't reliably model CSS
+         cascade resolution so the CSS fix's real regression evidence is
+         the live repro itself, not a unit test.
+      3. **An unlisted user found via exact FP/pub search showed no
+         avatar** — user: the SAME uploaded avatar was visible on the
+         user's own profile page. Root cause: a KNOWN, EXPLICITLY documented
+         scope cut from the attachments round (`apps/profile/client.js`'s
+         own top doc comment even named it: "user-list/contact-list/forum
+         still only ever call `@qu/ui`'s plain `renderAvatar()` for OTHER
+         actors' avatars... falls back to the initials badge everywhere
+         else this round"). `renderAvatar()` only ever understood an emoji,
+         an `https://` URL, or unset - it has no idea an uploaded avatar's
+         `avatar` field can also hold `asset:<assetId>` (`<qu-asset-upload>`
+         via `@qu/services`' `AssetService`); only `apps/profile`'s own
+         PRIVATE `renderAvatarOrAsset()` helper understood that third shape.
+         Fixed by promoting it into `@qu/ui/avatar.js` as a shared,
+         exported `renderAvatarOrAsset()` (plus the `ASSET_AVATAR_PREFIX`
+         constant it needs, also now shared rather than duplicated) and
+         wiring it into all three other call sites (`user-list`'s main
+         listing AND its unlisted-search row, `contact-list`, `forum`'s
+         message-author avatars) - `apps/profile/client.js` now imports the
+         SAME shared function instead of keeping its own copy. Each of the
+         three apps sets `.assetService = services.assets` once on its own
+         mount `container`, the same "set on an ancestor before descendant
+         Custom Elements connect" discipline `.qu` already requires
+         throughout `@qu/ui`. Verified: 5 new unit tests (`avatar.test.js`)
+         + 1 new integration test (`user-list/test/client.test.js`, a real
+         `AssetEngine`-backed unlisted actor) + a live two-peer Playwright
+         repro (peer A uploads a real avatar via Profile Settings without
+         ever joining the directory, peer B finds them by exact pub search)
+         confirming the unlisted row now renders a genuine `<qu-asset>`
+         with a real `<img src="blob:...">`, matching the profile page.
+      All three: full suite green (960 tests), `npm run build` clean, and
+      each verified with its own dedicated live Playwright repro against a
+      real relay - not just unit tests - both to confirm the bug existed
+      before touching code and to confirm the fix afterward.
 
 ## Development
 

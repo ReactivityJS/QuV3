@@ -19,7 +19,7 @@
  *     envelope garbage, not an alias - `related`/`relatedPaths` genuinely
  *     don't fit here, there's no path a plain `<qu-view>` could safely
  *     read this from directly.
- *   - `renderAvatar()` composes a whole DOM subtree from resolved values,
+ *   - `renderAvatarOrAsset()` composes a whole DOM subtree from resolved values,
  *     not a single field a `<qu-view>` could mirror, and a manual `watch()`
  *     call here would have no lifecycle hook to unsubscribe from when a
  *     row is later removed (`<qu-list>` only self-cleans ITS OWN
@@ -44,7 +44,7 @@
  */
 import { createI18n } from '@qu/i18n';
 import { formatActorLabel, paths } from '@qu/services';
-import { renderAvatar, injectStyle, ensureTheme, renderFlagToggle } from '@qu/ui';
+import { renderAvatarOrAsset, injectStyle, ensureTheme, renderFlagToggle } from '@qu/ui';
 import { QuCrypto } from '@qu/core';
 
 const DICT = {
@@ -75,6 +75,11 @@ const STYLE = `
   .qu-user-search { width: 100%; box-sizing: border-box; margin: 0 0 0.6rem; padding: 0.5rem 0.7rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); font: inherit; }
   .qu-user-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
   .qu-user-list li { display: flex; align-items: center; gap: 0.6rem; padding: 0.5rem 0.7rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); }
+  /* Without this, search filtering below (\`li.hidden = ...\`) would have no
+     visual effect - a plain author-stylesheet class selector beats the UA's
+     own [hidden] rule at equal specificity, so every row would stay
+     visible regardless of the search query. */
+  .qu-user-list li[hidden] { display: none; }
   .qu-user-list li.qu-user-unlisted { border-style: dashed; }
   .qu-user-info { flex: 1; min-width: 0; display: flex; flex-direction: column; text-decoration: none; color: inherit; }
   .qu-user-info:hover .qu-user-alias { text-decoration: underline; }
@@ -113,6 +118,13 @@ export function mount(container, { qu, services, subscribe, syncFetch }) {
   ensureTheme();
   injectStyle(STYLE_ID, STYLE);
   let stopped = false;
+
+  // Same "set on an ancestor before descendant Custom Elements connect"
+  // discipline `.qu` already requires elsewhere in `@qu/ui` -
+  // `renderAvatarOrAsset()` below resolves this via `<qu-asset>`'s own
+  // `findAssetService()` ancestor walk, for any actor who uploaded a real
+  // image avatar (see @qu/ui/avatar.js's own doc comment).
+  container.assetService = services.assets;
 
   // Defense in depth - a future shell would already subscribe to
   // '/store/directory' by default, but this app shouldn't silently depend
@@ -159,7 +171,7 @@ export function mount(container, { qu, services, subscribe, syncFetch }) {
     const alias = formatActorLabel(trimmed, profile);
     const li = document.createElement('li');
     li.className = 'qu-user-unlisted';
-    li.appendChild(renderAvatar(trimmed, alias, profile.avatar, { size: '2.2rem' }));
+    li.appendChild(renderAvatarOrAsset(trimmed, alias, profile.avatar, { size: '2.2rem' }));
 
     const info = document.createElement('a');
     info.className = 'qu-user-info';
@@ -224,7 +236,7 @@ export function mount(container, { qu, services, subscribe, syncFetch }) {
       (async () => {
         const profile = await services.profile.getPublicProfile(pub);
         if (stopped) return;
-        li.querySelector('.qu-user-avatar-slot').replaceChildren(renderAvatar(pub, formatActorLabel(pub, profile), profile?.avatar, { size: '2.2rem' }));
+        li.querySelector('.qu-user-avatar-slot').replaceChildren(renderAvatarOrAsset(pub, formatActorLabel(pub, profile), profile?.avatar, { size: '2.2rem' }));
         li.querySelector('.qu-user-alias').textContent = formatActorLabel(pub, profile);
         applyFilter(search.value); // a freshly resolved alias might newly match (or no longer match) the current search
       })();

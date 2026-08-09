@@ -2,10 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { QuStore, MemoryStoreAdapter } from '@qu/core';
 import { QuIdentityEngine, actorPath } from '@qu/identity';
-import { AccessEngine } from '@qu/engines';
+import { AccessEngine, AssetEngine } from '@qu/engines';
 import {
   ListService, DirectoryService, ProfileService, FlagService,
-  ContactsService, ActorService, paths,
+  ContactsService, ActorService, AssetService, paths,
 } from '@qu/services';
 import { installDom, waitFor } from '@qu/ui/testing';
 
@@ -15,6 +15,7 @@ const { mount } = await import('../client.js');
 async function freshEnv() {
   const qu = new QuStore();
   qu.mount('store', new MemoryStoreAdapter());
+  qu.mount('blob', new MemoryStoreAdapter());
   new AccessEngine(qu);
   const identity = new QuIdentityEngine(qu);
   await identity.importMnemonic(identity.generateMnemonic());
@@ -26,8 +27,9 @@ async function freshEnv() {
   const flags = new FlagService(qu, identity, list);
   const contacts = new ContactsService(flags, identity);
   const actors = new ActorService(identity);
+  const assets = new AssetService(qu, new AssetEngine(qu), identity);
 
-  return { qu, identity, services: { directory, profile, contacts, actors } };
+  return { qu, identity, services: { directory, profile, contacts, actors, assets } };
 }
 
 /** Publishes a SEPARATE identity's profile (and, optionally, directory entry) onto the shared `qu` store - simulating data that has already synced in from a peer. */
@@ -154,6 +156,45 @@ test('an exact FP for an UNLISTED actor is resolved live and shown with a "Not l
   await waitFor(() => container.querySelector('.qu-user-badge') !== null, { timeout: 2000 });
 
   assert.equal(container.querySelector('.qu-user-unlisted .qu-user-alias').textContent, 'Ghost');
+});
+
+test('an exact FP for an UNLISTED actor who uploaded a real image avatar renders it as a <qu-asset>, not a missing/initials badge', async () => {
+  // Regression test - reported live: an unlisted user found via FP/pub
+  // search showed no avatar at all, even though the SAME profile's avatar
+  // rendered correctly on its own profile page. Root cause was two-fold
+  // (see @qu/ui/avatar.js's own doc comment): resolveUnlisted() called the
+  // plain renderAvatar(), which doesn't understand the "asset:<id>" shape
+  // an uploaded avatar's `avatar` field holds - it would show either raw
+  // "asset:..." text or fall through to the initials badge, never the
+  // real image.
+  const { qu, services } = await freshEnv();
+
+  const otherQu = new QuStore();
+  otherQu.mount('store', new MemoryStoreAdapter());
+  otherQu.mount('blob', new MemoryStoreAdapter());
+  const otherIdentity = new QuIdentityEngine(otherQu);
+  await otherIdentity.importMnemonic(otherIdentity.generateMnemonic());
+  const otherAssets = new AssetService(otherQu, new AssetEngine(otherQu), otherIdentity);
+  const otherPub = await otherIdentity.publishMainProfile({ alias: 'Ghost' });
+  await otherAssets.upload(otherPub, 'avatar1', new TextEncoder().encode('fake png bytes'));
+  await new ProfileService(otherQu, otherIdentity).saveProfile({ alias: 'Ghost', avatar: 'asset:avatar1' });
+  // Not in the directory (unlisted) - simulate only the profile + asset having synced in, same as publishOtherUser() does for the plain profile-only case.
+  await qu.putSealed(actorPath(otherPub, 'profile'), await otherQu.get(actorPath(otherPub, 'profile')));
+  await qu.putSealed(`/store/${otherPub}/assets/avatar1/meta`, await otherQu.get(`/store/${otherPub}/assets/avatar1/meta`));
+  await qu.putSealed(`/blob/${otherPub}/avatar1/chunk_0`, await otherQu.get(`/blob/${otherPub}/avatar1/chunk_0`));
+
+  const container = makeContainer();
+  mount(container, { qu, services, subscribe: noopSubscribe });
+  await new Promise((resolve) => setTimeout(resolve, 60));
+
+  const search = container.querySelector('input');
+  search.value = otherPub;
+  search.dispatchEvent(new window.Event('input'));
+  await waitFor(() => container.querySelector('.qu-user-unlisted qu-asset') !== null, { timeout: 2000 });
+
+  const assetEl = container.querySelector('.qu-user-unlisted qu-asset');
+  assert.equal(assetEl.getAttribute('space-id'), otherPub);
+  assert.equal(assetEl.getAttribute('asset-id'), 'avatar1');
 });
 
 test('a query too short to be an FP never triggers the unlisted lookup', async () => {

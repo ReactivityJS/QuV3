@@ -110,7 +110,7 @@
 import { watchChildren } from '@qu/reactive';
 import { paths, formatActorLabel } from '@qu/services';
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme, renderAvatar } from '@qu/ui';
+import { injectStyle, ensureTheme, renderAvatarOrAsset } from '@qu/ui';
 
 const THREAD_ID = 'general';
 const REACTION_CHOICES = ['👍', '❤️', '😂', '😮', '🔥'];
@@ -171,6 +171,12 @@ const STYLE = `
   .qu-forum-empty { padding: 1.5rem; text-align: center; opacity: 0.7; }
   .qu-forum-composer-wrap { display: flex; flex-direction: column; gap: 0.4rem; }
   .qu-forum-pending-attachment { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85em; opacity: 0.85; }
+  /* Without this, pendingAttachmentEl.hidden = true (its default, and how
+     it resets after posting/removing) would have no visual effect - a plain
+     author-stylesheet class selector beats the UA's own [hidden] rule at
+     equal specificity, so this row would show empty and take up composer
+     layout space even with no attachment pending. */
+  .qu-forum-pending-attachment[hidden] { display: none; }
   .qu-forum-pending-attachment button { background: none; border: none; cursor: pointer; opacity: 0.7; font: inherit; padding: 0; }
   .qu-forum-message-attachment { margin-top: 0.5rem; max-width: 18rem; }
 `;
@@ -306,7 +312,7 @@ export function mount(container, { qu, services, apps, subscribe, syncFetch, ext
 
     const profile = await resolveAuthor(message.author);
     const label = formatActorLabel(message.author, profile);
-    li.appendChild(renderAvatar(message.author, label, profile?.avatar, { size: '2.2rem' }));
+    li.appendChild(renderAvatarOrAsset(message.author, label, profile?.avatar, { size: '2.2rem' }));
 
     const body = document.createElement('div');
     body.className = 'qu-forum-message-body';

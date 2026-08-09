@@ -50,6 +50,12 @@ const { t } = createI18n(DICT);
 const STYLE_ID = 'qu-shell-pwa-style';
 const STYLE = `
   .qu-pwa-bar { display: flex; gap: 0.5rem; padding: 0.4rem 0.8rem; border-bottom: 1px solid var(--qu-color-border, #8884); background: color-mix(in srgb, var(--qu-color-accent, #5b5bd6) 10%, transparent); }
+  /* Without this, bar.hidden = true (the default, until something is
+     actually actionable - see mountPwaUi()) would have no visual effect: a
+     plain author-stylesheet class selector beats the UA's own [hidden]
+     rule at equal specificity, so an empty, permanently-visible bar with
+     its own border/background would show on every single page load. */
+  .qu-pwa-bar[hidden] { display: none; }
   .qu-pwa-bar button { padding: 0.3rem 0.7rem; border-radius: var(--qu-radius-sm, 0.3rem); border: 1px solid var(--qu-color-border, #8884); background: var(--qu-color-accent, #5b5bd6); color: white; cursor: pointer; font: inherit; }
   .qu-pwa-bar button:disabled { opacity: 0.6; cursor: default; }
 `;
@@ -61,13 +67,29 @@ const STYLE = `
 export function registerServiceWorker({ onUpdateAvailable } = {}) {
   if (!navigator.serviceWorker) return; // unsupported browser - no PWA update flow, nothing else degrades
 
+  // `Clients.claim()` (see sw.js's own `activate` handler) fires
+  // `controllerchange` even the very FIRST time this page transitions from
+  // "no controller at all" to "controlled" - that is NOT a genuine code
+  // update (nothing this page was already running just got replaced), so
+  // it must never trigger a reload. Confirmed live: without this guard, a
+  // freshly onboarded browser reloads itself once, completely unprompted,
+  // the moment its very first service worker finishes activating - if that
+  // race lands while the page is ALREADY mid-reload for an unrelated
+  // reason (e.g. `apps/profile`'s own theme/language "Reload now"), the
+  // boot sequence can restart before it ever finishes, which is exactly
+  // what surfaces as a page that appears to hang on load. Snapshotting
+  // `.controller` here, before `.register()` even runs, mirrors the same
+  // "was this page already controlled" check `watchInstalling()` below
+  // already uses to tell a genuine update apart from a first install.
+  const hadControllerAtBoot = Boolean(navigator.serviceWorker.controller);
+
   // Scoped to THIS call, not module-level: a real page calls this exactly
   // once per load (so this is effectively "once ever" there too), and it
   // keeps every test in this file independent - a fresh call always starts
   // with a fresh "haven't reloaded yet" state.
   let reloaded = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
-    if (reloaded) return;
+    if (reloaded || !hadControllerAtBoot) return;
     reloaded = true;
     window.location.reload();
   });
