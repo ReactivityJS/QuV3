@@ -866,6 +866,39 @@ own tests, built bottom-up per the dependency order in
       console or page errors across the same full real-relay session covering
       onboarding, profile editing, directory visibility, User List, and the full
       Forum interaction set.
+- [x] **`apps/profile`: an honest "reload to apply" prompt for language/theme, and
+      a live template/style preview** — user-reported: language/theme "doesn't
+      seem to have any effect", and asked to also verify whether even a reload
+      helps (it does - confirmed with a real relay: `setLocale()`'s own doc
+      comment already says "takes effect on next page load, not live
+      mid-session", `ensureTheme()` is idempotent per page load - both correctly
+      apply on a genuine reload, this file's own claim of "instant effect on THIS
+      device" was simply wrong, and nothing ever told the user a reload was
+      even needed).
+      **Settings save**: replaced the old auto-clearing "Saved!" flash (accurate
+      about the DATA, misleading about there being any visible effect yet) with a
+      persistent status message + an explicit "Reload now" button - stays until
+      the user acts, doesn't silently disappear after 1.5s like `apps/profile`'s
+      other save flashes correctly still do (those DO take effect immediately,
+      since they're rendered by this same watch()-driven component).
+      **Template/style live preview**: `#/~<myOwnPub>` always renders the
+      EDITABLE form for its owner, never `renderPublicProfile()` - meaning an
+      owner could never see their own template/style take effect at all, not
+      even after reloading, without asking someone else to look. New shared
+      helpers `applyTemplateStyle()`/`renderProfileHeader()` (extracted from
+      `renderPublicProfile()`'s own rendering, now reused by it too - the preview
+      can never drift from what a visitor actually sees) back a small preview box
+      in the edit form that updates on every alias/avatar keystroke and
+      template/style selection, no save required.
+      Full suite green at 875 tests (4 new: reload-prompt persistence, the
+      "Reload now" click genuinely reloading, the live preview reacting without
+      saving, and confirming preview changes are never silently persisted).
+      Verified end to end with a real relay: reload really does apply a saved
+      language/theme change (confirmed directly, independent of this round's UI
+      fix); the reload prompt stays visible for 2+ seconds without auto-clearing;
+      clicking "Reload now" itself applies German text + the sunset accent; the
+      live preview updates instantly on every field change and is confirmed
+      NOT persisted until "Save" is actually clicked.
 
 ## Development
 

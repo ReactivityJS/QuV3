@@ -349,7 +349,7 @@ test('#/~<pub>/settings for someone else\'s pub redirects back to their plain pr
   }
 });
 
-test('own #/~<pub>/settings saves the preference AND applies it immediately via setLocale()/setStoredTheme()', async () => {
+test('own #/~<pub>/settings saves the preference, persists it via setLocale()/setStoredTheme(), and shows a persistent reload prompt (not a transient "Saved!" flash - neither has any live effect on the current page)', async () => {
   const { qu, identity, services, myPub } = await freshEnv();
   await services.profile.saveProfile({ alias: 'Ada' });
 
@@ -369,12 +369,82 @@ test('own #/~<pub>/settings saves the preference AND applies it immediately via 
     // legitimately land in the gap where `.qu-profile-status` doesn't exist
     // at all yet - `?.textContent` on that moment is `undefined` (falsy,
     // keep polling), not a thrown TypeError.
-    await waitFor(() => container.querySelector('.qu-profile-status')?.textContent === 'Saved!');
+    await waitFor(() => container.querySelector('.qu-profile-status')?.textContent.includes('Reload'));
     const own = await services.profile.getOwnProfile();
     assert.equal(own.preferredLocale, 'de');
     assert.equal(own.preferredTheme, 'sunset');
     assert.equal(getStoredLocale(), 'de');
     assert.equal(getStoredTheme(), 'sunset');
+
+    // Deliberately NOT auto-clearing (unlike renderOwnProfile()'s own
+    // transient flash) - the user still has to actually act.
+    const reloadBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === 'Reload now');
+    assert.ok(reloadBtn, 'expected a persistent "Reload now" button');
+    assert.equal(reloadBtn.hidden, false);
+  } finally {
+    stop();
+  }
+});
+
+test('clicking "Reload now" actually reloads the page', async () => {
+  const { qu, identity, services, myPub } = await freshEnv();
+  await services.profile.saveProfile({ alias: 'Ada' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`, 'settings'] });
+  try {
+    await waitFor(() => container.querySelector('.qu-profile-settings') !== null);
+    [...container.querySelectorAll('button')].find((b) => b.textContent === 'Save').click();
+    await waitFor(() => [...container.querySelectorAll('button')].find((b) => b.textContent === 'Reload now')?.hidden === false);
+
+    // jsdom's real Location.reload is entirely locked down (neither
+    // reassignable nor redefinable) - swap the bare `window` global this
+    // click handler resolves at CALL time for a minimal stub instead, same
+    // technique apps/shell/test/pwa.test.js already established.
+    const realWindow = globalThis.window;
+    let reloaded = false;
+    globalThis.window = { location: { reload: () => { reloaded = true; } } };
+    try {
+      [...container.querySelectorAll('button')].find((b) => b.textContent === 'Reload now').click();
+    } finally {
+      globalThis.window = realWindow;
+    }
+    assert.equal(reloaded, true);
+  } finally {
+    stop();
+  }
+});
+
+test('the live template/style preview updates as the form changes, without saving', async () => {
+  const { qu, identity, services, myPub } = await freshEnv();
+  await services.profile.saveProfile({ alias: 'Ada', avatar: '🚀' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`] });
+  try {
+    await waitFor(() => container.querySelector('.qu-profile-preview') !== null);
+    const preview = container.querySelector('.qu-profile-preview');
+    assert.match(preview.textContent, /Ada/);
+
+    const inputs = container.querySelectorAll('.qu-profile-own input[type="text"]');
+    inputs[0].value = 'Ada Lovelace';
+    inputs[0].dispatchEvent(new window.Event('input'));
+    assert.match(preview.textContent, /Ada Lovelace/);
+
+    const selects = container.querySelectorAll('.qu-profile-own select');
+    selects[0].value = 'banner'; // template
+    selects[0].dispatchEvent(new window.Event('change'));
+    selects[1].value = 'ocean'; // style
+    selects[1].dispatchEvent(new window.Event('change'));
+
+    assert.ok(preview.querySelector('.qu-template-banner'), 'expected the banner template class applied live');
+    const accent = preview.querySelector('.qu-profile-view').style.getPropertyValue('--qu-color-accent');
+    assert.equal(accent, '#0891b2'); // THEME_PRESETS.ocean
+
+    // None of this was ever saved - the real own profile is untouched.
+    const own = await services.profile.getOwnProfile();
+    assert.equal(own.alias, 'Ada');
+    assert.equal(own.template, '');
   } finally {
     stop();
   }

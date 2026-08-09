@@ -23,21 +23,35 @@
  * IDENTITY-BOUND LANGUAGE/THEME (Settings subpath): `preferredLocale`/
  * `preferredTheme` are private, self-encrypted profile fields (see
  * `ProfileService`'s own doc comment) - the source of truth, synced across
- * this identity's OWN devices. Saving here ALSO calls `setLocale()`/
- * `setStoredTheme()` immediately (instant effect on THIS device, matching
- * `@qu/i18n`'s own "takes effect on next page load" note for locale); every
- * other device this identity logs into picks it up the same way `apps/shell`'s
- * own boot sequence already does (see that file's own doc comment) - no
- * live cross-device push, consistent with the existing locale precedent.
+ * this identity's OWN devices. Saving here calls `setLocale()`/
+ * `setStoredTheme()` immediately - persisted to `localStorage` right away,
+ * confirmed correct end to end with a real relay - but NEITHER has any
+ * live effect on the CURRENTLY RUNNING page: `@qu/i18n`'s own `setLocale()`
+ * doc comment says so explicitly ("takes effect on next page load, not live
+ * mid-session"), and `ensureTheme()` is idempotent (first call per page load
+ * wins, see its own doc comment) - both were already-decided, deliberate
+ * device-local designs from earlier rounds, not something this file
+ * controls. What WAS wrong here: this file used to claim "instant effect on
+ * THIS device" - it never was, and nothing told the user a reload was even
+ * needed. Fixed with an explicit, persistent (non-auto-clearing) "reload to
+ * apply" prompt + button after a Settings save, instead of a misleading
+ * status flash implying it already happened.
  *
- * TEMPLATE/STYLE (own edit form only, no live "preview as a visitor" mode -
- * scope cut, not a limitation anyone has hit): `template` picks one of a
- * few small READ-ONLY layout variants (`renderPublicProfile()` below) a
- * VISITOR sees; `style` reuses `@qu/ui`'s `THEME_PRESETS` (the SAME palette
- * system `apps/shell`'s own device theme uses) as an accent applied ONLY to
- * the profile page itself (an inline CSS custom property on this page's own
+ * TEMPLATE/STYLE PREVIEW (own edit form): `template` picks one of a few
+ * small READ-ONLY layout variants (`renderPublicProfile()` below) a VISITOR
+ * sees; `style` reuses `@qu/ui`'s `THEME_PRESETS` (the SAME palette system
+ * `apps/shell`'s own device theme uses) as an accent applied ONLY to the
+ * profile page itself (an inline CSS custom property on that page's own
  * root, never `ensureTheme()`'s global `:root` - never affects the rest of
- * a visitor's UI).
+ * a visitor's UI). `#/~<myOwnPub>` always renders the EDITABLE form for the
+ * owner, never `renderPublicProfile()` - meaning the owner could never
+ * actually SEE their own template/style take effect, not even after a
+ * reload, without asking someone else to look. Fixed with a small, live
+ * preview box directly in the edit form (`renderProfileHeader()`/
+ * `applyTemplateStyle()`, shared with `renderPublicProfile()`'s own
+ * rendering so the preview is never able to drift from the real thing) -
+ * updates on every keystroke/select change, no save required for the
+ * preview itself.
  *
  * Avatar stays a plain text field (URL or emoji) - `renderAvatar()` already
  * supports both fully; no file upload via an Asset/Blob engine this round
@@ -74,6 +88,9 @@ const DICT = {
     yourKeys: 'Your keys', pub: 'Signing key (pub)', epub: 'Encryption key (epub)',
     contactAdd: 'Add contact', contactRemove: 'Remove contact',
     notFound: 'This identity has not published a profile (yet).',
+    savedReloadHint: 'Saved! Reload the page to see the new language/theme.',
+    reloadNow: 'Reload now',
+    preview: 'Preview (how visitors see your profile)',
   },
   de: {
     title: 'Profil',
@@ -93,6 +110,9 @@ const DICT = {
     yourKeys: 'Deine Schlüssel', pub: 'Signatur-Schlüssel (pub)', epub: 'Verschlüsselungs-Schlüssel (epub)',
     contactAdd: 'Kontakt hinzufügen', contactRemove: 'Kontakt entfernen',
     notFound: 'Diese Identität hat (noch) kein Profil veröffentlicht.',
+    savedReloadHint: 'Gespeichert! Lade die Seite neu, um Sprache/Theme zu sehen.',
+    reloadNow: 'Jetzt neu laden',
+    preview: 'Vorschau (so sehen dich Besucher)',
   },
 };
 const { t } = createI18n(DICT);
@@ -119,7 +139,32 @@ const STYLE = `
   .qu-profile-view.qu-template-compact .qu-profile-header { gap: 0.5rem; }
   .qu-profile-view.qu-template-compact .qu-profile-header h1 { font-size: 1.1em; }
   .qu-profile-not-found { padding: 2rem; text-align: center; opacity: 0.7; }
+  .qu-profile-preview-label { font-weight: 600; font-size: 0.9em; }
+  .qu-profile-preview { border: 1px dashed var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); padding: 0.8rem; }
+  .qu-profile-preview .qu-profile-header h1 { font-size: 1.1em; }
+  .qu-profile-settings-reload { display: flex; align-items: center; gap: 0.6rem; }
 `;
+
+/** Shared by `renderPublicProfile()` (the real thing) and `renderOwnProfile()`'s own live preview - so the preview can never drift from what a visitor actually sees. */
+function applyTemplateStyle(el, template, style) {
+  const validTemplate = TEMPLATES.includes(template) ? template : 'default';
+  el.classList.add(`qu-template-${validTemplate}`);
+  const stylePreset = THEME_PRESETS[style] || {};
+  for (const [prop, value] of Object.entries(stylePreset)) el.style.setProperty(prop, value);
+}
+
+/** Same sharing reason as `applyTemplateStyle()` above. */
+function renderProfileHeader(pub, label, avatar, avatarSize = '3rem') {
+  const header = document.createElement('div');
+  header.className = 'qu-profile-header';
+  header.appendChild(renderAvatar(pub, label, avatar, { size: avatarSize }));
+  const headingWrap = document.createElement('div');
+  const heading = document.createElement('h1');
+  heading.textContent = label;
+  headingWrap.appendChild(heading);
+  header.appendChild(headingWrap);
+  return header;
+}
 
 export function mount(container, { qu, identity, services, segments = [] }) {
   ensureTheme();
@@ -295,6 +340,33 @@ function renderOwnProfile(root, own, listed, services, myPub, saveState, justSav
   styleSelect.value = own.style || 'default';
   styleRow.append(styleLabel, styleSelect);
 
+  // Live preview - updates on every keystroke/select change, no save
+  // needed, using the SAME `applyTemplateStyle()`/`renderProfileHeader()`
+  // `renderPublicProfile()` itself renders with, so it can never drift from
+  // what a visitor actually sees. See this file's own top doc comment on
+  // why this exists: `#/~<myOwnPub>` never renders `renderPublicProfile()`
+  // for its own owner, so without this the owner could never see their own
+  // template/style take effect at all, not even after a reload.
+  const previewLabel = document.createElement('label');
+  previewLabel.className = 'qu-profile-preview-label';
+  previewLabel.textContent = t('preview');
+  const previewBox = document.createElement('div');
+  previewBox.className = 'qu-profile-preview';
+  function updatePreview() {
+    previewBox.textContent = '';
+    const inner = document.createElement('div');
+    inner.className = 'qu-profile-view';
+    applyTemplateStyle(inner, templateSelect.value, styleSelect.value);
+    const label = formatActorLabel(myPub, { alias: aliasRow.input.value.trim() });
+    inner.appendChild(renderProfileHeader(myPub, label, avatarRow.input.value, '2.2rem'));
+    previewBox.appendChild(inner);
+  }
+  updatePreview();
+  aliasRow.input.addEventListener('input', updatePreview);
+  avatarRow.input.addEventListener('input', updatePreview);
+  templateSelect.addEventListener('change', updatePreview);
+  styleSelect.addEventListener('change', updatePreview);
+
   const fieldsHeading = document.createElement('label');
   fieldsHeading.textContent = t('fields');
   const fieldsList = document.createElement('div');
@@ -354,6 +426,7 @@ function renderOwnProfile(root, own, listed, services, myPub, saveState, justSav
 
   view.append(
     heading, aliasRow.row, avatarRow.row, templateRow, styleRow,
+    previewLabel, previewBox,
     fieldsHeading, fieldsList, addFieldBtn,
     saveBtn, status,
     listedLabel, settingsLink, keysBlock
@@ -419,13 +492,25 @@ function renderSettings(root, own, services, myPub, saveState, justSaved) {
 
   const status = document.createElement('span');
   status.className = 'qu-profile-status';
+  const reloadRow = document.createElement('div');
+  reloadRow.className = 'qu-profile-settings-reload';
+  const reloadBtn = document.createElement('button');
+  reloadBtn.type = 'button';
+  reloadBtn.textContent = t('reloadNow');
+  reloadBtn.hidden = true;
+  reloadBtn.addEventListener('click', () => window.location.reload());
+  reloadRow.append(status, reloadBtn);
   // See mount()'s/renderOwnProfile()'s own doc comments on `saveState` -
-  // this save also republishes the public profile document, so the flash
-  // is shown on the NEXT render(), not set directly on this soon-to-be-
-  // discarded `status` node.
+  // this save also republishes the public profile document, so this is
+  // shown on the NEXT render(), not set directly on this soon-to-be-
+  // discarded `status`/`reloadBtn` pair. Deliberately NOT auto-clearing
+  // (unlike renderOwnProfile()'s own transient "Saved!" flash) - the user
+  // still needs to actually reload to see the language/theme change take
+  // effect (see this file's own top doc comment), so the prompt stays
+  // until they do, or navigate away.
   if (justSaved) {
-    status.textContent = t('saved');
-    setTimeout(() => { status.textContent = ''; }, 1500);
+    status.textContent = t('savedReloadHint');
+    reloadBtn.hidden = false;
   }
 
   const saveBtn = document.createElement('button');
@@ -445,9 +530,9 @@ function renderSettings(root, own, services, myPub, saveState, justSaved) {
       preferredLocale,
       preferredTheme,
     });
-    // Instant effect on THIS device - other devices this identity logs
-    // into pick it up via apps/shell's own boot sequence (see this file's
-    // own doc comment).
+    // Persisted for the NEXT page load (see this file's own top doc
+    // comment - neither @qu/i18n's locale nor @qu/ui's theme has any live
+    // effect on the currently running page, by design in both packages).
     setLocale(preferredLocale);
     setStoredTheme(preferredTheme);
   });
@@ -456,27 +541,17 @@ function renderSettings(root, own, services, myPub, saveState, justSaved) {
   backLink.href = `#/~${myPub}`;
   backLink.textContent = t('backToProfile');
 
-  view.append(heading, localeRow, themeRow, saveBtn, status, backLink);
+  view.append(heading, localeRow, themeRow, saveBtn, reloadRow, backLink);
   root.appendChild(view);
 }
 
 function renderPublicProfile(root, pub, profile, services) {
-  const template = TEMPLATES.includes(profile.template) ? profile.template : 'default';
-  const stylePreset = THEME_PRESETS[profile.style] || {};
-
   const view = document.createElement('div');
-  view.className = `qu-profile qu-profile-view qu-template-${template}`;
-  for (const [prop, value] of Object.entries(stylePreset)) view.style.setProperty(prop, value);
+  view.className = 'qu-profile qu-profile-view';
+  applyTemplateStyle(view, profile.template, profile.style);
 
   const label = formatActorLabel(pub, profile);
-  const header = document.createElement('div');
-  header.className = 'qu-profile-header';
-  header.appendChild(renderAvatar(pub, label, profile.avatar, { size: '3rem' }));
-  const headingWrap = document.createElement('div');
-  const heading = document.createElement('h1');
-  heading.textContent = label;
-  headingWrap.appendChild(heading);
-  header.appendChild(headingWrap);
+  const header = renderProfileHeader(pub, label, profile.avatar);
 
   const fieldsBlock = document.createElement('div');
   fieldsBlock.className = 'qu-profile-fields';
