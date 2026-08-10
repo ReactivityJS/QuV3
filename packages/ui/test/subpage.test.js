@@ -24,6 +24,20 @@ test('builds a back link and an empty content area, then calls render(content)',
   assert.equal(content.textContent, 'hello');
 });
 
+test('showBackLink: false skips the back link entirely, content still renders', () => {
+  const container = document.createElement('div');
+  let renderedContent = null;
+  renderSubpage(container, {
+    showBackLink: false,
+    render: (content) => { renderedContent = content; content.textContent = 'hello'; },
+  });
+
+  assert.equal(container.querySelector('a.qu-subpage-back'), null);
+  const content = container.querySelector('.qu-subpage-content');
+  assert.equal(content, renderedContent);
+  assert.equal(content.textContent, 'hello');
+});
+
 test('clears any previous content on a re-render', () => {
   const container = document.createElement('div');
   container.textContent = 'stale content from a previous mount';
