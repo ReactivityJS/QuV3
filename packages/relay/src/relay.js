@@ -176,6 +176,12 @@ export class QuRelay {
       // itself defers every loader read to call time, well after boot()'s
       // own app-loading step below has completed).
       resolveNotification: this.options.resolveNotification ?? createManifestNotificationResolver(this.loader),
+      // See PushDeliveryService's own "WHO GETS NOTIFIED IS ALSO
+      // EXTENSIBLE" doc comment - the SAME Registry every app's
+      // `register(qu, manifest, registry)` already receives, so a future
+      // `registry.hooks.on('notify.threadCandidates', ...)` call in an
+      // app's own server-side module needs no wiring beyond that call.
+      registry: this.registry,
     }));
 
     this._httpServer = null;

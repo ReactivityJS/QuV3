@@ -382,6 +382,26 @@ export class MessageService {
   }
 
   /**
+   * A single message by id - cheaper than `listMessages()` when a caller
+   * already knows exactly which one it wants (e.g. resolving a notification's
+   * stored `{spaceId, threadId, messageId}` reference back into real
+   * content - see `apps/notifications`' own doc comment). No internal
+   * `syncFetch` backfill, matching `listDerived()`'s own documented
+   * convention - a miss here is the CALLER's job to backfill first (an
+   * explicit `syncFetch(threadMessagePath(...))` call), same as every other
+   * read in this Service.
+   * @param {string|number} spaceId @param {string} threadId @param {string} messageId
+   * @returns {Promise<object|null>} `{id, ts, ...}` (same shape `listMessages()`
+   *   entries have), or `null` if missing or undecryptable.
+   */
+  async getMessage(spaceId, threadId, messageId) {
+    const quBit = await this.qu.get(threadMessagePath(spaceId, threadId, messageId));
+    if (!quBit?.val) return null;
+    const val = await this.#decryptMessage(quBit);
+    return val ? { id: val._id, ts: quBit.ts, ...val } : null;
+  }
+
+  /**
    * @param {string|number} spaceId
    * @param {string} threadId
    * @param {string} parentMessageId

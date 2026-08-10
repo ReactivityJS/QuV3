@@ -1172,10 +1172,17 @@ function classifyMessageContentType(message) {
   return 'post';
 }
 
-/** A short excerpt centered on the first match, so a long message's result row doesn't dump its entire body. */
+/**
+ * A short excerpt centered on the first match, so a long message's result
+ * row doesn't dump its entire body. An empty/falsy `query` (e.g. resolving a
+ * notification's reference, where there's no search term to center on - see
+ * `resolveForumReference()` below) is treated the same as "no match found":
+ * `String.prototype.indexOf('')` returns `0`, not `-1`, so this is checked
+ * explicitly rather than relying on that quirk.
+ */
 function buildSnippet(body, query, radius = 60) {
   if (!body) return '';
-  const idx = body.toLowerCase().indexOf(query);
+  const idx = query ? body.toLowerCase().indexOf(query) : -1;
   if (idx === -1) return body.length > 140 ? `${body.slice(0, 140)}…` : body;
   const start = Math.max(0, idx - radius);
   const end = Math.min(body.length, idx + query.length + radius);
@@ -1236,8 +1243,37 @@ export async function searchForum({ services, qu, apps, query, types, scope, seg
 }
 
 /**
+ * The `content.resolveReference` contributor (see `apps/notifications/
+ * manifest.quapp`'s own doc comment for the full payload contract) -
+ * resolves a stored notification's bare `{spaceId, threadId, messageId}`
+ * reference back into a `content.search`-shaped entry, so the SAME
+ * `renderSearchResult()` below (Search's own template) can render it -
+ * `apps/notifications` never needs to know Forum's message/topic shape any
+ * more than `apps/search` does. A single `getMessage()` lookup, not a full
+ * `listMessages()` scan - see that Service method's own doc comment.
+ * @param {{services: object, qu: object, syncFetch?: Function, spaceId: string|number, threadId: string, messageId: string}} payload
+ * @returns {Promise<object|null>} One entry, or `null` if unresolvable
+ *   (deleted message, access revoked, etc.) - `ExtensionPointHost.collect()`
+ *   treats a falsy return as "no result", not an error.
+ */
+export async function resolveForumReference({ services, qu, syncFetch, spaceId, threadId, messageId }) {
+  await syncFetch?.(paths.threadMessagePath(spaceId, threadId, messageId)).catch(() => {});
+  const message = await services.messages.getMessage(spaceId, threadId, messageId);
+  if (!message) return null;
+
+  const topicBit = await qu.get(paths.documentPath(spaceId, threadId));
+  return {
+    contentType: classifyMessageContentType(message), ts: message.ts, author: message.author,
+    snippet: buildSnippet(message.body, ''),
+    href: `#/forum/t/${threadId}`,
+    topicId: threadId, channelId: topicBit?.val?.channelId ?? null, topicTitle: topicBit?.val?.title ?? threadId,
+  };
+}
+
+/**
  * The `content.searchResultTemplate` contributor - renders one row for an
- * entry THIS SAME app returned from `searchForum()` above.
+ * entry THIS SAME app returned from `searchForum()`/`resolveForumReference()`
+ * above (both callers, Search and Notifications, share this one template).
  * @param {HTMLElement} container
  * @param {{entry: object, services: object}} payload
  */
