@@ -208,9 +208,20 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
     const res = await fetch('/config.json');
     adminPubs = res.ok ? ((await res.json()).adminPubs ?? []) : [];
   } catch { /* offline/unreachable - header just shows no admin link, everything else still works */ }
+  // A boot-time snapshot of the SAME catalog `renderRoute()` re-fetches on
+  // every navigation below - the header is mounted exactly once for the
+  // whole session (see its own "SEARCH SLOT" doc comment), so a snapshot
+  // this fresh is fine; an admin disabling/adding an app mid-session just
+  // isn't reflected in the header's own `shell.headerAction` contributors
+  // until next reload, same acceptable staleness `adminPubs` above already has.
+  let bootApps = [];
+  try {
+    const res = await fetch('/apps.json');
+    bootApps = res.ok ? await res.json() : [];
+  } catch { /* offline/unreachable - header renders no shell.headerAction contributors, everything else still works */ }
   let stopHeader = null;
   try {
-    stopHeader = mountHeader(headerRoot, { qu, services, adminPubs, subscribe, syncFetch });
+    stopHeader = mountHeader(headerRoot, { qu, services, adminPubs, subscribe, syncFetch, apps: bootApps });
   } catch (err) {
     log.warn('shell header unavailable in this environment:', err.message);
   }

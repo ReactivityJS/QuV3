@@ -49,7 +49,7 @@ export const MANIFEST_KINDS = Object.freeze(['engine', 'service', 'app']);
 export const PUSH_ACTION_TYPES = Object.freeze(['create', 'update', 'delete', 'mention', 'custom']);
 
 /** The small shared vocabulary a `contributes` entry's optional `kind` may use - see that field's own doc comment below for why. */
-export const CONTRIBUTION_KINDS = Object.freeze(['ui', 'hook', 'menu']);
+export const CONTRIBUTION_KINDS = Object.freeze(['ui', 'hook', 'menu', 'query']);
 
 /**
  * @typedef {Object} Manifest
@@ -153,6 +153,16 @@ export const CONTRIBUTION_KINDS = Object.freeze(['ui', 'hook', 'menu']);
  *       contributor concatenated and returned - e.g. a host app's "..." menu
  *       on one of its own items, extended with entries other apps
  *       contribute (Reply/Forward/Share).
+ *     - Data-returning fan-out (`kind: 'query'`, same `ExtensionPointHost.
+ *       collect(point, payload)` mechanism as `'menu'` above, just with
+ *       point-specific data instead of `{id, label, icon?, onClick}`
+ *       shaped items): e.g. a search app's `content.search` point, where
+ *       each app owning its own content (Forum, Chat, ...) contributes its
+ *       own matching results for a query - `collect()`'s optional
+ *       `{onlyAppId}` lets a caller that already knows which single app it
+ *       wants (a "search only within Forum" scope) call just that one
+ *       contributor instead of fanning out to all of them (see
+ *       extension-points.js's own doc comment).
  *   `order` sorts contributors within one `point` (lower first, default 0),
  *   same convention as `actions[].order`. An app with nothing to contribute
  *   simply omits this field - additive, non-breaking, exactly like `actions`.

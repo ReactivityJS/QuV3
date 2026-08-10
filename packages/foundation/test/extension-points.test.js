@@ -103,6 +103,52 @@ test('collect(): a throwing contributor is skipped, others still contribute', as
   assert.deepEqual(items, [{ id: 'like', label: 'Like msg1', appId: 'likes' }]);
 });
 
+test('collect(): {onlyAppId} restricts the fan-out to a single contributor', async () => {
+  const host = new ExtensionPointHost(apps(
+    { name: 'bookmarks', clientMainUrl: PLUGIN_B_URL, contributes: [{ point: 'contextMenu.forumMessage', export: 'getMenuItems', order: 10 }] },
+    { name: 'likes', clientMainUrl: PLUGIN_A_URL, contributes: [{ point: 'contextMenu.forumMessage', export: 'getMenuItems', order: 0 }] },
+  ));
+  const items = await host.collect('contextMenu.forumMessage', { id: 'msg1' }, { onlyAppId: 'bookmarks' });
+  assert.deepEqual(items, [{ id: 'bookmark', label: 'Bookmark msg1', appId: 'bookmarks' }]);
+});
+
+test('collect(): {onlyAppId} matching no contributor yields an empty list, not an error', async () => {
+  const host = new ExtensionPointHost(apps(
+    { name: 'likes', clientMainUrl: PLUGIN_A_URL, contributes: [{ point: 'p', export: 'getMenuItems' }] },
+  ));
+  assert.deepEqual(await host.collect('p', { id: 'msg1' }, { onlyAppId: 'nobody' }), []);
+});
+
+test('renderFrom(): calls exactly the named contributor, not any other contributor of the same point', async () => {
+  const host = new ExtensionPointHost(apps(
+    { name: 'bookmarks', clientMainUrl: PLUGIN_B_URL, contributes: [{ point: 'content.actions', export: 'renderBookmark' }] },
+    { name: 'likes', clientMainUrl: PLUGIN_A_URL, contributes: [{ point: 'content.actions', export: 'renderLike' }] },
+  ));
+  const container = document.createElement('div');
+  await host.renderFrom('content.actions', 'bookmarks', container, { id: 'msg1' });
+
+  assert.equal(container.children.length, 1);
+  assert.equal(container.querySelector('button').textContent, 'bookmark:msg1');
+});
+
+test('renderFrom(): no contributor matches appId - a no-op, nothing thrown', async () => {
+  const host = new ExtensionPointHost(apps(
+    { name: 'likes', clientMainUrl: PLUGIN_A_URL, contributes: [{ point: 'content.actions', export: 'renderLike' }] },
+  ));
+  const container = document.createElement('div');
+  await host.renderFrom('content.actions', 'nobody', container, { id: 'msg1' });
+  assert.equal(container.children.length, 0);
+});
+
+test('renderFrom(): a throwing contributor is caught, nothing thrown back to the caller', async () => {
+  const host = new ExtensionPointHost(apps(
+    { name: 'broken', clientMainUrl: PLUGIN_A_URL, contributes: [{ point: 'content.actions', export: 'throwingRender' }] },
+  ));
+  const container = document.createElement('div');
+  await assert.doesNotReject(() => host.renderFrom('content.actions', 'broken', container, { id: 'msg1' }));
+  assert.equal(container.children.length, 0);
+});
+
 test('renderSlot(): calling the same point twice does not double-register contributors (no duplicate DOM per call)', async () => {
   const host = new ExtensionPointHost(apps(
     { name: 'likes', clientMainUrl: PLUGIN_A_URL, contributes: [{ point: 'content.actions', export: 'renderLike' }] },

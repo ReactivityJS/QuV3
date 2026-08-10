@@ -109,6 +109,7 @@ const DICT = {
     showAliasIn1to1: 'Show sender name in 1:1 chats',
     ownColor: 'Your message color',
     saved: 'Saved.',
+    searchResultIn: 'in "{room}"',
   },
   de: {
     title: 'Chats',
@@ -134,6 +135,7 @@ const DICT = {
     showAliasIn1to1: 'Absendername in 1:1-Chats anzeigen',
     ownColor: 'Deine Nachrichtenfarbe',
     saved: 'Gespeichert.',
+    searchResultIn: 'in „{room}“',
   },
 };
 const { t } = createI18n(DICT);
@@ -193,6 +195,10 @@ const STYLE = `
   .qu-chat-settings { display: flex; flex-direction: column; gap: 0.4rem; max-width: 24rem; }
   .qu-chat-settings label { display: flex; align-items: center; gap: 0.5rem; }
   .qu-chat-settings-status { font-size: 0.85em; opacity: 0.75; }
+  .qu-chat-search-result { display: block; padding: 0.6rem 0.8rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); text-decoration: none; color: inherit; }
+  .qu-chat-search-result:hover { background: var(--qu-color-surface, #8882); }
+  .qu-chat-search-result-meta { font-size: 0.8em; opacity: 0.7; }
+  .qu-chat-search-result-snippet { margin: 0.25rem 0 0; overflow-wrap: anywhere; }
 `;
 
 function formatTs(ts) {
@@ -925,4 +931,120 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     stopComposerMentions();
     stopComposerEmoji();
   };
+}
+
+// ===================================================================
+// SEARCH - `content.search`/`content.searchResultTemplate` contributor
+// (apps/search's own extension points, see that app's manifest.quapp for
+// the full payload contract) - closes part of this file's own "SCOPE" doc
+// comment gap ("per-chat/global search ... left for a real follow-up
+// round"). Chat never imports apps/search; apps/search never imports Chat -
+// both only agree on these two point strings, same shape apps/forum's own
+// identically-named contributors already establish (see that file's own
+// doc comment). Chat's composer never attaches files (see this file's own
+// top doc comment's SCOPE note - no `<qu-asset-upload>` here, unlike
+// Forum), so `classifyMessageContentType()` below only ever returns
+// `'post'`/`'link'` for a chat message - the `'image'`/`'video'`/`'file'`
+// filters simply never match here, not a bug.
+// ===================================================================
+
+/** @param {object} message @returns {'post'|'image'|'video'|'file'|'link'} */
+function classifyMessageContentType(message) {
+  const mime = message.attachment?.mime ?? '';
+  if (mime.startsWith('image/')) return 'image';
+  if (mime.startsWith('video/')) return 'video';
+  if (message.attachment) return 'file';
+  if (detectLinks(message.body ?? '').some((seg) => seg.type === 'link')) return 'link';
+  return 'post';
+}
+
+/** A short excerpt centered on the first match, so a long message's result row doesn't dump its entire body. */
+function buildSnippet(body, query, radius = 60) {
+  if (!body) return '';
+  const idx = body.toLowerCase().indexOf(query);
+  if (idx === -1) return body.length > 140 ? `${body.slice(0, 140)}…` : body;
+  const start = Math.max(0, idx - radius);
+  const end = Math.min(body.length, idx + query.length + radius);
+  return `${start > 0 ? '…' : ''}${body.slice(start, end)}${end < body.length ? '…' : ''}`;
+}
+
+/**
+ * The `content.search` contributor.
+ * @param {{services: object, apps: object[], myPub?: string, query: string, types: string[]|null, scope: 'global'|'app'|'subpage', segments?: string[]}} payload -
+ *   `segments` is the ORIGINAL `#/chat/...` route's segments (see
+ *   `mount()`'s own `[, seg1, seg2] = segments` above) - only consulted for
+ *   `scope: 'subpage'`; `'app'`/`'global'` both mean "search every room this
+ *   identity is in" from THIS contributor's point of view.
+ * @returns {Promise<Array<object>>}
+ */
+export async function searchChat({ services, apps, myPub, query, types, scope, segments = [] }) {
+  const SPACE_ID = apps?.find((a) => a.name === 'chat')?.spaceId;
+  const q = (query ?? '').trim().toLowerCase();
+  if (!SPACE_ID || !q) return [];
+  myPub ??= await services.actors.whoAmI();
+  const [, seg1, seg2] = segments;
+
+  async function messagesOfRoom(roomId, href, roomName) {
+    const { messages } = await services.messages.listMessages(SPACE_ID, roomId);
+    const out = [];
+    for (const message of messages) {
+      if (!message.body?.toLowerCase().includes(q)) continue;
+      const contentType = classifyMessageContentType(message);
+      if (types?.length && !types.includes(contentType)) continue;
+      out.push({ contentType, ts: message.ts, author: message.author, snippet: buildSnippet(message.body, q), href, roomId, roomName });
+    }
+    return out;
+  }
+
+  if (scope === 'subpage' && seg1 === 'g' && seg2) {
+    const config = await services.messages.getConfig(SPACE_ID, seg2);
+    return messagesOfRoom(seg2, `#/chat/g/${seg2}`, config?.name ?? seg2);
+  }
+  if (scope === 'subpage' && seg1 && seg1 !== 'new-group') {
+    const roomId = await ChatService.roomId([myPub, seg1]);
+    const profile = await services.profile.getPublicProfile(seg1);
+    return messagesOfRoom(roomId, `#/chat/${seg1}`, formatActorLabel(seg1, profile ?? {}));
+  }
+
+  // 'app'/'global', or 'subpage' with no specific room (the room list) - every room this identity is in.
+  const [contacts, groupIds] = await Promise.all([services.contacts.listContacts(), services.chat.listMyGroups()]);
+  const dmResults = await Promise.all(contacts.map(async (c) => {
+    const roomId = await ChatService.roomId([myPub, c.actorPub]);
+    return messagesOfRoom(roomId, `#/chat/${c.actorPub}`, formatActorLabel(c.actorPub, c.profile));
+  }));
+  const groupResults = await Promise.all(groupIds.map(async (groupId) => {
+    const config = await services.messages.getConfig(SPACE_ID, groupId);
+    if (!config) return []; // invited but the group thread itself hasn't synced in yet - same guard mountRoomListView() itself uses
+    return messagesOfRoom(groupId, `#/chat/g/${groupId}`, config.name ?? groupId);
+  }));
+  return [...dmResults.flat(), ...groupResults.flat()];
+}
+
+/**
+ * The `content.searchResultTemplate` contributor - renders one row for an
+ * entry THIS SAME app returned from `searchChat()` above.
+ * @param {HTMLElement} container
+ * @param {{entry: object, services: object}} payload
+ */
+export async function renderSearchResult(container, { entry, services }) {
+  const wrap = document.createElement('a');
+  wrap.className = 'qu-chat-search-result';
+  wrap.href = entry.href;
+
+  let authorLabel = entry.author ?? '';
+  try {
+    const profile = entry.author ? await services.profile.getPublicProfile(entry.author) : null;
+    if (profile) authorLabel = formatActorLabel(entry.author, profile);
+  } catch { /* offline/unresolvable - falls back to the raw pubkey */ }
+
+  const meta = document.createElement('div');
+  meta.className = 'qu-chat-search-result-meta';
+  meta.textContent = `${authorLabel} · ${t('searchResultIn', { room: entry.roomName ?? entry.roomId ?? '' })} · ${new Date(entry.ts).toLocaleString()}`;
+
+  const snippet = document.createElement('p');
+  snippet.className = 'qu-chat-search-result-snippet';
+  snippet.textContent = entry.snippet ?? '';
+
+  wrap.append(meta, snippet);
+  container.appendChild(wrap);
 }
