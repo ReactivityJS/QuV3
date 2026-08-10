@@ -1,0 +1,22 @@
+{
+  "name": "chat",
+  "version": "1.0.0",
+  "kind": "app",
+  "main": "./index.js",
+  "clientMain": "./dist/client.js",
+  "label": "Chat",
+  "icon": "💭",
+  "navOrder": 11,
+  "spaceId": "39d30ff2-be01-4277-93a5-85d21b4ce096",
+  "requires": [],
+  "pushActions": [
+    { "id": "newMessage", "label": "New messages", "type": "create" },
+    { "id": "mention", "label": "Mentions", "type": "mention" }
+  ],
+  "actions": [
+    { "slot": "contact-row", "id": "chat", "label": "Chat", "icon": "💬", "hrefTemplate": "#/chat/{pub}" }
+  ],
+  "contributes": [
+    { "point": "userSettings.contributions", "export": "renderChatSettings", "kind": "ui", "order": 20 }
+  ]
+}

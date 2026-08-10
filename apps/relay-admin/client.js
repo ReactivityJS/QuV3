@@ -34,6 +34,12 @@
  * policy + per-app toggles, not a full flag-catalog CMS); the Data Explorer
  * (`admin-http.js`'s `handleDataList`/`handleDataImport`) has no UI here at
  * all yet, a separate, larger follow-up in its own right.
+ *
+ * CHAT SECTION (added alongside `apps/chat`'s port): `settings.chat.
+ * allowMemberCreateGroup` mirrors Channels' own `allowMemberCreate` toggle
+ * exactly - see `packages/relay/src/relay-settings.js`'s own doc comment on
+ * that field for why chat needs no `allowMemberRestricted` counterpart (a
+ * chat room/group is ALWAYS reader-restricted, never a public option).
  */
 import { QuCrypto } from '@qu/core';
 import { createI18n } from '@qu/i18n';
@@ -52,6 +58,9 @@ const DICT = {
     allowMemberCreate: 'Members may create channels',
     allowMemberRestricted: 'Members may create restricted (private) channels',
     channelsHint: 'This relay\'s own admins can always create channels/restricted channels, regardless of these settings.',
+    chat: 'Chat',
+    allowMemberCreateGroup: 'Members may create chat groups',
+    chatHint: 'This relay\'s own admins can always create a chat group, regardless of this setting. 1:1 chats between contacts are never gated.',
     flagTypes: 'Flag types',
     flagTypesHint: 'Read-only for now - edit via a future round.',
     save: 'Save settings',
@@ -70,6 +79,9 @@ const DICT = {
     allowMemberCreate: 'Mitglieder dürfen Kanäle anlegen',
     allowMemberRestricted: 'Mitglieder dürfen private (restricted) Kanäle anlegen',
     channelsHint: 'Admins dieses Relays dürfen unabhängig von diesen Einstellungen immer Kanäle/private Kanäle anlegen.',
+    chat: 'Chat',
+    allowMemberCreateGroup: 'Mitglieder dürfen Chat-Gruppen anlegen',
+    chatHint: 'Admins dieses Relays dürfen unabhängig von dieser Einstellung immer eine Chat-Gruppe anlegen. 1:1-Chats zwischen Kontakten sind nie eingeschränkt.',
     flagTypes: 'Flag-Typen',
     flagTypesHint: 'Aktuell nur lesbar - Bearbeitung folgt in einer späteren Runde.',
     save: 'Einstellungen speichern',
@@ -193,6 +205,20 @@ export async function mount(container, { identity, services, apps }) {
   channelsHint.textContent = t('channelsHint');
   channelsSection.append(channelsTitle, allowCreateLabel, allowRestrictedLabel, channelsHint);
 
+  // ---- Chat ----
+  const chatSection = document.createElement('section');
+  const chatTitle = document.createElement('h2');
+  chatTitle.textContent = t('chat');
+  const allowCreateGroupLabel = document.createElement('label');
+  const allowCreateGroupInput = document.createElement('input');
+  allowCreateGroupInput.type = 'checkbox';
+  allowCreateGroupInput.checked = settings.chat?.allowMemberCreateGroup ?? true;
+  allowCreateGroupLabel.append(allowCreateGroupInput, document.createTextNode(t('allowMemberCreateGroup')));
+  const chatHint = document.createElement('p');
+  chatHint.className = 'qu-relay-admin-hint';
+  chatHint.textContent = t('chatHint');
+  chatSection.append(chatTitle, allowCreateGroupLabel, chatHint);
+
   // ---- Flag types (read-only) ----
   const flagTypesSection = document.createElement('section');
   const flagTypesTitle = document.createElement('h2');
@@ -217,7 +243,7 @@ export async function mount(container, { identity, services, apps }) {
   status.className = 'qu-relay-admin-status';
   status.hidden = true;
 
-  form.append(generalSection, appsSection, channelsSection, flagTypesSection, saveBtn, status);
+  form.append(generalSection, appsSection, channelsSection, chatSection, flagTypesSection, saveBtn, status);
   bodyRoot.appendChild(form);
 
   form.addEventListener('submit', async (e) => {
@@ -231,6 +257,7 @@ export async function mount(container, { identity, services, apps }) {
         rateLimits: { maxMessagesPerMinute: Number(rateLimitInput.value) || 0 },
         disabledApps: newDisabledApps,
         channels: { allowMemberCreate: allowCreateInput.checked, allowMemberRestricted: allowRestrictedInput.checked },
+        chat: { allowMemberCreateGroup: allowCreateGroupInput.checked },
       };
       const mainKey = await identity.getMainKey();
       const signature = await QuCrypto.sign(new TextEncoder().encode(JSON.stringify(patch)), mainKey.privateKeyPkcs8);

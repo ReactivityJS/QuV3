@@ -30,6 +30,7 @@ const DEFAULT_SETTINGS = {
   disabledApps: [],
   flagTypes: [{ id: 'favorite', label: 'Favorite', icon: '⭐', mode: 'private', entityKinds: ['app', 'user'] }],
   channels: { allowMemberCreate: true, allowMemberRestricted: false },
+  chat: { allowMemberCreateGroup: true },
 };
 
 const APPS = [
@@ -55,7 +56,7 @@ test('an admin identity sees the settings form, pre-populated from /config.json'
   const env = await freshEnv();
   t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({
     adminPubs: [env.myPub],
-    settings: { ...DEFAULT_SETTINGS, defaultLocale: 'de', rateLimits: { maxMessagesPerMinute: 30 }, disabledApps: ['reactions'], channels: { allowMemberCreate: false, allowMemberRestricted: true } },
+    settings: { ...DEFAULT_SETTINGS, defaultLocale: 'de', rateLimits: { maxMessagesPerMinute: 30 }, disabledApps: ['reactions'], channels: { allowMemberCreate: false, allowMemberRestricted: true }, chat: { allowMemberCreateGroup: false } },
   }), { status: 200 }));
 
   const container = makeContainer();
@@ -74,6 +75,9 @@ test('an admin identity sees the settings form, pre-populated from /config.json'
     const channelCheckboxes = [...container.querySelectorAll('form > section:nth-of-type(3) input[type="checkbox"]')];
     assert.equal(channelCheckboxes[0].checked, false); // allowMemberCreate
     assert.equal(channelCheckboxes[1].checked, true); // allowMemberRestricted
+
+    const chatCheckboxes = [...container.querySelectorAll('form > section:nth-of-type(4) input[type="checkbox"]')];
+    assert.equal(chatCheckboxes[0].checked, false); // allowMemberCreateGroup
 
     assert.match(container.querySelector('.qu-relay-admin-flagtypes').textContent, /Favorite/);
   } finally {
@@ -114,6 +118,7 @@ test('saving posts a REAL, independently-verifiable Ed25519 signature over the e
     assert.equal(capturedBody.actorPub, env.myPub);
     assert.equal(capturedBody.settings.defaultLocale, 'de');
     assert.deepEqual(capturedBody.settings.disabledApps, ['reactions']);
+    assert.deepEqual(capturedBody.settings.chat, { allowMemberCreateGroup: true }); // untouched - the form's own default
 
     await waitFor(() => container.querySelector('.qu-relay-admin-status')?.hidden === false);
     assert.match(container.querySelector('.qu-relay-admin-status').textContent, /Saved/);

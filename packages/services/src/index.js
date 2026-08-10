@@ -12,9 +12,11 @@
  * Entity API over `@qu/engines`' AssetEngine - file/image/video/audio
  * attachments), BookmarksService (a private per-identity list over forum
  * messages, the same `FlagService`-wrapper shape as `FavoritesService`),
- * and createTrustedCatalogStore (the signer-filtered `/store/apps/catalog`
- * facade shared by `apps/app-list` and `apps/shell`). See each file's own
- * doc comment.
+ * createTrustedCatalogStore (the signer-filtered `/store/apps/catalog`
+ * facade shared by `apps/app-list` and `apps/shell`), ChannelService
+ * (Forum's Channel -> Topic hierarchy), and ChatService (`apps/chat`'s
+ * 1:1-room-id-derivation + group-invite mechanism, on top of
+ * MessageService). See each file's own doc comment.
  */
 export * as paths from './paths.js';
 export { unwrap, unwrapAll } from './unwrap.js';
@@ -31,6 +33,7 @@ export { extractMentions, formatMarkdown, applyFormatting } from './thread-forma
 export { URL_RE_GLOBAL, detectLinks } from './link-detect.js';
 export { MessageService, THREAD_PRESETS } from './message-service.js';
 export { ChannelService } from './channel-service.js';
+export { ChatService } from './chat-service.js';
 export { ReactionService } from './reaction-service.js';
 export { PinService } from './pin-service.js';
 export { PresenceService } from './presence-service.js';

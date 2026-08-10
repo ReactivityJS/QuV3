@@ -55,3 +55,10 @@ test('saveSettings() with a channels patch merges it into the default channels s
   const result = await getSettings(qu);
   assert.deepEqual(result.channels, { allowMemberCreate: false, allowMemberRestricted: false }); // allowMemberRestricted kept its default
 });
+
+test('saveSettings() with a chat patch merges it into the default chat sub-object', async () => {
+  const qu = freshQu();
+  await saveSettings(qu, { chat: { allowMemberCreateGroup: false } });
+  const result = await getSettings(qu);
+  assert.deepEqual(result.chat, { allowMemberCreateGroup: false });
+});
