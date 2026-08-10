@@ -62,6 +62,25 @@ test('renderSlot(): a contributor whose module fails to load is skipped without 
   assert.equal(container.children.length, 0);
 });
 
+test('renderSlot(): a contributor from an admin-disabled app (enabled: false) contributes nothing', async () => {
+  const host = new ExtensionPointHost(apps(
+    { name: 'bookmarks', clientMainUrl: PLUGIN_B_URL, enabled: false, contributes: [{ point: 'content.actions', export: 'renderBookmark' }] },
+    { name: 'likes', clientMainUrl: PLUGIN_A_URL, contributes: [{ point: 'content.actions', export: 'renderLike' }] },
+  ));
+  const container = document.createElement('div');
+  await host.renderSlot('content.actions', container, { id: 'msg1' });
+
+  assert.equal(container.children.length, 1);
+  assert.equal(container.children[0].dataset.contributorApp, 'likes');
+});
+
+test('collect(): a contributor from an admin-disabled app (enabled: false) contributes nothing', async () => {
+  const host = new ExtensionPointHost(apps(
+    { name: 'broken', clientMainUrl: PLUGIN_A_URL, enabled: false, contributes: [{ point: 'p', export: 'getMenuItems' }] },
+  ));
+  assert.deepEqual(await host.collect('p', { id: 'msg1' }), []);
+});
+
 test('collect(): gathers every contributor\'s items, tagged with appId, sorted by order', async () => {
   const host = new ExtensionPointHost(apps(
     { name: 'bookmarks', clientMainUrl: PLUGIN_B_URL, contributes: [{ point: 'contextMenu.forumMessage', export: 'getMenuItems', order: 10 }] },

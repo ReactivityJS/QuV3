@@ -138,6 +138,7 @@ export class ExtensionPointHost {
   #contributorsFor(point) {
     const found = [];
     for (const app of this.#apps) {
+      if (app.enabled === false) continue; // an admin-disabled app (relay-settings' disabledApps) contributes nothing, same as not being in the catalog at all
       for (const c of app.contributes ?? []) {
         if (c.point !== point) continue;
         found.push({ appId: app.name, clientMainUrl: app.clientMainUrl, export: c.export, order: c.order ?? 0 });

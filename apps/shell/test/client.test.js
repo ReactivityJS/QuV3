@@ -165,6 +165,50 @@ test('navigating to a known route dynamically imports and mounts the target app 
   }
 });
 
+test('navigating to a route an admin has disabled (enabled: false) shows "app not found" instead of mounting it', async (t) => {
+  const qu = freshQu();
+  const identity = new QuIdentityEngine(qu);
+  await identity.importMnemonic(identity.generateMnemonic());
+  const clientMainUrl = dataUrlModule(`
+    export function mount(container) {
+      container.textContent = 'MOUNTED';
+      return () => {};
+    }
+  `);
+  t.mock.method(globalThis, 'fetch', mockFetch({ apps: [{ name: 'testapp', clientMainUrl, enabled: false }] }));
+
+  const container = makeContainer();
+  const stop = await mount(container, { qu, identity });
+  try {
+    window.location.hash = '#/testapp';
+    window.dispatchEvent(new window.Event('hashchange'));
+    await waitFor(() => container.querySelector('.qu-shell-placeholder') !== null);
+    assert.ok(!container.querySelector('.qu-shell-screen')?.textContent.includes('MOUNTED'));
+  } finally {
+    stop();
+  }
+});
+
+test('navigating to a contribute-only app (a clientMain with no mount() export) shows "app not found" instead of throwing', async (t) => {
+  const qu = freshQu();
+  const identity = new QuIdentityEngine(qu);
+  await identity.importMnemonic(identity.generateMnemonic());
+  const clientMainUrl = dataUrlModule(`
+    export function renderSomething() {}
+  `);
+  t.mock.method(globalThis, 'fetch', mockFetch({ apps: [{ name: 'testapp', clientMainUrl }] }));
+
+  const container = makeContainer();
+  const stop = await mount(container, { qu, identity });
+  try {
+    window.location.hash = '#/testapp';
+    window.dispatchEvent(new window.Event('hashchange'));
+    await waitFor(() => container.querySelector('.qu-shell-placeholder') !== null);
+  } finally {
+    stop();
+  }
+});
+
 test('ctx.extensionPoints.renderSlot() actually dynamically imports a DIFFERENT catalog app\'s contributed export and mounts its DOM', async (t) => {
   const qu = freshQu();
   const identity = new QuIdentityEngine(qu);

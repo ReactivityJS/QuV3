@@ -48,3 +48,10 @@ test('a second saveSettings() call merges onto the FIRST persisted state, not th
 test('settings are stored under the local-only prefix', async () => {
   assert.equal(RELAY_SETTINGS_PATH.startsWith('/store/secure/'), true);
 });
+
+test('saveSettings() with a channels patch merges it into the default channels sub-object', async () => {
+  const qu = freshQu();
+  await saveSettings(qu, { channels: { allowMemberCreate: false } });
+  const result = await getSettings(qu);
+  assert.deepEqual(result.channels, { allowMemberCreate: false, allowMemberRestricted: false }); // allowMemberRestricted kept its default
+});

@@ -17,10 +17,11 @@
  *   - `#/forum/c/<channelId>` - one channel's topic list, a "new topic"
  *     form, and (if restricted) an "invite member" field.
  *   - `#/forum/t/<topicId>` - one topic's thread: message list, composer,
- *     reactions, pins, attachments, the `content.messageActions` extension
- *     point - everything this app already had before Channels/Topics
- *     existed, now parametrized by `topicId` instead of a single hardcoded
- *     thread id.
+ *     attachments, plus whatever admin-enabled plugins render into this
+ *     app's own extension points (reactions/pins/bookmarks - see EXTENSION
+ *     POINTS below) - everything this app already had before Channels/
+ *     Topics existed, now parametrized by `topicId` instead of a single
+ *     hardcoded thread id.
  *
  * MIGRATION: `apps/forum/index.js`'s `register()` wraps the ORIGINAL flat
  * public thread (from before this round) in a real "General" channel/topic,
@@ -74,11 +75,17 @@
  * topic's attachments stay unencrypted, matching the message bodies
  * sitting next to them.
  *
- * REACTIONS/PINS/EMOJI/MENTIONS - see `@qu/thread-ui`'s own doc comment for
- * the shared `renderEmojiPicker()`/`mountMentionAutocomplete()`/
- * `insertAtCursor()` primitives this app's composer and reaction rows are
- * built from - the SAME package a future `apps/chat` port is meant to reuse
- * without rework.
+ * EMOJI/MENTIONS - see `@qu/thread-ui`'s own doc comment for the shared
+ * `renderEmojiPicker()`/`mountMentionAutocomplete()`/`mountEmojiAutocomplete()`/
+ * `insertAtCursor()` primitives this app's composer is built from - the SAME
+ * package a future `apps/chat` port is meant to reuse without rework.
+ *
+ * REACTIONS/PINS are NOT built into this file at all anymore - they're
+ * admin-toggleable plugins (`apps/reactions`, `apps/pins`), reached only
+ * through the extension points below (`content.messageReactions`,
+ * `content.messagePinToggle`, `forum.topicToolbar`). Disabling either via
+ * relay-settings' `disabledApps` (see `packages/relay/src/relay-settings.js`)
+ * makes it render nothing, with zero change needed here.
  *
  * REACTIVITY (topic view): the message list re-fetches via `services.
  * messages.listMessages()` (not the raw watched QuBits) every time
@@ -86,8 +93,8 @@
  * `apps/profile`'s own `watch()` pattern (ignore the raw callback value,
  * re-read through the Service that knows how to decrypt/format it
  * correctly). Every async render function in this file (`renderMessages()`,
- * `renderPinned()`, each message's own reaction/pin row) is guarded by a
- * monotonic per-call token, the fix for a confirmed duplicate-content race:
+ * `renderMessage()`) is guarded by a monotonic per-call token, the fix for
+ * a confirmed duplicate-content race:
  * `watchChildren()`/`watch()` can fire twice in quick succession (a local
  * write's own notify, then a live relay echo, or a syncFetch backfill), and
  * without a token an OLDER, slower render finishing AFTER a newer one used
@@ -102,15 +109,28 @@
  * of its own substitutions - there is no way a message body can smuggle
  * real markup through it. Covered by an explicit regression test anyway.
  *
- * EXTENSION POINT (`content.messageActions`, declared in this app's own
- * `manifest.quapp` under `definesExtensionPoints`): per message, right
- * after the built-in edit/pin actions, a small `<span>` is appended and
- * handed to `ctx.extensionPoints.renderSlot('content.messageActions',
- * slotEl, payload)` - ANY app whose OWN manifest declares `contributes:
- * [{point: "content.messageActions", export: "..."}]` gets dynamically
- * imported and rendered into it, with NO import of that app anywhere in
- * this file (see `apps/bookmarks/client.js`, the first real one). `payload`
- * is `{services, messageId, spaceId, threadId, body, author}`.
+ * EXTENSION POINTS (declared in this app's own `manifest.quapp` under
+ * `definesExtensionPoints`) - ANY app whose OWN manifest declares a matching
+ * `contributes: [{point: "...", export: "..."}]` gets dynamically imported
+ * and rendered into the slot, with NO import of that app anywhere in this
+ * file (see `apps/bookmarks/client.js`, the first real one):
+ *   - `content.messageActions` - per message, right after edit/pin/reactions,
+ *     a small `<span>` handed to `ctx.extensionPoints.renderSlot(...)`.
+ *     Payload: `{services, messageId, spaceId, threadId, body, author}`
+ *     (e.g. Bookmarks' toggle).
+ *   - `content.messagePinToggle` - per message, in its own action row.
+ *     Payload: `{services, qu, syncFetch, spaceId, threadId, messageId}`
+ *     (Pins' own toggle).
+ *   - `content.messageReactions` - per message, its own reaction row.
+ *     Payload: `{services, qu, syncFetch, spaceId, threadId, messageId,
+ *     myPub}` (Reactions' own widget).
+ *   - `forum.topicToolbar` - rendered ONCE per topic view, above the
+ *     message list. Payload: `{services, qu, syncFetch, spaceId, threadId}`
+ *     (Pins' own "Pinned" bar).
+ * The `qu`/`syncFetch`/`myPub` fields the last three carry (absent from
+ * `content.messageActions`' older payload shape) exist because both
+ * Reactions and Pins need a genuinely LIVE subscription, not just a
+ * one-shot Service call - see either app's own doc comment.
  *
  * KNOWN GAPS, left for later: no delete (`MessageService` has none, author-
  * only `editMessage()` is the whole story), no channel-metadata editing UI
@@ -124,9 +144,7 @@ import { watchChildren, watch } from '@qu/reactive';
 import { paths, formatActorLabel } from '@qu/services';
 import { createI18n } from '@qu/i18n';
 import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage } from '@qu/ui';
-import { renderEmojiPicker, mountMentionAutocomplete, insertAtCursor } from '@qu/thread-ui';
-
-const REACTION_CHOICES = ['👍', '❤️', '😂', '😮', '🔥'];
+import { renderEmojiPicker, mountMentionAutocomplete, mountEmojiAutocomplete, insertAtCursor } from '@qu/thread-ui';
 
 const DICT = {
   en: {
@@ -135,10 +153,8 @@ const DICT = {
     composerPlaceholder: 'Write a message…',
     send: 'Send',
     edit: 'Edit', save: 'Save', cancel: 'Cancel',
-    pin: 'Pin', unpin: 'Unpin',
-    pinnedBar: 'Pinned',
     attachRemove: 'Remove attachment',
-    insertEmoji: 'Insert emoji', moreEmoji: 'More emoji',
+    insertEmoji: 'Insert emoji',
     backToForum: '← Forum', backToChannel: '← {channel}',
     channels: 'Channels',
     noChannelsYet: 'No channels yet - create one below.',
@@ -163,10 +179,8 @@ const DICT = {
     composerPlaceholder: 'Nachricht schreiben…',
     send: 'Senden',
     edit: 'Bearbeiten', save: 'Speichern', cancel: 'Abbrechen',
-    pin: 'Anheften', unpin: 'Lösen',
-    pinnedBar: 'Angeheftet',
     attachRemove: 'Anhang entfernen',
-    insertEmoji: 'Emoji einfügen', moreEmoji: 'Weitere Emojis',
+    insertEmoji: 'Emoji einfügen',
     backToForum: '← Forum', backToChannel: '← {channel}',
     channels: 'Kanäle',
     noChannelsYet: 'Noch keine Kanäle - leg unten einen an.',
@@ -194,10 +208,6 @@ function formatReplies(count) {
 
 const STYLE_ID = 'qu-forum-style';
 const STYLE = `
-  .qu-forum-pinned { display: flex; flex-direction: column; gap: 0.3rem; margin-bottom: 0.8rem; padding: 0.5rem 0.7rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); background: color-mix(in srgb, var(--qu-color-accent, #5b5bd6) 8%, transparent); }
-  .qu-forum-pinned-title { font-weight: 600; font-size: 0.8em; opacity: 0.75; }
-  .qu-forum-pinned-row { display: flex; align-items: center; gap: 0.5rem; }
-  .qu-forum-pinned-row span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.9em; }
   .qu-forum-messages { list-style: none; margin: 0 0 0.8rem; padding: 0; display: flex; flex-direction: column; gap: 0.6rem; }
   .qu-forum-message { display: flex; gap: 0.6rem; padding: 0.5rem 0.7rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); }
   .qu-forum-message-body { flex: 1; min-width: 0; }
@@ -211,9 +221,6 @@ const STYLE = `
   .qu-forum-message-actions button { background: none; border: none; cursor: pointer; opacity: 0.6; font: inherit; font-size: 0.85em; padding: 0; }
   .qu-forum-message-actions button:hover { opacity: 1; }
   .qu-forum-message-extensions { display: inline-flex; gap: 0.3rem; margin-top: 0.4rem; }
-  .qu-forum-reactions { display: flex; gap: 0.3rem; margin-top: 0.4rem; flex-wrap: wrap; align-items: center; }
-  .qu-forum-reaction { border: 1px solid var(--qu-color-border, #8884); border-radius: 999px; background: transparent; cursor: pointer; padding: 0.1rem 0.5rem; font-size: 0.9em; }
-  .qu-forum-reaction.qu-forum-reaction-mine { background: color-mix(in srgb, var(--qu-color-accent, #5b5bd6) 20%, transparent); border-color: var(--qu-color-accent, #5b5bd6); }
   .qu-forum-edit-row { display: flex; flex-direction: column; gap: 0.4rem; position: relative; }
   .qu-forum-edit-row textarea { font: inherit; padding: 0.4rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); resize: vertical; }
   .qu-forum-edit-row-buttons { display: flex; gap: 0.4rem; }
@@ -242,6 +249,24 @@ const STYLE = `
   .qu-forum-channel-row a { display: flex; align-items: center; gap: 0.4rem; padding: 0.4rem 0.6rem; border-radius: var(--qu-radius-md, 0.4rem); text-decoration: none; color: inherit; }
   .qu-forum-channel-row a:hover { background: var(--qu-color-border, #8884); }
   .qu-forum-restricted-badge { font-size: 0.75em; opacity: 0.75; }
+  /* Channel/topic view layout: a persistent mini channel list alongside the
+     main content - esoTalk's own "the channel list never disappears, no
+     matter how deep you've drilled in" idiom (see this app's own top doc
+     comment / this section's own doc comment on mountMiniChannelSidebar()). */
+  .qu-forum-layout { display: flex; gap: 1.2rem; align-items: flex-start; }
+  .qu-forum-layout > aside { flex: 0 0 12rem; min-width: 0; }
+  .qu-forum-layout > div { flex: 1; min-width: 0; }
+  .qu-forum-mini-sidebar h2 { font-size: 0.85em; opacity: 0.75; margin: 0 0 0.4rem; }
+  .qu-forum-mini-channels { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.15rem; }
+  .qu-forum-mini-channels a { display: flex; align-items: center; gap: 0.3rem; padding: 0.3rem 0.5rem; border-radius: var(--qu-radius-md, 0.4rem); text-decoration: none; color: inherit; font-size: 0.9em; }
+  .qu-forum-mini-channels a:hover { background: var(--qu-color-border, #8884); }
+  .qu-forum-mini-channel-active { background: color-mix(in srgb, var(--qu-color-accent, #5b5bd6) 15%, transparent); font-weight: 600; }
+  /* Below this width the two columns no longer have room to sit side by
+     side - stack instead of squeezing the message list into a sliver. */
+  @media (max-width: 40rem) {
+    .qu-forum-layout { flex-direction: column; }
+    .qu-forum-layout > aside { flex-basis: auto; width: 100%; }
+  }
   .qu-forum-new-channel-form, .qu-forum-new-topic-form, .qu-forum-invite-form { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.6rem; max-width: 26rem; }
   .qu-forum-new-channel-form input[type="text"], .qu-forum-new-topic-form input[type="text"], .qu-forum-invite-form input[type="text"] { font: inherit; padding: 0.4rem 0.6rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); }
   .qu-forum-new-channel-form label { display: flex; align-items: center; gap: 0.4rem; font-size: 0.9em; }
@@ -316,6 +341,33 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
   const activityRoot = document.createElement('div');
   container.append(heading, channelsRoot, activityRoot);
 
+  // Admin-configurable channel-creation policy (relay-settings.js'
+  // `channels.allowMemberCreate`/`allowMemberRestricted`) - CLIENT-SIDE
+  // ONLY: this hides/adjusts the create-channel form, it does not (yet)
+  // stop a modified client from calling `services.channels.createChannel()`
+  // directly. See `packages/relay/src/relay-settings.js`'s own doc comment
+  // on `channels` for exactly why real engine-level enforcement isn't done
+  // here - channel documents and topic documents share the same generic
+  // `documentPath()` "docs" kind, with no path-level way yet to tell them
+  // apart for a pipeline Engine to gate on. `adminPubs` always bypasses this
+  // policy - an admin is never locked out by their own setting. Read once
+  // per mount (a policy change takes effect on next navigation, same
+  // "settings apply on next relevant fetch" convention `apps/shell/client.js`'s
+  // own `adminPubs` read already has for the header's Relay Admin link).
+  let channelPolicy = { allowMemberCreate: true, allowMemberRestricted: false };
+  let isChannelPolicyAdmin = false;
+  (async () => {
+    try {
+      const res = await fetch('/config.json');
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.settings?.channels) channelPolicy = data.settings.channels;
+      const myPub = await services.actors.whoAmI();
+      isChannelPolicyAdmin = (data.adminPubs ?? []).includes(myPub);
+    } catch { /* offline/unreachable - falls back to the permissive defaults above, matching DEFAULT_RELAY_SETTINGS */ }
+    if (!stopped) render();
+  })();
+
   let renderToken = 0;
   async function render() {
     const token = ++renderToken;
@@ -366,10 +418,15 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
       }
       root.appendChild(ul);
     }
-    root.appendChild(newChannelForm());
+    const form = newChannelForm();
+    if (form) root.appendChild(form);
   }
 
+  /** @returns {HTMLFormElement|null} `null` when this identity isn't allowed to create a channel at all. */
   function newChannelForm() {
+    if (!isChannelPolicyAdmin && !channelPolicy.allowMemberCreate) return null;
+    const allowRestricted = isChannelPolicyAdmin || channelPolicy.allowMemberRestricted;
+
     const form = document.createElement('form');
     form.className = 'qu-forum-new-channel-form';
     const titleInput = document.createElement('input');
@@ -381,6 +438,7 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
     const restrictedInput = document.createElement('input');
     restrictedInput.type = 'checkbox';
     restrictedLabel.append(restrictedInput, document.createTextNode(t('restrictedChannel')));
+    restrictedLabel.hidden = !allowRestricted;
 
     const membersInput = document.createElement('input');
     membersInput.type = 'text';
@@ -464,12 +522,76 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
   };
 }
 
+/**
+ * A read-only, always-visible channel list - esoTalk's own "channel tabs
+ * stay visible no matter how deep you've drilled in" idiom (see
+ * `docs/`-adjacent research this round: esoTalk's persistent channel
+ * sidebar/tabs bar, kept up regardless of which conversation you're
+ * reading). Deliberately NOT the same function as the board view's own
+ * `renderChannelsSidebar()` above - that one also owns the (policy-gated)
+ * create-channel form, which stays exclusive to the board view (the one
+ * true "browse/manage every channel" screen) rather than duplicating that
+ * gating logic into every other view that merely wants quick cross-channel
+ * navigation.
+ * @param {HTMLElement} root
+ * @param {{qu: object, services: object, syncFetch?: Function, SPACE_ID: string}} deps
+ * @param {string|null} [activeChannelId] - Highlighted in the list, when known.
+ * @returns {() => void} stop function
+ */
+function mountMiniChannelSidebar(root, { qu, services, syncFetch, SPACE_ID }, activeChannelId = null) {
+  root.className = 'qu-forum-mini-sidebar';
+  let stopped = false;
+
+  async function render() {
+    if (stopped) return;
+    const channels = await services.channels.listChannels(SPACE_ID);
+    if (stopped) return;
+    root.textContent = '';
+    const title = document.createElement('h2');
+    title.textContent = t('channels');
+    root.appendChild(title);
+    const ul = document.createElement('ul');
+    ul.className = 'qu-forum-mini-channels';
+    for (const channel of channels) {
+      const li = document.createElement('li');
+      const a = document.createElement('a');
+      a.href = `#/forum/c/${channel._id}`;
+      a.textContent = channel.title;
+      if (channel._id === activeChannelId) a.classList.add('qu-forum-mini-channel-active');
+      if (channel.restricted) {
+        const badge = document.createElement('span');
+        badge.className = 'qu-forum-restricted-badge';
+        badge.textContent = '🔒';
+        a.appendChild(badge);
+      }
+      li.appendChild(a);
+      ul.appendChild(li);
+    }
+    root.appendChild(ul);
+  }
+
+  const off = watch(qu, paths.listPath(SPACE_ID, 'channels'), () => render(), { syncFetch });
+  return () => {
+    stopped = true;
+    off();
+  };
+}
+
 // ===================================================================
 // CHANNEL VIEW - #/forum/c/<channelId>: one channel's topics
 // ===================================================================
 
 function mountChannelView(container, { qu, services, syncFetch, SPACE_ID, channelId }) {
   let stopped = false;
+  container.textContent = '';
+  const layout = document.createElement('div');
+  layout.className = 'qu-forum-layout';
+  const sidebarRoot = document.createElement('aside');
+  const mainRoot = document.createElement('div');
+  layout.append(sidebarRoot, mainRoot);
+  container.appendChild(layout);
+  const stopSidebar = mountMiniChannelSidebar(sidebarRoot, { qu, services, syncFetch, SPACE_ID }, channelId);
+
   const heading = document.createElement('div');
   heading.className = 'qu-forum-channel-heading';
   const headingTitle = document.createElement('h1');
@@ -479,7 +601,7 @@ function mountChannelView(container, { qu, services, syncFetch, SPACE_ID, channe
   const topicsRoot = document.createElement('div');
   const inviteRoot = document.createElement('div');
 
-  renderSubpage(container, {
+  renderSubpage(mainRoot, {
     backHref: '#/forum',
     backLabel: t('backToForum'),
     render: (content) => content.append(heading, topicsRoot, inviteRoot),
@@ -598,6 +720,7 @@ function mountChannelView(container, { qu, services, syncFetch, SPACE_ID, channe
     stopped = true;
     offTopics();
     offChannel();
+    stopSidebar();
   };
 }
 
@@ -607,11 +730,33 @@ function mountChannelView(container, { qu, services, syncFetch, SPACE_ID, channe
 
 function mountTopicView(container, { qu, services, subscribe, syncFetch, extensionPoints, SPACE_ID, topicId }) {
   let stopped = false;
+  container.textContent = '';
+  const layout = document.createElement('div');
+  layout.className = 'qu-forum-layout';
+  const sidebarRoot = document.createElement('aside');
+  const mainRoot = document.createElement('div');
+  layout.append(sidebarRoot, mainRoot);
+  container.appendChild(layout);
+  // No activeChannelId yet - a topic only knows its own parent channel
+  // after the async lookup below resolves, and this list is cheap enough
+  // (and rare enough to actually matter) that re-highlighting it isn't
+  // worth a second render pass - it still fully works for navigation, just
+  // without the active-channel highlight in a topic view specifically
+  // (unlike the channel view, which has its `channelId` synchronously).
+  const stopSidebar = mountMiniChannelSidebar(sidebarRoot, { qu, services, syncFetch, SPACE_ID }, null);
 
   const heading = document.createElement('h1');
   heading.textContent = t('title');
 
   const pinnedRoot = document.createElement('div');
+  // Rendered ONCE - unlike the per-message slots in renderMessage(), this
+  // point's own contributor (Pins' `renderPinnedBar()`) self-manages its
+  // own live updates (a Custom Element watching the topic's pins path
+  // itself - see that file's own doc comment), so there's no per-topic
+  // watchChildren() left in THIS file for pins at all.
+  if (extensionPoints) {
+    extensionPoints.renderSlot('forum.topicToolbar', pinnedRoot, { services, qu, syncFetch, spaceId: SPACE_ID, threadId: topicId });
+  }
   const messagesRoot = document.createElement('div');
   const composerWrap = document.createElement('div');
   composerWrap.className = 'qu-forum-composer-wrap';
@@ -632,17 +777,19 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
   });
   composerRow.append(composerInput, emojiPicker, attachUpload, sendBtn);
 
-  // @mention completion (by alias or pub, from the 2nd typed character) -
-  // wire-format unchanged, purely a compose-time insert helper. See
+  // @mention completion (by alias or pub, from the 2nd typed character) and
+  // :shortcode: emoji completion, both from the 2nd typed character - wire-
+  // format unchanged, purely compose-time insert helpers. See
   // `@qu/thread-ui`'s own doc comment.
   const stopComposerMentions = mountMentionAutocomplete(composerInput, { services, subscribe });
+  const stopComposerEmoji = mountEmojiAutocomplete(composerInput);
 
   const pendingAttachmentEl = document.createElement('div');
   pendingAttachmentEl.className = 'qu-forum-pending-attachment';
   pendingAttachmentEl.hidden = true;
   composerWrap.append(composerRow, pendingAttachmentEl);
 
-  renderSubpage(container, {
+  renderSubpage(mainRoot, {
     backHref: '#/forum',
     backLabel: t('backToForum'),
     render: (content) => content.append(heading, pinnedRoot, messagesRoot, composerWrap),
@@ -650,7 +797,7 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
   // renderSubpage() builds the back link internally and hands back nothing
   // - re-selected here (by the class it's own doc comment guarantees) so it
   // can be updated once the topic's real channel is known, below.
-  const backLink = container.querySelector('.qu-subpage-back');
+  const backLink = mainRoot.querySelector('.qu-subpage-back');
 
   // Resolves the topic's own title and its parent channel (for the back
   // link) - doesn't block the message list itself from loading, both start
@@ -811,13 +958,20 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
       editBtn.addEventListener('click', () => renderMessageEdit(textWrap, message));
       actions.appendChild(editBtn);
     }
-    const pinBtn = document.createElement('button');
-    pinBtn.type = 'button';
-    mountPinButton(pinBtn, message.id);
-    actions.appendChild(pinBtn);
+    const pinSlot = document.createElement('span');
+    if (extensionPoints) {
+      await extensionPoints.renderSlot('content.messagePinToggle', pinSlot, {
+        services, qu, syncFetch, spaceId: SPACE_ID, threadId: topicId, messageId: message.id,
+      });
+    }
+    actions.appendChild(pinSlot);
 
     const reactionsRoot = document.createElement('div');
-    mountReactions(reactionsRoot, message.id, myPub);
+    if (extensionPoints) {
+      await extensionPoints.renderSlot('content.messageReactions', reactionsRoot, {
+        services, qu, syncFetch, spaceId: SPACE_ID, threadId: topicId, messageId: message.id, myPub,
+      });
+    }
 
     const extensionSlot = document.createElement('span');
     extensionSlot.className = 'qu-forum-message-extensions';
@@ -869,13 +1023,14 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     textarea.value = editingDrafts.get(message.id) ?? message.body;
     editingDrafts.set(message.id, textarea.value);
     textarea.addEventListener('input', () => editingDrafts.set(message.id, textarea.value));
-    // Same mention completion as the composer - a fresh instance per
+    // Same mention + emoji completion as the composer - a fresh instance per
     // renderMessageEdit() call, torn down the same way mountReactions()'s/
     // mountPinButton()'s own per-message watchers are: pushed onto the
     // shared `messageWatchers` array clearMessageWatchers() drains on every
     // renderMessages() rebuild (this row gets rebuilt right along with
     // everything else whenever the thread changes).
     messageWatchers.push(mountMentionAutocomplete(textarea, { services, subscribe }));
+    messageWatchers.push(mountEmojiAutocomplete(textarea));
     const buttons = document.createElement('div');
     buttons.className = 'qu-forum-edit-row-buttons';
     const saveBtn = document.createElement('button');
@@ -903,112 +1058,13 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     root.appendChild(row);
   }
 
-  function mountReactions(root, messageId, myPub) {
-    // Local to this call - `mountReactions()` is re-invoked fresh, with a
-    // fresh closure, for every message on every renderMessages() rebuild
-    // (`clearMessageWatchers()` tears down the OLD instance's watcher
-    // first), so there's no shared state to guard across messages here -
-    // just the same "two watchChildren() fires racing each other for THIS
-    // one message" case every render() in this file needs guarding against.
-    let reactionToken = 0;
-    async function render() {
-      const token = ++reactionToken;
-      if (stopped) return;
-      const reactions = await services.reactions.getReactions(SPACE_ID, topicId, messageId);
-      if (stopped || token !== reactionToken) return;
-      root.textContent = '';
-      const row = document.createElement('div');
-      row.className = 'qu-forum-reactions';
-
-      // Which one (if any) is MY current reaction - `ReactionService.
-      // setReaction()`'s own "one reaction per actor, a second call simply
-      // replaces the first" semantics means there's at most one. Computed
-      // once and shared by both the quick row's own toggle-off logic and
-      // the "+" picker's extended grid below, so picking an already-mine
-      // emoji from EITHER place clears it rather than just re-setting it.
-      let myReaction = null;
-      for (const [emoji, reactors] of Object.entries(reactions)) {
-        if (reactors.includes(myPub)) { myReaction = emoji; break; }
-      }
-
-      for (const emoji of REACTION_CHOICES) {
-        const reactors = reactions[emoji] ?? [];
-        const mine = emoji === myReaction;
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'qu-forum-reaction' + (mine ? ' qu-forum-reaction-mine' : '');
-        btn.textContent = reactors.length > 0 ? `${emoji} ${reactors.length}` : emoji;
-        btn.addEventListener('click', () => services.reactions.setReaction(SPACE_ID, topicId, messageId, mine ? null : emoji));
-        row.appendChild(btn);
-      }
-      row.appendChild(renderEmojiPicker({
-        onPick: (emoji) => services.reactions.setReaction(SPACE_ID, topicId, messageId, emoji === myReaction ? null : emoji),
-        trigger: '+',
-        triggerTitle: t('moreEmoji'),
-      }));
-      root.appendChild(row);
-    }
-    const off = watchChildren(qu, paths.threadReactionsParentPath(SPACE_ID, topicId, messageId), () => render(), { syncFetch });
-    messageWatchers.push(off);
-  }
-
-  /**
-   * Same live-per-message pattern as `mountReactions()` above, watching the
-   * TOPIC's pins parent path (shared by every message's own button, and
-   * separately by `renderPinned()`'s own top-bar watcher below) - a little
-   * redundant (every currently rendered message's button re-fetches
-   * `listPinned()` on ANY pin change in the topic, not just its own), but
-   * keeps every pin button honestly live without inventing a second data
-   * shape, and this app has no pagination yet to make that cost noticeable.
-   */
-  function mountPinButton(btn, messageId) {
-    let pinBtnToken = 0; // same per-instance guard as mountReactions() above
-    async function render() {
-      const token = ++pinBtnToken;
-      if (stopped) return;
-      const pinnedIds = await services.pins.listPinned(SPACE_ID, topicId);
-      if (stopped || token !== pinBtnToken) return;
-      const pinned = pinnedIds.includes(messageId);
-      btn.textContent = pinned ? t('unpin') : t('pin');
-      btn.onclick = () => services.pins.setPinned(SPACE_ID, topicId, messageId, !pinned);
-    }
-    const off = watchChildren(qu, paths.threadPinsParentPath(SPACE_ID, topicId), () => render(), { syncFetch });
-    messageWatchers.push(off);
-  }
-
-  let pinnedRenderToken = 0; // same class of race as renderMessages() above, own independent render path
-  async function renderPinned() {
-    const token = ++pinnedRenderToken;
-    if (stopped) return;
-    const pinnedIds = await services.pins.listPinned(SPACE_ID, topicId);
-    if (stopped || token !== pinnedRenderToken) return;
-    pinnedRoot.textContent = '';
-    if (pinnedIds.length === 0) return;
-
-    const box = document.createElement('div');
-    box.className = 'qu-forum-pinned';
-    const title = document.createElement('div');
-    title.className = 'qu-forum-pinned-title';
-    title.textContent = `📌 ${t('pinnedBar')} (${pinnedIds.length})`;
-    box.appendChild(title);
-
-    for (const messageId of pinnedIds) {
-      const quBit = await qu.get(paths.threadMessagePath(SPACE_ID, topicId, messageId));
-      if (stopped || token !== pinnedRenderToken) return;
-      const row = document.createElement('div');
-      row.className = 'qu-forum-pinned-row';
-      const span = document.createElement('span');
-      span.textContent = quBit?.val?.body ?? messageId;
-      const unpinBtn = document.createElement('button');
-      unpinBtn.type = 'button';
-      unpinBtn.textContent = '✕';
-      unpinBtn.title = t('unpin');
-      unpinBtn.addEventListener('click', () => services.pins.setPinned(SPACE_ID, topicId, messageId, false));
-      row.append(span, unpinBtn);
-      box.appendChild(row);
-    }
-    pinnedRoot.appendChild(box);
-  }
+  // Reactions (`content.messageReactions`) and the pin toggle/pinned bar
+  // (`content.messagePinToggle`/`forum.topicToolbar`) used to be hardcoded
+  // here - now admin-toggleable plugins (`apps/reactions`, `apps/pins`),
+  // rendered through the extension points declared in this app's own
+  // manifest.quapp. See `renderMessage()` above for the per-message slots
+  // and `mountTopicView()`'s own setup below for the once-per-topic
+  // `forum.topicToolbar` slot.
 
   sendBtn.addEventListener('click', async () => {
     const body = composerInput.value.trim();
@@ -1025,13 +1081,13 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
   });
 
   const offMessages = watchChildren(qu, paths.threadMessagesParentPath(SPACE_ID, topicId), () => renderMessages(), { syncFetch });
-  const offPins = watchChildren(qu, paths.threadPinsParentPath(SPACE_ID, topicId), () => renderPinned(), { syncFetch });
 
   return () => {
     stopped = true;
     clearMessageWatchers();
     offMessages();
-    offPins();
     stopComposerMentions();
+    stopComposerEmoji();
+    stopSidebar();
   };
 }

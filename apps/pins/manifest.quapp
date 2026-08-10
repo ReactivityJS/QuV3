@@ -1,0 +1,12 @@
+{
+  "name": "pins",
+  "version": "1.0.0",
+  "kind": "app",
+  "main": "./index.js",
+  "clientMain": "./dist/client.js",
+  "requires": [],
+  "contributes": [
+    { "point": "content.messagePinToggle", "export": "renderPinToggle", "kind": "ui", "order": 0 },
+    { "point": "forum.topicToolbar", "export": "renderPinnedBar", "kind": "ui", "order": 0 }
+  ]
+}

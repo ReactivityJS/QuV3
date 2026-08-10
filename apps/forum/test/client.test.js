@@ -125,6 +125,25 @@ const FORUM_APPS_WITH_BOOKMARKS = [
   { name: 'bookmarks', clientMainUrl: BOOKMARKS_CLIENT_URL, contributes: [{ point: 'content.messageActions', export: 'renderBookmarkToggle' }] },
 ];
 
+// Same "the REAL app, not a fake" reasoning as FORUM_APPS_WITH_BOOKMARKS -
+// apps/reactions and apps/pins are admin-toggleable plugins now, reached
+// only through the extension points forum's own manifest.quapp defines.
+const REACTIONS_CLIENT_URL = new URL('../../reactions/client.js', import.meta.url).href;
+const PINS_CLIENT_URL = new URL('../../pins/client.js', import.meta.url).href;
+const FORUM_APPS_WITH_REACTIONS = [
+  { name: 'forum', spaceId: FORUM_SPACE_ID },
+  { name: 'reactions', clientMainUrl: REACTIONS_CLIENT_URL, contributes: [{ point: 'content.messageReactions', export: 'renderReactionWidget' }] },
+];
+const FORUM_APPS_WITH_PINS = [
+  { name: 'forum', spaceId: FORUM_SPACE_ID },
+  {
+    name: 'pins', clientMainUrl: PINS_CLIENT_URL, contributes: [
+      { point: 'content.messagePinToggle', export: 'renderPinToggle' },
+      { point: 'forum.topicToolbar', export: 'renderPinnedBar' },
+    ],
+  },
+];
+
 function noopSubscribe() {}
 
 /** Must be attached to document.body - reactive rendering only matters once actually part of the document. */
@@ -388,7 +407,7 @@ test('a slow, stale renderMessages() call resolving AFTER a newer one never over
   }
 });
 
-test('reaction toggle: clicking an emoji sets it, clicking the same one again clears it, live for a second independent mount', async () => {
+test('content.messageReactions: the REAL apps/reactions app is dynamically imported and rendered per message, live across two independent mounts', async () => {
   const a = await freshEnv('Ada');
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
   await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'React to me' });
@@ -397,24 +416,31 @@ test('reaction toggle: clicking an emoji sets it, clicking the same one again cl
   // chain works across separate DOM instances, without needing a second
   // distinct identity for this particular assertion.
   const containerA = makeContainer();
-  const stopA = mount(containerA, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  const extensionPointsA = new ExtensionPointHost(FORUM_APPS_WITH_REACTIONS);
+  const stopA = mount(containerA, { qu: a.qu, services: a.services, apps: FORUM_APPS_WITH_REACTIONS, subscribe: noopSubscribe, extensionPoints: extensionPointsA, segments: TOPIC_SEGMENTS });
   const containerB = makeContainer();
-  const stopB = mount(containerB, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  const extensionPointsB = new ExtensionPointHost(FORUM_APPS_WITH_REACTIONS);
+  const stopB = mount(containerB, { qu: a.qu, services: a.services, apps: FORUM_APPS_WITH_REACTIONS, subscribe: noopSubscribe, extensionPoints: extensionPointsB, segments: TOPIC_SEGMENTS });
   try {
-    await waitFor(() => containerA.querySelector('.qu-forum-reaction') !== null);
-    const findThumbsUpA = () => [...containerA.querySelectorAll('.qu-forum-reaction')].find((btn) => btn.textContent.startsWith('👍'));
-    findThumbsUpA().click();
+    // Scoped to <qu-reactions-row> specifically - the composer's OWN insert-
+    // emoji button (`renderEmojiPicker({trigger: '😀', ...})`, still built
+    // directly into apps/forum/client.js) renders the exact same
+    // `.qu-thread-ui-emoji-trigger`/`.qu-thread-ui-emoji-panel` classes (the
+    // shared @qu/thread-ui component), so an unscoped querySelector() would
+    // just as happily grab the composer's trigger instead of the message's
+    // own reaction widget.
+    await waitFor(() => containerA.querySelector('qu-reactions-row .qu-thread-ui-emoji-trigger') !== null);
+    assert.equal(containerA.querySelector('.qu-reactions-pill'), null); // no reactions yet - only the "+" trigger
 
-    await waitFor(() => [...containerB.querySelectorAll('.qu-forum-reaction')].some((btn) => btn.textContent === '👍 1'));
-    assert.ok([...containerA.querySelectorAll('.qu-forum-reaction')].find((btn) => btn.textContent === '👍 1').classList.contains('qu-forum-reaction-mine'));
+    containerA.querySelector('qu-reactions-row .qu-thread-ui-emoji-trigger').click();
+    await waitFor(() => containerA.querySelector('qu-reactions-row .qu-thread-ui-emoji-panel') !== null);
+    [...containerA.querySelectorAll('qu-reactions-row .qu-thread-ui-emoji-panel button')].find((btn) => btn.textContent === '👍').click();
 
-    // Each live re-render rebuilds the reaction row with a fresh closure -
-    // re-query the CURRENT button rather than reusing the first click's now-
-    // stale, detached reference (whose own click handler is still bound to
-    // the pre-reaction "mine: false" state it was created with).
-    findThumbsUpA().click(); // toggle off
-    const findThumbsUpB = () => [...containerB.querySelectorAll('.qu-forum-reaction')].find((btn) => btn.textContent.startsWith('👍'));
-    await waitFor(() => findThumbsUpB()?.textContent === '👍');
+    await waitFor(() => [...containerB.querySelectorAll('.qu-reactions-pill')].some((btn) => btn.textContent === '👍 1'));
+    assert.ok(containerA.querySelector('.qu-reactions-pill').classList.contains('qu-reactions-pill-mine'));
+
+    containerA.querySelector('.qu-reactions-pill').click(); // toggle off
+    await waitFor(() => containerB.querySelector('.qu-reactions-pill') === null);
   } finally {
     stopA();
     stopB();
@@ -486,27 +512,29 @@ test('content.messageActions: a bookmark is private - a SECOND identity viewing 
   }
 });
 
-test('pinning shows the message in the pinned bar, live for a second independent mount; unpinning removes it', async () => {
+test('content.messagePinToggle/forum.topicToolbar: the REAL apps/pins app pins a message and shows it in the pinned bar, live for a second independent mount; unpinning removes it', async () => {
   const a = await freshEnv('Ada');
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
   await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'Pin this one' });
 
   const containerA = makeContainer();
-  const stopA = mount(containerA, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  const extensionPointsA = new ExtensionPointHost(FORUM_APPS_WITH_PINS);
+  const stopA = mount(containerA, { qu: a.qu, services: a.services, apps: FORUM_APPS_WITH_PINS, subscribe: noopSubscribe, extensionPoints: extensionPointsA, segments: TOPIC_SEGMENTS });
   const containerB = makeContainer();
-  const stopB = mount(containerB, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  const extensionPointsB = new ExtensionPointHost(FORUM_APPS_WITH_PINS);
+  const stopB = mount(containerB, { qu: a.qu, services: a.services, apps: FORUM_APPS_WITH_PINS, subscribe: noopSubscribe, extensionPoints: extensionPointsB, segments: TOPIC_SEGMENTS });
   try {
     await waitFor(() => containerA.querySelector('.qu-forum-message-actions button') !== null);
     const pinBtn = [...containerA.querySelectorAll('.qu-forum-message-actions button')].find((btn) => btn.textContent === 'Pin');
     assert.ok(pinBtn, 'expected a "Pin" button');
     pinBtn.click();
 
-    await waitFor(() => containerB.querySelector('.qu-forum-pinned') !== null);
-    assert.match(containerB.querySelector('.qu-forum-pinned-row span').textContent, /Pin this one/);
+    await waitFor(() => containerB.querySelector('.qu-pins-bar') !== null);
+    assert.match(containerB.querySelector('.qu-pins-bar-row span').textContent, /Pin this one/);
     await waitFor(() => [...containerA.querySelectorAll('.qu-forum-message-actions button')].some((btn) => btn.textContent === 'Unpin'));
 
-    containerB.querySelector('.qu-forum-pinned-row button').click(); // unpin via the bar's own ✕
-    await waitFor(() => containerB.querySelector('.qu-forum-pinned') === null);
+    containerB.querySelector('.qu-pins-bar-row button').click(); // unpin via the bar's own ✕
+    await waitFor(() => containerB.querySelector('.qu-pins-bar') === null);
   } finally {
     stopA();
     stopB();
@@ -707,6 +735,49 @@ test('board view: a restricted channel shows a 🔒 badge in the sidebar', async
   }
 });
 
+test('board view: channels.allowMemberCreate: false hides the create-channel form for a non-admin', async (t) => {
+  const a = await freshEnv('Ada');
+  t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ adminPubs: [], settings: { channels: { allowMemberCreate: false, allowMemberRestricted: false } } }), { status: 200 }));
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-channels, .qu-forum-empty') !== null);
+    await new Promise((resolve) => setTimeout(resolve, 30)); // let the /config.json fetch + re-render settle
+    assert.equal(container.querySelector('.qu-forum-new-channel-form'), null);
+  } finally {
+    stop();
+  }
+});
+
+test('board view: channels.allowMemberCreate: false still shows the form for this relay\'s own admin', async (t) => {
+  const a = await freshEnv('Ada');
+  t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ adminPubs: [a.myPub], settings: { channels: { allowMemberCreate: false, allowMemberRestricted: false } } }), { status: 200 }));
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-new-channel-form') !== null);
+  } finally {
+    stop();
+  }
+});
+
+test('board view: channels.allowMemberRestricted: false hides the restricted checkbox for a non-admin, but the form itself still allows an OPEN channel', async (t) => {
+  const a = await freshEnv('Ada');
+  t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ adminPubs: [], settings: { channels: { allowMemberCreate: true, allowMemberRestricted: false } } }), { status: 200 }));
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-new-channel-form') !== null);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(container.querySelector('.qu-forum-new-channel-form label').hidden, true);
+  } finally {
+    stop();
+  }
+});
+
 // ===================================================================
 // CHANNEL VIEW - #/forum/c/<channelId>
 // ===================================================================
@@ -729,6 +800,39 @@ test('channel view lists its topics with a live reply count, and a "new topic" f
     titleInput.value = 'Second topic';
     container.querySelector('.qu-forum-new-topic-form button').click();
     await waitFor(() => [...container.querySelectorAll('.qu-forum-topic-title')].some((el) => el.textContent === 'Second topic'));
+  } finally {
+    stop();
+  }
+});
+
+test('channel view: a persistent mini sidebar lists every channel and highlights the active one', async () => {
+  const a = await freshEnv('Ada');
+  const announcements = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Announcements' });
+  await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Off-topic' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', announcements._id] });
+  try {
+    await waitFor(() => container.querySelectorAll('.qu-forum-mini-channels a').length >= 3); // General + Announcements + Off-topic
+    const links = [...container.querySelectorAll('.qu-forum-mini-channels a')];
+    assert.ok(links.some((a2) => a2.textContent.includes('Off-topic')));
+    const active = container.querySelector('.qu-forum-mini-channel-active');
+    assert.match(active.textContent, /Announcements/);
+  } finally {
+    stop();
+  }
+});
+
+test('topic view: a persistent mini sidebar lists every channel alongside the thread', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Off-topic' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => container.querySelectorAll('.qu-forum-mini-channels a').length >= 2); // General + Off-topic
+    await waitFor(() => container.querySelector('.qu-forum-message, .qu-forum-empty') !== null); // the thread itself still renders alongside it
   } finally {
     stop();
   }
