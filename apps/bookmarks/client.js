@@ -3,33 +3,34 @@
  * `contributes`/`ExtensionPointHost` mechanism (the first was the
  * synthetic fake-app pair in `apps/shell`'s own test file) - this app is
  * BOTH a normally-mounted page (`mount()`, "My Bookmarks") AND a
- * cross-app UI plugin (`renderBookmarkToggle()`, dynamically imported and
- * called by whatever host app defines the `content.messageActions` point -
- * currently `apps/forum`, see that app's own doc comment) from the SAME
- * bundle - `apps/forum` never imports this file, and this file never
- * imports `apps/forum`; both sides only agree on the `content.
- * messageActions` point string and the payload shape below.
+ * cross-app UI plugin (`bookmarkMenuItem()`, dynamically imported and
+ * called by whatever host app defines the `content.messageMenu` point -
+ * `apps/forum` and `apps/chat` today, see either's own doc comment) from
+ * the SAME bundle - neither host imports this file, and this file never
+ * imports either host; both sides only agree on the `content.messageMenu`
+ * point string and the payload shape below.
  *
  * STORAGE: `@qu/services`' `BookmarksService` (a thin `FlagService`
  * wrapper, private/self-encrypted mode - a bookmark is nobody's business
- * but the identity that set it). Neither `mount()` nor
- * `renderBookmarkToggle()` construct their OWN `FlagService`/
- * `BookmarksService` - both read `services.bookmarks` off whatever context
- * they're given (the normal shell ctx for `mount()`, the host app's own
- * payload for the contribution), so there is exactly ONE way bookmarks get
- * read/written, never a second copy of the storage logic living in the UI
- * layer.
+ * but the identity that set it). Neither `mount()` nor `bookmarkMenuItem()`
+ * construct their OWN `FlagService`/`BookmarksService` - both read
+ * `services.bookmarks` off whatever context they're given (the normal
+ * shell ctx for `mount()`, the host app's own payload for the
+ * contribution), so there is exactly ONE way bookmarks get read/written,
+ * never a second copy of the storage logic living in the UI layer.
  *
- * CONTRIBUTOR PAYLOAD CONTRACT (`content.messageActions`): `(container,
- * payload)` where `payload` is `{services, messageId, spaceId, threadId,
- * body, author}` - `services` (specifically `services.bookmarks`) is what
+ * CONTRIBUTOR PAYLOAD CONTRACT (`content.messageMenu`, `kind: 'menu'` - a
+ * `collect()`-style `(payload) -> {id, label, icon, onClick}`, NOT a DOM
+ * mount): `payload` is `{services, messageId, spaceId, threadId, body,
+ * author, ...}` - `services` (specifically `services.bookmarks`) is what
  * lets this run with no `qu`/`identity` of its own; `messageId` is the
  * `entityRef` bookmarked; the rest (`spaceId`/`threadId`/`body`/`author`)
  * becomes the bookmark's stored SNAPSHOT (see `BookmarksService.add()`'s
  * own doc comment on why a snapshot, not a re-fetch) - a host app that
- * defines this point is expected to pass exactly this shape; a different
- * future host (e.g. a Chat app bookmarking its own messages) can reuse this
- * unchanged, since none of it is Forum-specific.
+ * renders this point is expected to pass exactly this shape. The CURRENT
+ * bookmarked state is resolved fresh on every `collect()` call - no live
+ * subscription, same "a menu is transient" reasoning `apps/pins/client.js`'s
+ * own `pinMenuItem()` doc comment has.
  *
  * "My Bookmarks" (`mount()`) is deliberately simple: one flat, reverse-
  * chronological list of every bookmark's stored snapshot, each linking back
@@ -46,7 +47,7 @@
 import { watchChildren } from '@qu/reactive';
 import { paths } from '@qu/services';
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme, renderFlagToggle } from '@qu/ui';
+import { injectStyle, ensureTheme } from '@qu/ui';
 
 const DICT = {
   en: {
@@ -147,34 +148,18 @@ export function mount(container, { qu, services, syncFetch }) {
 }
 
 /**
- * The `content.messageActions` contributor - see this file's own top doc
- * comment for the full payload contract. Deliberately builds its OWN
- * `renderFlagToggle()` adapter (matching `apps/app-list`'s own established
- * inline-adapter pattern, see its doc comment) rather than passing
- * `services.bookmarks` to `renderFlagToggle()` directly - `renderFlagToggle()`
- * expects `hasPrivate(flagType, entityKind, entityRef)`/`setPrivate(...)`,
- * `BookmarksService` intentionally hides those two string constants behind
- * a narrower `add(messageId)`/`remove(messageId)`/`isBookmarked(messageId)`
- * API, so a tiny adapter bridges the two.
- * @param {HTMLElement} container
+ * The `content.messageMenu` contributor - see this file's own top doc
+ * comment for the full payload contract.
  * @param {{services: object, messageId: string, spaceId?: string, threadId?: string, body?: string, author?: string}} payload
+ * @returns {Promise<{id: string, label: string, icon: string, onClick: () => void}>}
  */
-export async function renderBookmarkToggle(container, { services, messageId, spaceId, threadId, body, author }) {
+export async function bookmarkMenuItem({ services, messageId, spaceId, threadId, body, author }) {
+  const bookmarked = await services.bookmarks.isBookmarked(messageId);
   const snapshot = { spaceId, threadId, body, author };
-  const flagsAdapter = {
-    hasPrivate: () => services.bookmarks.isBookmarked(messageId),
-    setPrivate: (_flagType, _entityKind, _entityRef, on) =>
-      on ? services.bookmarks.add(messageId, snapshot) : services.bookmarks.remove(messageId),
+  return {
+    id: 'bookmark',
+    label: bookmarked ? t('bookmarkRemove') : t('bookmarkAdd'),
+    icon: bookmarked ? '📑' : '🔖',
+    onClick: () => (bookmarked ? services.bookmarks.remove(messageId) : services.bookmarks.add(messageId, snapshot)),
   };
-  const toggle = renderFlagToggle({
-    flags: flagsAdapter,
-    flagType: 'bookmark',
-    entityKind: 'forumMessage',
-    entityRef: messageId,
-    icon: '🔖',
-    activeIcon: '📑',
-    title: t('bookmarkAdd'),
-    activeTitle: t('bookmarkRemove'),
-  });
-  container.appendChild(toggle);
 }

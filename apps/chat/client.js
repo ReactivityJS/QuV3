@@ -21,13 +21,28 @@
  * doc comment already states why (re-keying history for a changed member
  * set is real future work, not implemented here or in QuV2).
  *
+ * MESSAGE CHROME: one "⋮" context menu (`content.messageMenu`,
+ * `@qu/thread-ui`'s `renderContextMenu()`) instead of a row of always-
+ * visible buttons - this app's own native items are Edit (own messages)
+ * and Reply (any message), merged with whatever `apps/pins`/`apps/bookmarks`
+ * contribute. The per-message footer ROW (`content.messageFooter`) is that
+ * menu's own trigger + timestamp + this identity's read-tick (own messages
+ * only) + Reactions' own live widget, side by side - see
+ * `buildMessageFooter()`. BOTH the row's own item order and the menu's own
+ * item order come from `@qu/foundation`'s `rankFor()` against
+ * `extensionPoints.order` (relay-settings' admin-edited `extensionOrder`,
+ * edited via `apps/relay-admin`), falling back to this file's own
+ * `FOOTER_ORDER_DEFAULT`/`MENU_ORDER_DEFAULT` - the SAME two default maps
+ * `apps/forum/client.js` uses, so the two apps render identically ordered
+ * chrome out of the box without either importing the other.
+ *
  * REUSE OVER RE-IMPLEMENTATION, V3's actual advantage over the QuV2 port:
- *   - Reactions/pins are NOT reimplemented here at all - this file renders
- *     the SAME `content.messageReactions`/`content.messagePinToggle`
+ *   - Reactions/pins/bookmarks are NOT reimplemented here at all - this
+ *     file renders the SAME `content.messageFooter`/`content.messageMenu`
  *     extension points `apps/forum` already defines, so `apps/reactions`/
- *     `apps/pins` (admin-toggleable via relay-settings' `disabledApps`,
- *     zero chat-specific code) render directly into a message's action row.
- *     `ExtensionPointHost.renderSlot()` is keyed purely by point NAME (see
+ *     `apps/pins`/`apps/bookmarks` (admin-toggleable via relay-settings'
+ *     `disabledApps`, zero chat-specific code) render/contribute directly.
+ *     `ExtensionPointHost` is keyed purely by point NAME (see
  *     `@qu/foundation`'s `extension-points.js`), not by which app's own
  *     manifest happens to declare it first - nothing stops a second
  *     consumer app from rendering into an already-declared point.
@@ -80,9 +95,18 @@
  */
 import { watch, watchChildren } from '@qu/reactive';
 import { paths, formatActorLabel, getPrivate, putPrivate, detectLinks, ChatService } from '@qu/services';
+import { rankFor } from '@qu/foundation';
 import { createI18n } from '@qu/i18n';
 import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage } from '@qu/ui';
-import { renderEmojiPicker, mountMentionAutocomplete, mountEmojiAutocomplete, insertAtCursor } from '@qu/thread-ui';
+import { renderEmojiPicker, renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, insertAtCursor } from '@qu/thread-ui';
+
+// See this file's own top doc comment's "MESSAGE CHROME" section - the
+// SAME two default-order maps `apps/forum/client.js` uses (keep both files'
+// copies identical if either ever changes), so `content.messageFooter`/
+// `content.messageMenu` render in the same default order in both apps
+// before an admin configures relay-settings' own `extensionOrder`.
+const FOOTER_ORDER_DEFAULT = { reactions: 0, 'core.menu': 10, 'core.timestamp': 20, 'core.readReceipt': 30 };
+const MENU_ORDER_DEFAULT = { edit: 0, reply: 5, pin: 10, bookmark: 20 };
 
 const DICT = {
   en: {
@@ -96,6 +120,7 @@ const DICT = {
     send: 'Send',
     edit: 'Edit', save: 'Save', cancel: 'Cancel',
     reply: 'Reply', replyingTo: 'Replying to {name}',
+    moreActions: 'More actions',
     attachRemove: 'Remove attachment',
     insertEmoji: 'Insert emoji',
     newGroup: '+ New group',
@@ -121,6 +146,7 @@ const DICT = {
     send: 'Senden',
     edit: 'Bearbeiten', save: 'Speichern', cancel: 'Abbrechen',
     reply: 'Antworten', replyingTo: 'Antwort an {name}',
+    moreActions: 'Weitere Aktionen',
     attachRemove: 'Anhang entfernen',
     insertEmoji: 'Emoji einfügen',
     newGroup: '+ Neue Gruppe',
@@ -164,12 +190,14 @@ const STYLE = `
   .qu-chat-bubble-reply { border-left: 2px solid var(--qu-color-accent, #5b5bd6); padding-left: 0.4rem; margin-bottom: 0.25rem; font-size: 0.82em; opacity: 0.75; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .qu-chat-bubble-text { overflow-wrap: anywhere; white-space: pre-wrap; }
   .qu-chat-bubble-text a { color: inherit; }
-  .qu-chat-bubble-foot { display: flex; align-items: center; gap: 0.3rem; margin-top: 0.15rem; font-size: 0.7em; opacity: 0.6; justify-content: flex-end; }
-  .qu-chat-bubble-edited { font-style: italic; }
+  /* The per-message footer ROW (content.messageFooter) - menu trigger,
+     timestamp, read-tick, reactions, in whatever order rankFor() resolves
+     (admin-configurable, see this file's own top doc comment and
+     FOOTER_ORDER_DEFAULT above). Each segment renders into its own <span>
+     child, laid out by this one flex rule - mirrors
+     apps/forum/client.js's own .qu-forum-message-footer exactly. */
+  .qu-chat-bubble-footer { display: flex; align-items: center; gap: 0.4rem; margin-top: 0.25rem; font-size: 0.7em; opacity: 0.75; flex-wrap: wrap; }
   .qu-chat-bubble-tick-read { color: var(--qu-color-accent, #5b5bd6); opacity: 1; }
-  .qu-chat-bubble-actions { display: flex; gap: 0.4rem; margin-top: 0.25rem; flex-wrap: wrap; }
-  .qu-chat-bubble-actions button { background: none; border: none; cursor: pointer; opacity: 0.6; font: inherit; font-size: 0.78em; padding: 0; }
-  .qu-chat-bubble-actions button:hover { opacity: 1; }
   .qu-chat-bubble-attachment { margin-top: 0.4rem; max-width: 16rem; }
   .qu-chat-edit-row { display: flex; flex-direction: column; gap: 0.3rem; position: relative; }
   .qu-chat-edit-row textarea { font: inherit; padding: 0.35rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); resize: vertical; }
@@ -739,61 +767,91 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     else renderMessageText(textWrap, message);
     bubble.appendChild(textWrap);
 
-    const foot = document.createElement('div');
-    foot.className = 'qu-chat-bubble-foot';
-    const tsEl = document.createElement('span');
-    let footText = formatTs(message.ts);
-    if (message.editedAt) footText += ` (${t('edit').toLowerCase()})`;
-    tsEl.textContent = footText;
-    foot.appendChild(tsEl);
-    if (mine) {
-      const otherReceipts = Object.values(readReceipts);
-      const isRead = otherReceipts.some((upto) => upto >= message.ts);
-      const tick = document.createElement('span');
-      tick.textContent = isRead ? '✓✓' : '✓';
-      tick.title = isRead ? t('read') : t('sent');
-      if (isRead) tick.classList.add('qu-chat-bubble-tick-read');
-      foot.appendChild(tick);
-    }
-    bubble.appendChild(foot);
-
-    const actions = document.createElement('div');
-    actions.className = 'qu-chat-bubble-actions';
-    const replyBtn = document.createElement('button');
-    replyBtn.type = 'button';
-    replyBtn.textContent = t('reply');
-    replyBtn.addEventListener('click', async () => {
-      const authorLabel = mine ? t('you') : formatActorLabel(message.author, await resolveAuthor(message.author));
-      setReplyingTo(message, authorLabel);
-      composerInput.focus();
-    });
-    actions.appendChild(replyBtn);
-    if (mine) {
-      const editBtn = document.createElement('button');
-      editBtn.type = 'button';
-      editBtn.textContent = t('edit');
-      editBtn.addEventListener('click', () => renderMessageEdit(textWrap, message));
-      actions.appendChild(editBtn);
-    }
-    const pinSlot = document.createElement('span');
-    if (extensionPoints) {
-      await extensionPoints.renderSlot('content.messagePinToggle', pinSlot, {
-        services, qu, syncFetch, spaceId: SPACE_ID, threadId: roomId, messageId: message.id,
-      });
-    }
-    actions.appendChild(pinSlot);
-    bubble.appendChild(actions);
-
-    const reactionsRoot = document.createElement('div');
-    if (extensionPoints) {
-      await extensionPoints.renderSlot('content.messageReactions', reactionsRoot, {
-        services, qu, syncFetch, spaceId: SPACE_ID, threadId: roomId, messageId: message.id, myPub,
-      });
-    }
-    bubble.appendChild(reactionsRoot);
+    const footer = await buildMessageFooter(message, mine, readReceipts, textWrap);
+    bubble.appendChild(footer);
 
     row.appendChild(bubble);
     return row;
+  }
+
+  /**
+   * The per-message footer ROW (`content.messageMenu`/`content.messageFooter`
+   * - see this file's own top doc comment). Mirrors
+   * `apps/forum/client.js`'s own `buildMessageFooter()` almost exactly -
+   * two differences: a native "Reply" menu item (any message, not just
+   * `mine`), and a native `core.readReceipt` footer segment (own messages
+   * only - the ✓/✓✓ tick, see `renderMessages()`'s own `readReceipts` lookup).
+   * @param {object} message @param {boolean} mine @param {Record<string, number>} readReceipts
+   * @param {HTMLElement} textWrap - re-rendered in place by the native "Edit" menu item.
+   * @returns {Promise<HTMLElement>}
+   */
+  async function buildMessageFooter(message, mine, readReceipts, textWrap) {
+    const menuPayload = {
+      services, qu, syncFetch, spaceId: SPACE_ID, threadId: roomId, messageId: message.id, myPub, mine,
+      body: message.body, author: message.author,
+    };
+
+    const segments = [
+      {
+        id: 'core.menu',
+        render: (el) => {
+          el.appendChild(renderContextMenu({
+            trigger: '⋮',
+            triggerTitle: t('moreActions'),
+            getItems: async () => {
+              const nativeItems = [];
+              if (mine) nativeItems.push({ id: 'edit', label: t('edit'), icon: '✏️', onClick: () => renderMessageEdit(textWrap, message) });
+              nativeItems.push({
+                id: 'reply', label: t('reply'), icon: '↩️',
+                onClick: async () => {
+                  const authorLabel = mine ? t('you') : formatActorLabel(message.author, await resolveAuthor(message.author));
+                  setReplyingTo(message, authorLabel);
+                  composerInput.focus();
+                },
+              });
+              const pluginItems = extensionPoints ? await extensionPoints.collect('content.messageMenu', menuPayload) : [];
+              return [...nativeItems, ...pluginItems].sort(
+                (a, b) => rankFor(extensionPoints?.order, 'content.messageMenu', a.id, MENU_ORDER_DEFAULT[a.id] ?? 50)
+                  - rankFor(extensionPoints?.order, 'content.messageMenu', b.id, MENU_ORDER_DEFAULT[b.id] ?? 50)
+              );
+            },
+          }));
+        },
+      },
+      {
+        id: 'core.timestamp',
+        render: (el) => {
+          el.textContent = message.editedAt ? `${formatTs(message.ts)} (${t('edit').toLowerCase()})` : formatTs(message.ts);
+        },
+      },
+      {
+        id: 'reactions',
+        render: (el) => (extensionPoints ? extensionPoints.renderSlot('content.messageFooter', el, menuPayload) : null),
+      },
+    ];
+    if (mine) {
+      segments.push({
+        id: 'core.readReceipt',
+        render: (el) => {
+          const isRead = Object.values(readReceipts).some((upto) => upto >= message.ts);
+          el.textContent = isRead ? '✓✓' : '✓';
+          el.title = isRead ? t('read') : t('sent');
+          if (isRead) el.classList.add('qu-chat-bubble-tick-read');
+        },
+      });
+    }
+
+    const footer = document.createElement('div');
+    footer.className = 'qu-chat-bubble-footer';
+    const ranked = segments
+      .map((seg) => ({ ...seg, rank: rankFor(extensionPoints?.order, 'content.messageFooter', seg.id, FOOTER_ORDER_DEFAULT[seg.id] ?? 50) }))
+      .sort((a, b) => a.rank - b.rank);
+    for (const seg of ranked) {
+      const wrap = document.createElement('span');
+      await seg.render(wrap);
+      footer.appendChild(wrap);
+    }
+    return footer;
   }
 
   function renderMessageText(root, message) {

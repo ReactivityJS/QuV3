@@ -35,8 +35,17 @@ const DEFAULT_SETTINGS = {
 
 const APPS = [
   { name: 'forum', label: 'Forum', icon: '💬' },
-  { name: 'reactions', label: 'reactions', icon: '🧩' },
+  { name: 'reactions', label: 'reactions', icon: '🧩', contributes: [{ point: 'content.messageFooter', export: 'renderReactionWidget' }] },
+  { name: 'pins', label: 'pins', icon: '📌', contributes: [{ point: 'content.messageMenu', export: 'pinMenuItem' }] },
 ];
+
+/** section:nth-of-type - order-section index depends on how many sections come before it (see mount()'s own form.append() order). */
+const FOOTER_ORDER_SECTION = 'form > section:nth-of-type(5)';
+const MENU_ORDER_SECTION = 'form > section:nth-of-type(6)';
+
+function orderRowLabels(section) {
+  return [...section.querySelectorAll('.qu-relay-admin-order-row')].map((row) => row.querySelector('span').textContent);
+}
 
 test('a non-admin identity sees "not authorized", no form', async (t) => {
   const env = await freshEnv();
@@ -111,7 +120,8 @@ test('saving posts a REAL, independently-verifiable Ed25519 signature over the e
   try {
     await waitFor(() => container.querySelector('form') !== null);
     container.querySelector('select').value = 'de';
-    container.querySelectorAll('.qu-relay-admin-apps-list input[type="checkbox"]')[1].checked = false; // uncheck reactions
+    const appLabels = [...container.querySelectorAll('.qu-relay-admin-apps-list label')];
+    appLabels[appLabels.findIndex((l) => l.textContent.includes('reactions'))].querySelector('input').checked = false;
     container.querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
 
     await waitFor(() => capturedBody !== null);
@@ -123,6 +133,79 @@ test('saving posts a REAL, independently-verifiable Ed25519 signature over the e
     await waitFor(() => container.querySelector('.qu-relay-admin-status')?.hidden === false);
     assert.match(container.querySelector('.qu-relay-admin-status').textContent, /Saved/);
     assert.equal(container.querySelector('.qu-relay-admin-status').classList.contains('qu-relay-admin-status-error'), false);
+  } finally {
+    stop?.();
+  }
+});
+
+test('message row/menu order sections render every native item + catalog contributor, in the built-in DEFAULT order when unconfigured', async (t) => {
+  const env = await freshEnv();
+  t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ adminPubs: [env.myPub], settings: DEFAULT_SETTINGS }), { status: 200 }));
+
+  const container = makeContainer();
+  const stop = await mount(container, { identity: env.identity, services: env.services, apps: APPS });
+  try {
+    await waitFor(() => container.querySelector(FOOTER_ORDER_SECTION) !== null);
+    // defaultOrder: reactions:0, core.menu:10, core.timestamp:20, core.readReceipt:30
+    assert.deepEqual(orderRowLabels(container.querySelector(FOOTER_ORDER_SECTION)), [
+      '🧩 reactions', '⋮ Context menu', 'Timestamp', 'Read tick (chat)',
+    ]);
+    // defaultOrder: edit:0, reply:5, pin:10, bookmark:20 - "bookmark" isn't
+    // in APPS at all here, so it never appears (nothing contributes it).
+    assert.deepEqual(orderRowLabels(container.querySelector(MENU_ORDER_SECTION)), [
+      'Edit', 'Reply (chat)', '📌 pins',
+    ]);
+  } finally {
+    stop?.();
+  }
+});
+
+test('message row order: a previously-configured extensionOrder is honored, with a newly-appeared id appended at the end', async (t) => {
+  const env = await freshEnv();
+  t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({
+    adminPubs: [env.myPub],
+    // core.readReceipt intentionally omitted - proves it still shows up, appended.
+    settings: { ...DEFAULT_SETTINGS, extensionOrder: { 'content.messageFooter': ['core.timestamp', 'reactions', 'core.menu'] } },
+  }), { status: 200 }));
+
+  const container = makeContainer();
+  const stop = await mount(container, { identity: env.identity, services: env.services, apps: APPS });
+  try {
+    await waitFor(() => container.querySelector(FOOTER_ORDER_SECTION) !== null);
+    assert.deepEqual(orderRowLabels(container.querySelector(FOOTER_ORDER_SECTION)), [
+      'Timestamp', '🧩 reactions', '⋮ Context menu', 'Read tick (chat)',
+    ]);
+  } finally {
+    stop?.();
+  }
+});
+
+test('message row order: the ▼/▲ buttons reorder items, disabled at the respective end, and the new order is what gets saved', async (t) => {
+  const env = await freshEnv();
+  let capturedBody = null;
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    if (url === '/config.json') return new Response(JSON.stringify({ adminPubs: [env.myPub], settings: DEFAULT_SETTINGS }), { status: 200 });
+    capturedBody = JSON.parse(init.body);
+    return new Response(JSON.stringify({ ...capturedBody.settings }), { status: 200 });
+  });
+
+  const container = makeContainer();
+  const stop = await mount(container, { identity: env.identity, services: env.services, apps: APPS });
+  try {
+    await waitFor(() => container.querySelector(FOOTER_ORDER_SECTION) !== null);
+    const footerSection = container.querySelector(FOOTER_ORDER_SECTION);
+    let rows = footerSection.querySelectorAll('.qu-relay-admin-order-row');
+    assert.equal(rows[0].querySelectorAll('button')[0].disabled, true); // can't move the first item up
+    assert.equal(rows[3].querySelectorAll('button')[1].disabled, true); // can't move the last item down
+
+    // Move "reactions" (row 0) down once - swaps with "core.menu".
+    rows[0].querySelectorAll('button')[1].click(); // ▼
+    assert.deepEqual(orderRowLabels(footerSection), ['⋮ Context menu', '🧩 reactions', 'Timestamp', 'Read tick (chat)']);
+
+    container.querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+    await waitFor(() => capturedBody !== null);
+    assert.deepEqual(capturedBody.settings.extensionOrder['content.messageFooter'], ['core.menu', 'reactions', 'core.timestamp', 'core.readReceipt']);
+    assert.deepEqual(capturedBody.settings.extensionOrder['content.messageMenu'], ['edit', 'reply', 'pins']); // untouched point still included, per the "replace the whole map" contract
   } finally {
     stop?.();
   }

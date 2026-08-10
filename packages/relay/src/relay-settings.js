@@ -63,11 +63,23 @@ export const DEFAULT_RELAY_SETTINGS = Object.freeze({
   // server-side enforcement needs a distinguishable path/kind for a chat
   // group's thread config the same way `channels`' own note describes.
   chat: Object.freeze({ allowMemberCreateGroup: true }),
+  // Admin-editable, cross-app-consistent ordering for extension-point items
+  // - `{[point]: [id, ...]}`, consulted by `@qu/foundation`'s
+  // `ExtensionPointHost` (via `rankFor()`, see that module's own doc
+  // comment) to sort BOTH manifest-declared plugin contributors AND a host
+  // app's own native items (`core.<name>` ids) for the same point, so e.g.
+  // "reactions on the left, the read-tick on the right" is ONE setting that
+  // renders identically wherever `content.messageFooter` appears (both
+  // `apps/forum` and `apps/chat` today), not a per-app hardcoded order. An
+  // id absent from a point's list here keeps its own manifest/hardcoded
+  // default order, appended after every explicitly configured id - see
+  // `rankFor()`'s own doc comment for the exact precedence.
+  extensionOrder: Object.freeze({}),
 });
 
 /**
  * @param {import('@qu/core').QuStore} qu
- * @returns {Promise<{defaultLocale: string, rateLimits: {maxMessagesPerMinute: number}, disabledApps: string[], flagTypes: Array<{id: string, label: string, icon: string, mode: string, entityKinds: string[]}>, channels: {allowMemberCreate: boolean, allowMemberRestricted: boolean}, chat: {allowMemberCreateGroup: boolean}}>}
+ * @returns {Promise<{defaultLocale: string, rateLimits: {maxMessagesPerMinute: number}, disabledApps: string[], flagTypes: Array<{id: string, label: string, icon: string, mode: string, entityKinds: string[]}>, channels: {allowMemberCreate: boolean, allowMemberRestricted: boolean}, chat: {allowMemberCreateGroup: boolean}, extensionOrder: Record<string, string[]>}>}
  *   Always fully populated - missing fields fall back to `DEFAULT_RELAY_SETTINGS`.
  */
 export async function getSettings(qu) {
@@ -79,6 +91,7 @@ export async function getSettings(qu) {
     rateLimits: { ...DEFAULT_RELAY_SETTINGS.rateLimits, ...val.rateLimits },
     channels: { ...DEFAULT_RELAY_SETTINGS.channels, ...val.channels },
     chat: { ...DEFAULT_RELAY_SETTINGS.chat, ...val.chat },
+    extensionOrder: { ...DEFAULT_RELAY_SETTINGS.extensionOrder, ...val.extensionOrder },
   };
 }
 
