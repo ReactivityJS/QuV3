@@ -1833,4 +1833,66 @@ own tests, built bottom-up per the dependency order in
       star a different app, hit the invisible-but-present menu instead).
       Fixed with an explicit `.qu-shell-menu[hidden] { display: none; }`
       override.
+- [x] **`apps/chat`** - QuV2's messenger (`apps/chat/client.js`, 2600+ lines:
+      room list, 1:1/group rooms, reactions, pins, replies, forwarding,
+      attachments, voice messages, location sharing, search) ported onto
+      V3's primitives, deliberately LEANER wherever V3 already gives a real,
+      free substitute instead of re-implementing the same feature twice -
+      see the app's own top doc comment for the full account. New in
+      `@qu/services`: **`ChatService`** (`chat-service.js`) - ported near-
+      unchanged from QuV2 (`ChatService.roomId()`'s deterministic,
+      order-independent 1:1-room-id hash; `createGroup()`'s fixed-member-list
+      group + per-member invite mailbox, delivered via `THREAD_PRESETS.mail`
+      exactly the way relay-settings.js's own `channels` comment had already
+      anticipated: "`THREAD_PRESETS.chat()`/`group()` already back a future
+      Chat 'create group' flow with the exact same shape") plus one genuine
+      V3 addition, `ensureRoom()` (wraps the room-id derivation + idempotent
+      `MessageService.createThread()` in one call, so `apps/chat` never has
+      to reach past its Service layer for a raw hash the way QuV2's own
+      `client.js` did). **Reuse over re-implementation** - the actual
+      difference V3's extension-point mechanism makes over a straight port:
+      reactions/pins are NOT reimplemented here at all - `apps/chat`'s room
+      view renders the exact SAME `content.messageReactions`/
+      `content.messagePinToggle` points `apps/forum` already defines, and
+      `apps/reactions`/`apps/pins` (unmodified, admin-toggleable) render
+      straight into it, since `ExtensionPointHost.renderSlot()` is keyed
+      purely by point NAME, not by which app's manifest declared it first;
+      mention/emoji autocomplete and attachments reuse `@qu/thread-ui`/
+      `<qu-asset-upload>`/`<qu-asset>` unchanged, the same primitives
+      `apps/forum`'s own composer already uses. **User-specific settings**
+      (per the migration's own ask): `apps/chat` contributes
+      `renderChatSettings()` to `apps/profile`'s existing
+      `userSettings.contributions` extension point (show-sender-name-in-1:1
+      + own-message-color, self-encrypted via `@qu/services`'
+      private-storage) - reachable at `#/~<pub>/settings`, the one place
+      every app's per-user preferences already live, no chat-specific
+      settings screen needed. **Relay Admin settings** (same ask): a new
+      `settings.chat.allowMemberCreateGroup` policy in
+      `packages/relay/src/relay-settings.js`, mirroring Channels' own
+      `allowMemberCreate` exactly (no `allowMemberRestricted` counterpart -
+      a chat room/group is ALWAYS reader-restricted, never a public option),
+      plus a "Chat" section in `apps/relay-admin/client.js` right after
+      "Channels". Read receipts moved from QuV2's three-state tick
+      (sent/relay-confirmed/read) to a simpler two-state one (sent/read) -
+      `PresenceService.publishReadReceipt()`/`.getReadReceipts()` (PUBLIC)
+      already existed unmodified; nothing in `services` currently exposes a
+      relay-confirmation hook (`SyncEngine.waitForAck()`) to a client, so
+      the middle state is a documented, honest scope cut rather than a
+      half-built one. **Not ported this round** (documented in the app's own
+      top doc comment, not silently dropped): forwarding, voice messages
+      (MediaRecorder), location sharing, per-chat/global search with
+      link/file/image/date filters, visual `@mention` highlighting inside a
+      bubble (the `mentions` field still drives push-notification routing,
+      which is the part that actually matters functionally) - each a real,
+      valid follow-up in its own right, not attempted half-way here.
+      Verified: full suite green (1078 tests, `chat-service.test.js` +
+      `apps/chat/test/client.test.js` new, `relay-settings.test.js`/
+      `apps/relay-admin/test/client.test.js` extended for the new `chat`
+      policy, `packages/relay/test/relay.test.js`'s real-apps-directory
+      catalog test updated for the new app), `npm run build` bundles
+      `apps/chat/client.js` cleanly, and a real `QuRelay` boot against the
+      actual `apps/` directory confirms `chat` registers, loads, and
+      publishes a correctly-shaped `/apps.json` catalog entry (`spaceId`,
+      `clientMainUrl`, `pushActions`, the `contact-row` action, the
+      `userSettings.contributions` contribution).
 

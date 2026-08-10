@@ -1,0 +1,928 @@
+/**
+ * CHAT — a Telegram/WhatsApp/Signal-style messenger: a room list (1:1 rooms
+ * derived from Contacts, plus groups this identity has been invited to) and
+ * a room view with message bubbles. Ported from QuV2's `apps/chat/client.js`
+ * (2600+ lines - room list, 1:1/group rooms, reactions, pins, replies,
+ * forwarding, attachments, voice messages, location sharing, search) onto
+ * V3's primitives, deliberately LEANER where V3 already gives a real, free
+ * substitute rather than re-implementing the same feature twice - see SCOPE
+ * below for exactly what that trades away.
+ *
+ * ENCRYPTION IS THE DEFAULT for both room kinds, not an opt-in: a 1:1 room
+ * (`THREAD_PRESETS.chat`, via `ChatService.ensureRoom()`) and a group
+ * (`THREAD_PRESETS.group`, via `ChatService.createGroup()`) both set
+ * `readers` to the fixed member list, which makes every message body AND
+ * every attachment end-to-end encrypted for exactly those members - a relay
+ * operator, or anyone else syncing the space, sees ciphertext only. See
+ * `ChatService`'s own doc comment for the 1:1 room-id derivation and the
+ * group-invite-mailbox mechanism.
+ *
+ * GROUP MEMBERSHIP IS FIXED AT CREATION - `THREAD_PRESETS.group()`'s own
+ * doc comment already states why (re-keying history for a changed member
+ * set is real future work, not implemented here or in QuV2).
+ *
+ * REUSE OVER RE-IMPLEMENTATION, V3's actual advantage over the QuV2 port:
+ *   - Reactions/pins are NOT reimplemented here at all - this file renders
+ *     the SAME `content.messageReactions`/`content.messagePinToggle`
+ *     extension points `apps/forum` already defines, so `apps/reactions`/
+ *     `apps/pins` (admin-toggleable via relay-settings' `disabledApps`,
+ *     zero chat-specific code) render directly into a message's action row.
+ *     `ExtensionPointHost.renderSlot()` is keyed purely by point NAME (see
+ *     `@qu/foundation`'s `extension-points.js`), not by which app's own
+ *     manifest happens to declare it first - nothing stops a second
+ *     consumer app from rendering into an already-declared point.
+ *   - Mention/emoji autocomplete reuse `@qu/thread-ui`'s
+ *     `mountMentionAutocomplete()`/`mountEmojiAutocomplete()`/
+ *     `renderEmojiPicker()`/`insertAtCursor()` unchanged - the exact
+ *     primitives `apps/forum`'s own composer already uses, and the reason
+ *     that package's own doc comment names "a future apps/chat port" as
+ *     its second real consumer.
+ *   - Attachments reuse `@qu/ui`'s `<qu-asset-upload>`/`<qu-asset>` over
+ *     `services.assets` unchanged - same pattern as `apps/forum`'s own
+ *     attachment integration, with this room's `readers` passed as
+ *     `readerPubs` so an attachment gets the SAME end-to-end encryption as
+ *     the message body sitting next to it.
+ *   - Per-user settings (see `renderChatSettings()` at the bottom of this
+ *     file) are contributed to `apps/profile`'s `userSettings.contributions`
+ *     extension point instead of a chat-local settings screen QuV2 had to
+ *     build itself - reachable at `#/~<pub>/settings`, discoverable in the
+ *     one place every other app's per-user preferences already live.
+ *   - Group-creation policy is admin-configurable via relay-settings' own
+ *     `chat.allowMemberCreateGroup` (see `packages/relay/src/relay-settings.js`)
+ *     and a Relay Admin UI section, mirroring `apps/forum`'s own
+ *     `channels.allowMemberCreate` - CLIENT-SIDE gating only, matching that
+ *     field's own documented scope (hides the UI, doesn't yet stop a
+ *     modified client from calling `services.chat.createGroup()` directly).
+ *
+ * READ STATE: `PresenceService.publishReadReceipt()` (PUBLIC, visible to
+ * other members - what powers the "read" tick on a SENDER's own messages)
+ * is published whenever this identity views a room's newest message;
+ * `MessageService.markRead()` (PRIVATE) drives this identity's OWN unread
+ * dot in the room list. Presence (online/last-seen) is polled on a fixed
+ * interval while a room view is mounted - `PresenceService.getPresence()`
+ * is explicitly a STALENESS check, not a push mechanism (see its own doc
+ * comment), so polling is the intended usage, not a shortcut.
+ *
+ * Routes: `#/chat` (room list), `#/chat/<peerActorPub>` (1:1 room),
+ * `#/chat/g/<groupId>` (group room), `#/chat/new-group` (create-group form).
+ *
+ * SCOPE - deliberately NOT ported from QuV2's messenger, left for a real
+ * follow-up round rather than half-built here: forwarding, voice messages
+ * (MediaRecorder), location sharing, per-chat/global search with
+ * link/file/image/date filters, a three-state (sent/relay-confirmed/read)
+ * tick - this app renders a simpler two-state (sent/read) tick instead,
+ * since no client-side hook into `SyncEngine.waitForAck()` is wired through
+ * `services` yet. Visual `@mention` highlighting inside a message body is
+ * also not rendered (the underlying `mentions` field still drives push
+ * notification routing via this app's own `pushActions`, which is the part
+ * that actually matters functionally) - only bare `http(s)://` links are
+ * auto-linked, via `@qu/services`' shared `detectLinks()`.
+ */
+import { watch, watchChildren } from '@qu/reactive';
+import { paths, formatActorLabel, getPrivate, putPrivate, detectLinks, ChatService } from '@qu/services';
+import { createI18n } from '@qu/i18n';
+import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage } from '@qu/ui';
+import { renderEmojiPicker, mountMentionAutocomplete, mountEmojiAutocomplete, insertAtCursor } from '@qu/thread-ui';
+
+const DICT = {
+  en: {
+    title: 'Chats',
+    empty: 'No chats yet - add a contact from the User List, or start a group.',
+    backToChats: '← Chats',
+    online: 'online',
+    lastSeen: 'last seen {time}',
+    membersOnline: '{count} members, {online} online',
+    composerPlaceholder: 'Message',
+    send: 'Send',
+    edit: 'Edit', save: 'Save', cancel: 'Cancel',
+    reply: 'Reply', replyingTo: 'Replying to {name}',
+    attachRemove: 'Remove attachment',
+    insertEmoji: 'Insert emoji',
+    newGroup: '+ New group',
+    createGroup: 'Create group',
+    groupName: 'Group name',
+    selectMembers: 'Add members',
+    noContacts: 'No contacts yet - add some from the User List first.',
+    groupNotFound: 'This group doesn\'t exist, or you\'re not a member.',
+    you: 'You',
+    read: 'Read', sent: 'Sent',
+    showAliasIn1to1: 'Show sender name in 1:1 chats',
+    ownColor: 'Your message color',
+    saved: 'Saved.',
+  },
+  de: {
+    title: 'Chats',
+    empty: 'Noch keine Chats - Kontakt aus der Nutzerliste hinzufügen oder eine Gruppe starten.',
+    backToChats: '← Chats',
+    online: 'online',
+    lastSeen: 'zuletzt online {time}',
+    membersOnline: '{count} Mitglieder, {online} online',
+    composerPlaceholder: 'Nachricht',
+    send: 'Senden',
+    edit: 'Bearbeiten', save: 'Speichern', cancel: 'Abbrechen',
+    reply: 'Antworten', replyingTo: 'Antwort an {name}',
+    attachRemove: 'Anhang entfernen',
+    insertEmoji: 'Emoji einfügen',
+    newGroup: '+ Neue Gruppe',
+    createGroup: 'Gruppe erstellen',
+    groupName: 'Gruppenname',
+    selectMembers: 'Mitglieder hinzufügen',
+    noContacts: 'Noch keine Kontakte - zuerst in der Nutzerliste hinzufügen.',
+    groupNotFound: 'Diese Gruppe existiert nicht, oder du bist kein Mitglied.',
+    you: 'Du',
+    read: 'Gelesen', sent: 'Gesendet',
+    showAliasIn1to1: 'Absendername in 1:1-Chats anzeigen',
+    ownColor: 'Deine Nachrichtenfarbe',
+    saved: 'Gespeichert.',
+  },
+};
+const { t } = createI18n(DICT);
+
+const STYLE_ID = 'qu-chat-style';
+const STYLE = `
+  .qu-chat-rooms { list-style: none; margin: 0 0 0.8rem; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; max-width: 34rem; }
+  .qu-chat-room-row a { display: flex; align-items: center; gap: 0.6rem; padding: 0.5rem 0.6rem; border-radius: var(--qu-radius-md, 0.4rem); text-decoration: none; color: inherit; }
+  .qu-chat-room-row a:hover { background: var(--qu-color-border, #8884); }
+  .qu-chat-room-main { flex: 1; min-width: 0; }
+  .qu-chat-room-name-row { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; }
+  .qu-chat-room-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .qu-chat-room-ts { font-size: 0.75em; opacity: 0.6; flex-shrink: 0; }
+  .qu-chat-room-preview { font-size: 0.85em; opacity: 0.7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .qu-chat-room-unread { display: inline-block; width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--qu-color-accent, #5b5bd6); flex-shrink: 0; }
+  .qu-chat-empty { padding: 1.5rem; text-align: center; opacity: 0.7; }
+  .qu-chat-new-group { display: block; margin-top: 0.4rem; opacity: 0.85; }
+  .qu-chat-new-group:hover { opacity: 1; }
+  .qu-chat-header { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.6rem; }
+  .qu-chat-header-name { font-weight: 700; font-size: 1.1em; }
+  .qu-chat-header-status { font-size: 0.8em; opacity: 0.65; }
+  .qu-chat-messages { list-style: none; margin: 0 0 0.8rem; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; max-width: 40rem; }
+  .qu-chat-bubble-row { display: flex; }
+  .qu-chat-bubble-row-mine { justify-content: flex-end; }
+  .qu-chat-bubble { max-width: 80%; padding: 0.4rem 0.65rem; border-radius: var(--qu-radius-lg, 0.9rem); background: var(--qu-color-surface, #8882); }
+  .qu-chat-bubble-mine { background: color-mix(in srgb, var(--qu-color-accent, #5b5bd6) 25%, transparent); }
+  .qu-chat-bubble-author { font-size: 0.78em; font-weight: 600; opacity: 0.8; margin-bottom: 0.1rem; }
+  .qu-chat-bubble-reply { border-left: 2px solid var(--qu-color-accent, #5b5bd6); padding-left: 0.4rem; margin-bottom: 0.25rem; font-size: 0.82em; opacity: 0.75; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .qu-chat-bubble-text { overflow-wrap: anywhere; white-space: pre-wrap; }
+  .qu-chat-bubble-text a { color: inherit; }
+  .qu-chat-bubble-foot { display: flex; align-items: center; gap: 0.3rem; margin-top: 0.15rem; font-size: 0.7em; opacity: 0.6; justify-content: flex-end; }
+  .qu-chat-bubble-edited { font-style: italic; }
+  .qu-chat-bubble-tick-read { color: var(--qu-color-accent, #5b5bd6); opacity: 1; }
+  .qu-chat-bubble-actions { display: flex; gap: 0.4rem; margin-top: 0.25rem; flex-wrap: wrap; }
+  .qu-chat-bubble-actions button { background: none; border: none; cursor: pointer; opacity: 0.6; font: inherit; font-size: 0.78em; padding: 0; }
+  .qu-chat-bubble-actions button:hover { opacity: 1; }
+  .qu-chat-bubble-attachment { margin-top: 0.4rem; max-width: 16rem; }
+  .qu-chat-edit-row { display: flex; flex-direction: column; gap: 0.3rem; position: relative; }
+  .qu-chat-edit-row textarea { font: inherit; padding: 0.35rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); resize: vertical; }
+  .qu-chat-edit-row-buttons { display: flex; gap: 0.4rem; }
+  .qu-chat-reply-banner { display: flex; justify-content: space-between; align-items: center; padding: 0.3rem 0.6rem; border-left: 3px solid var(--qu-color-accent, #5b5bd6); background: var(--qu-color-surface, #8882); border-radius: var(--qu-radius-sm, 0.3rem); font-size: 0.85em; margin-bottom: 0.3rem; }
+  .qu-chat-reply-banner button { background: none; border: none; cursor: pointer; opacity: 0.7; font: inherit; }
+  .qu-chat-composer-wrap { display: flex; flex-direction: column; gap: 0.4rem; max-width: 40rem; }
+  .qu-chat-composer { display: flex; gap: 0.5rem; position: relative; }
+  .qu-chat-composer textarea { flex: 1; font: inherit; padding: 0.5rem 0.6rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); resize: vertical; min-height: 2.4rem; }
+  .qu-chat-composer button { padding: 0 1rem; border-radius: var(--qu-radius-md, 0.4rem); border: none; background: var(--qu-color-accent, #5b5bd6); color: white; cursor: pointer; font: inherit; }
+  .qu-chat-composer button:disabled { opacity: 0.6; cursor: default; }
+  .qu-chat-pending-attachment { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85em; opacity: 0.85; }
+  .qu-chat-pending-attachment[hidden] { display: none; }
+  .qu-chat-pending-attachment button { background: none; border: none; cursor: pointer; opacity: 0.7; font: inherit; padding: 0; }
+  .qu-chat-new-group-form { display: flex; flex-direction: column; gap: 0.5rem; max-width: 26rem; }
+  .qu-chat-new-group-form input[type="text"] { font: inherit; padding: 0.4rem 0.6rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); }
+  .qu-chat-member-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; max-height: 16rem; overflow-y: auto; }
+  .qu-chat-member-list label { display: flex; align-items: center; gap: 0.5rem; padding: 0.2rem 0; }
+  .qu-chat-new-group-form button[type="submit"] { align-self: flex-start; padding: 0.4rem 1rem; border-radius: var(--qu-radius-md, 0.4rem); border: none; background: var(--qu-color-accent, #5b5bd6); color: white; cursor: pointer; font: inherit; }
+  .qu-chat-new-group-form button:disabled { opacity: 0.6; cursor: default; }
+  .qu-chat-settings { display: flex; flex-direction: column; gap: 0.4rem; max-width: 24rem; }
+  .qu-chat-settings label { display: flex; align-items: center; gap: 0.5rem; }
+  .qu-chat-settings-status { font-size: 0.85em; opacity: 0.75; }
+`;
+
+function formatTs(ts) {
+  return new Date(ts).toLocaleString();
+}
+
+// ===================================================================
+// PER-USER CHAT SETTINGS - private, self-encrypted (see @qu/services'
+// private-storage.js). Read/written from both the room view (to decide
+// whether to show a sender name in a 1:1 bubble, and what color to paint
+// this identity's own bubbles) and renderChatSettings() below (the
+// userSettings.contributions extension-point contributor apps/profile
+// renders at #/~<pub>/settings) - both live in THIS file/bundle, so no
+// cross-app import is needed either way.
+// ===================================================================
+
+function chatSettingsPath(myPub) {
+  return `/store/actors/~${myPub}/private/chat-settings`;
+}
+
+const DEFAULT_CHAT_SETTINGS = { showAliasIn1to1: false, ownColor: '' };
+
+async function getChatSettings(qu, identity, myPub) {
+  const stored = await getPrivate(qu, identity, chatSettingsPath(myPub));
+  return { ...DEFAULT_CHAT_SETTINGS, ...stored };
+}
+
+async function setChatSettings(qu, identity, myPub, patch) {
+  const merged = { ...(await getChatSettings(qu, identity, myPub)), ...patch };
+  await putPrivate(qu, identity, chatSettingsPath(myPub), merged);
+  return merged;
+}
+
+/**
+ * The `userSettings.contributions` contributor (see `apps/profile/client.js`'s
+ * own doc comment for the point's full payload contract - `{myPub, services}`,
+ * rendered once inside Settings' `.qu-profile-ext-settings` container).
+ * @param {HTMLElement} container
+ * @param {{myPub: string, services: object}} payload
+ */
+export async function renderChatSettings(container, { myPub, services }) {
+  const qu = services.messages?.qu;
+  const identity = services.messages?.identity;
+  if (!qu || !identity) return; // defensive - every real host wires both, see MessageService's own constructor
+
+  const heading = document.createElement('h3');
+  heading.textContent = 'Chat';
+  const form = document.createElement('form');
+  form.className = 'qu-chat-settings';
+
+  const current = await getChatSettings(qu, identity, myPub);
+
+  const aliasLabel = document.createElement('label');
+  const aliasInput = document.createElement('input');
+  aliasInput.type = 'checkbox';
+  aliasInput.checked = current.showAliasIn1to1;
+  aliasLabel.append(aliasInput, document.createTextNode(t('showAliasIn1to1')));
+
+  const colorLabel = document.createElement('label');
+  const colorInput = document.createElement('input');
+  colorInput.type = 'color';
+  colorInput.value = current.ownColor || '#5b5bd6';
+  colorLabel.append(document.createTextNode(t('ownColor')), colorInput);
+
+  const status = document.createElement('div');
+  status.className = 'qu-chat-settings-status';
+  status.hidden = true;
+
+  form.append(aliasLabel, colorLabel, status);
+
+  async function save() {
+    await setChatSettings(qu, identity, myPub, { showAliasIn1to1: aliasInput.checked, ownColor: colorInput.value });
+    status.textContent = t('saved');
+    status.hidden = false;
+  }
+  aliasInput.addEventListener('change', save);
+  colorInput.addEventListener('change', save);
+
+  container.append(heading, form);
+}
+
+// ===================================================================
+// ROUTER
+// ===================================================================
+
+export function mount(container, ctx) {
+  ensureTheme();
+  injectStyle(STYLE_ID, STYLE);
+  const { qu, services, apps, subscribe, segments = [] } = ctx;
+
+  const SPACE_ID = apps?.find((a) => a.name === 'chat')?.spaceId;
+  if (!SPACE_ID) throw new Error('[chat] no "spaceId" found in the apps catalog for "chat" - check manifest.quapp');
+
+  container.assetService = services.assets; // see apps/forum/client.js's own doc comment - <qu-asset-upload>/<qu-asset> resolve this via an ancestor walk
+
+  subscribe?.(paths.spacePath(SPACE_ID)); // every room's thread lives under this ONE app space
+  subscribe?.(`/blob/${SPACE_ID}`); // attachment chunks - separate top-level mount, see AssetEngine's own doc comment
+
+  const [, seg1, seg2] = segments;
+  const viewCtx = { ...ctx, SPACE_ID };
+  let stopView;
+  if (seg1 === 'new-group') {
+    stopView = mountNewGroupView(container, viewCtx);
+  } else if (seg1 === 'g' && seg2) {
+    stopView = mountRoomView(container, viewCtx, { kind: 'group', roomId: seg2 });
+  } else if (seg1) {
+    stopView = mountRoomView(container, viewCtx, { kind: 'dm', peerPub: seg1 });
+  } else {
+    stopView = mountRoomListView(container, viewCtx);
+  }
+  return () => stopView?.();
+}
+
+/**
+ * Resolves this identity's group-creation policy (relay-settings' `chat.
+ * allowMemberCreateGroup`) + whether it's one of this relay's own admins -
+ * same CLIENT-SIDE-only shape as `apps/forum/client.js`'s own
+ * `fetchChannelPolicy()`, see that function's own doc comment for why.
+ * @param {object} services
+ * @returns {Promise<{allowMemberCreateGroup: boolean, isAdmin: boolean}>}
+ */
+async function fetchChatPolicy(services) {
+  let allowMemberCreateGroup = true;
+  let isAdmin = false;
+  try {
+    const res = await fetch('/config.json');
+    if (res.ok) {
+      const data = await res.json();
+      if (typeof data.settings?.chat?.allowMemberCreateGroup === 'boolean') {
+        allowMemberCreateGroup = data.settings.chat.allowMemberCreateGroup;
+      }
+      const myPub = await services.actors.whoAmI();
+      isAdmin = (data.adminPubs ?? []).includes(myPub);
+    }
+  } catch { /* offline/unreachable - falls back to the permissive default */ }
+  return { allowMemberCreateGroup, isAdmin };
+}
+
+// ===================================================================
+// ROOM LIST VIEW - #/chat
+// ===================================================================
+
+function mountRoomListView(container, { qu, services, subscribe, syncFetch, SPACE_ID }) {
+  let stopped = false;
+  container.textContent = '';
+
+  const heading = document.createElement('h1');
+  heading.textContent = t('title');
+  const listRoot = document.createElement('div');
+  container.append(heading, listRoot);
+
+  let renderToken = 0;
+  async function render() {
+    const token = ++renderToken;
+    if (stopped) return;
+    const myPub = await services.actors.whoAmI();
+    if (stopped || token !== renderToken) return;
+
+    const [contacts, groupIds] = await Promise.all([
+      services.contacts.listContacts(),
+      services.chat.listMyGroups(),
+    ]);
+    if (stopped || token !== renderToken) return;
+
+    const dmRooms = await Promise.all(contacts.map(async (c) => {
+      const roomId = await ChatService.roomId([myPub, c.actorPub]);
+      const { messages } = await services.messages.listMessages(SPACE_ID, roomId, { order: 'desc', limit: 1 });
+      const lastReadAt = await services.messages.getLastReadAt(SPACE_ID, roomId);
+      const last = messages[0] ?? null;
+      return {
+        kind: 'dm', roomId, href: `#/chat/${c.actorPub}`,
+        name: formatActorLabel(c.actorPub, c.profile), avatarSeed: c.actorPub, avatar: c.profile?.avatar,
+        lastMessage: last, unread: !!last && last.author !== myPub && last.ts > lastReadAt,
+      };
+    }));
+    const groupRooms = (await Promise.all(groupIds.map(async (groupId) => {
+      const config = await services.messages.getConfig(SPACE_ID, groupId);
+      if (!config) return null; // invited but the group thread itself hasn't synced in yet
+      const { messages } = await services.messages.listMessages(SPACE_ID, groupId, { order: 'desc', limit: 1 });
+      const lastReadAt = await services.messages.getLastReadAt(SPACE_ID, groupId);
+      const last = messages[0] ?? null;
+      return {
+        kind: 'group', roomId: groupId, href: `#/chat/g/${groupId}`,
+        name: config.name ?? groupId, avatarSeed: groupId, avatar: null,
+        lastMessage: last, unread: !!last && last.author !== myPub && last.ts > lastReadAt,
+      };
+    }))).filter(Boolean);
+
+    if (stopped || token !== renderToken) return;
+    const rooms = [...dmRooms, ...groupRooms].sort((a, b) => (b.lastMessage?.ts ?? 0) - (a.lastMessage?.ts ?? 0));
+
+    listRoot.textContent = '';
+    if (rooms.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'qu-chat-empty';
+      empty.textContent = t('empty');
+      listRoot.appendChild(empty);
+    } else {
+      const ul = document.createElement('ul');
+      ul.className = 'qu-chat-rooms';
+      for (const room of rooms) ul.appendChild(roomRow(room));
+      listRoot.appendChild(ul);
+    }
+
+    const { allowMemberCreateGroup, isAdmin } = await fetchChatPolicy(services);
+    if (stopped || token !== renderToken) return;
+    if (isAdmin || allowMemberCreateGroup) {
+      const newGroupLink = document.createElement('a');
+      newGroupLink.href = '#/chat/new-group';
+      newGroupLink.className = 'qu-chat-new-group';
+      newGroupLink.textContent = t('newGroup');
+      listRoot.appendChild(newGroupLink);
+    }
+  }
+
+  function roomRow(room) {
+    const li = document.createElement('li');
+    li.className = 'qu-chat-room-row';
+    const a = document.createElement('a');
+    a.href = room.href;
+    a.appendChild(renderAvatarOrAsset(room.avatarSeed, room.name, room.avatar, { size: '2.4rem' }));
+
+    const main = document.createElement('div');
+    main.className = 'qu-chat-room-main';
+    const nameRow = document.createElement('div');
+    nameRow.className = 'qu-chat-room-name-row';
+    const nameEl = document.createElement('span');
+    nameEl.className = 'qu-chat-room-name';
+    nameEl.textContent = room.name;
+    nameRow.appendChild(nameEl);
+    if (room.lastMessage) {
+      const tsEl = document.createElement('span');
+      tsEl.className = 'qu-chat-room-ts';
+      tsEl.textContent = formatTs(room.lastMessage.ts);
+      nameRow.appendChild(tsEl);
+    }
+    const preview = document.createElement('div');
+    preview.className = 'qu-chat-room-preview';
+    preview.textContent = room.lastMessage?.body ?? '';
+    main.append(nameRow, preview);
+    a.appendChild(main);
+
+    if (room.unread) {
+      const dot = document.createElement('span');
+      dot.className = 'qu-chat-room-unread';
+      a.appendChild(dot);
+    }
+    li.appendChild(a);
+    return li;
+  }
+
+  render();
+  // Structural changes (a new contact added, a new group invite arriving)
+  // re-render the whole list - see this file's own top doc comment on why
+  // per-message live re-sorting across every room is out of scope, same
+  // "cheap at conversational scale, fully live once you're INSIDE a room"
+  // trade-off apps/forum's own board view already documents.
+  let offContacts = () => {};
+  let offInvites = () => {};
+  (async () => {
+    const myPub = await services.actors.whoAmI();
+    if (stopped) return;
+    subscribe?.(paths.privateFlagParentPath(myPub, 'favorite', 'user'));
+    offContacts = watchChildren(qu, paths.privateFlagParentPath(myPub, 'favorite', 'user'), () => render(), { syncFetch });
+
+    const inviteSpace = await services.chat.myInviteSpace();
+    if (stopped) { offContacts(); return; }
+    subscribe?.(paths.threadMessagesParentPath(inviteSpace, 'groups'));
+    offInvites = watchChildren(qu, paths.threadMessagesParentPath(inviteSpace, 'groups'), () => render(), { syncFetch });
+  })();
+
+  return () => {
+    stopped = true;
+    offContacts();
+    offInvites();
+  };
+}
+
+// ===================================================================
+// NEW GROUP VIEW - #/chat/new-group
+// ===================================================================
+
+function mountNewGroupView(container, { services, SPACE_ID }) {
+  let stopped = false;
+  const formRoot = document.createElement('div');
+  const heading = document.createElement('h1');
+  heading.textContent = t('createGroup');
+
+  renderSubpage(container, {
+    backHref: '#/chat',
+    backLabel: t('backToChats'),
+    render: (content) => content.append(heading, formRoot),
+  });
+
+  (async () => {
+    const contacts = await services.contacts.listContacts();
+    if (stopped) return;
+
+    const form = document.createElement('form');
+    form.className = 'qu-chat-new-group-form';
+    const nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.placeholder = t('groupName');
+    nameInput.required = true;
+
+    const membersLabel = document.createElement('div');
+    membersLabel.textContent = t('selectMembers');
+    const memberList = document.createElement('ul');
+    memberList.className = 'qu-chat-member-list';
+    const checkboxes = [];
+    if (contacts.length === 0) {
+      const p = document.createElement('p');
+      p.className = 'qu-chat-empty';
+      p.textContent = t('noContacts');
+      memberList.appendChild(p);
+    }
+    for (const contact of contacts) {
+      const li = document.createElement('li');
+      const label = document.createElement('label');
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.value = contact.actorPub;
+      label.append(checkbox, document.createTextNode(formatActorLabel(contact.actorPub, contact.profile)));
+      li.appendChild(label);
+      memberList.appendChild(li);
+      checkboxes.push(checkbox);
+    }
+
+    const submit = document.createElement('button');
+    submit.type = 'submit';
+    submit.textContent = t('createGroup');
+    submit.disabled = contacts.length === 0;
+    form.append(nameInput, membersLabel, memberList, submit);
+    formRoot.appendChild(form);
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const name = nameInput.value.trim();
+      const memberPubs = checkboxes.filter((c) => c.checked).map((c) => c.value);
+      if (!name || memberPubs.length === 0) return;
+      submit.disabled = true;
+      try {
+        const { groupId } = await services.chat.createGroup(SPACE_ID, { name, memberPubs });
+        window.location.hash = `#/chat/g/${groupId}`;
+      } finally {
+        submit.disabled = false;
+      }
+    });
+  })();
+
+  return () => { stopped = true; };
+}
+
+// ===================================================================
+// ROOM VIEW - #/chat/<peerPub> (1:1) / #/chat/g/<groupId> (group)
+// ===================================================================
+
+function mountRoomView(container, { qu, services, subscribe, syncFetch, extensionPoints, SPACE_ID }, target) {
+  let stopped = false;
+  container.textContent = '';
+
+  const mainRoot = document.createElement('div');
+  const heading = document.createElement('div');
+  heading.className = 'qu-chat-header';
+  const headerName = document.createElement('div');
+  const headerNameEl = document.createElement('div');
+  headerNameEl.className = 'qu-chat-header-name';
+  const headerStatusEl = document.createElement('div');
+  headerStatusEl.className = 'qu-chat-header-status';
+  headerName.append(headerNameEl, headerStatusEl);
+  const headerAvatarSlot = document.createElement('div');
+  heading.append(headerAvatarSlot, headerName);
+
+  const messagesRoot = document.createElement('div');
+  const composerWrap = document.createElement('div');
+  composerWrap.className = 'qu-chat-composer-wrap';
+  const replyBanner = document.createElement('div');
+  replyBanner.className = 'qu-chat-reply-banner';
+  replyBanner.hidden = true;
+  const composerRow = document.createElement('div');
+  composerRow.className = 'qu-chat-composer';
+  const composerInput = document.createElement('textarea');
+  composerInput.placeholder = t('composerPlaceholder');
+  const attachUpload = document.createElement('qu-asset-upload');
+  attachUpload.setAttribute('space-id', SPACE_ID);
+  attachUpload.setAttribute('label', '📎');
+  const sendBtn = document.createElement('button');
+  sendBtn.type = 'button';
+  sendBtn.textContent = t('send');
+  const emojiPicker = renderEmojiPicker({
+    onPick: (emoji) => insertAtCursor(composerInput, emoji),
+    trigger: '😀',
+    triggerTitle: t('insertEmoji'),
+  });
+  composerRow.append(composerInput, emojiPicker, attachUpload, sendBtn);
+  const pendingAttachmentEl = document.createElement('div');
+  pendingAttachmentEl.className = 'qu-chat-pending-attachment';
+  pendingAttachmentEl.hidden = true;
+  composerWrap.append(replyBanner, composerRow, pendingAttachmentEl);
+
+  renderSubpage(mainRoot, {
+    backHref: '#/chat',
+    backLabel: t('backToChats'),
+    render: (content) => content.append(heading, messagesRoot, composerWrap),
+  });
+  container.appendChild(mainRoot);
+
+  const stopComposerMentions = mountMentionAutocomplete(composerInput, { services, subscribe });
+  const stopComposerEmoji = mountEmojiAutocomplete(composerInput);
+
+  let roomId = null;
+  let memberPubs = [];
+  let roomReady = false;
+
+  let pendingAttachment = null;
+  function clearPendingAttachment() {
+    pendingAttachment = null;
+    pendingAttachmentEl.hidden = true;
+    pendingAttachmentEl.textContent = '';
+  }
+  attachUpload.addEventListener('qu-asset-uploaded', (e) => {
+    pendingAttachment = { assetId: e.detail.assetId, ...e.detail.meta };
+    pendingAttachmentEl.textContent = '';
+    pendingAttachmentEl.hidden = false;
+    const label = document.createElement('span');
+    label.textContent = `📎 ${pendingAttachment.name}`;
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.textContent = '✕';
+    removeBtn.title = t('attachRemove');
+    removeBtn.addEventListener('click', clearPendingAttachment);
+    pendingAttachmentEl.append(label, removeBtn);
+  });
+
+  let replyingTo = null; // {id, author, body} or null
+  function setReplyingTo(message, authorLabel) {
+    replyingTo = message ? { id: message.id, body: message.body } : null;
+    replyBanner.textContent = '';
+    if (!message) { replyBanner.hidden = true; return; }
+    replyBanner.hidden = false;
+    const label = document.createElement('span');
+    label.textContent = t('replyingTo', { name: authorLabel });
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.textContent = '✕';
+    cancelBtn.addEventListener('click', () => setReplyingTo(null));
+    replyBanner.append(label, cancelBtn);
+  }
+
+  const profileCache = new Map();
+  async function resolveAuthor(pub) {
+    if (!profileCache.has(pub)) profileCache.set(pub, services.profile.getPublicProfile(pub).catch(() => null));
+    return profileCache.get(pub);
+  }
+
+  sendBtn.addEventListener('click', async () => {
+    if (!roomReady) return;
+    const body = composerInput.value.trim();
+    if (!body) return;
+    sendBtn.disabled = true;
+    try {
+      const extra = pendingAttachment ? { attachment: pendingAttachment } : {};
+      await services.messages.postMessage(SPACE_ID, roomId, { body, replyTo: replyingTo?.id ?? null, extra });
+      composerInput.value = '';
+      clearPendingAttachment();
+      setReplyingTo(null);
+    } finally {
+      sendBtn.disabled = false;
+    }
+  });
+
+  const editingDrafts = new Map();
+  let messageWatchers = [];
+  function clearMessageWatchers() {
+    for (const off of messageWatchers) off();
+    messageWatchers = [];
+  }
+
+  let renderToken = 0;
+  let myPub = null;
+  let chatSettings = DEFAULT_CHAT_SETTINGS;
+
+  async function renderMessages() {
+    const token = ++renderToken;
+    if (stopped || !roomReady) return;
+    myPub = await services.actors.whoAmI();
+    chatSettings = await getChatSettings(qu, services.messages.identity, myPub);
+    if (stopped || token !== renderToken) return;
+    const { messages } = await services.messages.listMessages(SPACE_ID, roomId);
+    if (stopped || token !== renderToken) return;
+
+    const otherMembers = memberPubs.filter((p) => p !== myPub);
+    const readReceipts = await services.presence.getReadReceipts(SPACE_ID, roomId, otherMembers);
+    if (stopped || token !== renderToken) return;
+
+    if (messages.length) {
+      const newestTs = messages[messages.length - 1].ts;
+      services.presence.publishReadReceipt(SPACE_ID, roomId, newestTs).catch(() => {});
+      services.messages.markRead(SPACE_ID, roomId).catch(() => {});
+    }
+
+    clearMessageWatchers();
+    messagesRoot.textContent = '';
+    if (messages.length > 0) {
+      const byId = new Map(messages.map((m) => [m.id, m]));
+      const ul = document.createElement('ul');
+      ul.className = 'qu-chat-messages';
+      for (const message of messages) {
+        const li = await renderMessage(message, byId, readReceipts);
+        if (stopped || token !== renderToken) return;
+        ul.appendChild(li);
+      }
+      messagesRoot.appendChild(ul);
+    }
+  }
+
+  async function renderMessage(message, byId, readReceipts) {
+    const mine = message.author === myPub;
+    const row = document.createElement('li');
+    row.className = 'qu-chat-bubble-row' + (mine ? ' qu-chat-bubble-row-mine' : '');
+    const bubble = document.createElement('div');
+    bubble.className = 'qu-chat-bubble' + (mine ? ' qu-chat-bubble-mine' : '');
+    if (mine && chatSettings.ownColor) bubble.style.background = chatSettings.ownColor;
+
+    const showAuthor = target.kind === 'group' || chatSettings.showAliasIn1to1;
+    if (showAuthor && !mine) {
+      const profile = await resolveAuthor(message.author);
+      const authorEl = document.createElement('div');
+      authorEl.className = 'qu-chat-bubble-author';
+      authorEl.textContent = formatActorLabel(message.author, profile);
+      bubble.appendChild(authorEl);
+    }
+
+    if (message.replyTo) {
+      const parent = byId.get(message.replyTo);
+      const replyEl = document.createElement('div');
+      replyEl.className = 'qu-chat-bubble-reply';
+      replyEl.textContent = parent?.body ?? '…';
+      bubble.appendChild(replyEl);
+    }
+
+    const textWrap = document.createElement('div');
+    if (editingDrafts.has(message.id)) renderMessageEdit(textWrap, message);
+    else renderMessageText(textWrap, message);
+    bubble.appendChild(textWrap);
+
+    const foot = document.createElement('div');
+    foot.className = 'qu-chat-bubble-foot';
+    const tsEl = document.createElement('span');
+    let footText = formatTs(message.ts);
+    if (message.editedAt) footText += ` (${t('edit').toLowerCase()})`;
+    tsEl.textContent = footText;
+    foot.appendChild(tsEl);
+    if (mine) {
+      const otherReceipts = Object.values(readReceipts);
+      const isRead = otherReceipts.some((upto) => upto >= message.ts);
+      const tick = document.createElement('span');
+      tick.textContent = isRead ? '✓✓' : '✓';
+      tick.title = isRead ? t('read') : t('sent');
+      if (isRead) tick.classList.add('qu-chat-bubble-tick-read');
+      foot.appendChild(tick);
+    }
+    bubble.appendChild(foot);
+
+    const actions = document.createElement('div');
+    actions.className = 'qu-chat-bubble-actions';
+    const replyBtn = document.createElement('button');
+    replyBtn.type = 'button';
+    replyBtn.textContent = t('reply');
+    replyBtn.addEventListener('click', async () => {
+      const authorLabel = mine ? t('you') : formatActorLabel(message.author, await resolveAuthor(message.author));
+      setReplyingTo(message, authorLabel);
+      composerInput.focus();
+    });
+    actions.appendChild(replyBtn);
+    if (mine) {
+      const editBtn = document.createElement('button');
+      editBtn.type = 'button';
+      editBtn.textContent = t('edit');
+      editBtn.addEventListener('click', () => renderMessageEdit(textWrap, message));
+      actions.appendChild(editBtn);
+    }
+    const pinSlot = document.createElement('span');
+    if (extensionPoints) {
+      await extensionPoints.renderSlot('content.messagePinToggle', pinSlot, {
+        services, qu, syncFetch, spaceId: SPACE_ID, threadId: roomId, messageId: message.id,
+      });
+    }
+    actions.appendChild(pinSlot);
+    bubble.appendChild(actions);
+
+    const reactionsRoot = document.createElement('div');
+    if (extensionPoints) {
+      await extensionPoints.renderSlot('content.messageReactions', reactionsRoot, {
+        services, qu, syncFetch, spaceId: SPACE_ID, threadId: roomId, messageId: message.id, myPub,
+      });
+    }
+    bubble.appendChild(reactionsRoot);
+
+    row.appendChild(bubble);
+    return row;
+  }
+
+  function renderMessageText(root, message) {
+    root.textContent = '';
+    const p = document.createElement('p');
+    p.className = 'qu-chat-bubble-text';
+    for (const segment of detectLinks(message.body)) {
+      if (segment.type === 'link') {
+        const a = document.createElement('a');
+        a.href = segment.value;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.textContent = segment.value;
+        p.appendChild(a);
+      } else {
+        p.appendChild(document.createTextNode(segment.value));
+      }
+    }
+    root.appendChild(p);
+    if (message.attachment) {
+      const assetEl = document.createElement('qu-asset');
+      assetEl.className = 'qu-chat-bubble-attachment';
+      assetEl.setAttribute('space-id', SPACE_ID);
+      assetEl.setAttribute('asset-id', message.attachment.assetId);
+      root.appendChild(assetEl);
+    }
+  }
+
+  function renderMessageEdit(root, message) {
+    root.textContent = '';
+    const row = document.createElement('div');
+    row.className = 'qu-chat-edit-row';
+    const textarea = document.createElement('textarea');
+    textarea.value = editingDrafts.get(message.id) ?? message.body;
+    editingDrafts.set(message.id, textarea.value);
+    textarea.addEventListener('input', () => editingDrafts.set(message.id, textarea.value));
+    messageWatchers.push(mountMentionAutocomplete(textarea, { services, subscribe }));
+    messageWatchers.push(mountEmojiAutocomplete(textarea));
+    const buttons = document.createElement('div');
+    buttons.className = 'qu-chat-edit-row-buttons';
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.textContent = t('save');
+    saveBtn.addEventListener('click', async () => {
+      const body = textarea.value.trim();
+      if (!body) return;
+      await services.messages.editMessage(SPACE_ID, roomId, message.id, { body });
+      editingDrafts.delete(message.id);
+    });
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.textContent = t('cancel');
+    cancelBtn.addEventListener('click', () => {
+      editingDrafts.delete(message.id);
+      renderMessageText(root, message);
+    });
+    buttons.append(saveBtn, cancelBtn);
+    row.append(textarea, buttons);
+    root.appendChild(row);
+  }
+
+  // ---- presence: polled, not pushed - see this file's own top doc comment ----
+  let presenceTimer = null;
+  async function renderPresence() {
+    if (stopped || !roomReady) return;
+    const otherMembers = memberPubs.filter((p) => p !== myPub);
+    const presence = await services.presence.getPresence(SPACE_ID, roomId, otherMembers);
+    if (stopped) return;
+    if (target.kind === 'dm') {
+      const p = presence[target.peerPub];
+      headerStatusEl.textContent = p?.online ? t('online') : (p ? t('lastSeen', { time: formatTs(p.lastSeen) }) : '');
+    } else {
+      const online = Object.values(presence).filter((p) => p.online).length;
+      headerStatusEl.textContent = t('membersOnline', { count: memberPubs.length, online });
+    }
+  }
+
+  let stopHeartbeat = null;
+
+  (async () => {
+    myPub = await services.actors.whoAmI();
+    if (stopped) return;
+
+    if (target.kind === 'dm') {
+      roomId = await services.chat.ensureRoom(SPACE_ID, target.peerPub);
+      if (stopped) return;
+      memberPubs = [myPub, target.peerPub];
+      attachUpload.readerPubs = memberPubs;
+      const profile = await resolveAuthor(target.peerPub);
+      if (stopped) return;
+      headerNameEl.textContent = formatActorLabel(target.peerPub, profile);
+      headerAvatarSlot.appendChild(renderAvatarOrAsset(target.peerPub, headerNameEl.textContent, profile?.avatar, { size: '2.6rem' }));
+    } else {
+      roomId = target.roomId;
+      const config = await services.messages.getConfig(SPACE_ID, roomId);
+      if (stopped) return;
+      if (!config) {
+        const p = document.createElement('p');
+        p.className = 'qu-chat-empty';
+        p.textContent = t('groupNotFound');
+        messagesRoot.appendChild(p);
+        composerWrap.hidden = true;
+        return;
+      }
+      memberPubs = Array.isArray(config.readers) ? config.readers : [];
+      attachUpload.readerPubs = memberPubs;
+      headerNameEl.textContent = config.name ?? roomId;
+      headerAvatarSlot.appendChild(renderAvatarOrAsset(roomId, headerNameEl.textContent, null, { size: '2.6rem' }));
+    }
+    roomReady = true;
+
+    stopHeartbeat = services.presence.startHeartbeat(SPACE_ID, roomId);
+    renderPresence();
+    presenceTimer = setInterval(renderPresence, 5_000);
+
+    subscribe?.(paths.threadMessagesParentPath(SPACE_ID, roomId));
+    offMessages = watchChildren(qu, paths.threadMessagesParentPath(SPACE_ID, roomId), () => renderMessages(), { syncFetch });
+    renderMessages();
+  })();
+
+  let offMessages = () => {};
+
+  return () => {
+    stopped = true;
+    clearMessageWatchers();
+    offMessages();
+    stopHeartbeat?.();
+    if (presenceTimer) clearInterval(presenceTimer);
+    stopComposerMentions();
+    stopComposerEmoji();
+  };
+}

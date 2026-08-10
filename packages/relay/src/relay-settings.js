@@ -46,11 +46,28 @@ export const DEFAULT_RELAY_SETTINGS = Object.freeze({
   // own distinguishable path/kind first - real, valuable follow-up work, not
   // done here to avoid gating on a value-shape heuristic instead.
   channels: Object.freeze({ allowMemberCreate: true, allowMemberRestricted: false }),
+  // Who may create a Chat group (`apps/chat`'s `ChatService.createGroup()`,
+  // via `THREAD_PRESETS.group()`) - the exact same shape `channels` above
+  // already anticipated (see this file's own comment there: "THREAD_PRESETS.
+  // chat()/group() already back a future Chat 'create group' flow with the
+  // exact same shape"). No `allowMemberRestricted` counterpart here - unlike
+  // a Channel, a chat room/group is ALWAYS reader-restricted (genuinely
+  // encrypted for its fixed member list, never a public option), so there is
+  // no "restricted vs open" distinction left to gate. `allowMemberCreateGroup:
+  // false` still lets this relay's own `adminPubs` create a group regardless -
+  // same "an admin is never locked out by their own policy" rule `channels`
+  // already has. NOTE - honored CLIENT-SIDE only today, same documented scope
+  // as `channels` above: `apps/chat/client.js` hides the "+ New group" link
+  // and gates its own create-group form, but nothing yet stops a modified
+  // client from calling `services.chat.createGroup()` directly - real
+  // server-side enforcement needs a distinguishable path/kind for a chat
+  // group's thread config the same way `channels`' own note describes.
+  chat: Object.freeze({ allowMemberCreateGroup: true }),
 });
 
 /**
  * @param {import('@qu/core').QuStore} qu
- * @returns {Promise<{defaultLocale: string, rateLimits: {maxMessagesPerMinute: number}, disabledApps: string[], flagTypes: Array<{id: string, label: string, icon: string, mode: string, entityKinds: string[]}>, channels: {allowMemberCreate: boolean, allowMemberRestricted: boolean}}>}
+ * @returns {Promise<{defaultLocale: string, rateLimits: {maxMessagesPerMinute: number}, disabledApps: string[], flagTypes: Array<{id: string, label: string, icon: string, mode: string, entityKinds: string[]}>, channels: {allowMemberCreate: boolean, allowMemberRestricted: boolean}, chat: {allowMemberCreateGroup: boolean}}>}
  *   Always fully populated - missing fields fall back to `DEFAULT_RELAY_SETTINGS`.
  */
 export async function getSettings(qu) {
@@ -61,6 +78,7 @@ export async function getSettings(qu) {
     ...val,
     rateLimits: { ...DEFAULT_RELAY_SETTINGS.rateLimits, ...val.rateLimits },
     channels: { ...DEFAULT_RELAY_SETTINGS.channels, ...val.channels },
+    chat: { ...DEFAULT_RELAY_SETTINGS.chat, ...val.chat },
   };
 }
 

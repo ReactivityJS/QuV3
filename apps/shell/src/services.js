@@ -1,4 +1,4 @@
-import { ListService, FlagService, ContactsService, FavoritesService, ProfileService, DirectoryService, ActorService, AccessService, MessageService, ReactionService, PinService, AssetService, BookmarksService, NotificationPrefsService, PushSubscriptionService, ChannelService } from '@qu/services';
+import { ListService, FlagService, ContactsService, FavoritesService, ProfileService, DirectoryService, ActorService, AccessService, MessageService, ReactionService, PinService, PresenceService, AssetService, BookmarksService, NotificationPrefsService, PushSubscriptionService, ChannelService, ChatService } from '@qu/services';
 import { AssetEngine, CollectionEngine } from '@qu/engines';
 
 /**
@@ -85,6 +85,15 @@ export function createClientServices(qu, identity, { syncFetch = null, getGenera
     // created elsewhere never sees it - confirmed live, see
     // ChannelService's own constructor doc comment for the full mechanism.
     channels: new ChannelService(qu, identity, list, access, messages, syncFetch),
+    // apps/chat's room presence (online/offline/last-seen) + public read
+    // receipts - shares no state with `messages` (see PresenceService's own
+    // doc comment on why it isn't a ListService shape at all), first real
+    // client caller.
+    presence: new PresenceService(qu, identity),
+    // apps/chat's 1:1-room-id-derivation + group-invite mechanism, on top
+    // of this SAME `messages` instance (a chat room is just another
+    // MessageService thread, see ChatService's own doc comment).
+    chat: new ChatService(messages, identity),
     // First real client caller of AssetEngine (see its own doc comment) -
     // same "backfill hook built, no caller yet" gap this file's doc comment
     // already describes for syncFetch/getGeneration themselves.
