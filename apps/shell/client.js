@@ -202,12 +202,23 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
   // `adminPubs` is this relay's own operator allowlist (see
   // `@qu/relay`'s `AdminHttp#verifyAdmin()`) - fetched here only so the
   // header's user menu knows whether to SHOW a Relay Admin link at all;
-  // the real, enforced gate stays entirely server-side.
+  // the real, enforced gate stays entirely server-side. `extensionOrder`
+  // (relay-settings' admin-edited `{[point]: [id, ...]}` map, see
+  // `@qu/foundation`'s `extension-order.js`) is fetched the SAME once-per-
+  // page-load way - same accepted "won't reflect a live admin edit without
+  // a reload" trade-off `adminPubs` itself already has - and threaded into
+  // every `ExtensionPointHost` built below, so a point's configured order
+  // renders identically regardless of which app happens to be mounted.
   let adminPubs = [];
+  let extensionOrder = {};
   try {
     const res = await fetch('/config.json');
-    adminPubs = res.ok ? ((await res.json()).adminPubs ?? []) : [];
-  } catch { /* offline/unreachable - header just shows no admin link, everything else still works */ }
+    if (res.ok) {
+      const data = await res.json();
+      adminPubs = data.adminPubs ?? [];
+      extensionOrder = data.settings?.extensionOrder ?? {};
+    }
+  } catch { /* offline/unreachable - header just shows no admin link, extension points fall back to their own default order */ }
   // A boot-time snapshot of the SAME catalog `renderRoute()` re-fetches on
   // every navigation below - the header is mounted exactly once for the
   // whole session (see its own "SEARCH SLOT" doc comment), so a snapshot
@@ -273,7 +284,7 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
     // direct/mistaken navigation to it degrades to the same "not found"
     // placeholder rather than throwing on `mod.mount is not a function`.
     if (typeof mod.mount !== 'function') { renderPlaceholder(t('appNotFound')); return; }
-    const extensionPoints = new ExtensionPointHost(apps);
+    const extensionPoints = new ExtensionPointHost(apps, { extensionOrder });
     stopMountedApp = (await mod.mount(screen, { qu, identity, services, apps, segments, subscribe, syncFetch, extensionPoints })) ?? null;
   }
 

@@ -62,3 +62,18 @@ test('saveSettings() with a chat patch merges it into the default chat sub-objec
   const result = await getSettings(qu);
   assert.deepEqual(result.chat, { allowMemberCreateGroup: false });
 });
+
+test('saveSettings() with an extensionOrder patch round-trips a {point: [id,...]} map', async () => {
+  const qu = freshQu();
+  await saveSettings(qu, { extensionOrder: { 'content.messageFooter': ['reactions', 'core.timestamp'] } });
+  const result = await getSettings(qu);
+  assert.deepEqual(result.extensionOrder, { 'content.messageFooter': ['reactions', 'core.timestamp'] });
+});
+
+test('saveSettings() with an extensionOrder patch replaces the WHOLE map, same "send the full sub-object" contract as channels/rateLimits - a caller must include every point it wants to keep', async () => {
+  const qu = freshQu();
+  await saveSettings(qu, { extensionOrder: { 'content.messageFooter': ['reactions'] } });
+  await saveSettings(qu, { extensionOrder: { 'content.messageMenu': ['core.edit'] } });
+  const result = await getSettings(qu);
+  assert.deepEqual(result.extensionOrder, { 'content.messageMenu': ['core.edit'] }); // messageFooter's own entry did NOT survive - not merged by point key
+});

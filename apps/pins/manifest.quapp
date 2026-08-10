@@ -6,7 +6,7 @@
   "clientMain": "./dist/client.js",
   "requires": [],
   "contributes": [
-    { "point": "content.messagePinToggle", "export": "renderPinToggle", "kind": "ui", "order": 0 },
+    { "point": "content.messageMenu", "export": "pinMenuItem", "kind": "menu", "order": 0 },
     { "point": "forum.topicToolbar", "export": "renderPinnedBar", "kind": "ui", "order": 0 }
   ]
 }

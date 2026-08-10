@@ -1895,4 +1895,82 @@ own tests, built bottom-up per the dependency order in
       publishes a correctly-shaped `/apps.json` catalog entry (`spaceId`,
       `clientMainUrl`, `pushActions`, the `contact-row` action, the
       `userSettings.contributions` contribution).
+- [x] **Message chrome redesign + admin-configurable, cross-app extension
+      ordering** - per explicit ask: Edit/Pin/Bookmark move out of a row of
+      always-visible buttons into ONE "⋮" context menu
+      (`@qu/thread-ui`'s new `renderContextMenu()`, same trigger/panel/
+      outside-click-close shape as its own `renderEmojiPicker()`), and the
+      per-message footer becomes ONE row (menu trigger + timestamp +
+      Reactions' own live widget, plus a read-tick in `apps/chat`) instead
+      of scattered action rows. Two new, generic extension points replace
+      the old `content.messageActions`/`content.messagePinToggle`/
+      `content.messageReactions`: **`content.messageFooter`** (`kind: 'ui'`,
+      the row) and **`content.messageMenu`** (`kind: 'menu'`, `collect()`-
+      based - Pin/Bookmark now resolve their current state FRESH each time
+      the menu opens, no more always-on `watchChildren()` subscription for
+      either). Both `apps/forum` and `apps/chat` render the identical two
+      points with the identical native-item set (Edit/timestamp/menu
+      natively, Reply/read-tick chat-only), proving the reuse: neither app
+      imports the other, both just agree on point names/payload shapes.
+      **New admin-configurable ordering** (the actual ask: "reactions on
+      the left, the read-tick on the right, identical in Forum and Chat"):
+      `@qu/foundation`'s new `rankFor()` (`extension-order.js`) ranks a
+      point's items - both manifest-declared plugin contributors AND a
+      host app's own native items (`core.<name>` ids) - against a NEW
+      relay-settings field, `extensionOrder: {[point]: [id, ...]}`,
+      admin-edited via two new `apps/relay-admin` sections ("Message row
+      order"/"Message menu order") with ▲/▼ reordering (deliberately NOT
+      drag-and-drop - no library, no custom HTML5 drag-event wiring, exactly
+      as capable for these short lists). `ExtensionPointHost` gained an
+      `extensionOrder` constructor option + a `.order` getter so a host app
+      can rank its own native items the identical way; `apps/shell/client.js`
+      fetches `settings.extensionOrder` from `/config.json` once (same
+      "won't reflect a live admin edit without a reload" trade-off
+      `adminPubs` itself already has) and threads it into every
+      `ExtensionPointHost` it builds. An id absent from a point's
+      configured order keeps its own manifest/hardcoded default position,
+      appended after every explicitly-configured one - a freshly installed
+      plugin never jumps ahead of an admin's explicit arrangement.
+      `apps/reactions` repointed its existing contribution to
+      `content.messageFooter` unchanged; `apps/pins`'/`apps/bookmarks`' own
+      per-message toggles converted from live Custom Elements to
+      `collect()`-style menu-item resolvers (`pinMenuItem()`/
+      `bookmarkMenuItem()`) - `apps/pins`' `forum.topicToolbar` "Pinned bar"
+      is untouched (still continuously on-screen, still a live Custom
+      Element - only the per-message TOGGLE moved). Verified: full suite
+      green (1101 tests - new `extension-order.test.js`, extended
+      `extension-points.test.js`/`relay-settings.test.js`/
+      `apps/relay-admin/test/client.test.js`/`packages/thread-ui`'s new
+      `context-menu.test.js`, `apps/forum`'s and `apps/chat`'s own test
+      suites reworked around the menu/footer instead of the old inline
+      buttons), `npm run build` bundles cleanly.
+- [x] **Chat composer redesign + voice messages + location sharing** - per
+      explicit ask ("V2's composer was nicer/more structured, bring voice
+      messages and location sharing back, using V3's own advantages"):
+      `apps/chat`'s composer is now a rounded "pill" (textarea + emoji
+      trigger) plus a tool cluster (attach/location) and ONE circular action
+      button that MORPHS between 🎙️ (composer empty) and ➤ send (composer
+      has text) - Telegram/WhatsApp's own composer language, replacing the
+      old flat text-input-plus-row-of-buttons layout. Bubbles gained a
+      subtle "tail" (asymmetric corners, sharp on the avatar side) and a
+      faint shadow so they read as distinct surfaces; `apps/forum`'s own
+      message card got the same shadow/radius touch-up.
+      **Voice messages**: `MediaRecorder` (feature-detected, degrades to a
+      hint on an unsupported browser/device) records a `Blob`, uploaded
+      through the EXACT SAME `services.assets.upload()` +
+      `message.extra.attachment` path a file attachment already used before
+      this round - so `<qu-asset kind="auto">`'s existing MIME sniff just
+      picks `audio` and renders a native `<audio controls>` player, zero new
+      rendering code. **Location sharing**: one-time `navigator.geolocation`
+      position, sent as `message.extra.location: {lat, lng}` - deliberately
+      NO embedded map-tile preview image (fetching one on every view would
+      leak a room's location to a third-party tile server beyond the relay/
+      its members), just a link out to OpenStreetMap plus the raw
+      coordinates as text. Both reuse `apps/chat`'s pre-existing encrypted-
+      room/attachment machinery unchanged - no new Service, no new
+      extension point, no new `@qu/services` code at all for either
+      feature. Verified: full suite green (1104 tests - `MediaRecorder`/
+      `navigator.geolocation` mocked in `apps/chat/test/client.test.js`,
+      including the composer's mic/send morph itself), `npm run build`
+      bundles cleanly.
 

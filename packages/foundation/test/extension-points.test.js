@@ -186,6 +186,37 @@ test('a caller-supplied shared QuEvents instance is used instead of a private on
   assert.equal(host.events, shared);
 });
 
+test('extensionOrder overrides manifest contributes[].order for sorting - an admin can put "bookmarks" before "likes" despite their manifest order', async () => {
+  const host = new ExtensionPointHost(apps(
+    { name: 'likes', clientMainUrl: PLUGIN_A_URL, contributes: [{ point: 'content.actions', export: 'renderLike', order: 0 }] },
+    { name: 'bookmarks', clientMainUrl: PLUGIN_B_URL, contributes: [{ point: 'content.actions', export: 'renderBookmark', order: 10 }] },
+  ), { extensionOrder: { 'content.actions': ['bookmarks', 'likes'] } });
+  const container = document.createElement('div');
+  await host.renderSlot('content.actions', container, { id: 'msg1' });
+
+  assert.equal(container.children[0].dataset.contributorApp, 'bookmarks');
+  assert.equal(container.children[1].dataset.contributorApp, 'likes');
+});
+
+test('extensionOrder for a DIFFERENT point does not affect this one - falls back to manifest order', async () => {
+  const host = new ExtensionPointHost(apps(
+    { name: 'likes', clientMainUrl: PLUGIN_A_URL, contributes: [{ point: 'content.actions', export: 'renderLike', order: 0 }] },
+    { name: 'bookmarks', clientMainUrl: PLUGIN_B_URL, contributes: [{ point: 'content.actions', export: 'renderBookmark', order: 10 }] },
+  ), { extensionOrder: { 'some.other.point': ['bookmarks', 'likes'] } });
+  const container = document.createElement('div');
+  await host.renderSlot('content.actions', container, { id: 'msg1' });
+
+  assert.equal(container.children[0].dataset.contributorApp, 'likes'); // manifest order 0 - unaffected
+  assert.equal(container.children[1].dataset.contributorApp, 'bookmarks');
+});
+
+test('the .order getter exposes exactly what the host was constructed with, for a host app to rank its own native items the same way', () => {
+  const config = { 'content.messageFooter': ['reactions', 'core.timestamp'] };
+  const host = new ExtensionPointHost(apps(), { extensionOrder: config });
+  assert.equal(host.order, config);
+  assert.equal(new ExtensionPointHost(apps()).order, null);
+});
+
 test('listDefinedPoints(): discovers every declared point across the catalog, tagged with who defined it', () => {
   const found = listDefinedPoints(apps(
     { name: 'forum', definesExtensionPoints: [{ point: 'content.messageActions', kind: 'ui', description: 'extra action buttons per forum message' }] },

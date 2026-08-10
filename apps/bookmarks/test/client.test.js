@@ -6,7 +6,7 @@ import { ListService, FlagService, BookmarksService, ActorService } from '@qu/se
 import { installDom, waitFor } from '@qu/ui/testing';
 
 installDom();
-const { mount, renderBookmarkToggle } = await import('../client.js');
+const { mount, bookmarkMenuItem } = await import('../client.js');
 
 async function freshEnv() {
   const qu = new QuStore();
@@ -114,40 +114,30 @@ test('the returned stop function tears down cleanly - no error thrown', async ()
   assert.doesNotThrow(() => stop());
 });
 
-// ===== renderBookmarkToggle() - the content.messageActions contributor ====
+// ===== bookmarkMenuItem() - the content.messageMenu contributor ===========
 
-test('renderBookmarkToggle(): renders inactive, then toggles active on click, persisting via services.bookmarks', async () => {
+test('bookmarkMenuItem(): resolves an inactive item whose onClick adds the bookmark, persisting the snapshot', async () => {
   const { services } = await freshEnv();
-  const container = document.createElement('div');
-  document.body.appendChild(container);
-
-  await renderBookmarkToggle(container, {
+  const item = await bookmarkMenuItem({
     services, messageId: 'msg1', spaceId: 'forum-space', threadId: 'general', body: 'hello', author: 'author-pub',
   });
-  await waitFor(() => container.querySelector('button') !== null);
-  const btn = container.querySelector('button');
-  await waitFor(() => btn.textContent === '🔖'); // resolved inactive state
+  assert.equal(item.id, 'bookmark');
+  assert.equal(item.icon, '🔖'); // inactive state
 
-  btn.click();
-  await waitFor(() => btn.textContent === '📑');
-  assert.equal(await services.bookmarks.isBookmarked('msg1'), true);
+  await item.onClick();
 
   const [entry] = await services.bookmarks.list();
   assert.equal(entry.body, 'hello');
   assert.equal(entry.author, 'author-pub');
-
-  btn.click();
-  await waitFor(() => btn.textContent === '🔖');
-  assert.equal(await services.bookmarks.isBookmarked('msg1'), false);
 });
 
-test('renderBookmarkToggle(): reflects an ALREADY-bookmarked message as active on mount', async () => {
+test('bookmarkMenuItem(): an ALREADY-bookmarked message resolves an active item whose onClick removes it', async () => {
   const { services } = await freshEnv();
   await services.bookmarks.add('msg1', { body: 'already saved', author: 'a' });
 
-  const container = document.createElement('div');
-  document.body.appendChild(container);
-  await renderBookmarkToggle(container, { services, messageId: 'msg1' });
+  const item = await bookmarkMenuItem({ services, messageId: 'msg1' });
+  assert.equal(item.icon, '📑'); // active state
 
-  await waitFor(() => container.querySelector('button')?.textContent === '📑');
+  await item.onClick();
+  assert.equal(await services.bookmarks.isBookmarked('msg1'), false);
 });

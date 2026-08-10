@@ -116,13 +116,13 @@ const FORUM_SPACE_ID = '4eb04aa2-4ca9-4c9a-aa7e-33ad3802edb1';
 const FORUM_APPS = [{ name: 'forum', spaceId: FORUM_SPACE_ID }];
 
 // The REAL apps/bookmarks/client.js (not a synthetic fake) - proves the
-// content.messageActions contribution end to end against actual production
+// content.messageMenu contribution end to end against actual production
 // code, the same way `ExtensionPointHost` would dynamically import it from
 // a real apps catalog's `clientMainUrl`.
 const BOOKMARKS_CLIENT_URL = new URL('../../bookmarks/client.js', import.meta.url).href;
 const FORUM_APPS_WITH_BOOKMARKS = [
   { name: 'forum', spaceId: FORUM_SPACE_ID },
-  { name: 'bookmarks', clientMainUrl: BOOKMARKS_CLIENT_URL, contributes: [{ point: 'content.messageActions', export: 'renderBookmarkToggle' }] },
+  { name: 'bookmarks', clientMainUrl: BOOKMARKS_CLIENT_URL, contributes: [{ point: 'content.messageMenu', export: 'bookmarkMenuItem' }] },
 ];
 
 // Same "the REAL app, not a fake" reasoning as FORUM_APPS_WITH_BOOKMARKS -
@@ -132,17 +132,34 @@ const REACTIONS_CLIENT_URL = new URL('../../reactions/client.js', import.meta.ur
 const PINS_CLIENT_URL = new URL('../../pins/client.js', import.meta.url).href;
 const FORUM_APPS_WITH_REACTIONS = [
   { name: 'forum', spaceId: FORUM_SPACE_ID },
-  { name: 'reactions', clientMainUrl: REACTIONS_CLIENT_URL, contributes: [{ point: 'content.messageReactions', export: 'renderReactionWidget' }] },
+  { name: 'reactions', clientMainUrl: REACTIONS_CLIENT_URL, contributes: [{ point: 'content.messageFooter', export: 'renderReactionWidget' }] },
 ];
 const FORUM_APPS_WITH_PINS = [
   { name: 'forum', spaceId: FORUM_SPACE_ID },
   {
     name: 'pins', clientMainUrl: PINS_CLIENT_URL, contributes: [
-      { point: 'content.messagePinToggle', export: 'renderPinToggle' },
+      { point: 'content.messageMenu', export: 'pinMenuItem' },
       { point: 'forum.topicToolbar', export: 'renderPinnedBar' },
     ],
   },
 ];
+
+/**
+ * Opens a message's "⋮" context menu (content.messageFooter's core.menu
+ * segment) and returns its panel - `root` scopes to one specific message's
+ * own `<li>` when a view has more than one (defaults to the whole container).
+ */
+async function openMessageMenu(root) {
+  await waitFor(() => root.querySelector('.qu-thread-ui-context-menu-trigger') !== null);
+  root.querySelector('.qu-thread-ui-context-menu-trigger').click();
+  await waitFor(() => root.querySelector('.qu-thread-ui-context-menu-panel') !== null);
+  return root.querySelector('.qu-thread-ui-context-menu-panel');
+}
+
+/** Finds a context-menu item button by its label text, within an already-open panel. */
+function menuItemButton(panel, label) {
+  return [...panel.querySelectorAll('.qu-thread-ui-context-menu-item')].find((btn) => btn.textContent.includes(label));
+}
 
 function noopSubscribe() {}
 
@@ -407,7 +424,7 @@ test('a slow, stale renderMessages() call resolving AFTER a newer one never over
   }
 });
 
-test('content.messageReactions: the REAL apps/reactions app is dynamically imported and rendered per message, live across two independent mounts', async () => {
+test('content.messageFooter (reactions): the REAL apps/reactions app is dynamically imported and rendered per message, live across two independent mounts', async () => {
   const a = await freshEnv('Ada');
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
   await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'React to me' });
@@ -447,7 +464,7 @@ test('content.messageReactions: the REAL apps/reactions app is dynamically impor
   }
 });
 
-test('content.messageActions: the REAL apps/bookmarks app (not a fake) is dynamically imported and rendered per message via ExtensionPointHost.renderSlot()', async () => {
+test('content.messageMenu (bookmarks): the REAL apps/bookmarks app (not a fake) contributes a menu item via ExtensionPointHost.collect()', async () => {
   const a = await freshEnv('Ada');
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
   await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'bookmark me' });
@@ -456,39 +473,42 @@ test('content.messageActions: the REAL apps/bookmarks app (not a fake) is dynami
   const extensionPoints = new ExtensionPointHost(FORUM_APPS_WITH_BOOKMARKS);
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS_WITH_BOOKMARKS, subscribe: noopSubscribe, extensionPoints, segments: TOPIC_SEGMENTS });
   try {
-    await waitFor(() => container.querySelector('.qu-forum-message-extensions button') !== null);
-    const btn = container.querySelector('.qu-forum-message-extensions button');
-    await waitFor(() => btn.textContent === '🔖'); // resolved inactive state (apps/bookmarks' own hasPrivate() check)
+    let panel = await openMessageMenu(container);
+    let bookmarkBtn = menuItemButton(panel, 'Bookmark this message'); // resolved inactive state (apps/bookmarks' own hasPrivate() check)
+    assert.ok(bookmarkBtn, 'expected a "Bookmark this message" menu item');
+    bookmarkBtn.click(); // also closes the menu, per renderContextMenu()'s own contract - onClick() itself is fire-and-forget from the DOM click handler's own perspective
+    await new Promise((resolve) => setTimeout(resolve, 20)); // let the underlying async add() land
 
-    btn.click();
-    await waitFor(() => btn.textContent === '📑');
     assert.equal(await a.services.bookmarks.isBookmarked((await a.services.messages.listMessages(FORUM_SPACE_ID, 'general')).messages[0].id), true);
-
     const [entry] = await a.services.bookmarks.list();
     assert.equal(entry.body, 'bookmark me');
     assert.equal(entry.spaceId, FORUM_SPACE_ID);
     assert.equal(entry.threadId, 'general');
+
+    panel = await openMessageMenu(container);
+    assert.ok(menuItemButton(panel, 'Remove bookmark'), 'expected the item to now read "Remove bookmark"');
   } finally {
     stop();
   }
 });
 
-test('content.messageActions: without extensionPoints/a contributing app, the slot stays empty - no crash', async () => {
+test('content.messageMenu: without extensionPoints/a contributing app, the menu still opens with just this app\'s OWN native items ("Edit" for an own message) - no crash', async () => {
   const a = await freshEnv('Ada');
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
-  await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'no bookmarks app loaded' });
+  await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'no plugins loaded' });
 
   const container = makeContainer();
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS }); // no extensionPoints at all
   try {
-    await waitFor(() => container.querySelector('.qu-forum-message') !== null);
-    assert.equal(container.querySelector('.qu-forum-message-extensions').children.length, 0);
+    const panel = await openMessageMenu(container);
+    assert.ok(menuItemButton(panel, 'Edit')); // this app's own native item, unaffected by the missing extensionPoints
+    assert.equal(panel.querySelectorAll('.qu-thread-ui-context-menu-item').length, 1); // nothing else - no plugin contributed
   } finally {
     stop();
   }
 });
 
-test('content.messageActions: a bookmark is private - a SECOND identity viewing the same message sees its own (unbookmarked) toggle state', async () => {
+test('content.messageMenu (bookmarks): a bookmark is private - a SECOND identity viewing the same message sees its own (unbookmarked) menu item', async () => {
   const a = await freshEnv('Ada');
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
   await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'shared message' });
@@ -502,17 +522,17 @@ test('content.messageActions: a bookmark is private - a SECOND identity viewing 
   const extensionPoints = new ExtensionPointHost(FORUM_APPS_WITH_BOOKMARKS);
   const stop = mount(container, { qu: b.qu, services: b.services, apps: FORUM_APPS_WITH_BOOKMARKS, subscribe: noopSubscribe, extensionPoints, segments: TOPIC_SEGMENTS });
   try {
-    await waitFor(() => container.querySelector('.qu-forum-message-extensions button') !== null);
-    const btn = container.querySelector('.qu-forum-message-extensions button');
-    // Give the async hasPrivate() resolution a moment, then confirm it settles UNBOOKMARKED for Bob.
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.equal(btn.textContent, '🔖'); // Bob's own, independent, still-inactive state
+    const panel = await openMessageMenu(container);
+    // Bob's own, independent, still-inactive state - and no "Edit" item at
+    // all (Ada's message, not his).
+    assert.ok(menuItemButton(panel, 'Bookmark this message'));
+    assert.equal(menuItemButton(panel, 'Edit'), undefined);
   } finally {
     stop();
   }
 });
 
-test('content.messagePinToggle/forum.topicToolbar: the REAL apps/pins app pins a message and shows it in the pinned bar, live for a second independent mount; unpinning removes it', async () => {
+test('content.messageMenu (pins) / forum.topicToolbar: the REAL apps/pins app pins a message via its menu item and shows it in the pinned bar, live for a second independent mount; unpinning removes it', async () => {
   const a = await freshEnv('Ada');
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
   await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'Pin this one' });
@@ -524,14 +544,16 @@ test('content.messagePinToggle/forum.topicToolbar: the REAL apps/pins app pins a
   const extensionPointsB = new ExtensionPointHost(FORUM_APPS_WITH_PINS);
   const stopB = mount(containerB, { qu: a.qu, services: a.services, apps: FORUM_APPS_WITH_PINS, subscribe: noopSubscribe, extensionPoints: extensionPointsB, segments: TOPIC_SEGMENTS });
   try {
-    await waitFor(() => containerA.querySelector('.qu-forum-message-actions button') !== null);
-    const pinBtn = [...containerA.querySelectorAll('.qu-forum-message-actions button')].find((btn) => btn.textContent === 'Pin');
-    assert.ok(pinBtn, 'expected a "Pin" button');
+    let panelA = await openMessageMenu(containerA);
+    const pinBtn = menuItemButton(panelA, 'Pin');
+    assert.ok(pinBtn, 'expected a "Pin" menu item');
     pinBtn.click();
 
     await waitFor(() => containerB.querySelector('.qu-pins-bar') !== null);
     assert.match(containerB.querySelector('.qu-pins-bar-row span').textContent, /Pin this one/);
-    await waitFor(() => [...containerA.querySelectorAll('.qu-forum-message-actions button')].some((btn) => btn.textContent === 'Unpin'));
+
+    panelA = await openMessageMenu(containerA); // reopen - menu closed itself on the click above
+    assert.ok(menuItemButton(panelA, 'Unpin'));
 
     containerB.querySelector('.qu-pins-bar-row button').click(); // unpin via the bar's own ✕
     await waitFor(() => containerB.querySelector('.qu-pins-bar') === null);
@@ -556,7 +578,8 @@ test('an in-progress, unsaved edit survives an unrelated message arriving in the
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
   try {
     await waitFor(() => container.querySelector('.qu-forum-message') !== null);
-    container.querySelector('.qu-forum-message-actions button').click(); // "Edit" - the only button own message has besides Pin
+    const panel = await openMessageMenu(container);
+    menuItemButton(panel, 'Edit').click();
     const textarea = container.querySelector('.qu-forum-edit-row textarea');
     assert.ok(textarea, 'expected the edit form to be open');
     textarea.value = 'Not yet saved...';
@@ -599,10 +622,13 @@ test('the edit button only appears on the viewer\'s own message - a genuinely se
     const otherLi = [...container.querySelectorAll('.qu-forum-message')].find((li) => li.dataset.messageId !== own.id);
 
     assert.equal(otherLi.dataset.author, b.myPub);
-    assert.ok([...ownLi.querySelectorAll('button')].some((btn) => btn.textContent === 'Edit'));
-    assert.equal([...otherLi.querySelectorAll('button')].some((btn) => btn.textContent === 'Edit'), false);
+    const ownPanel = await openMessageMenu(ownLi);
+    assert.ok(menuItemButton(ownPanel, 'Edit'));
+    const otherPanel = await openMessageMenu(otherLi);
+    assert.equal(menuItemButton(otherPanel, 'Edit'), undefined);
 
-    [...ownLi.querySelectorAll('button')].find((btn) => btn.textContent === 'Edit').click();
+    const ownPanelAgain = await openMessageMenu(ownLi); // reopen - the previous one closed on its own via outside interaction above
+    menuItemButton(ownPanelAgain, 'Edit').click();
     const textarea = ownLi.querySelector('.qu-forum-edit-row textarea');
     textarea.value = 'My EDITED message';
     [...ownLi.querySelectorAll('.qu-forum-edit-row-buttons button')].find((btn) => btn.textContent === 'Save').click();

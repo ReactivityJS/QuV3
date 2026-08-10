@@ -9,6 +9,6 @@
   "navOrder": 11,
   "requires": [],
   "contributes": [
-    { "point": "content.messageActions", "export": "renderBookmarkToggle", "kind": "ui", "order": 10 }
+    { "point": "content.messageMenu", "export": "bookmarkMenuItem", "kind": "menu", "order": 20 }
   ]
 }

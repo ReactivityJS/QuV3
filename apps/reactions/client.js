@@ -2,13 +2,18 @@
  * REACTIONS — an admin-toggleable plugin (turn it off via relay-settings'
  * `disabledApps`, see `@qu/foundation`'s `ExtensionPointHost` doc comment on
  * how a disabled app's `contributes` entries stop firing entirely) instead
- * of hardcoded forum chrome. Extracted out of `apps/forum/client.js`'s own
- * `mountReactions()` - same `ReactionService` underneath, same
- * `content.messageReactions` extension point `apps/forum` now defines
- * instead of calling this UI inline, no forum-specific code left in either
- * direction (this file never imports `apps/forum`; forum never imports
- * this file - see `apps/bookmarks/client.js`'s own doc comment for the
- * established shape this follows).
+ * of hardcoded forum/chat chrome. Extracted out of `apps/forum/client.js`'s
+ * own `mountReactions()` - same `ReactionService` underneath, now reached
+ * through `content.messageFooter` (the per-message footer ROW - menu
+ * trigger, timestamp, read-tick, reactions - both `apps/forum` and
+ * `apps/chat` render, see either's own doc comment), no forum/chat-specific
+ * code in this file either direction (this file never imports either host;
+ * neither host imports this file - see `apps/bookmarks/client.js`'s own doc
+ * comment for the established shape this follows). Its position WITHIN that
+ * row (leftmost by this codebase's own default - see either host's
+ * `DEFAULT_FOOTER_ORDER`) is admin-configurable via relay-settings'
+ * `extensionOrder['content.messageFooter']`, keyed by this app's own
+ * manifest `name` ("reactions") - see `@qu/foundation`'s `rankFor()`.
  *
  * UX MODEL - modeled after QuV2's chat app (`apps/chat/client.js`), not
  * this app's own QuV2-forum predecessor (which had no reactions at all) or
@@ -36,7 +41,7 @@
  * same reasoning `@qu/ui`'s own `<qu-view>`/`<qu-list>` already use (see
  * `packages/ui/src/components.js`'s own doc comment).
  *
- * CONTRIBUTOR PAYLOAD CONTRACT (`content.messageReactions`): `(container,
+ * CONTRIBUTOR PAYLOAD CONTRACT (`content.messageFooter`): `(container,
  * payload)` where `payload` is `{services, qu, syncFetch, spaceId,
  * threadId, messageId, myPub}` - `qu`/`syncFetch` (not part of
  * `content.messageActions`' own payload shape) are needed here because a
@@ -124,7 +129,7 @@ class QuReactionsRowElement extends HTMLElement {
 if (!customElements.get('qu-reactions-row')) customElements.define('qu-reactions-row', QuReactionsRowElement);
 
 /**
- * The `content.messageReactions` contributor - see this file's own top doc
+ * The `content.messageFooter` contributor - see this file's own top doc
  * comment for the full payload contract.
  * @param {HTMLElement} container
  * @param {{services: object, qu: object, syncFetch?: Function, spaceId: string, threadId: string, messageId: string, myPub: string}} payload

@@ -92,12 +92,30 @@
  * `insertAtCursor()` primitives this app's composer is built from - the SAME
  * package a future `apps/chat` port is meant to reuse without rework.
  *
- * REACTIONS/PINS are NOT built into this file at all anymore - they're
- * admin-toggleable plugins (`apps/reactions`, `apps/pins`), reached only
- * through the extension points below (`content.messageReactions`,
- * `content.messagePinToggle`, `forum.topicToolbar`). Disabling either via
+ * REACTIONS/PINS/BOOKMARKS are NOT built into this file at all - they're
+ * admin-toggleable plugins (`apps/reactions`, `apps/pins`, `apps/bookmarks`),
+ * reached only through the extension points below (`content.messageFooter`,
+ * `content.messageMenu`, `forum.topicToolbar`). Disabling any of them via
  * relay-settings' `disabledApps` (see `packages/relay/src/relay-settings.js`)
  * makes it render nothing, with zero change needed here.
+ *
+ * MESSAGE CHROME (`buildMessageFooter()`) - Edit/Pin/Bookmark used to be
+ * separate always-visible buttons in an "actions" row; per this round's
+ * redesign they now live in ONE "⋮" context menu (`content.messageMenu`,
+ * `renderContextMenu()` - see `@qu/thread-ui`'s own doc comment), so a
+ * message shows exactly ONE always-visible affordance for them, not a row
+ * of icons competing with the reaction pills. The footer row itself
+ * (`content.messageFooter`) is the menu trigger + timestamp + Reactions'
+ * own live widget, side by side - both this row's own item order AND the
+ * menu's own item order come from `@qu/foundation`'s `rankFor()` against
+ * `extensionPoints.order` (relay-settings' admin-edited `extensionOrder`,
+ * edited via `apps/relay-admin` - see that app's own doc comment), falling
+ * back to this file's own `FOOTER_ORDER_DEFAULT`/`MENU_ORDER_DEFAULT` when
+ * an admin hasn't configured a given point yet. `apps/chat/client.js`
+ * builds its OWN message row/menu the identical way, with the identical
+ * two default-order maps, so the two apps render identically ordered chrome
+ * out of the box without either importing the other - see its own doc
+ * comment.
  *
  * REACTIVITY (topic view): the message list re-fetches via `services.
  * messages.listMessages()` (not the raw watched QuBits) every time
@@ -124,25 +142,22 @@
  * EXTENSION POINTS (declared in this app's own `manifest.quapp` under
  * `definesExtensionPoints`) - ANY app whose OWN manifest declares a matching
  * `contributes: [{point: "...", export: "..."}]` gets dynamically imported
- * and rendered into the slot, with NO import of that app anywhere in this
- * file (see `apps/bookmarks/client.js`, the first real one):
- *   - `content.messageActions` - per message, right after edit/pin/reactions,
- *     a small `<span>` handed to `ctx.extensionPoints.renderSlot(...)`.
- *     Payload: `{services, messageId, spaceId, threadId, body, author}`
- *     (e.g. Bookmarks' toggle).
- *   - `content.messagePinToggle` - per message, in its own action row.
- *     Payload: `{services, qu, syncFetch, spaceId, threadId, messageId}`
- *     (Pins' own toggle).
- *   - `content.messageReactions` - per message, its own reaction row.
- *     Payload: `{services, qu, syncFetch, spaceId, threadId, messageId,
- *     myPub}` (Reactions' own widget).
- *   - `forum.topicToolbar` - rendered ONCE per topic view, above the
- *     message list. Payload: `{services, qu, syncFetch, spaceId, threadId}`
- *     (Pins' own "Pinned" bar).
- * The `qu`/`syncFetch`/`myPub` fields the last three carry (absent from
- * `content.messageActions`' older payload shape) exist because both
- * Reactions and Pins need a genuinely LIVE subscription, not just a
- * one-shot Service call - see either app's own doc comment.
+ * and rendered/called for the point, with NO import of that app anywhere in
+ * this file (see `apps/bookmarks/client.js`, the first real one):
+ *   - `content.messageFooter` (`kind: 'ui'`) - the per-message footer ROW,
+ *     rendered via `ctx.extensionPoints.renderSlot(...)` into ONE segment
+ *     among this file's own native ones (menu trigger, timestamp) - see
+ *     `buildMessageFooter()`. Payload: `{services, qu, syncFetch, spaceId,
+ *     threadId, messageId, myPub, mine, body, author}` (Reactions' own
+ *     live widget).
+ *   - `content.messageMenu` (`kind: 'menu'`, `ExtensionPointHost.collect()`)
+ *     - this message's own "⋮" context menu, gathered fresh every time it
+ *     opens and merged with this file's own native "Edit" item - see
+ *     `buildMessageFooter()`. Same payload shape as `content.messageFooter`.
+ *     Returns `{id, label, icon, onClick}` (Pins'/Bookmarks' own entries).
+ *   - `forum.topicToolbar` (`kind: 'ui'`) - rendered ONCE per topic view,
+ *     above the message list. Payload: `{services, qu, syncFetch, spaceId,
+ *     threadId}` (Pins' own "Pinned" bar).
  *
  * KNOWN GAPS, left for later: no delete (`MessageService` has none, author-
  * only `editMessage()` is the whole story), no channel-metadata editing UI
@@ -153,10 +168,21 @@
  * scale past it).
  */
 import { watchChildren, watch } from '@qu/reactive';
+import { rankFor } from '@qu/foundation';
 import { paths, formatActorLabel, detectLinks } from '@qu/services';
 import { createI18n } from '@qu/i18n';
 import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage } from '@qu/ui';
-import { renderEmojiPicker, mountMentionAutocomplete, mountEmojiAutocomplete, insertAtCursor } from '@qu/thread-ui';
+import { renderEmojiPicker, renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, insertAtCursor } from '@qu/thread-ui';
+
+// Default fallback order for `content.messageFooter`/`content.messageMenu`
+// items when an admin hasn't configured `relay-settings`' `extensionOrder`
+// for that point yet (see `@qu/foundation`'s `rankFor()`) - reactions
+// leftmost, the "⋮" menu and timestamp after, matching `apps/chat/client.js`'s
+// OWN copy of these same two maps exactly, so the two apps render identical
+// default ordering without either importing the other (an admin can still
+// reorder either point via Relay Admin - see that app's own doc comment).
+const FOOTER_ORDER_DEFAULT = { reactions: 0, 'core.menu': 10, 'core.timestamp': 20 };
+const MENU_ORDER_DEFAULT = { edit: 0, pin: 10, bookmark: 20 };
 
 const DICT = {
   en: {
@@ -165,6 +191,7 @@ const DICT = {
     composerPlaceholder: 'Write a message…',
     send: 'Send',
     edit: 'Edit', save: 'Save', cancel: 'Cancel',
+    moreActions: 'More actions',
     attachRemove: 'Remove attachment',
     insertEmoji: 'Insert emoji',
     channels: 'Channels',
@@ -193,6 +220,7 @@ const DICT = {
     composerPlaceholder: 'Nachricht schreiben…',
     send: 'Senden',
     edit: 'Bearbeiten', save: 'Speichern', cancel: 'Abbrechen',
+    moreActions: 'Weitere Aktionen',
     attachRemove: 'Anhang entfernen',
     insertEmoji: 'Emoji einfügen',
     channels: 'Kanäle',
@@ -225,18 +253,20 @@ function formatReplies(count) {
 const STYLE_ID = 'qu-forum-style';
 const STYLE = `
   .qu-forum-messages { list-style: none; margin: 0 0 0.8rem; padding: 0; display: flex; flex-direction: column; gap: 0.6rem; }
-  .qu-forum-message { display: flex; gap: 0.6rem; padding: 0.5rem 0.7rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); }
+  .qu-forum-message { display: flex; gap: 0.6rem; padding: 0.55rem 0.75rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-lg, 0.7rem); background: var(--qu-color-surface, transparent); box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
   .qu-forum-message-body { flex: 1; min-width: 0; }
   .qu-forum-message-head { display: flex; align-items: baseline; gap: 0.5rem; }
   .qu-forum-message-author { font-weight: 600; }
-  .qu-forum-message-ts { font-size: 0.75em; opacity: 0.6; }
-  .qu-forum-message-edited { font-size: 0.75em; opacity: 0.6; font-style: italic; }
   .qu-forum-message-text { overflow-wrap: anywhere; }
   .qu-forum-message-text code { font-family: var(--qu-font-mono, ui-monospace, monospace); background: var(--qu-color-surface, #8882); padding: 0.05rem 0.3rem; border-radius: var(--qu-radius-sm, 0.3rem); }
-  .qu-forum-message-actions { display: flex; gap: 0.4rem; margin-top: 0.3rem; }
-  .qu-forum-message-actions button { background: none; border: none; cursor: pointer; opacity: 0.6; font: inherit; font-size: 0.85em; padding: 0; }
-  .qu-forum-message-actions button:hover { opacity: 1; }
-  .qu-forum-message-extensions { display: inline-flex; gap: 0.3rem; margin-top: 0.4rem; }
+  /* The per-message footer ROW (content.messageFooter) - menu trigger,
+     timestamp, reactions, in whatever order rankFor() resolves (admin-
+     configurable via relay-settings' extensionOrder, see this file's own
+     top doc comment and FOOTER_ORDER_DEFAULT above). Each segment renders
+     into its own <span> child, laid out left-to-right by this one flex
+     rule - no per-segment CSS needed beyond it. */
+  .qu-forum-message-footer { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.35rem; flex-wrap: wrap; }
+  .qu-forum-message-ts { font-size: 0.75em; opacity: 0.6; }
   .qu-forum-edit-row { display: flex; flex-direction: column; gap: 0.4rem; position: relative; }
   .qu-forum-edit-row textarea { font: inherit; padding: 0.4rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); resize: vertical; }
   .qu-forum-edit-row-buttons { display: flex; gap: 0.4rem; }
@@ -995,56 +1025,80 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     const authorEl = document.createElement('span');
     authorEl.className = 'qu-forum-message-author';
     authorEl.textContent = label;
-    const tsEl = document.createElement('span');
-    tsEl.className = 'qu-forum-message-ts';
-    tsEl.textContent = formatTs(message.ts);
-    head.append(authorEl, tsEl);
-    if (message.editedAt) {
-      const editedEl = document.createElement('span');
-      editedEl.className = 'qu-forum-message-edited';
-      editedEl.textContent = `(${t('edit').toLowerCase()})`;
-      head.appendChild(editedEl);
-    }
+    head.appendChild(authorEl);
 
     const textWrap = document.createElement('div');
     if (editingDrafts.has(message.id)) renderMessageEdit(textWrap, message);
     else renderMessageText(textWrap, message);
 
-    const actions = document.createElement('div');
-    actions.className = 'qu-forum-message-actions';
-    if (message.author === myPub) {
-      const editBtn = document.createElement('button');
-      editBtn.type = 'button';
-      editBtn.textContent = t('edit');
-      editBtn.addEventListener('click', () => renderMessageEdit(textWrap, message));
-      actions.appendChild(editBtn);
-    }
-    const pinSlot = document.createElement('span');
-    if (extensionPoints) {
-      await extensionPoints.renderSlot('content.messagePinToggle', pinSlot, {
-        services, qu, syncFetch, spaceId: SPACE_ID, threadId: topicId, messageId: message.id,
-      });
-    }
-    actions.appendChild(pinSlot);
+    const footer = await buildMessageFooter(message, myPub, textWrap);
 
-    const reactionsRoot = document.createElement('div');
-    if (extensionPoints) {
-      await extensionPoints.renderSlot('content.messageReactions', reactionsRoot, {
-        services, qu, syncFetch, spaceId: SPACE_ID, threadId: topicId, messageId: message.id, myPub,
-      });
-    }
-
-    const extensionSlot = document.createElement('span');
-    extensionSlot.className = 'qu-forum-message-extensions';
-    if (extensionPoints) {
-      await extensionPoints.renderSlot('content.messageActions', extensionSlot, {
-        services, messageId: message.id, spaceId: SPACE_ID, threadId: topicId, body: message.body, author: message.author,
-      });
-    }
-
-    body.append(head, textWrap, actions, reactionsRoot, extensionSlot);
+    body.append(head, textWrap, footer);
     li.appendChild(body);
     return li;
+  }
+
+  /**
+   * The per-message footer ROW (`content.messageFooter`) - see this file's
+   * own top doc comment. Three segments: `core.menu` (the "⋮" trigger,
+   * opening `content.messageMenu` - this message's own Edit, plus whatever
+   * `apps/pins`/`apps/bookmarks` contribute), `core.timestamp`, and
+   * `reactions` (`apps/reactions`' own live widget, via `renderSlot()`).
+   * Order comes from `rankFor()` against `extensionPoints.order` (relay-
+   * settings' admin-edited `extensionOrder`), falling back to
+   * `FOOTER_ORDER_DEFAULT`/`MENU_ORDER_DEFAULT` when unconfigured.
+   * @param {object} message @param {string} myPub @param {HTMLElement} textWrap - re-rendered in place by the native "Edit" menu item.
+   * @returns {Promise<HTMLElement>}
+   */
+  async function buildMessageFooter(message, myPub, textWrap) {
+    const mine = message.author === myPub;
+    const menuPayload = {
+      services, qu, syncFetch, spaceId: SPACE_ID, threadId: topicId, messageId: message.id, myPub, mine,
+      body: message.body, author: message.author,
+    };
+
+    const segments = [
+      {
+        id: 'core.menu',
+        render: (el) => {
+          el.appendChild(renderContextMenu({
+            trigger: '⋮',
+            triggerTitle: t('moreActions'),
+            getItems: async () => {
+              const nativeItems = mine ? [{ id: 'edit', label: t('edit'), icon: '✏️', onClick: () => renderMessageEdit(textWrap, message) }] : [];
+              const pluginItems = extensionPoints ? await extensionPoints.collect('content.messageMenu', menuPayload) : [];
+              return [...nativeItems, ...pluginItems].sort(
+                (a, b) => rankFor(extensionPoints?.order, 'content.messageMenu', a.id, MENU_ORDER_DEFAULT[a.id] ?? 50)
+                  - rankFor(extensionPoints?.order, 'content.messageMenu', b.id, MENU_ORDER_DEFAULT[b.id] ?? 50)
+              );
+            },
+          }));
+        },
+      },
+      {
+        id: 'core.timestamp',
+        render: (el) => {
+          el.className = 'qu-forum-message-ts';
+          el.textContent = message.editedAt ? `${formatTs(message.ts)} (${t('edit').toLowerCase()})` : formatTs(message.ts);
+        },
+      },
+      {
+        id: 'reactions',
+        render: (el) => (extensionPoints ? extensionPoints.renderSlot('content.messageFooter', el, menuPayload) : null),
+      },
+    ];
+
+    const footer = document.createElement('div');
+    footer.className = 'qu-forum-message-footer';
+    const ranked = segments
+      .map((seg) => ({ ...seg, rank: rankFor(extensionPoints?.order, 'content.messageFooter', seg.id, FOOTER_ORDER_DEFAULT[seg.id] ?? 50) }))
+      .sort((a, b) => a.rank - b.rank);
+    for (const seg of ranked) {
+      const wrap = document.createElement('span');
+      await seg.render(wrap);
+      footer.appendChild(wrap);
+    }
+    return footer;
   }
 
   function renderMessageText(root, message) {
@@ -1119,13 +1173,11 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     root.appendChild(row);
   }
 
-  // Reactions (`content.messageReactions`) and the pin toggle/pinned bar
-  // (`content.messagePinToggle`/`forum.topicToolbar`) used to be hardcoded
-  // here - now admin-toggleable plugins (`apps/reactions`, `apps/pins`),
-  // rendered through the extension points declared in this app's own
-  // manifest.quapp. See `renderMessage()` above for the per-message slots
-  // and `mountTopicView()`'s own setup below for the once-per-topic
-  // `forum.topicToolbar` slot.
+  // Reactions/Pin/Bookmark used to be hardcoded here - now admin-toggleable
+  // plugins (`apps/reactions`, `apps/pins`, `apps/bookmarks`), reached
+  // through `content.messageFooter`/`content.messageMenu` (see
+  // `buildMessageFooter()` above) and the once-per-topic `forum.topicToolbar`
+  // slot (`mountTopicView()`'s own setup below).
 
   sendBtn.addEventListener('click', async () => {
     const body = composerInput.value.trim();

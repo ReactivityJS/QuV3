@@ -40,10 +40,62 @@
  * exactly - see `packages/relay/src/relay-settings.js`'s own doc comment on
  * that field for why chat needs no `allowMemberRestricted` counterpart (a
  * chat room/group is ALWAYS reader-restricted, never a public option).
+ *
+ * MESSAGE ROW / MENU ORDER SECTIONS (added alongside the same round's
+ * message-chrome redesign - see `apps/forum/client.js`'s own top doc
+ * comment on `content.messageFooter`/`content.messageMenu`): edits
+ * `settings.extensionOrder`, an admin-wide `{[point]: [id, ...]}` map
+ * `@qu/foundation`'s `rankFor()` consults to sort BOTH a host app's own
+ * native items (`core.menu`, `edit`, ...) and a plugin's manifest
+ * `contributes` entry (`reactions`, `pins`, `bookmarks`) for a given point -
+ * see that function's own doc comment. `KNOWN_ORDER_POINTS` below is the
+ * FIXED catalog of points this UI knows how to edit (native ids + a default
+ * order, hand-picked to match `apps/forum/client.js`'s/`apps/chat/client.js`'s
+ * own `FOOTER_ORDER_DEFAULT`/`MENU_ORDER_DEFAULT` - keep all three copies in
+ * sync if any of them ever changes) - a real future round could discover
+ * points generically via `@qu/foundation`'s `listDefinedPoints()` instead of
+ * this hardcoded list, deliberately not built here to keep this round's
+ * scope to what was actually asked (order two known points, simply and
+ * robustly) rather than a fully generic point-editor.
+ *
+ * REORDERING UI is a plain ordered list with ▲/▼ buttons, not drag-and-drop
+ * - a deliberate simplicity choice (no drag-and-drop library, no custom
+ * HTML5 drag-event wiring to maintain) that's exactly as capable for a
+ * short, few-item list like either point has today.
  */
 import { QuCrypto } from '@qu/core';
 import { createI18n } from '@qu/i18n';
+import { rankFor } from '@qu/foundation';
 import { injectStyle, ensureTheme } from '@qu/ui';
+
+/**
+ * The fixed catalog of extension points this UI can reorder - native item
+ * ids/labels + a default order matching `apps/forum/client.js`'s/
+ * `apps/chat/client.js`'s own `FOOTER_ORDER_DEFAULT`/`MENU_ORDER_DEFAULT`.
+ * `titleKey`/`nativeLabelKey`s are `DICT` keys, resolved at render time
+ * (after `t` exists) rather than stored as already-resolved strings here.
+ */
+const KNOWN_ORDER_POINTS = [
+  {
+    point: 'content.messageFooter',
+    titleKey: 'orderMessageFooter',
+    defaultOrder: { reactions: 0, 'core.menu': 10, 'core.timestamp': 20, 'core.readReceipt': 30 },
+    nativeItems: [
+      { id: 'core.menu', labelKey: 'orderCoreMenu' },
+      { id: 'core.timestamp', labelKey: 'orderCoreTimestamp' },
+      { id: 'core.readReceipt', labelKey: 'orderCoreReadReceipt' },
+    ],
+  },
+  {
+    point: 'content.messageMenu',
+    titleKey: 'orderMessageMenu',
+    defaultOrder: { edit: 0, reply: 5, pin: 10, bookmark: 20 },
+    nativeItems: [
+      { id: 'edit', labelKey: 'orderCoreEdit' },
+      { id: 'reply', labelKey: 'orderCoreReply' },
+    ],
+  },
+];
 
 const DICT = {
   en: {
@@ -63,6 +115,17 @@ const DICT = {
     chatHint: 'This relay\'s own admins can always create a chat group, regardless of this setting. 1:1 chats between contacts are never gated.',
     flagTypes: 'Flag types',
     flagTypesHint: 'Read-only for now - edit via a future round.',
+    orderMessageFooter: 'Message row order',
+    orderMessageFooterHint: 'The per-message footer row (below every forum post / chat bubble) - same order in Forum and Chat.',
+    orderMessageMenu: 'Message menu order',
+    orderMessageMenuHint: 'The "⋮" context menu on a message - same order in Forum and Chat. An unchecked app in the Apps section above removes its own entry entirely.',
+    orderCoreMenu: '⋮ Context menu',
+    orderCoreTimestamp: 'Timestamp',
+    orderCoreReadReceipt: 'Read tick (chat)',
+    orderCoreEdit: 'Edit',
+    orderCoreReply: 'Reply (chat)',
+    orderMoveUp: 'Move up',
+    orderMoveDown: 'Move down',
     save: 'Save settings',
     saved: 'Saved.',
     saveFailed: 'Save failed: {error}',
@@ -84,6 +147,17 @@ const DICT = {
     chatHint: 'Admins dieses Relays dürfen unabhängig von dieser Einstellung immer eine Chat-Gruppe anlegen. 1:1-Chats zwischen Kontakten sind nie eingeschränkt.',
     flagTypes: 'Flag-Typen',
     flagTypesHint: 'Aktuell nur lesbar - Bearbeitung folgt in einer späteren Runde.',
+    orderMessageFooter: 'Reihenfolge der Nachrichtenzeile',
+    orderMessageFooterHint: 'Die Fußzeile unter jedem Forumsbeitrag / jeder Chat-Nachricht - identische Reihenfolge in Forum und Chat.',
+    orderMessageMenu: 'Reihenfolge des Nachrichtenmenüs',
+    orderMessageMenuHint: 'Das "⋮"-Kontextmenü einer Nachricht - identische Reihenfolge in Forum und Chat. Eine oben in "Apps" abgewählte App entfernt ihren Eintrag komplett.',
+    orderCoreMenu: '⋮ Kontextmenü',
+    orderCoreTimestamp: 'Zeitstempel',
+    orderCoreReadReceipt: 'Gelesen-Häkchen (Chat)',
+    orderCoreEdit: 'Bearbeiten',
+    orderCoreReply: 'Antworten (Chat)',
+    orderMoveUp: 'Nach oben',
+    orderMoveDown: 'Nach unten',
     save: 'Einstellungen speichern',
     saved: 'Gespeichert.',
     saveFailed: 'Speichern fehlgeschlagen: {error}',
@@ -102,7 +176,96 @@ const STYLE = `
   .qu-relay-admin-flagtypes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; }
   .qu-relay-admin-status { margin-top: 0.6rem; font-size: 0.9em; }
   .qu-relay-admin-status.qu-relay-admin-status-error { color: var(--qu-color-danger, #d64545); }
+  .qu-relay-admin-order-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.15rem; max-width: 22rem; }
+  .qu-relay-admin-order-row { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.3rem 0.5rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-sm, 0.3rem); }
+  .qu-relay-admin-order-row-buttons { display: flex; gap: 0.2rem; flex-shrink: 0; }
+  .qu-relay-admin-order-row-buttons button { background: none; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-sm, 0.3rem); cursor: pointer; font: inherit; line-height: 1; padding: 0.2rem 0.4rem; }
+  .qu-relay-admin-order-row-buttons button:disabled { opacity: 0.35; cursor: default; }
 `;
+
+/**
+ * @param {string} point
+ * @param {Array<{id: string}>} nativeItems
+ * @param {Record<string, number>} defaultOrder
+ * @param {Array<object>} apps - the manifest catalog, for discovering which
+ *   apps actually contribute to `point` today (their manifest `label`/`icon`
+ *   for display).
+ * @param {string[]|undefined} configured - `settings.extensionOrder[point]`, if already set.
+ * @returns {Array<{id: string, label: string}>} The list to display/reorder,
+ *   in EFFECTIVE current order - `configured` if set (any newly-appeared id
+ *   not yet in it gets appended, same "unlisted ids go to the end" rule
+ *   `rankFor()` itself already applies at render time), else every known
+ *   id sorted by `defaultOrder`.
+ */
+function resolveOrderItems(point, nativeItems, defaultOrder, apps, configured) {
+  const catalogContributors = apps
+    .filter((a) => a.enabled !== false && (a.contributes ?? []).some((c) => c.point === point))
+    .map((a) => ({ id: a.name, label: `${a.icon ?? '🧩'} ${a.label ?? a.name}` }));
+  const known = new Map([...nativeItems.map((n) => [n.id, n]), ...catalogContributors.map((c) => [c.id, c])]);
+
+  const ids = Array.isArray(configured) && configured.length > 0
+    ? [...configured.filter((id) => known.has(id)), ...[...known.keys()].filter((id) => !configured.includes(id))]
+    : [...known.keys()].sort((a, b) => rankFor({}, point, a, defaultOrder[a] ?? 50) - rankFor({}, point, b, defaultOrder[b] ?? 50));
+
+  return ids.map((id) => known.get(id));
+}
+
+/**
+ * One reorderable `<section>` for a single point - ▲/▼ buttons mutate a
+ * local array (nothing persisted until the surrounding form's own Save),
+ * see this file's own top doc comment on why not drag-and-drop.
+ * @returns {{section: HTMLElement, getOrder: () => string[]}}
+ */
+function buildOrderSection(titleKey, hintKey, items) {
+  const section = document.createElement('section');
+  const title = document.createElement('h2');
+  title.textContent = t(titleKey);
+  const hint = document.createElement('p');
+  hint.className = 'qu-relay-admin-hint';
+  hint.textContent = t(hintKey);
+  const list = document.createElement('ul');
+  list.className = 'qu-relay-admin-order-list';
+  section.append(title, hint, list);
+
+  let order = items.map((item) => item.id);
+  const labelOf = (id) => items.find((item) => item.id === id)?.label ?? id;
+
+  function render() {
+    list.textContent = '';
+    order.forEach((id, index) => {
+      const li = document.createElement('li');
+      li.className = 'qu-relay-admin-order-row';
+      const label = document.createElement('span');
+      label.textContent = labelOf(id);
+      const buttons = document.createElement('div');
+      buttons.className = 'qu-relay-admin-order-row-buttons';
+      const upBtn = document.createElement('button');
+      upBtn.type = 'button';
+      upBtn.textContent = '▲';
+      upBtn.title = t('orderMoveUp');
+      upBtn.disabled = index === 0;
+      upBtn.addEventListener('click', () => {
+        [order[index - 1], order[index]] = [order[index], order[index - 1]];
+        render();
+      });
+      const downBtn = document.createElement('button');
+      downBtn.type = 'button';
+      downBtn.textContent = '▼';
+      downBtn.title = t('orderMoveDown');
+      downBtn.disabled = index === order.length - 1;
+      downBtn.addEventListener('click', () => {
+        [order[index], order[index + 1]] = [order[index + 1], order[index]];
+        render();
+      });
+      buttons.append(upBtn, downBtn);
+      li.append(label, buttons);
+      list.appendChild(li);
+    });
+  }
+  render();
+
+  return { section, getOrder: () => order };
+}
 
 /**
  * @param {HTMLElement} container
@@ -219,6 +382,14 @@ export async function mount(container, { identity, services, apps }) {
   chatHint.textContent = t('chatHint');
   chatSection.append(chatTitle, allowCreateGroupLabel, chatHint);
 
+  // ---- Message row / menu order ----
+  const orderSections = KNOWN_ORDER_POINTS.map(({ point, titleKey, defaultOrder, nativeItems }) => {
+    const resolvedNativeItems = nativeItems.map((n) => ({ id: n.id, label: t(n.labelKey) }));
+    const items = resolveOrderItems(point, resolvedNativeItems, defaultOrder, apps, settings.extensionOrder?.[point]);
+    const built = buildOrderSection(titleKey, `${titleKey}Hint`, items);
+    return { point, ...built };
+  });
+
   // ---- Flag types (read-only) ----
   const flagTypesSection = document.createElement('section');
   const flagTypesTitle = document.createElement('h2');
@@ -243,7 +414,7 @@ export async function mount(container, { identity, services, apps }) {
   status.className = 'qu-relay-admin-status';
   status.hidden = true;
 
-  form.append(generalSection, appsSection, channelsSection, chatSection, flagTypesSection, saveBtn, status);
+  form.append(generalSection, appsSection, channelsSection, chatSection, ...orderSections.map((o) => o.section), flagTypesSection, saveBtn, status);
   bodyRoot.appendChild(form);
 
   form.addEventListener('submit', async (e) => {
@@ -258,6 +429,12 @@ export async function mount(container, { identity, services, apps }) {
         disabledApps: newDisabledApps,
         channels: { allowMemberCreate: allowCreateInput.checked, allowMemberRestricted: allowRestrictedInput.checked },
         chat: { allowMemberCreateGroup: allowCreateGroupInput.checked },
+        // extensionOrder replaces the WHOLE map on save (see relay-settings.js's
+        // own doc comment on that field) - every known point from
+        // KNOWN_ORDER_POINTS is always included here, so a point this form
+        // doesn't show is simply never in the patch (nothing to preserve -
+        // this UI is currently the only writer of extensionOrder at all).
+        extensionOrder: Object.fromEntries(orderSections.map((o) => [o.point, o.getOrder()])),
       };
       const mainKey = await identity.getMainKey();
       const signature = await QuCrypto.sign(new TextEncoder().encode(JSON.stringify(patch)), mainKey.privateKeyPkcs8);

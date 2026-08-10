@@ -1,5 +1,6 @@
 import { QuEvents } from '@qu/core';
 import { createLogger } from '@qu/log';
+import { rankFor } from './extension-order.js';
 
 const log = createLogger('extension-points');
 
@@ -94,6 +95,8 @@ export class ExtensionPointHost {
   #apps;
   /** @type {QuEvents} */
   #events;
+  /** @type {Record<string, string[]>|null} */
+  #extensionOrder;
   /** @type {Map<string, Promise<object>>} */
   #moduleCache = new Map();
   /** @type {Set<string>} */
@@ -103,20 +106,33 @@ export class ExtensionPointHost {
    * @param {Array<object>} apps - The manifest catalog (e.g. `ctx.apps`) -
    *   each entry as `buildAppsCatalog()` shapes it (`name`, `clientMainUrl`,
    *   `contributes`, ...).
-   * @param {{events?: QuEvents}} [options] - `events` lets a caller share one
-   *   `QuEvents` instance across several `ExtensionPointHost`s, or register
-   *   its own LOCAL, in-memory `.on()` handlers (e.g. from the currently
-   *   mounted app's own code) alongside manifest-declared contributors for
-   *   the same `point` - defaults to a fresh, private instance.
+   * @param {{events?: QuEvents, extensionOrder?: Record<string, string[]>}} [options]
+   *   `events` lets a caller share one `QuEvents` instance across several
+   *   `ExtensionPointHost`s, or register its own LOCAL, in-memory `.on()`
+   *   handlers (e.g. from the currently mounted app's own code) alongside
+   *   manifest-declared contributors for the same `point` - defaults to a
+   *   fresh, private instance. `extensionOrder` is relay-settings' own
+   *   admin-edited `{[point]: [id, ...]}` map (see `extension-order.js`'s
+   *   own doc comment) - when a point's id is listed there, it overrides
+   *   that contributor's manifest `contributes[].order` for sorting
+   *   purposes; exposed back via the `.order` getter below so a host app
+   *   can rank its OWN native items (via `rankFor()`) consistently with
+   *   whatever a plugin contributor gets sorted by.
    */
-  constructor(apps, { events } = {}) {
+  constructor(apps, { events, extensionOrder } = {}) {
     this.#apps = apps ?? [];
     this.#events = events ?? new QuEvents();
+    this.#extensionOrder = extensionOrder ?? null;
   }
 
   /** The underlying `QuEvents` bus - exposed so a mounted app can `.on()` its own local handlers alongside manifest-declared contributors. */
   get events() {
     return this.#events;
+  }
+
+  /** The admin-edited `{[point]: [id, ...]}` order map this host was built with (possibly `null`) - see `extension-order.js`'s `rankFor()`, the intended way to consult it. */
+  get order() {
+    return this.#extensionOrder;
   }
 
   /**
@@ -181,7 +197,10 @@ export class ExtensionPointHost {
       if (app.enabled === false) continue; // an admin-disabled app (relay-settings' disabledApps) contributes nothing, same as not being in the catalog at all
       for (const c of app.contributes ?? []) {
         if (c.point !== point) continue;
-        found.push({ appId: app.name, clientMainUrl: app.clientMainUrl, export: c.export, order: c.order ?? 0 });
+        // rankFor() lets an admin's extensionOrder override this manifest
+        // order for sorting purposes - see this class's own constructor
+        // doc comment and extension-order.js's own doc comment.
+        found.push({ appId: app.name, clientMainUrl: app.clientMainUrl, export: c.export, order: rankFor(this.#extensionOrder, point, app.name, c.order ?? 0) });
       }
     }
     return found.sort((a, b) => a.order - b.order);
