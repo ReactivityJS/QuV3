@@ -251,7 +251,7 @@ function formatReplies(count) {
 const STYLE_ID = 'qu-forum-style';
 const STYLE = `
   .qu-forum-messages { list-style: none; margin: 0 0 0.8rem; padding: 0; display: flex; flex-direction: column; gap: 0.6rem; }
-  .qu-forum-message { display: flex; gap: 0.6rem; padding: 0.5rem 0.7rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); }
+  .qu-forum-message { display: flex; gap: 0.6rem; padding: 0.55rem 0.75rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-lg, 0.7rem); background: var(--qu-color-surface, transparent); box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
   .qu-forum-message-body { flex: 1; min-width: 0; }
   .qu-forum-message-head { display: flex; align-items: baseline; gap: 0.5rem; }
   .qu-forum-message-author { font-weight: 600; }

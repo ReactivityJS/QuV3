@@ -13,6 +13,25 @@ import { installDom, waitFor } from '@qu/ui/testing';
 installDom();
 const { mount, renderChatSettings } = await import('../client.js');
 
+/** A minimal MediaRecorder test double - start()/stop() only, stop() synchronously fires ondataavailable then onstop, matching real MediaRecorder's own event order closely enough for startRecording()'s own handler. */
+class FakeMediaRecorder {
+  constructor() {
+    this.mimeType = 'audio/webm';
+  }
+  start() {}
+  stop() {
+    this.ondataavailable?.({ data: new Blob(['fake voice bytes'], { type: 'audio/webm' }) });
+    this.onstop?.();
+  }
+}
+function installVoiceMocks() {
+  navigator.mediaDevices = { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) };
+  globalThis.MediaRecorder = FakeMediaRecorder;
+}
+function installGeolocationMock(coords = { latitude: 52.52, longitude: 13.405 }) {
+  navigator.geolocation = { getCurrentPosition: (success) => success({ coords }) };
+}
+
 function createQu() {
   const qu = new QuStore();
   qu.mount('store', new MemoryStoreAdapter());
@@ -116,7 +135,7 @@ test('a 1:1 room derives the SAME roomId for both members, and messages round-tr
 
     const textarea = container.querySelector('textarea');
     textarea.value = 'Hey Bob!';
-    const sendBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === 'Send');
+    const sendBtn = container.querySelector('.qu-chat-composer-action');
     sendBtn.click();
 
     await waitFor(() => container.querySelector('.qu-chat-bubble-text')?.textContent.includes('Hey Bob!'));
@@ -258,7 +277,7 @@ test('the "Reply" menu item (native, any message) opens the reply banner and tag
 
     const textarea = container.querySelector('textarea');
     textarea.value = 'my reply';
-    [...container.querySelectorAll('button')].find((b) => b.textContent === 'Send').click();
+    container.querySelector('.qu-chat-composer-action').click();
 
     await waitFor(() => [...container.querySelectorAll('.qu-chat-bubble-text')].some((el) => el.textContent.includes('my reply')));
     const { messages } = await alice.services.messages.listMessages(CHAT_SPACE_ID, roomId);
@@ -328,10 +347,90 @@ test('a message with no reply banner active posts with replyTo: null (not "undef
     await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
     const textarea = container.querySelector('textarea');
     textarea.value = 'no reply';
-    [...container.querySelectorAll('button')].find((b) => b.textContent === 'Send').click();
+    container.querySelector('.qu-chat-composer-action').click();
     await waitFor(() => container.querySelector('.qu-chat-bubble-text')?.textContent.includes('no reply'));
     const { messages } = await alice.services.messages.listMessages(CHAT_SPACE_ID, roomId);
     assert.equal(messages.find((m) => m.body === 'no reply').replyTo, null);
+  } finally {
+    stop();
+  }
+});
+
+test('the composer action button morphs between mic (empty) and send (has text)', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
+    const actionBtn = container.querySelector('.qu-chat-composer-action');
+    const textarea = container.querySelector('textarea');
+    assert.equal(actionBtn.textContent, '🎙️');
+
+    textarea.value = 'hello';
+    textarea.dispatchEvent(new window.Event('input'));
+    assert.equal(actionBtn.textContent, '➤');
+
+    textarea.value = '';
+    textarea.dispatchEvent(new window.Event('input'));
+    assert.equal(actionBtn.textContent, '🎙️');
+  } finally {
+    stop();
+  }
+});
+
+test('recording a voice message (mocked MediaRecorder) uploads it as an attachment and posts extra.voice: true, rendered as a native <qu-asset>', async () => {
+  installVoiceMocks();
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
+    const actionBtn = container.querySelector('.qu-chat-composer-action');
+    assert.equal(actionBtn.textContent, '🎙️');
+
+    actionBtn.click(); // start recording
+    await waitFor(() => actionBtn.textContent === '⏹');
+    actionBtn.click(); // stop -> FakeMediaRecorder.stop() synchronously fires ondataavailable+onstop
+
+    await waitFor(() => container.querySelector('.qu-chat-bubble-attachment') !== null);
+    const roomId = await ChatService.roomId([alice.myPub, bob.myPub]);
+    const { messages } = await alice.services.messages.listMessages(CHAT_SPACE_ID, roomId);
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0].voice, true);
+    assert.ok(messages[0].attachment?.assetId);
+    // no redundant placeholder text line next to the player - see renderMessageText()'s own doc comment
+    assert.equal(container.querySelector('.qu-chat-bubble-text'), null);
+  } finally {
+    stop();
+  }
+});
+
+test('sharing location posts a message with extra.location, rendered as an OpenStreetMap link + coordinates', async () => {
+  installGeolocationMock({ latitude: 52.52, longitude: 13.405 });
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
+    container.querySelector('.qu-chat-tool-btn').click(); // the ONLY .qu-chat-tool-btn is the location button - attachUpload is a <qu-asset-upload>, not this class
+
+    await waitFor(() => container.querySelector('.qu-chat-bubble-location') !== null);
+    const link = container.querySelector('.qu-chat-bubble-location a');
+    assert.match(link.href, /openstreetmap\.org.*mlat=52\.52.*mlon=13\.405/);
+    assert.match(container.querySelector('.qu-chat-bubble-location-coords').textContent, /52\.52000, 13\.40500/);
+
+    const roomId = await ChatService.roomId([alice.myPub, bob.myPub]);
+    const { messages } = await alice.services.messages.listMessages(CHAT_SPACE_ID, roomId);
+    assert.deepEqual(messages[0].location, { lat: 52.52, lng: 13.405 });
   } finally {
     stop();
   }

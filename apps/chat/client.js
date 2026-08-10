@@ -81,17 +81,45 @@
  * Routes: `#/chat` (room list), `#/chat/<peerActorPub>` (1:1 room),
  * `#/chat/g/<groupId>` (group room), `#/chat/new-group` (create-group form).
  *
+ * COMPOSER: a rounded "pill" (textarea + emoji trigger) plus a tool
+ * cluster (attach/location) and ONE circular action button that MORPHS
+ * between 🎙️ (composer empty) and ➤ send (composer has text) - Telegram/
+ * WhatsApp's own composer language, not a flat text-input row with a line
+ * of plain buttons after it. See `updateActionBtn()`.
+ *
+ * VOICE MESSAGES: `MediaRecorder` (feature-detected - silently falls back
+ * to a `voiceNotSupported` hint on a browser/device without it) records to
+ * a `Blob`, uploaded through the EXACT SAME `services.assets.upload()` +
+ * `message.extra.attachment` shape a file attachment already uses (see
+ * `attachUpload`'s own `qu-asset-uploaded` handler) - so `<qu-asset
+ * kind="auto">`'s existing MIME sniff (`@qu/ui`'s `asset-components.js`)
+ * picks `audio` and renders a native `<audio controls>` player for it, zero
+ * new rendering code needed. `message.extra.voice: true` only suppresses
+ * the redundant placeholder body text (`t('voiceMessage')`) next to the
+ * player - see `renderMessageText()`.
+ *
+ * LOCATION SHARING: one-time position (`navigator.geolocation`, also
+ * feature-detected), sent as `message.extra.location: {lat, lng}` - a
+ * message-list entry like any other, not a special view. Deliberately NO
+ * embedded map-TILE preview image: rendering one would mean fetching from a
+ * third-party tile server on every view of the message, leaking this room's
+ * location to a party beyond the relay/its members - just a link out to
+ * OpenStreetMap plus the raw coordinates as text.
+ *
  * SCOPE - deliberately NOT ported from QuV2's messenger, left for a real
- * follow-up round rather than half-built here: forwarding, voice messages
- * (MediaRecorder), location sharing, per-chat/global search with
- * link/file/image/date filters, a three-state (sent/relay-confirmed/read)
- * tick - this app renders a simpler two-state (sent/read) tick instead,
- * since no client-side hook into `SyncEngine.waitForAck()` is wired through
- * `services` yet. Visual `@mention` highlighting inside a message body is
- * also not rendered (the underlying `mentions` field still drives push
- * notification routing via this app's own `pushActions`, which is the part
- * that actually matters functionally) - only bare `http(s)://` links are
- * auto-linked, via `@qu/services`' shared `detectLinks()`.
+ * follow-up round rather than half-built here: forwarding, per-chat/global
+ * search with link/file/image/date filters, a three-state (sent/relay-
+ * confirmed/read) tick - this app renders a simpler two-state (sent/read)
+ * tick instead, since no client-side hook into `SyncEngine.waitForAck()` is
+ * wired through `services` yet. A recorded voice message has no waveform/
+ * duration preview (the native `<audio controls>` element's own scrubber
+ * covers playback position) and no press-and-hold-to-record/slide-to-cancel
+ * gesture (tap-to-start, tap-to-stop instead) - both real, valid follow-ups,
+ * not attempted half-way here. Visual `@mention` highlighting inside a
+ * message body is also not rendered (the underlying `mentions` field still
+ * drives push notification routing via this app's own `pushActions`, which
+ * is the part that actually matters functionally) - only bare `http(s)://`
+ * links are auto-linked, via `@qu/services`' shared `detectLinks()`.
  */
 import { watch, watchChildren } from '@qu/reactive';
 import { paths, formatActorLabel, getPrivate, putPrivate, detectLinks, ChatService } from '@qu/services';
@@ -123,6 +151,12 @@ const DICT = {
     moreActions: 'More actions',
     attachRemove: 'Remove attachment',
     insertEmoji: 'Insert emoji',
+    recordVoice: 'Record a voice message',
+    voiceStop: 'Stop recording and send',
+    voiceNotSupported: 'Voice messages aren\'t supported in this browser.',
+    voiceMessage: '🎙️ Voice message',
+    shareLocation: 'Share my location',
+    locationMessage: 'Location',
     newGroup: '+ New group',
     createGroup: 'Create group',
     groupName: 'Group name',
@@ -149,6 +183,12 @@ const DICT = {
     moreActions: 'Weitere Aktionen',
     attachRemove: 'Anhang entfernen',
     insertEmoji: 'Emoji einfügen',
+    recordVoice: 'Sprachnachricht aufnehmen',
+    voiceStop: 'Aufnahme beenden und senden',
+    voiceNotSupported: 'Sprachnachrichten werden in diesem Browser nicht unterstützt.',
+    voiceMessage: '🎙️ Sprachnachricht',
+    shareLocation: 'Meinen Standort teilen',
+    locationMessage: 'Standort',
     newGroup: '+ Neue Gruppe',
     createGroup: 'Gruppe erstellen',
     groupName: 'Gruppenname',
@@ -181,22 +221,30 @@ const STYLE = `
   .qu-chat-header { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.6rem; }
   .qu-chat-header-name { font-weight: 700; font-size: 1.1em; }
   .qu-chat-header-status { font-size: 0.8em; opacity: 0.65; }
-  .qu-chat-messages { list-style: none; margin: 0 0 0.8rem; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; max-width: 40rem; }
+  .qu-chat-messages { list-style: none; margin: 0 0 0.8rem; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; max-width: 40rem; }
   .qu-chat-bubble-row { display: flex; }
   .qu-chat-bubble-row-mine { justify-content: flex-end; }
-  .qu-chat-bubble { max-width: 80%; padding: 0.4rem 0.65rem; border-radius: var(--qu-radius-lg, 0.9rem); background: var(--qu-color-surface, #8882); }
-  .qu-chat-bubble-mine { background: color-mix(in srgb, var(--qu-color-accent, #5b5bd6) 25%, transparent); }
+  /* A soft "tail" via asymmetric corners - the corner nearest the avatar
+     side stays sharp, matching Telegram/WhatsApp's own bubble language -
+     plus a faint shadow so bubbles read as distinct surfaces, not just
+     flat-colored text blocks. */
+  .qu-chat-bubble { max-width: 75%; padding: 0.45rem 0.7rem; border-radius: var(--qu-radius-lg, 0.9rem) var(--qu-radius-lg, 0.9rem) var(--qu-radius-lg, 0.9rem) var(--qu-radius-sm, 0.25rem); background: var(--qu-color-surface, #8882); box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
+  .qu-chat-bubble-mine { background: color-mix(in srgb, var(--qu-color-accent, #5b5bd6) 25%, transparent); border-radius: var(--qu-radius-lg, 0.9rem) var(--qu-radius-lg, 0.9rem) var(--qu-radius-sm, 0.25rem) var(--qu-radius-lg, 0.9rem); }
   .qu-chat-bubble-author { font-size: 0.78em; font-weight: 600; opacity: 0.8; margin-bottom: 0.1rem; }
   .qu-chat-bubble-reply { border-left: 2px solid var(--qu-color-accent, #5b5bd6); padding-left: 0.4rem; margin-bottom: 0.25rem; font-size: 0.82em; opacity: 0.75; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .qu-chat-bubble-text { overflow-wrap: anywhere; white-space: pre-wrap; }
   .qu-chat-bubble-text a { color: inherit; }
+  .qu-chat-bubble-location { margin-top: 0.2rem; }
+  .qu-chat-bubble-location a { color: inherit; font-weight: 600; text-decoration: none; }
+  .qu-chat-bubble-location a:hover { text-decoration: underline; }
+  .qu-chat-bubble-location-coords { font-size: 0.78em; opacity: 0.7; margin-top: 0.1rem; }
   /* The per-message footer ROW (content.messageFooter) - menu trigger,
      timestamp, read-tick, reactions, in whatever order rankFor() resolves
      (admin-configurable, see this file's own top doc comment and
      FOOTER_ORDER_DEFAULT above). Each segment renders into its own <span>
      child, laid out by this one flex rule - mirrors
      apps/forum/client.js's own .qu-forum-message-footer exactly. */
-  .qu-chat-bubble-footer { display: flex; align-items: center; gap: 0.4rem; margin-top: 0.25rem; font-size: 0.7em; opacity: 0.75; flex-wrap: wrap; }
+  .qu-chat-bubble-footer { display: flex; align-items: center; gap: 0.4rem; margin-top: 0.3rem; font-size: 0.7em; opacity: 0.75; flex-wrap: wrap; }
   .qu-chat-bubble-tick-read { color: var(--qu-color-accent, #5b5bd6); opacity: 1; }
   .qu-chat-bubble-attachment { margin-top: 0.4rem; max-width: 16rem; }
   .qu-chat-edit-row { display: flex; flex-direction: column; gap: 0.3rem; position: relative; }
@@ -205,10 +253,22 @@ const STYLE = `
   .qu-chat-reply-banner { display: flex; justify-content: space-between; align-items: center; padding: 0.3rem 0.6rem; border-left: 3px solid var(--qu-color-accent, #5b5bd6); background: var(--qu-color-surface, #8882); border-radius: var(--qu-radius-sm, 0.3rem); font-size: 0.85em; margin-bottom: 0.3rem; }
   .qu-chat-reply-banner button { background: none; border: none; cursor: pointer; opacity: 0.7; font: inherit; }
   .qu-chat-composer-wrap { display: flex; flex-direction: column; gap: 0.4rem; max-width: 40rem; }
-  .qu-chat-composer { display: flex; gap: 0.5rem; position: relative; }
-  .qu-chat-composer textarea { flex: 1; font: inherit; padding: 0.5rem 0.6rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); resize: vertical; min-height: 2.4rem; }
-  .qu-chat-composer button { padding: 0 1rem; border-radius: var(--qu-radius-md, 0.4rem); border: none; background: var(--qu-color-accent, #5b5bd6); color: white; cursor: pointer; font: inherit; }
-  .qu-chat-composer button:disabled { opacity: 0.6; cursor: default; }
+  /* The composer: a tool cluster (attach/location), a rounded PILL holding
+     the textarea + emoji trigger, and one circular action button that
+     morphs mic <-> send (see updateActionBtn() in mountRoomView()) -
+     Telegram/WhatsApp's own composer language, not a single flat text-input
+     row with a row of plain buttons after it. */
+  .qu-chat-composer { display: flex; align-items: flex-end; gap: 0.4rem; position: relative; }
+  .qu-chat-composer-tools { display: flex; align-items: center; gap: 0.2rem; padding-bottom: 0.35rem; }
+  .qu-chat-tool-btn { background: none; border: none; cursor: pointer; font-size: 1.1em; padding: 0.3rem; border-radius: 999px; opacity: 0.75; }
+  .qu-chat-tool-btn:hover { opacity: 1; background: var(--qu-color-border, #8884); }
+  .qu-chat-tool-btn:disabled { opacity: 0.35; cursor: default; }
+  .qu-chat-composer-input-wrap { flex: 1; min-width: 0; display: flex; align-items: flex-end; gap: 0.3rem; background: var(--qu-color-surface, #8882); border: 1px solid var(--qu-color-border, #8884); border-radius: 1.3rem; padding: 0.4rem 0.6rem; }
+  .qu-chat-composer-input-wrap textarea { flex: 1; min-width: 0; font: inherit; border: none; background: transparent; resize: none; min-height: 1.4rem; max-height: 8rem; padding: 0.15rem 0; }
+  .qu-chat-composer-input-wrap textarea:focus { outline: none; }
+  .qu-chat-composer-action { flex-shrink: 0; width: 2.6rem; height: 2.6rem; border-radius: 50%; border: none; background: var(--qu-color-accent, #5b5bd6); color: white; cursor: pointer; font-size: 1.1em; line-height: 1; }
+  .qu-chat-composer-action:disabled { opacity: 0.6; cursor: default; }
+  .qu-chat-composer-action-recording { background: var(--qu-color-danger, #d64545); }
   .qu-chat-pending-attachment { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85em; opacity: 0.85; }
   .qu-chat-pending-attachment[hidden] { display: none; }
   .qu-chat-pending-attachment button { background: none; border: none; cursor: pointer; opacity: 0.7; font: inherit; padding: 0; }
@@ -600,22 +660,41 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   const replyBanner = document.createElement('div');
   replyBanner.className = 'qu-chat-reply-banner';
   replyBanner.hidden = true;
+
+  // The composer is a rounded "pill" (textarea + emoji trigger) plus a
+  // tool cluster (attach/location) and one circular action button on the
+  // right that MORPHS between mic (empty composer) and send (composer has
+  // text) - see this file's own top doc comment's "COMPOSER" section.
   const composerRow = document.createElement('div');
   composerRow.className = 'qu-chat-composer';
-  const composerInput = document.createElement('textarea');
-  composerInput.placeholder = t('composerPlaceholder');
+  const composerTools = document.createElement('div');
+  composerTools.className = 'qu-chat-composer-tools';
   const attachUpload = document.createElement('qu-asset-upload');
   attachUpload.setAttribute('space-id', SPACE_ID);
   attachUpload.setAttribute('label', '📎');
-  const sendBtn = document.createElement('button');
-  sendBtn.type = 'button';
-  sendBtn.textContent = t('send');
+  const locationBtn = document.createElement('button');
+  locationBtn.type = 'button';
+  locationBtn.className = 'qu-chat-tool-btn';
+  locationBtn.textContent = '📍';
+  locationBtn.title = t('shareLocation');
+  composerTools.append(attachUpload, locationBtn);
+
+  const inputWrap = document.createElement('div');
+  inputWrap.className = 'qu-chat-composer-input-wrap';
+  const composerInput = document.createElement('textarea');
+  composerInput.placeholder = t('composerPlaceholder');
   const emojiPicker = renderEmojiPicker({
     onPick: (emoji) => insertAtCursor(composerInput, emoji),
     trigger: '😀',
     triggerTitle: t('insertEmoji'),
   });
-  composerRow.append(composerInput, emojiPicker, attachUpload, sendBtn);
+  inputWrap.append(composerInput, emojiPicker);
+
+  const actionBtn = document.createElement('button');
+  actionBtn.type = 'button';
+  actionBtn.className = 'qu-chat-composer-action';
+
+  composerRow.append(composerTools, inputWrap, actionBtn);
   const pendingAttachmentEl = document.createElement('div');
   pendingAttachmentEl.className = 'qu-chat-pending-attachment';
   pendingAttachmentEl.hidden = true;
@@ -676,20 +755,117 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     return profileCache.get(pub);
   }
 
-  sendBtn.addEventListener('click', async () => {
+  async function sendTextMessage() {
     if (!roomReady) return;
     const body = composerInput.value.trim();
     if (!body) return;
-    sendBtn.disabled = true;
+    actionBtn.disabled = true;
     try {
       const extra = pendingAttachment ? { attachment: pendingAttachment } : {};
       await services.messages.postMessage(SPACE_ID, roomId, { body, replyTo: replyingTo?.id ?? null, extra });
       composerInput.value = '';
       clearPendingAttachment();
       setReplyingTo(null);
+      updateActionBtn();
     } finally {
-      sendBtn.disabled = false;
+      actionBtn.disabled = false;
     }
+  }
+
+  // ---- voice messages: MediaRecorder -> the SAME AssetService upload +
+  // message.extra.attachment shape a file attachment already uses, so
+  // <qu-asset>'s own kind="auto" MIME sniff (AssetService.download()'s
+  // meta.mime, see @qu/ui's asset-components.js) picks "audio" and renders
+  // a native <audio controls> player - zero new rendering code needed. ----
+  let isRecording = false;
+  let mediaRecorder = null;
+  let recordedChunks = [];
+
+  function updateActionBtn() {
+    actionBtn.classList.toggle('qu-chat-composer-action-recording', isRecording);
+    if (isRecording) {
+      actionBtn.textContent = '⏹';
+      actionBtn.title = t('voiceStop');
+    } else if (composerInput.value.trim()) {
+      actionBtn.textContent = '➤';
+      actionBtn.title = t('send');
+    } else {
+      actionBtn.textContent = '🎙️';
+      actionBtn.title = t('recordVoice');
+    }
+  }
+  composerInput.addEventListener('input', updateActionBtn);
+  updateActionBtn();
+
+  async function startRecording() {
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      pendingAttachmentEl.hidden = false;
+      pendingAttachmentEl.textContent = t('voiceNotSupported');
+      return;
+    }
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+      return; // permission denied / no device - stays idle, nothing to recover
+    }
+    recordedChunks = [];
+    mediaRecorder = new MediaRecorder(stream);
+    mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunks.push(e.data); };
+    mediaRecorder.onstop = async () => {
+      for (const track of stream.getTracks()) track.stop();
+      const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+      if (blob.size === 0 || !roomReady) return;
+      const assetId = globalThis.crypto.randomUUID();
+      const file = new File([blob], `voice-${Date.now()}.webm`, { type: blob.type });
+      const meta = await services.assets.upload(SPACE_ID, assetId, file, { readerPubs: memberPubs });
+      await services.messages.postMessage(SPACE_ID, roomId, {
+        body: t('voiceMessage'), replyTo: replyingTo?.id ?? null,
+        extra: { attachment: { assetId, ...meta }, voice: true },
+      });
+      setReplyingTo(null);
+    };
+    mediaRecorder.start();
+    isRecording = true;
+    updateActionBtn();
+  }
+
+  function stopRecording() {
+    isRecording = false;
+    mediaRecorder?.stop();
+    mediaRecorder = null;
+    updateActionBtn();
+  }
+
+  actionBtn.addEventListener('click', () => {
+    if (isRecording) { stopRecording(); return; }
+    if (composerInput.value.trim()) { sendTextMessage(); return; }
+    startRecording();
+  });
+
+  // ---- location sharing: one-time position, sent as its own message.extra
+  // field - deliberately no embedded map-tile PREVIEW image (that would mean
+  // fetching from a third-party tile server on every render, leaking this
+  // room's location data to a party beyond the relay/its members) - just a
+  // link out to OpenStreetMap plus the raw coordinates, see renderMessageText(). ----
+  locationBtn.addEventListener('click', () => {
+    if (!roomReady || !navigator.geolocation) return;
+    locationBtn.disabled = true;
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        try {
+          await services.messages.postMessage(SPACE_ID, roomId, {
+            body: t('locationMessage'),
+            replyTo: replyingTo?.id ?? null,
+            extra: { location: { lat: position.coords.latitude, lng: position.coords.longitude } },
+          });
+          setReplyingTo(null);
+        } finally {
+          locationBtn.disabled = false;
+        }
+      },
+      () => { locationBtn.disabled = false; }
+    );
   });
 
   const editingDrafts = new Map();
@@ -856,27 +1032,49 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
 
   function renderMessageText(root, message) {
     root.textContent = '';
-    const p = document.createElement('p');
-    p.className = 'qu-chat-bubble-text';
-    for (const segment of detectLinks(message.body)) {
-      if (segment.type === 'link') {
-        const a = document.createElement('a');
-        a.href = segment.value;
-        a.target = '_blank';
-        a.rel = 'noopener noreferrer';
-        a.textContent = segment.value;
-        p.appendChild(a);
-      } else {
-        p.appendChild(document.createTextNode(segment.value));
+    // A voice message's `body` is just the placeholder t('voiceMessage')
+    // string (see startRecording()'s own onstop handler) - the <audio>
+    // player below is the actual content, so the redundant text line is
+    // skipped entirely, same reasoning a location message's own coordinate
+    // block below replaces its placeholder body text rather than showing both.
+    if (!message.voice && !message.location) {
+      const p = document.createElement('p');
+      p.className = 'qu-chat-bubble-text';
+      for (const segment of detectLinks(message.body)) {
+        if (segment.type === 'link') {
+          const a = document.createElement('a');
+          a.href = segment.value;
+          a.target = '_blank';
+          a.rel = 'noopener noreferrer';
+          a.textContent = segment.value;
+          p.appendChild(a);
+        } else {
+          p.appendChild(document.createTextNode(segment.value));
+        }
       }
+      root.appendChild(p);
     }
-    root.appendChild(p);
     if (message.attachment) {
       const assetEl = document.createElement('qu-asset');
       assetEl.className = 'qu-chat-bubble-attachment';
       assetEl.setAttribute('space-id', SPACE_ID);
       assetEl.setAttribute('asset-id', message.attachment.assetId);
       root.appendChild(assetEl);
+    }
+    if (message.location) {
+      const { lat, lng } = message.location;
+      const box = document.createElement('div');
+      box.className = 'qu-chat-bubble-location';
+      const link = document.createElement('a');
+      link.href = `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lng}#map=15/${lat}/${lng}`;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = `📍 ${t('locationMessage')}`;
+      const coords = document.createElement('div');
+      coords.className = 'qu-chat-bubble-location-coords';
+      coords.textContent = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+      box.append(link, coords);
+      root.appendChild(box);
     }
   }
 

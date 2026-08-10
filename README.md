@@ -1944,4 +1944,33 @@ own tests, built bottom-up per the dependency order in
       `context-menu.test.js`, `apps/forum`'s and `apps/chat`'s own test
       suites reworked around the menu/footer instead of the old inline
       buttons), `npm run build` bundles cleanly.
+- [x] **Chat composer redesign + voice messages + location sharing** - per
+      explicit ask ("V2's composer was nicer/more structured, bring voice
+      messages and location sharing back, using V3's own advantages"):
+      `apps/chat`'s composer is now a rounded "pill" (textarea + emoji
+      trigger) plus a tool cluster (attach/location) and ONE circular action
+      button that MORPHS between 🎙️ (composer empty) and ➤ send (composer
+      has text) - Telegram/WhatsApp's own composer language, replacing the
+      old flat text-input-plus-row-of-buttons layout. Bubbles gained a
+      subtle "tail" (asymmetric corners, sharp on the avatar side) and a
+      faint shadow so they read as distinct surfaces; `apps/forum`'s own
+      message card got the same shadow/radius touch-up.
+      **Voice messages**: `MediaRecorder` (feature-detected, degrades to a
+      hint on an unsupported browser/device) records a `Blob`, uploaded
+      through the EXACT SAME `services.assets.upload()` +
+      `message.extra.attachment` path a file attachment already used before
+      this round - so `<qu-asset kind="auto">`'s existing MIME sniff just
+      picks `audio` and renders a native `<audio controls>` player, zero new
+      rendering code. **Location sharing**: one-time `navigator.geolocation`
+      position, sent as `message.extra.location: {lat, lng}` - deliberately
+      NO embedded map-tile preview image (fetching one on every view would
+      leak a room's location to a third-party tile server beyond the relay/
+      its members), just a link out to OpenStreetMap plus the raw
+      coordinates as text. Both reuse `apps/chat`'s pre-existing encrypted-
+      room/attachment machinery unchanged - no new Service, no new
+      extension point, no new `@qu/services` code at all for either
+      feature. Verified: full suite green (1104 tests - `MediaRecorder`/
+      `navigator.geolocation` mocked in `apps/chat/test/client.test.js`,
+      including the composer's mic/send morph itself), `npm run build`
+      bundles cleanly.
 
