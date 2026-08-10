@@ -160,6 +160,51 @@ test('<qu-asset>: renders an <img> for an image/* asset', async () => {
   assert.equal(el.querySelector('img').alt, 'p.png');
 });
 
+test('<qu-asset>: clicking an image opens a fullscreen lightbox overlay; clicking the enlarged image toggles zoom; Escape closes it', async () => {
+  const service = fakeAssetService({ downloadResult: { meta: { name: 'p.png', mime: 'image/png', size: 3 }, data: new Uint8Array([1, 2, 3]) } });
+  const container = makeContainer(service);
+  const el = document.createElement('qu-asset');
+  el.setAttribute('space-id', 'gallery');
+  el.setAttribute('asset-id', 'photo1');
+  container.appendChild(el);
+
+  await waitFor(() => el.querySelector('img') !== null);
+  assert.equal(document.querySelector('.qu-asset-lightbox-overlay'), null);
+
+  el.querySelector('img').click();
+  const overlay = document.querySelector('.qu-asset-lightbox-overlay');
+  assert.ok(overlay);
+  const lightboxImg = overlay.querySelector('.qu-asset-lightbox-img');
+  assert.equal(lightboxImg.alt, 'p.png');
+  assert.equal(lightboxImg.classList.contains('qu-asset-lightbox-img-zoomed'), false);
+
+  lightboxImg.click(); // toggle zoom on, without closing the overlay
+  assert.ok(document.querySelector('.qu-asset-lightbox-overlay'));
+  assert.equal(lightboxImg.classList.contains('qu-asset-lightbox-img-zoomed'), true);
+
+  lightboxImg.click(); // toggle zoom back off
+  assert.equal(lightboxImg.classList.contains('qu-asset-lightbox-img-zoomed'), false);
+
+  document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape' }));
+  assert.equal(document.querySelector('.qu-asset-lightbox-overlay'), null);
+});
+
+test('<qu-asset>: clicking the lightbox backdrop (outside the image) closes it', async () => {
+  const service = fakeAssetService({ downloadResult: { meta: { name: 'p.png', mime: 'image/png', size: 3 }, data: new Uint8Array([1, 2, 3]) } });
+  const container = makeContainer(service);
+  const el = document.createElement('qu-asset');
+  el.setAttribute('space-id', 'gallery');
+  el.setAttribute('asset-id', 'photo1');
+  container.appendChild(el);
+
+  await waitFor(() => el.querySelector('img') !== null);
+  el.querySelector('img').click();
+  assert.ok(document.querySelector('.qu-asset-lightbox-overlay'));
+
+  document.querySelector('.qu-asset-lightbox-overlay').click();
+  assert.equal(document.querySelector('.qu-asset-lightbox-overlay'), null);
+});
+
 test('<qu-asset>: a class set by the caller BEFORE mounting survives - "qu-asset" is ADDED, never a full replacement', async () => {
   const service = fakeAssetService({ downloadResult: { meta: { name: 'p.png', mime: 'image/png', size: 3 }, data: new Uint8Array([1, 2, 3]) } });
   const container = makeContainer(service);

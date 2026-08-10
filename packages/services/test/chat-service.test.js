@@ -101,3 +101,49 @@ test('myInviteSpace() is this identity\'s own chat-invites-<pub> namespace', asy
   const alice = await freshPeer();
   assert.equal(await alice.chat.myInviteSpace(), `chat-invites-${alice.pub}`);
 });
+
+test('ensureRoom() posts a dm-invite into the OTHER member\'s mailbox on genuine first creation only; listMyDmRequests() reads it back', async () => {
+  const alice = await freshPeer();
+  const bob = await freshPeer();
+  await alice.identity.publishMainProfile({ name: 'Alice' });
+  await bob.identity.publishMainProfile({ name: 'Bob' });
+  await copyQuBit(bob.qu, alice.qu, `/store/actors/~${bob.pub}/profile`);
+  await copyQuBit(alice.qu, bob.qu, `/store/actors/~${alice.pub}/profile`);
+
+  const roomId = await alice.chat.ensureRoom('chat-space', bob.pub);
+
+  // Alice never invites herself.
+  assert.deepEqual(await alice.chat.listMyDmRequests(), []);
+
+  // Simulate the invite syncing to Bob's own store - same technique the
+  // group-invite test above uses.
+  const inviteSpace = `chat-invites-${bob.pub}`;
+  const metaBit = await alice.qu.get(`/store/${inviteSpace}/threads/groups/meta`);
+  await bob.qu.putSealed(`/store/${inviteSpace}/threads/groups/meta`, metaBit);
+  const entries = await alice.qu.getChildren(`/store/${inviteSpace}/threads/groups/msgs`);
+  for (const entry of entries) await bob.qu.putSealed(entry.path, entry.quBit);
+
+  const requests = await bob.chat.listMyDmRequests();
+  assert.deepEqual(requests, [{ fromPub: alice.pub, spaceId: 'chat-space', roomId }]);
+
+  // Re-opening the SAME room (either side, any number of times) is
+  // idempotent at the thread level and must NOT send a second invite -
+  // otherwise every visit to an already-known conversation would re-flag
+  // it as a fresh "message request".
+  await alice.chat.ensureRoom('chat-space', bob.pub);
+  await bob.chat.ensureRoom('chat-space', alice.pub);
+  const entriesAfter = await alice.qu.getChildren(`/store/${inviteSpace}/threads/groups/msgs`);
+  assert.equal(entriesAfter.length, entries.length);
+});
+
+test('ensureRoom() still creates the room even when the invite can\'t be sent (recipient\'s profile/X-key not yet known)', async () => {
+  const alice = await freshPeer();
+  const bob = await freshPeer();
+  await alice.identity.publishMainProfile({ name: 'Alice' });
+  // Deliberately NOT copying Bob's profile into Alice's store - #sendDmInvite()
+  // can't encrypt the invite for him without his X key, and must not let
+  // that failure stop the room itself from being created.
+  const roomId = await alice.chat.ensureRoom('chat-space', bob.pub);
+  const config = await alice.messages.getConfig('chat-space', roomId);
+  assert.deepEqual([...config.readers].sort(), [alice.pub, bob.pub].sort());
+});

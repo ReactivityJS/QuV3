@@ -79,6 +79,21 @@ const STYLE = `
   .qu-asset audio { width: 100%; }
   .qu-asset-file-link { display: inline-flex; align-items: center; gap: 0.4rem; text-decoration: none; }
   .qu-asset-empty { opacity: 0.6; font-size: 0.85em; }
+  /* LIGHTBOX - see renderImageLightbox()'s own doc comment. The thumbnail
+     itself just gets a zoom-in cursor; everything else is the overlay,
+     appended to document.body (never a local wrapper) so it genuinely
+     covers the whole viewport no matter where in the DOM the thumbnail
+     that opened it lives (a chat bubble, a forum post, ...). */
+  .qu-asset-image-wrap img { cursor: zoom-in; }
+  .qu-asset-lightbox-overlay { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.85); }
+  .qu-asset-lightbox-scroll { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; overflow: auto; }
+  .qu-asset-lightbox-img { max-width: 90vw; max-height: 90vh; cursor: zoom-in; box-shadow: 0 0.5rem 2rem rgba(0,0,0,0.5); }
+  /* Zoomed: natural size, no max-width/height cap - .qu-asset-lightbox-scroll's
+     own overflow:auto is what makes an image now larger than the viewport
+     scrollable instead of clipped. */
+  .qu-asset-lightbox-img-zoomed { max-width: none; max-height: none; cursor: zoom-out; }
+  .qu-asset-lightbox-close { position: fixed; top: 1rem; right: 1.2rem; z-index: 1001; background: none; border: none; color: white; font-size: 2rem; line-height: 1; cursor: pointer; opacity: 0.85; }
+  .qu-asset-lightbox-close:hover { opacity: 1; }
 `;
 
 function fmtSize(bytes) {
@@ -209,7 +224,7 @@ export class QuAssetUploadElement extends HTMLElement {
 const assetCache = new Map();
 
 function cacheKey(spaceId, assetId) {
-  return `${spaceId} ${assetId}`;
+  return `${spaceId}:${assetId}`;
 }
 
 function acquireCachedAsset(assetService, spaceId, assetId) {
@@ -313,12 +328,72 @@ function kindFromMime(mime) {
   return 'file';
 }
 
+/**
+ * Opens a fullscreen overlay (appended to `document.body`, `position:
+ * fixed; inset: 0`) showing `url` at up to 90vw/90vh, with a ✕ close
+ * button, Escape-to-close, and click-outside-to-close - the same trigger/
+ * overlay/outside-click-close shape `@qu/thread-ui`'s `renderEmojiPicker()`/
+ * `renderContextMenu()` already establish for a LOCAL popup, just anchored
+ * to the whole viewport instead of a trigger element, since a lightbox is
+ * conventionally a global overlay, not something scoped to wherever its
+ * thumbnail happens to sit in the DOM (a chat bubble, a forum post, ...).
+ *
+ * ZOOM: clicking the enlarged image itself toggles between "fit the
+ * viewport" (the default open state) and "natural size, scrollable" (the
+ * `-zoomed` class) - the same plain click-to-toggle idiom most lightboxes
+ * use, deliberately not a drag-to-pan/pinch-to-zoom gesture layer (real,
+ * valid future work, not attempted half-way here for a first pass).
+ * @param {string} url @param {{name?: string}} meta
+ */
+function openImageLightbox(url, meta) {
+  const overlay = document.createElement('div');
+  overlay.className = 'qu-asset-lightbox-overlay';
+  const scroll = document.createElement('div');
+  scroll.className = 'qu-asset-lightbox-scroll';
+  const img = document.createElement('img');
+  img.className = 'qu-asset-lightbox-img';
+  img.src = url;
+  img.alt = meta.name ?? '';
+  scroll.appendChild(img);
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'qu-asset-lightbox-close';
+  closeBtn.textContent = '✕';
+  closeBtn.title = 'Close';
+
+  function close() {
+    overlay.remove();
+    closeBtn.remove();
+    document.removeEventListener('keydown', onKeydown);
+  }
+  function onKeydown(e) {
+    if (e.key === 'Escape') close();
+  }
+  // The image toggles zoom; the surrounding backdrop (this same listener,
+  // since `scroll`/`overlay` fully wrap the image) closes - a click ON the
+  // image is stopped from also bubbling into that same close handler.
+  img.addEventListener('click', (e) => {
+    e.stopPropagation();
+    img.classList.toggle('qu-asset-lightbox-img-zoomed');
+  });
+  overlay.addEventListener('click', close);
+  closeBtn.addEventListener('click', close);
+  document.addEventListener('keydown', onKeydown);
+
+  overlay.appendChild(scroll);
+  document.body.append(overlay, closeBtn);
+}
+
 function renderByKind(kind, url, meta) {
   if (kind === 'image') {
+    const wrap = document.createElement('span');
+    wrap.className = 'qu-asset-image-wrap';
     const img = document.createElement('img');
     img.src = url;
     img.alt = meta.name;
-    return img;
+    img.addEventListener('click', () => openImageLightbox(url, meta));
+    wrap.appendChild(img);
+    return wrap;
   }
   if (kind === 'video') {
     const video = document.createElement('video');

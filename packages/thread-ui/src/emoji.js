@@ -20,6 +20,7 @@
  * own documented "no popup-menu" line by making the panel structurally
  * belong to its own trigger button instead of being a floating overlay.
  */
+import { flipUpIfNeeded } from './popup-position.js';
 
 /** Ported verbatim from QuV2 `apps/chat/client.js`'s `REACTION_CHOICES`. */
 export const EMOJI_QUICK = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🔥', '✅'];
@@ -43,7 +44,18 @@ const STYLE = `
   .qu-thread-ui-emoji-picker { position: relative; display: inline-flex; align-items: center; gap: 0.3rem; }
   .qu-thread-ui-emoji-quick, .qu-thread-ui-emoji-trigger { border: none; background: transparent; cursor: pointer; font-size: 1em; padding: 0.1rem 0.3rem; border-radius: var(--qu-radius-sm, 0.3rem); }
   .qu-thread-ui-emoji-quick:hover, .qu-thread-ui-emoji-trigger:hover { background: var(--qu-color-border, #8884); }
-  .qu-thread-ui-emoji-panel { position: absolute; z-index: 20; top: 100%; left: 0; margin-top: 0.2rem; display: grid; grid-template-columns: repeat(10, 1.6rem); gap: 0.1rem; max-height: 12rem; overflow-y: auto; padding: 0.4rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); background: var(--qu-color-surface, canvas); box-shadow: 0 0.3rem 0.8rem rgba(0,0,0,0.2); }
+  /* A genuinely OPAQUE background (--qu-color-surface, see @qu/ui's theme.js
+     own doc comment on why this token exists at all) - a floating panel
+     sitting on top of arbitrary content behind it needs real opacity, not
+     an alpha-blended token or the canvas system-color keyword this used
+     to fall back to (unsupported on some engines, silently dropping the
+     WHOLE declaration and leaving the panel blended into whatever's behind
+     it - confirmed real, reported as "too transparent"). The -flip-up class
+     is added by flipUpIfNeeded() (see @qu/thread-ui's popup-position.js)
+     when there isn't room below the trigger - same panel, anchored from
+     the bottom instead of the top. */
+  .qu-thread-ui-emoji-panel { position: absolute; z-index: 20; top: 100%; left: 0; margin-top: 0.2rem; display: grid; grid-template-columns: repeat(10, 1.6rem); gap: 0.1rem; max-height: 12rem; overflow-y: auto; padding: 0.4rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); background: var(--qu-color-surface, #ffffff); box-shadow: 0 0.3rem 0.8rem rgba(0,0,0,0.2); }
+  .qu-thread-ui-emoji-panel-flip-up { top: auto; bottom: 100%; margin-top: 0; margin-bottom: 0.2rem; }
   .qu-thread-ui-emoji-panel button { border: none; background: transparent; cursor: pointer; font-size: 1.1em; line-height: 1.6rem; border-radius: var(--qu-radius-sm, 0.3rem); }
   .qu-thread-ui-emoji-panel button:hover { background: var(--qu-color-border, #8884); }
 `;
@@ -116,6 +128,7 @@ export function renderEmojiPicker({ onPick, quick = [], extended = EMOJI_EXTENDE
       panel.appendChild(btn);
     }
     root.appendChild(panel);
+    flipUpIfNeeded(panel, triggerBtn, 'qu-thread-ui-emoji-panel-flip-up');
     // Deferred one tick so THIS same click (the one that just called
     // openPanel()) doesn't immediately bubble into onDocClick and close
     // what it just opened.

@@ -65,6 +65,34 @@ test('clicking the trigger again while the panel is open closes it (toggle)', ()
   assert.equal(el.querySelector('.qu-thread-ui-emoji-panel'), null);
 });
 
+test('opening near the bottom of the viewport flips the panel upward (flipUpIfNeeded)', () => {
+  const host = makeHost();
+  const el = renderEmojiPicker({ onPick: () => {}, trigger: '+' });
+  host.appendChild(el);
+  const trigger = el.querySelector('button');
+  window.innerHeight = 400;
+  trigger.getBoundingClientRect = () => ({ top: 380, bottom: 395, left: 0, right: 0, width: 0, height: 15 });
+
+  // The panel doesn't exist until openPanel() creates+appends it inside
+  // trigger.click() itself, so its own rect can't be stubbed beforehand -
+  // patch the shared prototype method just for this test instead, keyed by
+  // class name (real elements/tests are unaffected: this test's own host
+  // elements have no matching class).
+  const original = window.HTMLElement.prototype.getBoundingClientRect;
+  window.HTMLElement.prototype.getBoundingClientRect = function () {
+    if (this.classList.contains('qu-thread-ui-emoji-panel')) return { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 200 };
+    return original.call(this);
+  };
+  try {
+    trigger.click();
+    const panel = el.querySelector('.qu-thread-ui-emoji-panel');
+    assert.ok(panel);
+    assert.equal(panel.classList.contains('qu-thread-ui-emoji-panel-flip-up'), true);
+  } finally {
+    window.HTMLElement.prototype.getBoundingClientRect = original;
+  }
+});
+
 test('clicking outside the picker closes an open panel', async () => {
   const host = makeHost();
   const el = renderEmojiPicker({ onPick: () => {}, trigger: '+' });

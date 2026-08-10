@@ -21,10 +21,16 @@
  * for every consumer at the source rather than each one reinventing it.
  */
 import { insertAtCursor } from './cursor.js';
+import { flipUpIfNeeded } from './popup-position.js';
 
 const STYLE_ID = 'qu-thread-ui-autocomplete-style';
 const STYLE = `
-  .qu-thread-ui-autocomplete-list { position: absolute; z-index: 20; list-style: none; margin: 0.2rem 0 0; padding: 0.2rem; max-height: 10rem; overflow-y: auto; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); background: var(--qu-color-surface, canvas); box-shadow: 0 0.3rem 0.8rem rgba(0,0,0,0.2); min-width: 12rem; }
+  /* Opaque background + flip-up support - see emoji.js's own identical
+     comment on --qu-color-surface/flipUpIfNeeded() for why: a composer
+     (this dropdown's own anchor) commonly sits near the bottom of the
+     viewport, where an unconditionally-downward panel can open off-screen. */
+  .qu-thread-ui-autocomplete-list { position: absolute; z-index: 20; list-style: none; margin: 0.2rem 0 0; padding: 0.2rem; max-height: 10rem; overflow-y: auto; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); background: var(--qu-color-surface, #ffffff); box-shadow: 0 0.3rem 0.8rem rgba(0,0,0,0.2); min-width: 12rem; }
+  .qu-thread-ui-autocomplete-list-flip-up { margin: 0 0 0.2rem; top: auto; bottom: 100%; }
   .qu-thread-ui-autocomplete-item { padding: 0.3rem 0.5rem; border-radius: var(--qu-radius-sm, 0.3rem); cursor: pointer; font-size: 0.9em; }
   .qu-thread-ui-autocomplete-item:hover, .qu-thread-ui-autocomplete-active { background: var(--qu-color-border, #8884); }
 `;
@@ -127,6 +133,7 @@ export function mountTriggerAutocomplete(textareaEl, {
       list.appendChild(li);
     });
     (textareaEl.parentNode ?? document.body).appendChild(list);
+    flipUpIfNeeded(list, textareaEl, 'qu-thread-ui-autocomplete-list-flip-up');
   }
 
   async function onInput() {

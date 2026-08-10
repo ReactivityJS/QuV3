@@ -213,6 +213,8 @@ const DICT = {
     replies: '{count} replies', // no singular/plural distinction - @qu/i18n has no plural-rules engine by design (see its own doc comment), matches QuV2's own identical "{count} replies" convention
     lastPostBy: 'by {name}',
     searchResultIn: 'in "{topic}"',
+    permalink: 'Link to this post',
+    unread: 'New',
   },
   de: {
     title: 'Forum',
@@ -242,6 +244,8 @@ const DICT = {
     replies: '{count} Antworten',
     lastPostBy: 'von {name}',
     searchResultIn: 'in „{topic}“',
+    permalink: 'Link zu diesem Beitrag',
+    unread: 'Neu',
   },
 };
 const { t } = createI18n(DICT);
@@ -253,7 +257,24 @@ function formatReplies(count) {
 const STYLE_ID = 'qu-forum-style';
 const STYLE = `
   .qu-forum-messages { list-style: none; margin: 0 0 0.8rem; padding: 0; display: flex; flex-direction: column; gap: 0.6rem; }
-  .qu-forum-message { display: flex; gap: 0.6rem; padding: 0.55rem 0.75rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-lg, 0.7rem); background: var(--qu-color-surface, transparent); box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+  /* scroll-margin-top clears the shell's own fixed top header (3.25rem,
+     apps/shell/src/header.js) when a permalink's scrollIntoView() lands a
+     post at the very top of the viewport - see mountTopicView()'s own
+     "PERMALINKS" doc comment for why this is a plain page scroll (no
+     internal scroll container the way apps/chat's own room view has one)
+     and so needs this CSS-only equivalent instead of a JS offset. */
+  .qu-forum-message { display: flex; gap: 0.6rem; padding: 0.55rem 0.75rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-lg, 0.7rem); background: var(--qu-color-surface, transparent); box-shadow: 0 1px 2px rgba(0,0,0,0.06); scroll-margin-top: 4rem; }
+  @keyframes qu-forum-message-highlight-fade { from { outline-color: var(--qu-color-accent, #5b5bd6); } to { outline-color: transparent; } }
+  .qu-forum-message-highlight { outline: 2px solid var(--qu-color-accent, #5b5bd6); outline-offset: 2px; animation: qu-forum-message-highlight-fade 2s ease forwards; }
+  /* UNREAD-BY-ME - see renderMessage()'s own doc comment. A left accent bar
+     (not a full background tint, which would fight the reactions/attachment
+     content sitting inside the same card) plus a small text badge next to
+     the author name - the "here's what's new since your last visit" idiom
+     familiar from forum software, deliberately distinct from chat's own
+     per-message read TICK (a different signal entirely - see that badge's
+     own doc comment). */
+  .qu-forum-message-unread { border-left: 3px solid var(--qu-color-accent, #5b5bd6); }
+  .qu-forum-message-unread-badge { font-size: 0.68em; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: var(--qu-color-accent, #5b5bd6); border: 1px solid var(--qu-color-accent, #5b5bd6); border-radius: 999px; padding: 0.05rem 0.4rem; }
   .qu-forum-message-body { flex: 1; min-width: 0; }
   .qu-forum-message-head { display: flex; align-items: baseline; gap: 0.5rem; }
   .qu-forum-message-author { font-weight: 600; }
@@ -266,7 +287,8 @@ const STYLE = `
      into its own <span> child, laid out left-to-right by this one flex
      rule - no per-segment CSS needed beyond it. */
   .qu-forum-message-footer { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.35rem; flex-wrap: wrap; }
-  .qu-forum-message-ts { font-size: 0.75em; opacity: 0.6; }
+  .qu-forum-message-ts { font-size: 0.75em; opacity: 0.6; color: inherit; text-decoration: none; }
+  .qu-forum-message-ts:hover { text-decoration: underline; }
   .qu-forum-edit-row { display: flex; flex-direction: column; gap: 0.4rem; position: relative; }
   .qu-forum-edit-row textarea { font: inherit; padding: 0.4rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); resize: vertical; }
   .qu-forum-edit-row-buttons { display: flex; gap: 0.4rem; }
@@ -370,11 +392,15 @@ export function mount(container, ctx) {
   subscribe?.(paths.spacePath(SPACE_ID));
   subscribe?.(`/blob/${SPACE_ID}`); // attachment chunks live under a SEPARATE top-level mount - see AssetEngine's own doc comment
 
-  const [, kindSeg, idSeg] = segments;
+  // A trailing /m/<messageId> (`#/forum/t/<topicId>/m/<id>`) is a message
+  // PERMALINK - see mountTopicView()'s own "PERMALINKS" doc comment for
+  // what it does once there. Same scheme apps/chat/client.js's own route
+  // parsing already establishes for chat's own room routes.
+  const [, kindSeg, idSeg, seg3, seg4] = segments;
   const viewCtx = { ...ctx, SPACE_ID };
   let stopView;
   if (kindSeg === 't' && idSeg) {
-    stopView = mountTopicView(container, { ...viewCtx, topicId: idSeg });
+    stopView = mountTopicView(container, { ...viewCtx, topicId: idSeg, messageId: seg3 === 'm' ? seg4 : null });
   } else if (kindSeg === 'c' && idSeg) {
     stopView = mountChannelView(container, { ...viewCtx, channelId: idSeg });
   } else if (kindSeg === 'new') {
@@ -835,8 +861,26 @@ function mountChannelView(container, { qu, services, syncFetch, SPACE_ID, channe
 // TOPIC VIEW - #/forum/t/<topicId>: one topic's thread
 // ===================================================================
 
-function mountTopicView(container, { qu, services, subscribe, syncFetch, extensionPoints, SPACE_ID, topicId }) {
+/**
+ * PERMALINKS - a post's timestamp (see `buildMessageFooter()`) IS its
+ * permalink, `#/forum/t/<topicId>/m/<messageId>` - clicking it, or landing
+ * on one from Search/a notification (see `resolveForumReference()`... no,
+ * see this file's own `content.resolveReference` contributor below),
+ * scrolls that post into view and briefly highlights it
+ * (`.qu-forum-message-highlight`). Unlike `apps/chat/client.js`'s OWN
+ * permalink handling, this is a PLAIN PAGE scroll (`scrollIntoView()` on
+ * the post's own `<li>`, no internal scroll container) - `scroll-margin-
+ * top` (see STYLE) is what keeps the shell's own fixed top header from
+ * covering the target post once native scroll-into-view settles there,
+ * the CSS-only equivalent of the pixel-offset math a JS-driven scroll
+ * would otherwise need. No "stuck to bottom" state machine here either
+ * (chat's own `apps/chat/client.js` doc comment covers why it needs one) -
+ * a Topic reads oldest-to-newest like an ordinary thread/forum post list,
+ * never auto-follows to "the newest reply" the way a live chat room does.
+ */
+function mountTopicView(container, { qu, services, subscribe, syncFetch, extensionPoints, SPACE_ID, topicId, messageId = null }) {
   let stopped = false;
+  let pendingScrollTarget = messageId;
   container.textContent = '';
   const layout = document.createElement('div');
   layout.className = 'qu-forum-layout';
@@ -978,8 +1022,14 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     if (stopped) return;
     const myPub = await services.actors.whoAmI();
     if (stopped || token !== renderToken) return;
+    // Snapshot BEFORE markRead() below moves the marker - see this file's
+    // own "UNREAD-BY-ME" doc comment on buildMessageFooter() for why this
+    // has to be the position from before THIS view, not after.
+    const lastReadAt = await services.messages.getLastReadAt(SPACE_ID, topicId);
+    if (stopped || token !== renderToken) return;
     const { messages } = await services.messages.listMessages(SPACE_ID, topicId);
     if (stopped || token !== renderToken) return;
+    if (messages.length) services.messages.markRead(SPACE_ID, topicId).catch(() => {});
 
     clearMessageWatchers();
     messagesRoot.textContent = '';
@@ -994,7 +1044,7 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     const ul = document.createElement('ul');
     ul.className = 'qu-forum-messages';
     for (const message of messages) {
-      const li = await renderMessage(message, myPub);
+      const li = await renderMessage(message, myPub, lastReadAt);
       // A newer renderMessages() call may have started (and already called
       // clearMessageWatchers()) while `renderMessage()`'s own awaits
       // (attachment/profile/extension-slot lookups) were in flight - bail
@@ -1005,11 +1055,27 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
       ul.appendChild(li);
     }
     messagesRoot.appendChild(ul);
+
+    // See this function's own "PERMALINKS" doc comment on mountTopicView().
+    if (pendingScrollTarget) {
+      const targetLi = [...messagesRoot.querySelectorAll('.qu-forum-message')].find((el) => el.dataset.messageId === pendingScrollTarget);
+      pendingScrollTarget = null;
+      if (targetLi) {
+        // jsdom (this repo's test DOM) has no layout engine and doesn't
+        // implement scrollIntoView() at all - optional-chained so tests
+        // exercise every line around it without stubbing it out.
+        targetLi.scrollIntoView?.({ block: 'start' });
+        targetLi.classList.add('qu-forum-message-highlight');
+        setTimeout(() => targetLi.classList.remove('qu-forum-message-highlight'), 2000);
+      }
+    }
   }
 
-  async function renderMessage(message, myPub) {
+  async function renderMessage(message, myPub, lastReadAt) {
     const li = document.createElement('li');
-    li.className = 'qu-forum-message';
+    const unread = message.author !== myPub && message.ts > lastReadAt;
+    li.className = 'qu-forum-message' + (unread ? ' qu-forum-message-unread' : '');
+    li.id = `m-${message.id}`;
     li.dataset.messageId = message.id;
     li.dataset.author = message.author;
 
@@ -1026,6 +1092,21 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     authorEl.className = 'qu-forum-message-author';
     authorEl.textContent = label;
     head.appendChild(authorEl);
+    if (unread) {
+      // UNREAD-BY-ME - see mountTopicView()'s own doc comment: this is a
+      // PRIVATE per-identity "have I seen this" marker (MessageService.
+      // markRead()/getLastReadAt()), the deliberate opposite of apps/chat's
+      // own read-tick footer segment (a PUBLIC signal telling the SENDER
+      // someone else has read THEIR message - meaningless here, a Topic can
+      // have any number of readers, not one fixed peer to tick for). A
+      // small badge next to the author name, not a footer segment - it
+      // describes THIS reader's own relationship to the post, not something
+      // the post's author contributed or would see on their own copy of it.
+      const unreadBadge = document.createElement('span');
+      unreadBadge.className = 'qu-forum-message-unread-badge';
+      unreadBadge.textContent = t('unread');
+      head.appendChild(unreadBadge);
+    }
 
     const textWrap = document.createElement('div');
     if (editingDrafts.has(message.id)) renderMessageEdit(textWrap, message);
@@ -1078,8 +1159,14 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
       {
         id: 'core.timestamp',
         render: (el) => {
-          el.className = 'qu-forum-message-ts';
-          el.textContent = message.editedAt ? `${formatTs(message.ts)} (${t('edit').toLowerCase()})` : formatTs(message.ts);
+          // The timestamp doubles as this post's permalink - see
+          // mountTopicView()'s own "PERMALINKS" doc comment.
+          const link = document.createElement('a');
+          link.className = 'qu-forum-message-ts';
+          link.href = `#/forum/t/${topicId}/m/${message.id}`;
+          link.title = t('permalink');
+          link.textContent = message.editedAt ? `${formatTs(message.ts)} (${t('edit').toLowerCase()})` : formatTs(message.ts);
+          el.appendChild(link);
         },
       },
       {
@@ -1268,7 +1355,7 @@ export async function searchForum({ services, qu, apps, query, types, scope, seg
       out.push({
         contentType, ts: message.ts, author: message.author,
         snippet: buildSnippet(message.body, q),
-        href: `#/forum/t/${topicId}`,
+        href: `#/forum/t/${topicId}/m/${message.id}`,
         topicId, channelId, topicTitle: topicTitle ?? topicId,
       });
     }
@@ -1317,7 +1404,7 @@ export async function resolveForumReference({ services, qu, syncFetch, spaceId, 
   return {
     contentType: classifyMessageContentType(message), ts: message.ts, author: message.author,
     snippet: buildSnippet(message.body, ''),
-    href: `#/forum/t/${threadId}`,
+    href: `#/forum/t/${threadId}/m/${messageId}`,
     topicId: threadId, channelId: topicBit?.val?.channelId ?? null, topicTitle: topicBit?.val?.title ?? threadId,
   };
 }
