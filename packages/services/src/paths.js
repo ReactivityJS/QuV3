@@ -232,6 +232,24 @@ export function threadReadReceiptPath(spaceId, threadId, actorPub) {
 }
 
 /**
+ * The PARENT path of every member's read receipt in a thread - one level
+ * above `threadReadReceiptPath()`. `PresenceService.getReadReceipts()`
+ * itself still reads one already-known per-member path each (no derived-
+ * list enumeration needed, see that method's own doc comment) - this
+ * parent exists purely so a live UI can `watchChildren()` it the same way
+ * it already watches `threadMessagesParentPath()`, and re-run its own
+ * `getReadReceipts()` read whenever ANY member's receipt changes. Without
+ * this, a receipt arriving via sync updates the store but nothing ever
+ * re-reads it - a sender's own read-tick would silently freeze at whatever
+ * it was on first render, since receipts live under a sibling of `msgs/`,
+ * never a write `threadMessagesParentPath()`'s own watch would ever see.
+ * @param {string|number} spaceId @param {string} threadId @returns {string}
+ */
+export function threadReadReceiptsParentPath(spaceId, threadId) {
+  return `/store/${spaceId}/threads/${threadId}/reads`;
+}
+
+/**
  * One identity's own signed entry in the opt-in public directory -
  * `DirectoryService`. A DERIVED list (docs/v3-technical-concept.md §4.2):
  * each entry already lives at its own path under

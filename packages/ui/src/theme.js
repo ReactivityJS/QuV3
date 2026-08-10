@@ -18,17 +18,24 @@
  * host (e.g. a future `apps/shell`) that wants to reskin every mounted app
  * at once, not a requirement for correctness.
  *
- * Deliberately NOT doing (yet): per-scheme (light/dark) token values. Every
- * token below is either alpha-blended (`#8884` already self-adapts to
- * whatever's underneath, light or dark - this is WHY QuV2 chose an alpha
- * border color in the first place, not an oversight) or a saturated color
- * that reads fine on both (`#5b5bd6`, `#c00`) - `color-scheme: light dark`
- * (kept from QuV2's own `index.html`, verified-correct there) already
- * handles background/text via the `canvas`/`canvastext` keyword colors
- * every app already uses directly. A token that genuinely needs a different
- * value per scheme can be added to `overrides` (or, if it recurs, to
- * `DEFAULT_THEME` itself with a `prefers-color-scheme` rule) once a real
- * app needs it - no such app exists yet.
+ * PER-SCHEME (light/dark) TOKENS: every token except `--qu-color-surface`
+ * is either alpha-blended (`#8884` already self-adapts to whatever's
+ * underneath, light or dark) or a saturated color that reads fine on both
+ * (`#5b5bd6`, `#c00`). `--qu-color-surface` is the one token that genuinely
+ * needs a different value per scheme - a FLOATING panel (an emoji picker,
+ * a context menu, a mention-autocomplete dropdown - `@qu/thread-ui`'s
+ * `emoji.js`/`context-menu.js`/`trigger-autocomplete.js`) sits on top of
+ * arbitrary content behind it and needs a genuinely OPAQUE background to
+ * stay readable, unlike everything else in this file which is fine self-
+ * adapting via alpha blending. It used to be read via `var(--qu-color-surface,
+ * canvas)` at each call site with no token ever actually DEFINING it - the
+ * `canvas` CSS4 system-color keyword is opaque where supported, but on a
+ * browser/engine that doesn't recognize it the entire `background`
+ * declaration is dropped as invalid, leaving the panel BLENDED INTO
+ * whatever's behind it (confirmed real: reported as "the reactions/context-
+ * menu overlay is too transparent"). Defined here instead, with a real
+ * light AND dark literal (`ensureTheme()` emits both, see below) - never
+ * relies on `canvas`/`canvastext` again.
  *
  * `THEME_PRESETS`/`getStoredTheme()`/`setStoredTheme()` (new): a handful of
  * named accent palettes, persisted the exact same way `@qu/i18n`'s
@@ -50,10 +57,23 @@ export const DEFAULT_THEME = {
   '--qu-color-accent': '#5b5bd6',
   '--qu-color-border': '#8884',
   '--qu-color-danger': '#c00',
+  '--qu-color-surface': '#ffffff',
   '--qu-radius-sm': '0.3rem',
   '--qu-radius-md': '0.4rem',
   '--qu-font': 'system-ui, sans-serif',
   '--qu-font-mono': 'ui-monospace, monospace',
+};
+
+/**
+ * The ONE dark-scheme override this file ships (see `DEFAULT_THEME`'s own
+ * doc comment on why `--qu-color-surface` is the one token that needs it) -
+ * `ensureTheme()` emits this under a `prefers-color-scheme: dark` media
+ * query, layered on top of the plain `:root` block, same "later rule at
+ * equal specificity wins" cascade every other override in this file
+ * already relies on.
+ */
+const DARK_THEME_OVERRIDES = {
+  '--qu-color-surface': '#242426',
 };
 
 /**
@@ -98,7 +118,9 @@ export function setStoredTheme(name) {
  * @param {Partial<typeof DEFAULT_THEME>} [overrides] - Replace/add tokens on
  *   top of `DEFAULT_THEME` AND on top of the stored preset (if any) below -
  *   an explicit caller override always wins, same priority `createI18n()`'s
- *   explicit `locale` option has over the stored locale.
+ *   explicit `locale` option has over the stored locale. Applies to BOTH the
+ *   light block and (for any key `DARK_THEME_OVERRIDES` also has) the dark
+ *   one - an explicit override always wins over either scheme's own default.
  */
 export function ensureTheme(overrides = {}) {
   if (document.getElementById(STYLE_ID)) return;
@@ -106,8 +128,10 @@ export function ensureTheme(overrides = {}) {
   const preset = (stored && THEME_PRESETS[stored]) || {};
   const tokens = { ...DEFAULT_THEME, ...preset, ...overrides };
   const declarations = Object.entries(tokens).map(([name, value]) => `  ${name}: ${value};`).join('\n');
+  const darkTokens = { ...DARK_THEME_OVERRIDES, ...overrides };
+  const darkDeclarations = Object.entries(darkTokens).map(([name, value]) => `    ${name}: ${value};`).join('\n');
   const style = document.createElement('style');
   style.id = STYLE_ID;
-  style.textContent = `:root {\n${declarations}\n  color-scheme: light dark;\n}\n`;
+  style.textContent = `:root {\n${declarations}\n  color-scheme: light dark;\n}\n@media (prefers-color-scheme: dark) {\n  :root {\n${darkDeclarations}\n  }\n}\n`;
   document.head.appendChild(style);
 }

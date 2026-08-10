@@ -639,6 +639,85 @@ test('the edit button only appears on the viewer\'s own message - a genuinely se
   }
 });
 
+test('a post\'s timestamp is its permalink (#/forum/t/<topicId>/m/<id>); landing on that route scrolls to and highlights it', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'first' });
+  const target = await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'second' });
+  await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'third' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => container.querySelectorAll('.qu-forum-message').length === 3);
+    const targetLi = container.querySelector(`[data-message-id="${target.id}"]`);
+    const link = targetLi.querySelector('.qu-forum-message-ts');
+    assert.equal(link.getAttribute('href'), `#/forum/t/general/m/${target.id}`);
+    assert.equal(targetLi.id, `m-${target.id}`);
+  } finally {
+    stop();
+  }
+
+  const permalinkContainer = makeContainer();
+  const stopPermalink = mount(permalinkContainer, {
+    qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe,
+    segments: [...TOPIC_SEGMENTS, 'm', target.id],
+  });
+  try {
+    await waitFor(() => permalinkContainer.querySelectorAll('.qu-forum-message').length === 3);
+    const highlighted = [...permalinkContainer.querySelectorAll('.qu-forum-message')].filter((li) => li.classList.contains('qu-forum-message-highlight'));
+    assert.equal(highlighted.length, 1);
+    assert.equal(highlighted[0].id, `m-${target.id}`);
+  } finally {
+    stopPermalink();
+  }
+});
+
+test('UNREAD-BY-ME: another author\'s post shows an unread badge the first time this identity views the topic, and not again after', async () => {
+  const ada = await freshEnv('Ada');
+  const bob = await freshEnv('Bob');
+  await ada.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  await ada.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'hello from Ada' });
+  await mirrorThreadInto(ada, bob.qu, FORUM_SPACE_ID, 'general');
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: bob.qu, services: bob.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-message') !== null);
+    assert.ok(container.querySelector('.qu-forum-message').classList.contains('qu-forum-message-unread'));
+    assert.match(container.querySelector('.qu-forum-message-unread-badge').textContent, /new/i);
+  } finally {
+    stop();
+  }
+
+  // A fresh mount (a later visit) sees the SAME post no longer flagged -
+  // the first mount's own renderMessages() already called markRead().
+  const secondContainer = makeContainer();
+  const stopSecond = mount(secondContainer, { qu: bob.qu, services: bob.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => secondContainer.querySelector('.qu-forum-message') !== null);
+    assert.equal(secondContainer.querySelector('.qu-forum-message').classList.contains('qu-forum-message-unread'), false);
+    assert.equal(secondContainer.querySelector('.qu-forum-message-unread-badge'), null);
+  } finally {
+    stopSecond();
+  }
+});
+
+test('UNREAD-BY-ME: THIS identity\'s own posts never get an unread badge', async () => {
+  const ada = await freshEnv('Ada');
+  await ada.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  await ada.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'my own post' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: ada.qu, services: ada.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-message') !== null);
+    assert.equal(container.querySelector('.qu-forum-message').classList.contains('qu-forum-message-unread'), false);
+  } finally {
+    stop();
+  }
+});
+
 // Regression: formattedHtml is inserted via innerHTML - a message body
 // containing a <script> tag must render as literal, escaped text, never as
 // an actual executable element (see client.js's own doc comment on why

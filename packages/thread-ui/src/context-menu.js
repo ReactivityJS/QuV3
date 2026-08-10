@@ -20,12 +20,19 @@
  * itself already documents (ports like Pin resolve their CURRENT
  * pinned-state fresh on each `collect()` call, not via a standing watcher).
  */
+import { flipUpIfNeeded } from './popup-position.js';
+
 const STYLE_ID = 'qu-thread-ui-context-menu-style';
 const STYLE = `
   .qu-thread-ui-context-menu { position: relative; display: inline-flex; }
   .qu-thread-ui-context-menu-trigger { border: none; background: transparent; cursor: pointer; font-size: 1em; padding: 0.1rem 0.4rem; border-radius: var(--qu-radius-sm, 0.3rem); opacity: 0.7; }
   .qu-thread-ui-context-menu-trigger:hover { opacity: 1; background: var(--qu-color-border, #8884); }
-  .qu-thread-ui-context-menu-panel { position: absolute; z-index: 20; top: 100%; right: 0; margin-top: 0.2rem; display: flex; flex-direction: column; min-width: 9rem; padding: 0.3rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); background: var(--qu-color-surface, canvas); box-shadow: 0 0.3rem 0.8rem rgba(0,0,0,0.2); }
+  /* Opaque background + flip-up support - see emoji.js's own identical
+     comment on --qu-color-surface/flipUpIfNeeded() for why (same shared
+     helper, same root cause this fixes: "too transparent" + "opens off the
+     bottom of the screen"). */
+  .qu-thread-ui-context-menu-panel { position: absolute; z-index: 20; top: 100%; right: 0; margin-top: 0.2rem; display: flex; flex-direction: column; min-width: 9rem; padding: 0.3rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); background: var(--qu-color-surface, #ffffff); box-shadow: 0 0.3rem 0.8rem rgba(0,0,0,0.2); }
+  .qu-thread-ui-context-menu-panel-flip-up { top: auto; bottom: 100%; margin-top: 0; margin-bottom: 0.2rem; }
   .qu-thread-ui-context-menu-item { display: flex; align-items: center; gap: 0.5rem; border: none; background: transparent; cursor: pointer; font: inherit; text-align: left; padding: 0.35rem 0.5rem; border-radius: var(--qu-radius-sm, 0.3rem); }
   .qu-thread-ui-context-menu-item:hover { background: var(--qu-color-border, #8884); }
   .qu-thread-ui-context-menu-empty { padding: 0.35rem 0.5rem; font-size: 0.85em; opacity: 0.6; }
@@ -116,6 +123,7 @@ export function renderContextMenu({ getItems, trigger = '⋮', triggerTitle = 'M
       panel.appendChild(btn);
     }
     root.appendChild(panel);
+    flipUpIfNeeded(panel, triggerBtn, 'qu-thread-ui-context-menu-panel-flip-up');
     // Deferred one tick - same reasoning as renderEmojiPicker()'s own
     // openPanel(): without it, THIS click would immediately bubble into
     // onDocClick and close the panel it just opened.

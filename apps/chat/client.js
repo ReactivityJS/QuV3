@@ -79,7 +79,23 @@
  * comment), so polling is the intended usage, not a shortcut.
  *
  * Routes: `#/chat` (room list), `#/chat/<peerActorPub>` (1:1 room),
- * `#/chat/g/<groupId>` (group room), `#/chat/new-group` (create-group form).
+ * `#/chat/g/<groupId>` (group room), `#/chat/new-group` (create-group form),
+ * plus an optional trailing `/m/<messageId>` on either room route - a
+ * message PERMALINK (see `mount()`'s own route-parsing comment).
+ *
+ * PERMALINKS + SCROLL-FOLLOW: a message's timestamp (see
+ * `buildMessageFooter()`) IS its permalink - clicking it (or landing on one
+ * from Search/a notification, see `searchChat()`/`resolveChatReference()`)
+ * scrolls that message into view and briefly highlights it
+ * (`.qu-chat-bubble-row-highlight`). `mountRoomView()` also tracks whether
+ * the user is currently scrolled to the bottom (`stuckToBottom`): true by
+ * default, false when landing on an older permalink so the jump-to isn't
+ * immediately overridden. Scrolling back down to the bottom re-engages it;
+ * scrolling away releases it. `renderMessages()` (re-run on every new
+ * message via `watchChildren()`) only force-scrolls to the bottom when
+ * `stuckToBottom` is still true - so a new message auto-scrolls the view
+ * exactly when the user was already looking at the latest one, and never
+ * yanks them away from something they scrolled up to read.
  *
  * COMPOSER: a rounded "pill" (textarea + emoji trigger) plus a tool
  * cluster (attach/location) and ONE circular action button that MORPHS
@@ -122,7 +138,7 @@
  * links are auto-linked, via `@qu/services`' shared `detectLinks()`.
  */
 import { watch, watchChildren } from '@qu/reactive';
-import { paths, formatActorLabel, getPrivate, putPrivate, detectLinks, ChatService } from '@qu/services';
+import { paths, formatActorLabel, getPrivate, putPrivate, getPrivateChildren, detectLinks, ChatService } from '@qu/services';
 import { rankFor } from '@qu/foundation';
 import { createI18n } from '@qu/i18n';
 import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage } from '@qu/ui';
@@ -169,6 +185,10 @@ const DICT = {
     ownColor: 'Your message color',
     saved: 'Saved.',
     searchResultIn: 'in "{room}"',
+    permalink: 'Link to this message',
+    messageRequests: 'Message requests',
+    accept: 'Accept',
+    decline: 'Decline',
   },
   de: {
     title: 'Chats',
@@ -202,6 +222,10 @@ const DICT = {
     ownColor: 'Deine Nachrichtenfarbe',
     saved: 'Gespeichert.',
     searchResultIn: 'in „{room}“',
+    permalink: 'Link zu dieser Nachricht',
+    messageRequests: 'Nachrichtenanfragen',
+    accept: 'Annehmen',
+    decline: 'Ablehnen',
   },
 };
 const { t } = createI18n(DICT);
@@ -217,15 +241,60 @@ const STYLE = `
   .qu-chat-room-ts { font-size: 0.75em; opacity: 0.6; flex-shrink: 0; }
   .qu-chat-room-preview { font-size: 0.85em; opacity: 0.7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .qu-chat-room-unread { display: inline-block; width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--qu-color-accent, #5b5bd6); flex-shrink: 0; }
+  /* MESSAGE REQUESTS - see ChatService's own "1:1 DISCOVERY" doc comment.
+     A visually separate block ABOVE the normal room list (not just another
+     room row) - accepting/declining is a decision, not navigation, so it
+     deliberately doesn't look clickable-into-a-conversation the way an
+     ordinary room row does. */
+  .qu-chat-requests-heading { font-size: 0.85em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; opacity: 0.6; margin: 0 0 0.4rem; }
+  .qu-chat-requests { list-style: none; margin: 0 0 1rem; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; max-width: 34rem; }
+  .qu-chat-request-row { display: flex; align-items: center; gap: 0.6rem; padding: 0.5rem 0.6rem; border-radius: var(--qu-radius-md, 0.4rem); border: 1px solid var(--qu-color-border, #8884); }
+  .qu-chat-request-main { flex: 1; min-width: 0; }
+  .qu-chat-request-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .qu-chat-request-pub { font-size: 0.78em; opacity: 0.6; font-family: var(--qu-font-mono, ui-monospace, monospace); }
+  .qu-chat-request-actions { display: flex; gap: 0.4rem; flex-shrink: 0; }
+  .qu-chat-request-actions button { padding: 0.3rem 0.7rem; border-radius: var(--qu-radius-sm, 0.3rem); border: 1px solid var(--qu-color-border, #8884); background: transparent; cursor: pointer; font: inherit; }
+  .qu-chat-request-actions button:first-child { background: var(--qu-color-accent, #5b5bd6); color: white; border-color: transparent; }
   .qu-chat-empty { padding: 1.5rem; text-align: center; opacity: 0.7; }
   .qu-chat-new-group { display: block; margin-top: 0.4rem; opacity: 0.85; }
   .qu-chat-new-group:hover { opacity: 1; }
-  .qu-chat-header { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.6rem; }
-  .qu-chat-header-name { font-weight: 700; font-size: 1.1em; }
+  /* ROOM VIEW FIXED LAYOUT - see this file's own top doc comment. A flex
+     COLUMN sized to exactly fill the viewport below the shell's own fixed
+     top header (3.25rem, apps/shell/src/header.js) minus .qu-shell-screen's
+     own 1rem padding (top+bottom = 2rem) - cancelled via the negative
+     margin below so the header/composer bars can span truly edge-to-edge,
+     not just edge-to-edge-of-the-padded-content-box. The dvh unit (where
+     supported) is layered on top of the plain vh one so a mobile browser's
+     collapsing/expanding address bar doesn't hide the composer behind it -
+     see MDN's own "dvh vs vh" note; the plain vh declaration is the
+     fallback for a browser that doesn't recognize dvh at all (a browser
+     ignores a single invalid VALUE while still applying every other valid
+     declaration in the same rule, so the two same-property lines are safe
+     to stack, latter-wins-if-supported). Only the messages-scroll element
+     scrolls internally - the header/composer-wrap are flex-shrink: 0
+     siblings, so they're simply never part of the scrolling region, no
+     position: fixed/sticky needed. */
+  .qu-chat-room-view { display: flex; flex-direction: column; height: calc(100vh - 3.25rem - 2rem); height: calc(100dvh - 3.25rem - 2rem); margin: -1rem; }
+  .qu-chat-header { flex-shrink: 0; display: flex; align-items: center; gap: 0.6rem; padding: 0.6rem 1rem; border-bottom: 1px solid var(--qu-color-border, #8884); background: var(--qu-color-surface, #ffffff); }
+  .qu-chat-header-back { flex-shrink: 0; text-decoration: none; color: inherit; font-size: 1.2em; padding: 0.2rem 0.5rem; border-radius: var(--qu-radius-sm, 0.3rem); }
+  .qu-chat-header-back:hover { background: var(--qu-color-border, #8884); }
+  .qu-chat-header-namewrap { min-width: 0; overflow: hidden; }
+  .qu-chat-header-name { font-weight: 700; font-size: 1.1em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .qu-chat-header-status { font-size: 0.8em; opacity: 0.65; }
-  .qu-chat-messages { list-style: none; margin: 0 0 0.8rem; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; max-width: 40rem; }
+  .qu-chat-messages-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 1rem; }
+  .qu-chat-messages { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; max-width: 40rem; }
   .qu-chat-bubble-row { display: flex; }
   .qu-chat-bubble-row-mine { justify-content: flex-end; }
+  /* PERMALINKS - see this file's own top doc comment. Landing on
+     #/chat/.../m/<id> scrollIntoView()s this row (block: 'center', so the
+     target isn't glued to the very top edge, right under the fixed header)
+     then briefly highlights it so "here it is" is obvious even once the
+     scroll settles - matching apps/forum/client.js's own identical
+     treatment for a topic permalink. A CSS animation (not a transition)
+     fades it out on its own timeline; the JS side just removes the class
+     once, after the same duration, so nothing has to track animation-end. */
+  @keyframes qu-chat-bubble-row-highlight-fade { from { outline-color: var(--qu-color-accent, #5b5bd6); } to { outline-color: transparent; } }
+  .qu-chat-bubble-row-highlight .qu-chat-bubble { outline: 2px solid var(--qu-color-accent, #5b5bd6); outline-offset: 2px; animation: qu-chat-bubble-row-highlight-fade 2s ease forwards; }
   /* A soft "tail" via asymmetric corners - the corner nearest the avatar
      side stays sharp, matching Telegram/WhatsApp's own bubble language -
      plus a faint shadow so bubbles read as distinct surfaces, not just
@@ -247,6 +316,8 @@ const STYLE = `
      child, laid out by this one flex rule - mirrors
      apps/forum/client.js's own .qu-forum-message-footer exactly. */
   .qu-chat-bubble-footer { display: flex; align-items: center; gap: 0.4rem; margin-top: 0.3rem; font-size: 0.7em; opacity: 0.75; flex-wrap: wrap; }
+  .qu-chat-bubble-timestamp-link { color: inherit; text-decoration: none; }
+  .qu-chat-bubble-timestamp-link:hover { text-decoration: underline; }
   .qu-chat-bubble-tick-read { color: var(--qu-color-accent, #5b5bd6); opacity: 1; }
   .qu-chat-bubble-attachment { margin-top: 0.4rem; max-width: 16rem; }
   .qu-chat-edit-row { display: flex; flex-direction: column; gap: 0.3rem; position: relative; }
@@ -254,7 +325,7 @@ const STYLE = `
   .qu-chat-edit-row-buttons { display: flex; gap: 0.4rem; }
   .qu-chat-reply-banner { display: flex; justify-content: space-between; align-items: center; padding: 0.3rem 0.6rem; border-left: 3px solid var(--qu-color-accent, #5b5bd6); background: var(--qu-color-surface, #8882); border-radius: var(--qu-radius-sm, 0.3rem); font-size: 0.85em; margin-bottom: 0.3rem; }
   .qu-chat-reply-banner button { background: none; border: none; cursor: pointer; opacity: 0.7; font: inherit; }
-  .qu-chat-composer-wrap { display: flex; flex-direction: column; gap: 0.4rem; max-width: 40rem; }
+  .qu-chat-composer-wrap { flex-shrink: 0; display: flex; flex-direction: column; gap: 0.4rem; padding: 0.6rem 1rem; border-top: 1px solid var(--qu-color-border, #8884); background: var(--qu-color-surface, #ffffff); }
   /* The composer: a tool cluster (attach/location), a rounded PILL holding
      the textarea + emoji trigger, and one circular action button that
      morphs mic <-> send (see updateActionBtn() in mountRoomView()) -
@@ -385,15 +456,18 @@ export function mount(container, ctx) {
   subscribe?.(paths.spacePath(SPACE_ID)); // every room's thread lives under this ONE app space
   subscribe?.(`/blob/${SPACE_ID}`); // attachment chunks - separate top-level mount, see AssetEngine's own doc comment
 
-  const [, seg1, seg2] = segments;
+  // A trailing /m/<messageId> (`#/chat/<peerPub>/m/<id>` or `#/chat/g/<groupId>/m/<id>`)
+  // is a message PERMALINK - see mountRoomView()'s own doc comment on
+  // "PERMALINKS" for what it does once there.
+  const [, seg1, seg2, seg3, seg4] = segments;
   const viewCtx = { ...ctx, SPACE_ID };
   let stopView;
   if (seg1 === 'new-group') {
     stopView = mountNewGroupView(container, viewCtx);
   } else if (seg1 === 'g' && seg2) {
-    stopView = mountRoomView(container, viewCtx, { kind: 'group', roomId: seg2 });
+    stopView = mountRoomView(container, viewCtx, { kind: 'group', roomId: seg2, messageId: seg3 === 'm' ? seg4 : null });
   } else if (seg1) {
-    stopView = mountRoomView(container, viewCtx, { kind: 'dm', peerPub: seg1 });
+    stopView = mountRoomView(container, viewCtx, { kind: 'dm', peerPub: seg1, messageId: seg2 === 'm' ? seg3 : null });
   } else {
     stopView = mountRoomListView(container, viewCtx);
   }
@@ -435,21 +509,48 @@ function mountRoomListView(container, { qu, services, subscribe, syncFetch, SPAC
 
   const heading = document.createElement('h1');
   heading.textContent = t('title');
+  const requestsRoot = document.createElement('div');
   const listRoot = document.createElement('div');
-  container.append(heading, listRoot);
+  container.append(heading, requestsRoot, listRoot);
 
   let renderToken = 0;
   async function render() {
     const token = ++renderToken;
     if (stopped) return;
     const myPub = await services.actors.whoAmI();
+    const identity = services.messages.identity;
     if (stopped || token !== renderToken) return;
 
-    const [contacts, groupIds] = await Promise.all([
+    const [contacts, groupIds, dmRequests, dismissed] = await Promise.all([
       services.contacts.listContacts(),
       services.chat.listMyGroups(),
+      services.chat.listMyDmRequests(),
+      getPrivateChildren(qu, identity, paths.privateFlagParentPath(myPub, 'dismissed', 'chat-request')),
     ]);
     if (stopped || token !== renderToken) return;
+
+    // MESSAGE REQUESTS - see ChatService's own "1:1 DISCOVERY" doc comment.
+    // A request is worth SHOWING only while it's neither already accepted
+    // (the sender is a Contact - they already show up as an ordinary dmRoom
+    // below, would be redundant/confusing to ALSO list them here) nor
+    // already declined (a dismissed flag, see the `Decline` button below).
+    const contactPubs = new Set(contacts.map((c) => c.actorPub));
+    const dismissedPubs = new Set(dismissed.map(({ path }) => path.slice(path.lastIndexOf('/') + 1)));
+    const pendingRequests = dmRequests.filter((r) => !contactPubs.has(r.fromPub) && !dismissedPubs.has(r.fromPub));
+    requestsRoot.textContent = '';
+    if (pendingRequests.length > 0) {
+      const requestsHeading = document.createElement('h2');
+      requestsHeading.className = 'qu-chat-requests-heading';
+      requestsHeading.textContent = t('messageRequests');
+      const ul = document.createElement('ul');
+      ul.className = 'qu-chat-requests';
+      for (const request of pendingRequests) {
+        const profile = await services.profile.getPublicProfile(request.fromPub);
+        if (stopped || token !== renderToken) return;
+        ul.appendChild(requestRow(request, profile));
+      }
+      requestsRoot.append(requestsHeading, ul);
+    }
 
     const dmRooms = await Promise.all(contacts.map(async (c) => {
       const roomId = await ChatService.roomId([myPub, c.actorPub]);
@@ -535,6 +636,55 @@ function mountRoomListView(container, { qu, services, subscribe, syncFetch, SPAC
       a.appendChild(dot);
     }
     li.appendChild(a);
+    return li;
+  }
+
+  /**
+   * One pending DM request row (see ChatService's own "1:1 DISCOVERY" doc
+   * comment): the sender's identity (avatar/alias/pub - exactly what the
+   * user asked a request should show, so accepting is an informed choice,
+   * never a blind one) plus Accept/Decline. Deliberately NOT a link to the
+   * room itself - viewing the conversation before deciding isn't offered
+   * here, matching how a request inbox works elsewhere (Signal/Telegram):
+   * accept or decline first, read after.
+   * @param {{fromPub: string, spaceId: string|number, roomId: string}} request
+   * @param {object|null} profile
+   */
+  function requestRow(request, profile) {
+    const li = document.createElement('li');
+    li.className = 'qu-chat-request-row';
+    li.appendChild(renderAvatarOrAsset(request.fromPub, formatActorLabel(request.fromPub, profile), profile?.avatar, { size: '2.4rem' }));
+
+    const main = document.createElement('div');
+    main.className = 'qu-chat-request-main';
+    const nameEl = document.createElement('div');
+    nameEl.className = 'qu-chat-request-name';
+    nameEl.textContent = formatActorLabel(request.fromPub, profile);
+    const pubEl = document.createElement('div');
+    pubEl.className = 'qu-chat-request-pub';
+    pubEl.textContent = `~${request.fromPub.slice(0, 16)}…`;
+    main.append(nameEl, pubEl);
+
+    const actions = document.createElement('div');
+    actions.className = 'qu-chat-request-actions';
+    const acceptBtn = document.createElement('button');
+    acceptBtn.type = 'button';
+    acceptBtn.textContent = t('accept');
+    acceptBtn.addEventListener('click', async () => {
+      await services.contacts.addContact(request.fromPub);
+      window.location.hash = `#/chat/${request.fromPub}`;
+    });
+    const declineBtn = document.createElement('button');
+    declineBtn.type = 'button';
+    declineBtn.textContent = t('decline');
+    declineBtn.addEventListener('click', async () => {
+      const myPub = await services.actors.whoAmI();
+      await putPrivate(qu, services.messages.identity, paths.privateFlagPath(myPub, 'dismissed', 'chat-request', request.fromPub), true);
+      render();
+    });
+    actions.append(acceptBtn, declineBtn);
+
+    li.append(main, actions);
     return li;
   }
 
@@ -648,19 +798,38 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   let stopped = false;
   container.textContent = '';
 
-  const mainRoot = document.createElement('div');
+  // A flex COLUMN filling the viewport height below the shell's own fixed
+  // top header (see this file's own top doc comment's "FIXED LAYOUT"
+  // section) - `heading`/`composerWrap` are flex-shrink:0 (pinned), only
+  // `.qu-chat-messages-scroll` (wrapping `messagesRoot`) scrolls. Replaces
+  // the earlier `renderSubpage()` usage - the back arrow now lives INSIDE
+  // this one fixed header row instead of a separate line above it, so
+  // there's exactly one fixed top bar to account for, not two stacked ones.
+  const roomView = document.createElement('div');
+  roomView.className = 'qu-chat-room-view';
+
   const heading = document.createElement('div');
   heading.className = 'qu-chat-header';
+  const backLink = document.createElement('a');
+  backLink.className = 'qu-chat-header-back';
+  backLink.href = '#/chat';
+  backLink.textContent = '←';
+  backLink.title = t('backToChats');
+  backLink.setAttribute('aria-label', t('backToChats'));
+  const headerAvatarSlot = document.createElement('div');
   const headerName = document.createElement('div');
+  headerName.className = 'qu-chat-header-namewrap';
   const headerNameEl = document.createElement('div');
   headerNameEl.className = 'qu-chat-header-name';
   const headerStatusEl = document.createElement('div');
   headerStatusEl.className = 'qu-chat-header-status';
   headerName.append(headerNameEl, headerStatusEl);
-  const headerAvatarSlot = document.createElement('div');
-  heading.append(headerAvatarSlot, headerName);
+  heading.append(backLink, headerAvatarSlot, headerName);
 
+  const messagesScroll = document.createElement('div');
+  messagesScroll.className = 'qu-chat-messages-scroll';
   const messagesRoot = document.createElement('div');
+  messagesScroll.appendChild(messagesRoot);
   const composerWrap = document.createElement('div');
   composerWrap.className = 'qu-chat-composer-wrap';
   const replyBanner = document.createElement('div');
@@ -706,12 +875,8 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   pendingAttachmentEl.hidden = true;
   composerWrap.append(replyBanner, composerRow, pendingAttachmentEl);
 
-  renderSubpage(mainRoot, {
-    backHref: '#/chat',
-    backLabel: t('backToChats'),
-    render: (content) => content.append(heading, messagesRoot, composerWrap),
-  });
-  container.appendChild(mainRoot);
+  roomView.append(heading, messagesScroll, composerWrap);
+  container.appendChild(roomView);
 
   const stopComposerMentions = mountMentionAutocomplete(composerInput, { services, subscribe });
   const stopComposerEmoji = mountEmojiAutocomplete(composerInput);
@@ -719,6 +884,40 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   let roomId = null;
   let memberPubs = [];
   let roomReady = false;
+
+  // ---- PERMALINKS + scroll-follow (see this file's own top doc comment) ----
+  // `target.messageId` (set by mount()'s own `/m/<id>` route parsing) is a
+  // ONE-TIME scroll target consumed by the very first renderMessages() call
+  // after mount, then cleared - exactly like a URL fragment scroll.
+  // `stuckToBottom` mirrors "is the user currently looking at the newest
+  // message": true by default (a freshly opened room always shows the
+  // bottom), but NOT when landing on an older permalinked message - that
+  // must not get yanked away from immediately. The scroll listener below
+  // re-engages it the moment the user scrolls back down to the bottom
+  // themselves, and releases it the moment they scroll away - this is what
+  // makes a new incoming message auto-scroll only when the user was already
+  // at the bottom to see it, never interrupting whatever they were reading.
+  let pendingScrollTarget = target.messageId || null;
+  let stuckToBottom = !pendingScrollTarget;
+  // See renderMessages()'s own doc comment at the publishReadReceipt() call
+  // site - guards against a self-published read receipt re-triggering the
+  // read-receipts watch below, which would re-run renderMessages(), forever.
+  let lastPublishedReadUpto = 0;
+  // The currently-rendered messages, by id - kept up to date at the top of
+  // every renderMessages() call, so refreshReadTicks() (below) can update
+  // an ALREADY-rendered row's tick in place without needing its own copy of
+  // the message list.
+  let renderedMessagesById = new Map();
+  const BOTTOM_FOLLOW_THRESHOLD_PX = 80;
+  messagesScroll.addEventListener('scroll', () => {
+    stuckToBottom = messagesScroll.scrollHeight - messagesScroll.scrollTop - messagesScroll.clientHeight < BOTTOM_FOLLOW_THRESHOLD_PX;
+  });
+  function roomHash() {
+    return target.kind === 'group' ? `#/chat/g/${roomId}` : `#/chat/${target.peerPub}`;
+  }
+  function messagePermalink(message) {
+    return `${roomHash()}/m/${message.id}`;
+  }
 
   let pendingAttachment = null;
   function clearPendingAttachment() {
@@ -900,22 +1099,85 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
 
     if (messages.length) {
       const newestTs = messages[messages.length - 1].ts;
-      services.presence.publishReadReceipt(SPACE_ID, roomId, newestTs).catch(() => {});
-      services.messages.markRead(SPACE_ID, roomId).catch(() => {});
+      // Guarded to fire only when the read position actually ADVANCES, not
+      // on every renderMessages() call: publishReadReceipt() writes under
+      // threadReadReceiptsParentPath(), which this function's OWN
+      // watchChildren() (below, near offReadReceipts) re-renders on - an
+      // unconditional publish here would re-trigger that watch, which
+      // re-runs renderMessages(), which republishes, forever (an actual
+      // infinite tear-down/rebuild loop, caught only by a test that opens
+      // the context menu and finds it destroyed a tick after opening).
+      // Comparing against the last value THIS session already published
+      // (not what's stored - a fresh mount has nothing to compare against,
+      // hence 0) breaks the cycle: the receipt is a monotonic "read up to"
+      // marker, republishing the same value has no effect other than being
+      // a wasted (here, dangerous) write.
+      if (newestTs > lastPublishedReadUpto) {
+        lastPublishedReadUpto = newestTs;
+        services.presence.publishReadReceipt(SPACE_ID, roomId, newestTs).catch(() => {});
+        services.messages.markRead(SPACE_ID, roomId).catch(() => {});
+      }
     }
 
     clearMessageWatchers();
     messagesRoot.textContent = '';
+    renderedMessagesById = new Map(messages.map((m) => [m.id, m])); // see refreshReadTicks()'s own doc comment
     if (messages.length > 0) {
-      const byId = new Map(messages.map((m) => [m.id, m]));
       const ul = document.createElement('ul');
       ul.className = 'qu-chat-messages';
       for (const message of messages) {
-        const li = await renderMessage(message, byId, readReceipts);
+        const li = await renderMessage(message, renderedMessagesById, readReceipts);
         if (stopped || token !== renderToken) return;
         ul.appendChild(li);
       }
       messagesRoot.appendChild(ul);
+    }
+
+    // See mountRoomView()'s own doc comment on "PERMALINKS + scroll-follow".
+    if (pendingScrollTarget) {
+      const targetRow = [...messagesRoot.querySelectorAll('.qu-chat-bubble-row')].find((li) => li.dataset.messageId === pendingScrollTarget);
+      pendingScrollTarget = null;
+      if (targetRow) {
+        // jsdom (this repo's test DOM) has no layout engine and doesn't
+        // implement scrollIntoView() at all - optional-chained so tests
+        // exercise every line above/below it without stubbing it out.
+        targetRow.scrollIntoView?.({ block: 'center' });
+        targetRow.classList.add('qu-chat-bubble-row-highlight');
+        setTimeout(() => targetRow.classList.remove('qu-chat-bubble-row-highlight'), 2000);
+        return;
+      }
+      stuckToBottom = true; // the permalinked message is gone (deleted?) - fall through to "show latest" below
+    }
+    if (stuckToBottom) messagesScroll.scrollTop = messagesScroll.scrollHeight;
+  }
+
+  /**
+   * A peer's read receipt (PresenceService.publishReadReceipt()) changing
+   * is a FREQUENT, routine event (fires on every render of every OTHER
+   * member's own room view) - reusing renderMessages() for it would tear
+   * down and rebuild the entire message list, including any row an actual
+   * person happens to have an in-progress interaction with right at that
+   * moment (an open "⋮" context menu, an in-progress edit textarea) purely
+   * because someone else's read position moved. This does the ONE thing
+   * that actually changed - each own message's read-tick footer segment -
+   * in place, touching nothing else. Bound to the read-receipts watch (see
+   * mountRoomView()'s own offReadReceipts wiring below) instead of
+   * renderMessages() itself.
+   */
+  async function refreshReadTicks() {
+    if (stopped || !roomReady || !myPub) return;
+    const otherMembers = memberPubs.filter((p) => p !== myPub);
+    const readReceipts = await services.presence.getReadReceipts(SPACE_ID, roomId, otherMembers);
+    if (stopped) return;
+    for (const row of messagesRoot.querySelectorAll('.qu-chat-bubble-row')) {
+      const tickEl = row.querySelector('[data-segment="core.readReceipt"]');
+      if (!tickEl) continue; // not one of THIS identity's own messages - no tick segment was rendered for it at all
+      const message = renderedMessagesById.get(row.dataset.messageId);
+      if (!message) continue;
+      const isRead = Object.values(readReceipts).some((upto) => upto >= message.ts);
+      tickEl.textContent = isRead ? '✓✓' : '✓';
+      tickEl.title = isRead ? t('read') : t('sent');
+      tickEl.classList.toggle('qu-chat-bubble-tick-read', isRead);
     }
   }
 
@@ -923,6 +1185,12 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     const mine = message.author === myPub;
     const row = document.createElement('li');
     row.className = 'qu-chat-bubble-row' + (mine ? ' qu-chat-bubble-row-mine' : '');
+    // The permalink scroll target (see mountRoomView()'s own doc comment on
+    // "PERMALINKS + scroll-follow") - `id` for a real, shareable DOM anchor,
+    // `dataset` so renderMessages() can find this row by message id without
+    // needing to CSS-escape an arbitrary id string into a selector.
+    row.id = `m-${message.id}`;
+    row.dataset.messageId = message.id;
     const bubble = document.createElement('div');
     bubble.className = 'qu-chat-bubble' + (mine ? ' qu-chat-bubble-mine' : '');
     if (mine && chatSettings.ownColor) bubble.style.background = chatSettings.ownColor;
@@ -1003,7 +1271,16 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
       {
         id: 'core.timestamp',
         render: (el) => {
-          el.textContent = message.editedAt ? `${formatTs(message.ts)} (${t('edit').toLowerCase()})` : formatTs(message.ts);
+          // The timestamp doubles as this message's permalink (see
+          // mountRoomView()'s own "PERMALINKS + scroll-follow" doc comment) -
+          // a plain in-app hash link, not a copy-to-clipboard action, so it
+          // works the same whether shared externally or clicked right here.
+          const link = document.createElement('a');
+          link.className = 'qu-chat-bubble-timestamp-link';
+          link.href = messagePermalink(message);
+          link.title = t('permalink');
+          link.textContent = message.editedAt ? `${formatTs(message.ts)} (${t('edit').toLowerCase()})` : formatTs(message.ts);
+          el.appendChild(link);
         },
       },
       {
@@ -1030,6 +1307,11 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
       .sort((a, b) => a.rank - b.rank);
     for (const seg of ranked) {
       const wrap = document.createElement('span');
+      // Lets refreshReadTicks() (see mountRoomView()'s own doc comment)
+      // find and update the 'core.readReceipt' segment of an ALREADY
+      // rendered row directly, without renderMessages() tearing down and
+      // rebuilding the whole message list just because a receipt changed.
+      wrap.dataset.segment = seg.id;
       await seg.render(wrap);
       footer.appendChild(wrap);
     }
@@ -1173,15 +1455,32 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
 
     subscribe?.(paths.threadMessagesParentPath(SPACE_ID, roomId));
     offMessages = watchChildren(qu, paths.threadMessagesParentPath(SPACE_ID, roomId), () => renderMessages(), { syncFetch });
+    // Read receipts (PresenceService.publishReadReceipt()) live under a
+    // SIBLING of .../msgs (see threadReadReceiptsParentPath()'s own doc
+    // comment), so the watch above never fires for one arriving via sync -
+    // without this second watch, a peer's receipt lands in the local store
+    // just fine but the read-tick footer segment (built from a one-time
+    // getReadReceipts() snapshot in renderMessages()) never re-renders to
+    // reflect it, silently freezing at whatever it showed on first render.
+    // Bound to refreshReadTicks() (see its own doc comment), NOT
+    // renderMessages() itself - THIS identity's own receipt-publishing
+    // inside renderMessages() would otherwise retrigger this same watch on
+    // every single render (bounded by lastPublishedReadUpto's guard, but
+    // still a real full-list rebuild racing whatever the user is doing at
+    // that exact moment, e.g. a just-opened context menu getting torn down
+    // out from under them a tick after opening).
+    offReadReceipts = watchChildren(qu, paths.threadReadReceiptsParentPath(SPACE_ID, roomId), () => refreshReadTicks(), { syncFetch });
     renderMessages();
   })();
 
   let offMessages = () => {};
+  let offReadReceipts = () => {};
 
   return () => {
     stopped = true;
     clearMessageWatchers();
     offMessages();
+    offReadReceipts();
     stopHeartbeat?.();
     if (presenceTimer) clearInterval(presenceTimer);
     stopComposerMentions();
@@ -1254,7 +1553,7 @@ export async function searchChat({ services, apps, myPub, query, types, scope, s
       if (!message.body?.toLowerCase().includes(q)) continue;
       const contentType = classifyMessageContentType(message);
       if (types?.length && !types.includes(contentType)) continue;
-      out.push({ contentType, ts: message.ts, author: message.author, snippet: buildSnippet(message.body, q), href, roomId, roomName });
+      out.push({ contentType, ts: message.ts, author: message.author, snippet: buildSnippet(message.body, q), href: `${href}/m/${message.id}`, roomId, roomName });
     }
     return out;
   }
@@ -1315,6 +1614,11 @@ export async function resolveChatReference({ services, syncFetch, myPub, spaceId
     href = peerPub ? `#/chat/${peerPub}` : '#/chat';
     roomName = peerPub ? formatActorLabel(peerPub, profile ?? {}) : threadId;
   }
+  // Deep-link straight to the referenced message itself (see mountRoomView()'s
+  // own "PERMALINKS + scroll-follow" doc comment), not just the room it's in -
+  // `href === '#/chat'` only when the 1:1 peer couldn't be resolved at all, in
+  // which case there's no room to land in either, so the /m/ suffix is skipped.
+  if (href !== '#/chat') href = `${href}/m/${messageId}`;
 
   return {
     contentType: classifyMessageContentType(message), ts: message.ts, author: message.author,

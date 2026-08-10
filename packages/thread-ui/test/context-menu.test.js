@@ -106,3 +106,27 @@ test('clicking outside the menu closes an open panel', async () => {
   document.body.click();
   assert.equal(el.querySelector('.qu-thread-ui-context-menu-panel'), null);
 });
+
+test('opening near the bottom of the viewport flips the panel upward (flipUpIfNeeded)', async () => {
+  const host = makeHost();
+  const el = renderContextMenu({ getItems: () => [{ id: 'a', label: 'A', onClick: () => {} }] });
+  host.appendChild(el);
+  const trigger = el.querySelector('button');
+  window.innerHeight = 400;
+  trigger.getBoundingClientRect = () => ({ top: 380, bottom: 395, left: 0, right: 0, width: 0, height: 15 });
+
+  const original = window.HTMLElement.prototype.getBoundingClientRect;
+  window.HTMLElement.prototype.getBoundingClientRect = function () {
+    if (this.classList.contains('qu-thread-ui-context-menu-panel')) return { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 200 };
+    return original.call(this);
+  };
+  try {
+    trigger.click();
+    await tick();
+    const panel = el.querySelector('.qu-thread-ui-context-menu-panel');
+    assert.ok(panel);
+    assert.equal(panel.classList.contains('qu-thread-ui-context-menu-panel-flip-up'), true);
+  } finally {
+    window.HTMLElement.prototype.getBoundingClientRect = original;
+  }
+});

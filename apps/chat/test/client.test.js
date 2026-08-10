@@ -11,7 +11,7 @@ import { ExtensionPointHost } from '@qu/foundation';
 import { installDom, waitFor } from '@qu/ui/testing';
 
 installDom();
-const { mount, renderChatSettings } = await import('../client.js');
+const { mount, renderChatSettings, searchChat, resolveChatReference } = await import('../client.js');
 
 /** A minimal MediaRecorder test double - start()/stop() only, stop() synchronously fires ondataavailable then onstop, matching real MediaRecorder's own event order closely enough for startRecording()'s own handler. */
 class FakeMediaRecorder {
@@ -218,6 +218,77 @@ test('createGroup() + posting renders in the group room view, and shows up in th
   }
 });
 
+test('a first-ever DM from a non-contact shows up as a "message request" (not a silent room); Accept adds the contact and opens the room', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu); // alice needs bob's X key to encrypt both the message AND the dm-invite for him
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'hi, we\'ve never talked before' });
+
+  // Bob and Alice are NOT contacts of each other yet - mirror the invite
+  // mailbox (dm-invite reuses the SAME 'groups' invite thread group-invites
+  // use - see ChatService's own doc comment), Alice's profile, and the room
+  // thread itself into Bob's store, as if sync delivered all three.
+  await mirrorProfileInto(alice, bob.qu);
+  const inviteSpace = await bob.services.chat.myInviteSpace();
+  await mirrorThreadInto(alice, bob.qu, inviteSpace, 'groups');
+  await mirrorThreadInto(alice, bob.qu, CHAT_SPACE_ID, roomId);
+
+  const bobContacts = await bob.services.contacts.listContacts();
+  assert.deepEqual(bobContacts, []);
+
+  const bobContainer = makeContainer();
+  const stopBob = mount(bobContainer, { qu: bob.qu, services: bob.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat'] });
+  try {
+    await waitFor(() => bobContainer.querySelector('.qu-chat-request-row') !== null);
+    assert.match(bobContainer.querySelector('.qu-chat-requests-heading').textContent, /request/i);
+    assert.match(bobContainer.querySelector('.qu-chat-request-name').textContent, /Alice/);
+    // NOT rendered as an ordinary room row - a request is a decision, not
+    // yet a conversation to click into.
+    assert.equal(bobContainer.querySelector('.qu-chat-room-row'), null);
+
+    bobContainer.querySelector('.qu-chat-request-actions button').click(); // Accept is always the first button
+    // The hash is set LAST in the click handler, after addContact() has
+    // already resolved - waiting on it (a plain sync check) is what proves
+    // the whole handler ran, not just that it started. (An async predicate
+    // here - `waitFor(async () => await isContact(...))` - would be the
+    // documented waitFor() footgun: the check function itself is a truthy
+    // Promise before it's ever awaited, so it'd resolve on the very first
+    // poll, racing ahead of the click handler's own still-pending work.)
+    await waitFor(() => window.location.hash !== '');
+    assert.equal(window.location.hash, `#/chat/${alice.myPub}`);
+    assert.equal(await bob.services.contacts.isContact(alice.myPub), true);
+  } finally {
+    stopBob();
+  }
+});
+
+test('declining a message request dismisses it (does not add a contact, does not resurface after re-render)', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'hello stranger' });
+
+  await mirrorProfileInto(alice, bob.qu);
+  const inviteSpace = await bob.services.chat.myInviteSpace();
+  await mirrorThreadInto(alice, bob.qu, inviteSpace, 'groups');
+  await mirrorThreadInto(alice, bob.qu, CHAT_SPACE_ID, roomId);
+
+  const bobContainer = makeContainer();
+  const stopBob = mount(bobContainer, { qu: bob.qu, services: bob.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat'] });
+  try {
+    await waitFor(() => bobContainer.querySelector('.qu-chat-request-row') !== null);
+    const [, declineBtn] = bobContainer.querySelectorAll('.qu-chat-request-actions button');
+    declineBtn.click();
+
+    await waitFor(() => bobContainer.querySelector('.qu-chat-request-row') === null);
+    assert.equal(await bob.services.contacts.isContact(alice.myPub), false);
+  } finally {
+    stopBob();
+  }
+});
+
 test('renderChatSettings() - the userSettings.contributions contributor - persists a per-user preference via private-storage', async () => {
   const alice = await freshEnv('Alice');
   const container = makeContainer();
@@ -330,6 +401,38 @@ test('the read-tick footer segment reads "Read" (✓✓) when the peer\'s read r
   }
 });
 
+test('the read-tick updates to "Read" (✓✓) LIVE when the peer\'s receipt arrives AFTER mount - not just at initial render', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'read me later' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-bubble-footer')?.textContent.includes('✓'));
+    assert.equal(container.querySelector('.qu-chat-bubble-footer').textContent.includes('✓✓'), false);
+
+    // Bob reads it and publishes his receipt only NOW, well after Alice's
+    // room view already mounted and rendered its first ("Sent") tick - then
+    // it "syncs" into Alice's store the same putSealed() way every other
+    // cross-identity test here does, with NOTHING else re-triggering a
+    // render (no new message, no re-mount). Read receipts live under
+    // threadReadReceiptsParentPath(), a SIBLING of the messages parent path
+    // mountRoomView() already watches - without its own watchChildren() on
+    // that parent too, this receipt would land in Alice's local store but
+    // the tick would silently stay frozen on "Sent" forever.
+    await bob.services.presence.publishReadReceipt(CHAT_SPACE_ID, roomId, Date.now() + 1000);
+    const receiptPath = paths.threadReadReceiptPath(CHAT_SPACE_ID, roomId, bob.myPub);
+    await alice.qu.putSealed(receiptPath, await bob.qu.get(receiptPath));
+
+    await waitFor(() => container.querySelector('.qu-chat-bubble-footer')?.textContent.includes('✓✓'));
+  } finally {
+    stop();
+  }
+});
+
 test('a message with no reply banner active posts with replyTo: null (not "undefined")', async () => {
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');
@@ -431,6 +534,102 @@ test('sharing location posts a message with extra.location, rendered as an OpenS
     const roomId = await ChatService.roomId([alice.myPub, bob.myPub]);
     const { messages } = await alice.services.messages.listMessages(CHAT_SPACE_ID, roomId);
     assert.deepEqual(messages[0].location, { lat: 52.52, lng: 13.405 });
+  } finally {
+    stop();
+  }
+});
+
+test('a message\'s timestamp IS its permalink - #/chat/<peer>/m/<id> for a 1:1 room, #/chat/g/<groupId>/m/<id> for a group', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  const posted = await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'link me' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-bubble-text')?.textContent.includes('link me'));
+    const link = container.querySelector('.qu-chat-bubble-timestamp-link');
+    assert.equal(link.getAttribute('href'), `#/chat/${bob.myPub}/m/${posted.id}`);
+    // the row itself carries the same id, so the link's own target is a real, addressable DOM anchor
+    assert.equal(container.querySelector(`#m-${posted.id}`), link.closest('.qu-chat-bubble-row'));
+  } finally {
+    stop();
+  }
+
+  const { groupId } = await alice.services.chat.createGroup(CHAT_SPACE_ID, { name: 'Team Rocket', memberPubs: [bob.myPub] });
+  const groupPosted = await alice.services.messages.postMessage(CHAT_SPACE_ID, groupId, { body: 'group link me' });
+  const groupContainer = makeContainer();
+  const stopGroup = mount(groupContainer, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', 'g', groupId] });
+  try {
+    await waitFor(() => groupContainer.querySelector('.qu-chat-bubble-text')?.textContent.includes('group link me'));
+    const link = groupContainer.querySelector('.qu-chat-bubble-timestamp-link');
+    assert.equal(link.getAttribute('href'), `#/chat/g/${groupId}/m/${groupPosted.id}`);
+  } finally {
+    stopGroup();
+  }
+});
+
+test('landing on a message permalink route (#/chat/<peer>/m/<id>) scrolls to and highlights that message only', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'first' });
+  const target = await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'second' });
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'third' });
+
+  const container = makeContainer();
+  const stop = mount(container, {
+    qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe,
+    segments: ['chat', bob.myPub, 'm', target.id],
+  });
+  try {
+    await waitFor(() => container.querySelectorAll('.qu-chat-bubble-row').length === 3);
+    const rows = [...container.querySelectorAll('.qu-chat-bubble-row')];
+    const highlighted = rows.filter((row) => row.classList.contains('qu-chat-bubble-row-highlight'));
+    assert.equal(highlighted.length, 1);
+    assert.equal(highlighted[0].id, `m-${target.id}`);
+  } finally {
+    stop();
+  }
+});
+
+test('searchChat() and resolveChatReference() both link straight to the specific message, not just the room', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  const posted = await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'findable text' });
+
+  // scope: 'global'/'app' only walks services.contacts.listContacts() + listMyGroups()
+  // (see searchChat()'s own doc comment) - alice never added bob as a contact here,
+  // only ensureRoom()'d a DM with him, so 'subpage' (searching THIS room directly,
+  // via the route's own segments) is the scope that actually covers it.
+  const results = await searchChat({ services: alice.services, apps: CHAT_APPS, myPub: alice.myPub, query: 'findable', types: null, scope: 'subpage', segments: ['chat', bob.myPub] });
+  assert.equal(results.length, 1);
+  assert.equal(results[0].href, `#/chat/${bob.myPub}/m/${posted.id}`);
+
+  const resolved = await resolveChatReference({ services: alice.services, myPub: alice.myPub, spaceId: CHAT_SPACE_ID, threadId: roomId, messageId: posted.id });
+  assert.equal(resolved.href, `#/chat/${bob.myPub}/m/${posted.id}`);
+});
+
+test('the room view uses the fixed-layout structure: a back link in the header, and the message list wrapped in a scrollable container', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
+    assert.ok(container.querySelector('.qu-chat-room-view'));
+    const backLink = container.querySelector('.qu-chat-header-back');
+    assert.equal(backLink.getAttribute('href'), '#/chat');
+    // the message list lives INSIDE the scrollable wrapper, not directly under roomView
+    assert.ok(container.querySelector('.qu-chat-messages-scroll'));
+    assert.ok(container.querySelector('.qu-chat-messages-scroll .qu-chat-header') === null); // header is a SIBLING, not inside the scroll area
   } finally {
     stop();
   }

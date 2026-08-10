@@ -1973,4 +1973,87 @@ own tests, built bottom-up per the dependency order in
       `navigator.geolocation` mocked in `apps/chat/test/client.test.js`,
       including the composer's mic/send morph itself), `npm run build`
       bundles cleanly.
+- [x] **Popup opacity/positioning, fixed chat layout, message permalinks,
+      live read receipts, DM message requests, forum unread indicator,
+      image lightbox** - a round driven by direct usage feedback rather
+      than a single feature request:
+      **Opaque, viewport-aware popups**: `--qu-color-surface` (`@qu/ui`'s
+      `theme.js`) was referenced with inconsistent, often-transparent
+      per-callsite fallbacks (`canvas`, `#8882`, `transparent`) but never
+      actually DEFINED anywhere - root cause of "reactions/context-menu
+      overlay is too transparent". Now a real token (`#ffffff` light /
+      `#242426` dark via a new `prefers-color-scheme: dark` block). A new
+      shared `flipUpIfNeeded()` (`@qu/thread-ui`'s `popup-position.js`)
+      measures real post-layout geometry to flip a panel from opening
+      downward to upward when there isn't room below - wired into
+      `renderEmojiPicker()`, `renderContextMenu()`, and
+      `mountTriggerAutocomplete()` alike, so none of them can open off the
+      bottom of the screen again.
+      **Fixed chat header/composer**: `apps/chat`'s room view is now a flex
+      COLUMN sized to the viewport (`calc(100vh/100dvh - shell header -
+      screen padding)`) with the header/composer as `flex-shrink: 0`
+      siblings around ONE scrollable `.qu-chat-messages-scroll` middle -
+      simpler and more robust than `position: fixed/sticky` since only the
+      shell's own top offset needs accounting for, not chat's own bars.
+      **Message permalinks + scroll-follow** (`apps/chat` AND `apps/forum`):
+      a message's timestamp is now its own link
+      (`#/chat/<room>/m/<id>`/`#/forum/t/<topic>/m/<id>`); landing on one
+      scrolls the target into view and briefly highlights it. Chat (an
+      internal scroll container) tracks a `stuckToBottom` state - true by
+      default, false when landing on an older permalink - so a live
+      incoming message only auto-scrolls the view when the user was
+      already at the bottom; Forum (a plain page scroll, oldest-to-newest
+      like an ordinary thread) needs no such state machine, just
+      `scroll-margin-top` to clear the shell's fixed header.
+      `apps/search`'s `searchChat`/`searchForum` and
+      `apps/notifications`' `resolveChatReference`/`resolveForumReference`
+      now link straight to the specific message too, not just its room/topic.
+      **Fixed a real bug**: chat's read-tick footer segment never updated
+      live - `PresenceService.publishReadReceipt()` writes under a path
+      (`threadReadReceiptsParentPath()`, new) that nothing watched, since it
+      is a SIBLING of the messages parent path, not a child. Fixed with a
+      dedicated watch + a surgical `refreshReadTicks()` that updates just
+      the tick DOM in place, deliberately NOT a full `renderMessages()`
+      rebuild (which would otherwise tear down whatever the user happened
+      to have open - a context menu, an in-progress edit - the moment
+      anyone's read position changed, an actual regression caught by a new
+      test opening the menu and finding it destroyed a tick after opening).
+      **New: chat "message requests"** - a first-ever 1:1 DM from a
+      non-contact used to sync in perfectly but render nowhere (the room
+      list only ever enumerated Contacts), reading as "chat doesn't sync
+      with new people". `ChatService.ensureRoom()` now posts a `dm-invite`
+      into the recipient's mailbox on GENUINE first creation only (reusing
+      the same mechanism/thread `createGroup()`'s own invites already use),
+      best-effort (a failure - e.g. the sender's profile/X-key not yet
+      known to the recipient - never blocks the room itself from being
+      created). `apps/chat`'s room list surfaces these as a "Message
+      requests" section (sender's avatar/alias/pubkey, Accept adds the
+      Contact and opens the room, Decline dismisses privately) - never a
+      silent, un-consentable room appearing in the main list.
+      **Forum's own unread indicator**: NOT a port of chat's read tick (a
+      PUBLIC, one-fixed-peer signal that makes no sense for a Topic with
+      any number of readers) - a PRIVATE "have I seen this since my last
+      visit" badge/left-accent-bar per post, driven by the SAME
+      `MessageService.markRead()`/`getLastReadAt()` the room list's own
+      unread dot already uses, the familiar forum-software idiom instead.
+      **Image lightbox/zoom**: confirmed both `apps/forum` and `apps/chat`
+      already render every attachment through the ONE centralized
+      `@qu/ui` `<qu-asset>`/`<qu-asset-upload>` Custom Elements (nothing to
+      migrate) - added fullscreen + click-to-zoom directly there
+      (`openImageLightbox()`), so both apps get it from one central change,
+      exactly the "later, central image-viewer upgrade" this was meant to
+      set up for. Also fixed an unrelated, pre-existing latent bug found
+      along the way: `asset-components.js`'s `cacheKey()` concatenated
+      `spaceId`/`assetId` with a literal NUL byte instead of a printable
+      separator (a previous session's encoding mishap, invisible in a
+      terminal - `file` reported the whole module as binary).
+      Verified: full suite green (1164 tests - new
+      `packages/thread-ui/test/popup-position.test.js`, extended
+      `emoji.test.js`/`context-menu.test.js`/`theme.test.js`, extended
+      `apps/chat/test/client.test.js` (permalinks, live read-tick, message
+      requests) and `apps/forum/test/client.test.js` (permalinks, unread
+      badge), extended `packages/services/test/chat-service.test.js`
+      (dm-invite/listMyDmRequests), extended
+      `packages/ui/test/asset-components.test.js` (lightbox open/zoom/
+      close)), `npm run build` bundles cleanly.
 

@@ -41,6 +41,28 @@ test('ensureTheme is idempotent - a second call (even with different overrides) 
   assert.doesNotMatch(secondContent, /#ff0000/);
 });
 
+test('ensureTheme emits a real, opaque --qu-color-surface (light) and a dark-scheme override under prefers-color-scheme: dark', () => {
+  resetTheme();
+  ensureTheme();
+  const content = document.getElementById('qu-theme').textContent;
+  assert.match(content, /--qu-color-surface:\s*#ffffff;/);
+  assert.match(content, /@media \(prefers-color-scheme: dark\)/);
+  assert.match(content, /--qu-color-surface:\s*#242426;/);
+  // the dark override lives INSIDE the media block, not the plain :root one
+  const mediaBlockStart = content.indexOf('@media');
+  assert.ok(content.indexOf('#242426') > mediaBlockStart);
+});
+
+test('an explicit override applies to the dark block too, when the overridden key is also a dark-scheme token', () => {
+  resetTheme();
+  ensureTheme({ '--qu-color-surface': '#111111' });
+  const content = document.getElementById('qu-theme').textContent;
+  const mediaBlockStart = content.indexOf('@media');
+  assert.match(content.slice(0, mediaBlockStart), /--qu-color-surface:\s*#111111;/);
+  assert.match(content.slice(mediaBlockStart), /--qu-color-surface:\s*#111111;/);
+  assert.doesNotMatch(content.slice(mediaBlockStart), /#242426/);
+});
+
 test('an override replaces the corresponding default token when applied to a fresh (unmounted) theme', () => {
   resetTheme();
   ensureTheme({ '--qu-color-accent': '#123456' });
