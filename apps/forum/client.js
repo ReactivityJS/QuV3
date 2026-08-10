@@ -344,6 +344,8 @@ const STYLE = `
     .qu-forum-mini-channels a { white-space: nowrap; border: 1px solid var(--qu-color-border, #8884); border-radius: 999px; padding: 0.3rem 0.7rem; }
   }
   .qu-forum-new-channel-form, .qu-forum-new-topic-form, .qu-forum-invite-form { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.6rem; max-width: 26rem; }
+  .qu-forum-invite-error { color: var(--qu-color-danger, #c00); font-size: 0.85em; margin: 0; }
+  .qu-forum-invite-error[hidden] { display: none; }
   .qu-forum-new-channel-form input[type="text"], .qu-forum-new-topic-form input[type="text"], .qu-forum-invite-form input[type="text"] { font: inherit; padding: 0.4rem 0.6rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); }
   .qu-forum-new-channel-form label { display: flex; align-items: center; gap: 0.4rem; font-size: 0.9em; }
   .qu-forum-new-channel-form button, .qu-forum-new-topic-form button, .qu-forum-invite-form button { align-self: flex-start; padding: 0.4rem 1rem; border-radius: var(--qu-radius-md, 0.4rem); border: none; background: var(--qu-color-accent, #5b5bd6); color: white; cursor: pointer; font: inherit; }
@@ -819,15 +821,29 @@ function mountChannelView(container, { qu, services, syncFetch, SPACE_ID, channe
     const submit = document.createElement('button');
     submit.type = 'submit';
     submit.textContent = t('invite');
-    form.append(label, pubInput, submit);
+    const errorEl = document.createElement('p');
+    errorEl.className = 'qu-forum-invite-error';
+    errorEl.hidden = true;
+    form.append(label, pubInput, submit, errorEl);
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const actorPub = pubInput.value.trim();
       if (!actorPub) return;
       submit.disabled = true;
+      errorEl.hidden = true;
       try {
         await services.channels.addChannelMember(SPACE_ID, channelId, actorPub);
         pubInput.value = '';
+      } catch (err) {
+        // See ChannelService.addChannelMember()'s own doc comment: this can
+        // throw even after the channel-level membership add already
+        // succeeded, if growing one or more EXISTING topics' own ACL failed
+        // - surfaced here rather than left as a silent unhandled rejection
+        // (confirmed real: a caller with no try/catch here previously saw
+        // NOTHING, while the invited member could remain unable to post in
+        // some topics with no visible sign anything had gone wrong).
+        errorEl.textContent = err.message;
+        errorEl.hidden = false;
       } finally {
         submit.disabled = false;
       }
@@ -938,7 +954,10 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
   const pendingAttachmentEl = document.createElement('div');
   pendingAttachmentEl.className = 'qu-forum-pending-attachment';
   pendingAttachmentEl.hidden = true;
-  composerWrap.append(composerRow, pendingAttachmentEl);
+  // ABOVE the input row, not below it - see apps/chat/client.js's own
+  // identical composer-ordering fix for why (a pending attachment is
+  // context for what's about to be sent, not a footnote after the fact).
+  composerWrap.append(pendingAttachmentEl, composerRow);
 
   renderSubpage(mainRoot, {
     showBackLink: false, // the shell header's own Back/Forward already covers this - see this app's own top doc comment
@@ -1342,16 +1361,20 @@ function buildSnippet(body, query, radius = 60) {
 export async function searchForum({ services, qu, apps, query, types, scope, segments = [] }) {
   const SPACE_ID = apps?.find((a) => a.name === 'forum')?.spaceId;
   const q = (query ?? '').trim().toLowerCase();
-  if (!SPACE_ID || !q) return [];
+  // See apps/chat/client.js's own searchChat() doc comment on this same
+  // guard - a TYPE filter alone ("every image in this topic") is a real
+  // search, never satisfiable by a body-text match (an image post's body
+  // is no more descriptive than any other's).
+  if (!SPACE_ID || (!q && !types?.length)) return [];
   const [, kindSeg, idSeg] = segments;
 
   async function messagesOfTopic(topicId, channelId, topicTitle) {
     const { messages } = await services.messages.listMessages(SPACE_ID, topicId);
     const out = [];
     for (const message of messages) {
-      if (!message.body?.toLowerCase().includes(q)) continue;
       const contentType = classifyMessageContentType(message);
       if (types?.length && !types.includes(contentType)) continue;
+      if (q && !message.body?.toLowerCase().includes(q)) continue;
       out.push({
         contentType, ts: message.ts, author: message.author,
         snippet: buildSnippet(message.body, q),

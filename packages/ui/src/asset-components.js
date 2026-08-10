@@ -63,8 +63,20 @@ export function findAssetService(el) {
 
 const STYLE_ID = 'qu-asset-components-style';
 const STYLE = `
+  /* position: relative on the HOST element (not just its .qu-asset-upload-
+     picker child) is what makes the progress status below able to float
+     ABOVE it via position: absolute, entirely OUT of normal flow - without
+     this, a host composer laying qu-asset-upload out inline alongside a
+     text input (apps/chat's/apps/forum's own composer row) had the
+     progress status participate in that SAME flex row, and its own
+     min-content width (a filename + percentage + an 8rem bar) could easily
+     be wider than the room left over, squeezing the text input down to a
+     barely-visible sliver - confirmed live, not hypothetical. Floating it
+     above removes it from the row's own width negotiation entirely; the
+     picker button's own (small, fixed) width is all the row ever sees. */
+  qu-asset-upload { position: relative; display: inline-flex; }
   .qu-asset-upload-picker { display: inline-flex; align-items: center; gap: 0.5rem; }
-  .qu-asset-upload-progress { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.85em; opacity: 0.85; }
+  .qu-asset-upload-progress { position: absolute; z-index: 20; bottom: 100%; left: 0; margin-bottom: 0.3rem; display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.85em; min-width: 12rem; padding: 0.4rem 0.6rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); background: var(--qu-color-surface, #ffffff); box-shadow: 0 0.3rem 0.8rem rgba(0,0,0,0.2); }
   /* Without this, the [hidden] attribute this file sets via \`status.hidden = true\`
      (a plain author-stylesheet class selector beats the UA's own [hidden]
      rule at equal specificity) would never actually hide anything - the
@@ -75,7 +87,18 @@ const STYLE = `
   .qu-asset-upload-fill { height: 100%; background: var(--qu-color-accent, #5b5bd6); transition: width 0.15s ease; }
   .qu-asset-upload-fill.qu-asset-upload-fill-sync { background: var(--qu-color-success, #3fb950); }
   .qu-asset-upload-error { color: var(--qu-color-danger, #e5484d); }
-  .qu-asset img, .qu-asset video { max-width: 100%; border-radius: var(--qu-radius-md, 0.4rem); display: block; }
+  /* Capped to a message-appropriate size (both a chat bubble and a forum
+     post card) - a full-resolution photo or a widescreen video could
+     otherwise dominate an entire message list, forcing every OTHER message
+     around it to scroll far past just to get by one attachment. The
+     lightbox (see openImageLightbox() below) is what full-size viewing is
+     FOR - a thumbnail never needs to BE full-size to serve that. object-fit
+     preserves the original aspect ratio within that cap (never stretches
+     or crops) - max-width/max-height alone already do that for a plain
+     <img>/<video>, this only matters once EXPLICIT width/height attributes
+     are ever set (none are, today), kept as a deliberate safety net rather
+     than something this relies on silently continuing to be true. */
+  .qu-asset img, .qu-asset video { max-width: 100%; max-height: 20rem; border-radius: var(--qu-radius-md, 0.4rem); display: block; object-fit: contain; }
   .qu-asset audio { width: 100%; }
   .qu-asset-file-link { display: inline-flex; align-items: center; gap: 0.4rem; text-decoration: none; }
   .qu-asset-empty { opacity: 0.6; font-size: 0.85em; }

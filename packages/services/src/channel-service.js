@@ -251,8 +251,30 @@ export class ChannelService {
    * pick up the grown `channel.memberPubs` automatically via
    * `createTopic()`). A no-op for an already-open channel (nothing to grow
    * - every topic's thread is already public) or an already-present member.
+   *
+   * PER-TOPIC FAILURES DON'T ABORT THE REST - `Promise.allSettled()`, not a
+   * plain sequential loop that stops at the first `throw`. A prior version
+   * used a sequential `for` loop: one topic's `#growTopicMembership()` call
+   * failing (a stale local read racing a concurrent write, a transient
+   * local-write error, ...) meant every topic AFTER it in the list silently
+   * never got grown at all, with no error surfaced anywhere the admin who
+   * just invited someone would ever see - a real, confirmed cause of "this
+   * member can't post in some (but not all) topics of a channel they were
+   * just added to," with a relay/other peer's own `SyncEngine` rejecting
+   * their writes outright once they actually tried
+   * (`AccessEngine: writer not authorized to write to threads "..."`,
+   * a real, previously-unexplained log line). The channel-level membership
+   * add above (readable/writable channel doc, `channel.memberPubs`) still
+   * always fully succeeds before this runs; only per-topic growth can now
+   * partially fail, and does so LOUDLY (thrown here, not swallowed) so a
+   * caller (see `apps/forum/client.js`'s own invite form) can tell the
+   * admin something needs a retry instead of believing the invite fully
+   * worked.
    * @param {string|number} spaceId @param {string} channelId @param {string} actorPub
    * @returns {Promise<object>} The (possibly updated) channel.
+   * @throws {Error} If the channel-level add succeeded but growing one or
+   *   more EXISTING topics' own membership failed - the channel doc itself
+   *   is still updated either way; only some topics may need a retry.
    */
   async addChannelMember(spaceId, channelId, actorPub) {
     const channel = await this.getChannel(spaceId, channelId);
@@ -265,7 +287,11 @@ export class ChannelService {
     await this.qu.put(documentPath(spaceId, channelId), updated, writeOptions);
 
     const topics = await this.listTopics(spaceId, channelId);
-    for (const topic of topics) await this.#growTopicMembership(spaceId, topic._id, actorPub);
+    const results = await Promise.allSettled(topics.map((topic) => this.#growTopicMembership(spaceId, topic._id, actorPub)));
+    const failed = results.filter((r) => r.status === 'rejected');
+    if (failed.length > 0) {
+      throw new Error(`ChannelService.addChannelMember: added to the channel, but failed to grow membership for ${failed.length}/${topics.length} existing topic(s) - ${failed.map((r) => r.reason?.message ?? r.reason).join('; ')}`);
+    }
     return updated;
   }
 }

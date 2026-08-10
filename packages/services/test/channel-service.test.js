@@ -171,6 +171,42 @@ test('addChannelMember() grows a restricted channel\'s membership - EXISTING top
   assert.deepEqual(again.memberPubs, updated.memberPubs);
 });
 
+test('addChannelMember(): one topic failing to grow does not stop the OTHERS from growing, and still throws so the caller knows a retry is needed', async () => {
+  const ada = await freshSetup();
+  await ada.identity.publishMainProfile({ alias: 'Ada' });
+
+  const channel = await ada.channels.createChannel(SPACE, { title: 'Multi-topic restricted', restricted: true, memberPubs: [] });
+  const goodTopic = await ada.channels.createTopic(SPACE, channel._id, { title: 'Fine' });
+  const brokenTopic = await ada.channels.createTopic(SPACE, channel._id, { title: 'Corrupted ACL' });
+
+  // Simulate a divergent/corrupted state where Ada is (somehow) no longer a
+  // writer on ONE existing topic's own ACL doc - assertWriteAuthorized()'s
+  // "only an already-listed writer may change an ACL doc" rule (see
+  // access-engine.js) then rejects #growTopicMembership()'s own protect()
+  // call for THAT topic specifically, while the other topic is untouched.
+  await ada.qu.put(`/store/${SPACE}/acl/threads/${brokenTopic._id}`, { writers: ['someone-else'], readers: '*' }, {
+    signWith: (await ada.identity.getMainKey()).privateKeyPkcs8, writerPub: (await ada.identity.getMainKey()).publicKey,
+  });
+
+  await assert.rejects(
+    () => ada.channels.addChannelMember(SPACE, channel._id, 'new-member-pub'),
+    (err) => {
+      assert.match(err.message, /1\/2/);
+      return true;
+    }
+  );
+
+  // The channel-level membership add still fully succeeded...
+  const channelAfter = await ada.channels.getChannel(SPACE, channel._id);
+  assert.ok(channelAfter.memberPubs.includes('new-member-pub'));
+  // ...and the GOOD topic still grew despite the broken one failing.
+  const goodConfig = await ada.messages.getConfig(SPACE, goodTopic._id);
+  assert.ok(goodConfig.writers.includes('new-member-pub'));
+  // ...while the broken one genuinely didn't (this is the failure the thrown error is reporting).
+  const brokenConfig = await ada.messages.getConfig(SPACE, brokenTopic._id);
+  assert.equal(brokenConfig.writers.includes('new-member-pub'), false);
+});
+
 test('addChannelMember() is a no-op for an OPEN (non-restricted) channel - nothing to grow', async () => {
   const { channels, myPub } = await freshSetup();
   const channel = await channels.createChannel(SPACE, { title: 'Open board' });

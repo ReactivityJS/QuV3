@@ -61,11 +61,12 @@
  * that is making an "update available" moment observable at all - it does
  * NOT cache any app data, see `sw.js`'s own doc comment for why: Quniverse's
  * real data already lives in IndexedDB, synced over WebSocket, not a static
- * asset worth intercepting). Still deliberately NOT built: Web Push's
- * actual subscribe flow (`packages/push`/`PushSubscriptionService` exist
- * server-side already, but nothing here ever calls
- * `PushManager.subscribe()` yet - a separate, larger feature needing its
- * own permission UI, not something "PWA + updater" itself requires).
+ * asset worth intercepting). Web Push's actual subscribe flow (permission
+ * prompt + `PushManager.subscribe()` + `services.pushSubscriptions`) lives
+ * in `apps/profile/client.js`'s own Settings subpage instead (identity-bound
+ * device preferences, the same place every other one lives) - `sw.js`'s own
+ * `push`/`notificationclick` handlers are what actually SHOW a notification
+ * once a subscription exists and a push arrives.
  *
  * DELIBERATELY NOT BUILT THIS ROUND (see the README's own status entry for
  * the full account): remote-app integrity verification for `import()`
@@ -145,6 +146,27 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
   } catch (err) {
     log.warn('realtime sync unavailable in this environment:', err.message);
   }
+
+  // MOBILE FOREGROUND CATCH-UP - see SyncEngine.refreshSubscriptions()'s own
+  // doc comment for the exact gap this closes: backgrounding a mobile
+  // browser/PWA does NOT reliably close the underlying WebSocket (the OS may
+  // keep it alive, or a flaky network may let it go silently stale without
+  // either side noticing), so a real transport 'reconnect' event - the thing
+  // that would normally trigger a catch-up - may simply never fire even
+  // though real time passed while suspended. Confirmed live: a chat room
+  // left mounted through a phone screen lock never picked up messages sent
+  // while it was locked, even after unlocking - only leaving and
+  // re-entering the room (a fresh mount, with its own one-time subscribe +
+  // catch-up) did. `visibilitychange` -> visible is the one reliable signal
+  // "this page is back in front of a user" a browser gives regardless of
+  // what the underlying connection actually did - treating it the same as a
+  // reconnect (which is literally what refreshSubscriptions() does) closes
+  // the gap for every mounted app's active subscriptions at once, no
+  // per-app code needed.
+  function onVisibilityChange() {
+    if (document.visibilityState === 'visible') sync?.refreshSubscriptions();
+  }
+  document.addEventListener('visibilitychange', onVisibilityChange);
   // Two DIFFERENT backfill shapes, both from the same `sync` - never
   // confuse them:
   //   - `fetchOne(path)` (-> SyncEngine.fetch()) - ONE document, what
@@ -294,6 +316,7 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
   return () => {
     stopped = true;
     window.removeEventListener('hashchange', renderRoute);
+    document.removeEventListener('visibilitychange', onVisibilityChange);
     stopMountedApp?.();
     stopHeader?.();
     transport?.close();

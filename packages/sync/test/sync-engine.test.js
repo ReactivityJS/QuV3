@@ -414,6 +414,38 @@ test('reconnect catch-up never regresses a NEWER local write with an OLDER remot
   assert.equal((await clientQu.get('/store/space/docs/d1')).val.title, 'fresh (client)');
 });
 
+test('refreshSubscriptions() does the SAME resubscribe + reciprocal catch-up as a real reconnect, without touching the transport - the mobile "background/foreground never closed the socket" case', async () => {
+  const network = new TestNetwork();
+  const relayQu = freshQu();
+  await relayQu.put('/store/space/threads/general/msgs/missed', { body: 'while backgrounded' });
+  new SyncEngine(relayQu, new RelayTransport(network));
+
+  const clientQu = freshQu();
+  const clientTransport = new ClientTransport('client-a', network);
+  const client = new SyncEngine(clientQu, clientTransport);
+  client.subscribe('/store/space/threads/general/msgs');
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(await clientQu.get('/store/space/threads/general/msgs/missed'), null); // confirmed genuinely missed - subscribe() alone never retroactively fetches
+
+  const generationBefore = client.getGeneration();
+  client.refreshSubscriptions(); // no transport reconnect happened - the connection was never dropped
+  await waitUntil(async () => (await clientQu.get('/store/space/threads/general/msgs/missed'))?.val?.body === 'while backgrounded');
+  assert.equal(client.getGeneration(), generationBefore + 1); // still bumped, so per-generation background refresh (@qu/services' sync-freshness.js) re-checks too
+});
+
+test('refreshSubscriptions() does NOT fire onReconnect() app-level callbacks - it is not actually a reconnect', async () => {
+  const network = new TestNetwork();
+  new SyncEngine(freshQu(), new RelayTransport(network));
+  const clientTransport = new ClientTransport('client-a', network);
+  const client = new SyncEngine(freshQu(), clientTransport);
+  let calls = 0;
+  client.onReconnect(() => calls++);
+
+  client.refreshSubscriptions();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(calls, 0);
+});
+
 test('onReconnect() app-level callback fires on a reconnect, and its unsubscribe function stops future calls', async () => {
   const network = new TestNetwork();
   new SyncEngine(freshQu(), new RelayTransport(network));

@@ -19,12 +19,15 @@
  * (what this file would otherwise need) is exactly the kind of thing that's
  * easy to forget to bump.
  *
- * No `push`/`notificationclick` handlers this round - nothing in
- * `apps/shell` ever calls `PushManager.subscribe()` yet (`packages/push`/
- * `@qu/services`' `PushSubscriptionService` exist server-side, waiting for
- * a real client caller, same "hook built, no caller wired it up yet"
- * pattern as `ProfileService`'s own `syncFetch` parameter before
- * `apps/shell` existed) - a handler here would never receive anything.
+ * `push`/`notificationclick` (below): the browser decrypts a Web Push
+ * message before this handler ever sees it (aes128gcm, RFC 8291) - `event.
+ * data.json()` is already the plain object `@qu/relay`'s `PushDeliveryService`
+ * sent (`{title, body, appId, url}`, see `packages/push/src/send.js`'s own
+ * doc comment for why that's always a generic, never-the-actual-content
+ * template). `notificationclick` focuses an ALREADY-OPEN tab on this origin
+ * rather than always opening a new one - a user with the app already open
+ * in another tab almost certainly wants that tab brought forward, not a
+ * second copy of the whole app.
  *
  * Bare `console.*`, not `@qu/log`: this file runs in the separate
  * ServiceWorkerGlobalScope and is served completely unbundled (no bare
@@ -52,4 +55,40 @@ self.addEventListener('message', (event) => {
 
 self.addEventListener('fetch', (event) => {
   event.respondWith(fetch(event.request));
+});
+
+self.addEventListener('push', (event) => {
+  let payload;
+  try {
+    payload = event.data?.json();
+  } catch (err) {
+    console.error(`[sw ${SW_VERSION}] push event with unparsable payload:`, err);
+    return;
+  }
+  if (!payload) return;
+  const { title = 'Quniverse', body = '', url = '/' } = payload;
+  // data.url (read back in notificationclick below) - showNotification()
+  // itself has no "what to do on click" concept, only whatever this worker
+  // chooses to do with the event afterward.
+  event.waitUntil(self.registration.showNotification(title, { body, data: { url } }));
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const url = event.notification.data?.url ?? '/';
+  event.waitUntil(
+    (async () => {
+      const clientsList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+      // Prefer an ALREADY-OPEN tab on this origin - focus() it and navigate
+      // to the notification's own target, rather than always spawning a
+      // second tab; same-origin is guaranteed (a service worker only ever
+      // sees clients it itself controls).
+      for (const client of clientsList) {
+        await client.focus();
+        if ('navigate' in client) await client.navigate(url);
+        return;
+      }
+      await self.clients.openWindow(url);
+    })()
+  );
 });
