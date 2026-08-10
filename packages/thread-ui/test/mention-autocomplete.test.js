@@ -114,6 +114,27 @@ test('selecting a candidate replaces the typed fragment with @<fullPub> and clos
   }
 });
 
+test('selecting a candidate does not reopen the dropdown on the next tick (regression: the inserted @<pub> fragment itself matches TRIGGER_RE)', async () => {
+  const el = makeTextarea();
+  const stop = mountMentionAutocomplete(el, { services: fakeServices() });
+  try {
+    type(el, 'hi @ad');
+    await waitFor(() => document.querySelector('.qu-thread-ui-mention-list') !== null);
+
+    document.querySelector('.qu-thread-ui-mention-item').dispatchEvent(new CustomEvent('mousedown', { bubbles: true, cancelable: true }));
+    assert.equal(document.querySelector('.qu-thread-ui-mention-list'), null);
+
+    // The bug only ever showed up one microtask later, once onInput()'s
+    // re-entrant continuation (queued by insertAtCursor()'s own synthetic
+    // 'input' event) actually resumed - a synchronous check right after
+    // selection (the other test above) does not exercise that continuation.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(document.querySelector('.qu-thread-ui-mention-list'), null);
+  } finally {
+    stop();
+  }
+});
+
 test('no match narrows the dropdown to nothing and closes it', async () => {
   const el = makeTextarea();
   const stop = mountMentionAutocomplete(el, { services: fakeServices() });

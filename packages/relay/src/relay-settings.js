@@ -30,17 +30,38 @@ export const DEFAULT_RELAY_SETTINGS = Object.freeze({
     Object.freeze({ id: 'favorite', label: 'Favorite', icon: '⭐', mode: 'private', entityKinds: Object.freeze(['app', 'user']) }),
     Object.freeze({ id: 'like', label: 'Like', icon: '👍', mode: 'public', entityKinds: Object.freeze(['thread-message']) }),
   ]),
+  // Who may create a Channel-shaped group (today: `apps/forum`'s
+  // `ChannelService.createChannel()`; named generically, not `forum.*`,
+  // because `THREAD_PRESETS.chat()`/`group()` already back a future Chat
+  // "create group" flow with the exact same shape - see that module's own
+  // doc comment). `allowMemberCreate: false` and `allowMemberRestricted:
+  // false` still let this relay's own `adminPubs` create channels/restricted
+  // channels regardless - an admin is never locked out by their own policy.
+  // NOTE - honored CLIENT-SIDE only today (`apps/forum/client.js` hides the
+  // form): `ChannelService.createChannel()` stores a channel exactly like
+  // `createTopic()` stores a topic, both plain `documentPath()` "docs" -
+  // there is no path-level way yet to tell "a new channel" apart from "a new
+  // topic" for a pipeline Engine (`@qu/engines`' `AccessEngine`-style) to
+  // gate generically. Real enforcement needs channel documents to get their
+  // own distinguishable path/kind first - real, valuable follow-up work, not
+  // done here to avoid gating on a value-shape heuristic instead.
+  channels: Object.freeze({ allowMemberCreate: true, allowMemberRestricted: false }),
 });
 
 /**
  * @param {import('@qu/core').QuStore} qu
- * @returns {Promise<{defaultLocale: string, rateLimits: {maxMessagesPerMinute: number}, disabledApps: string[], flagTypes: Array<{id: string, label: string, icon: string, mode: string, entityKinds: string[]}>}>}
+ * @returns {Promise<{defaultLocale: string, rateLimits: {maxMessagesPerMinute: number}, disabledApps: string[], flagTypes: Array<{id: string, label: string, icon: string, mode: string, entityKinds: string[]}>, channels: {allowMemberCreate: boolean, allowMemberRestricted: boolean}}>}
  *   Always fully populated - missing fields fall back to `DEFAULT_RELAY_SETTINGS`.
  */
 export async function getSettings(qu) {
   const stored = await qu.get(RELAY_SETTINGS_PATH);
   const val = stored?.val ?? {};
-  return { ...DEFAULT_RELAY_SETTINGS, ...val, rateLimits: { ...DEFAULT_RELAY_SETTINGS.rateLimits, ...val.rateLimits } };
+  return {
+    ...DEFAULT_RELAY_SETTINGS,
+    ...val,
+    rateLimits: { ...DEFAULT_RELAY_SETTINGS.rateLimits, ...val.rateLimits },
+    channels: { ...DEFAULT_RELAY_SETTINGS.channels, ...val.channels },
+  };
 }
 
 /**

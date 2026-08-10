@@ -245,11 +245,23 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
       apps = res.ok ? await res.json() : [];
     } catch { /* transient fetch failure - treated the same as "app not found" below */ }
     const app = apps.find((a) => a.name === catalogName);
-    if (!app?.clientMainUrl) { renderPlaceholder(t('appNotFound')); return; }
+    // `enabled === false` (an admin's `disabledApps`, see relay-settings.js)
+    // is treated exactly like "not found" - the real enforced gate is still
+    // server-side (a disabled app's OWN routes are just as reachable if a
+    // client bypasses this check), but there's no reason for the shell's own
+    // UI to knowingly mount something an admin just turned off.
+    if (!app?.clientMainUrl || app.enabled === false) { renderPlaceholder(t('appNotFound')); return; }
 
     log.debug(`mounting app "${catalogName}"`);
     const mod = await import(/* @vite-ignore */ app.clientMainUrl);
     if (stopped) return;
+    // A contribute-only app (e.g. `apps/reactions`/`apps/pins` - live plugin
+    // code for another app's extension point, no page of its own) ships a
+    // clientMain with no `mount` export - still reachable in the App List
+    // catalog (it has no way to opt out of being listed there today), so a
+    // direct/mistaken navigation to it degrades to the same "not found"
+    // placeholder rather than throwing on `mod.mount is not a function`.
+    if (typeof mod.mount !== 'function') { renderPlaceholder(t('appNotFound')); return; }
     const extensionPoints = new ExtensionPointHost(apps);
     stopMountedApp = (await mod.mount(screen, { qu, identity, services, apps, segments, subscribe, syncFetch, extensionPoints })) ?? null;
   }

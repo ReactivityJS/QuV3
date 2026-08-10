@@ -462,7 +462,7 @@ test('booting with the REAL repo apps/ directory also loads app-list/user-list/c
   try {
     const relay = await new QuRelay({ storeDir: join(base, 'store'), blobDir: join(base, 'blob'), appsDir: REPO_APPS_DIR, port: 0 }).boot();
     try {
-      for (const name of ['app-list', 'user-list', 'contact-list', 'profile', 'forum', 'bookmarks', 'notifications']) assert.equal(relay.loader.isLoaded(name), true);
+      for (const name of ['app-list', 'user-list', 'contact-list', 'profile', 'forum', 'bookmarks', 'notifications', 'reactions', 'pins', 'relay-admin']) assert.equal(relay.loader.isLoaded(name), true);
 
       const res = await fetch(`http://localhost:${relay.port}/apps.json`);
       const catalog = await res.json();
@@ -470,8 +470,11 @@ test('booting with the REAL repo apps/ directory also loads app-list/user-list/c
       // apps/forum now has a clientMain too (see apps/forum/client.js), and
       // apps/bookmarks/apps/notifications (new this round) do from the
       // start - all are client-bearing manifests, so buildAppsCatalog()
-      // lists them alongside the others.
-      assert.deepEqual(names, ['app-list', 'bookmarks', 'contact-list', 'forum', 'notifications', 'profile', 'user-list']);
+      // lists them alongside the others. apps/reactions/apps/pins/
+      // apps/relay-admin are the newest additions: real, client-bearing,
+      // admin-toggleable plugin apps with no `label`/`icon`/`navOrder` of
+      // their own (see each one's own manifest.quapp doc comment on why).
+      assert.deepEqual(names, ['app-list', 'bookmarks', 'contact-list', 'forum', 'notifications', 'pins', 'profile', 'reactions', 'relay-admin', 'user-list']);
       for (const app of catalog) assert.equal(app.clientMainUrl, `/apps/${app.name}/dist/client.js`);
     } finally {
       await relay.close();

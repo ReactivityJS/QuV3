@@ -1,0 +1,11 @@
+{
+  "name": "reactions",
+  "version": "1.0.0",
+  "kind": "app",
+  "main": "./index.js",
+  "clientMain": "./dist/client.js",
+  "requires": [],
+  "contributes": [
+    { "point": "content.messageReactions", "export": "renderReactionWidget", "kind": "ui", "order": 0 }
+  ]
+}
