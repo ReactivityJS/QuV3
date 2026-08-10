@@ -17,6 +17,8 @@
     { "slot": "contact-row", "id": "chat", "label": "Chat", "icon": "💬", "hrefTemplate": "#/chat/{pub}" }
   ],
   "contributes": [
-    { "point": "userSettings.contributions", "export": "renderChatSettings", "kind": "ui", "order": 20 }
+    { "point": "userSettings.contributions", "export": "renderChatSettings", "kind": "ui", "order": 20 },
+    { "point": "content.search", "export": "searchChat", "kind": "query" },
+    { "point": "content.searchResultTemplate", "export": "renderSearchResult", "kind": "ui" }
   ]
 }

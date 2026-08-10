@@ -18,5 +18,9 @@
     { "point": "content.messagePinToggle", "kind": "ui", "description": "The Pin/Unpin toggle for a forum message - e.g. Pins' own toggle. Payload: {services, qu, syncFetch, spaceId, threadId, messageId}." },
     { "point": "content.messageReactions", "kind": "ui", "description": "The emoji-reaction row for a forum message - e.g. Reactions' own widget. Payload: {services, qu, syncFetch, spaceId, threadId, messageId, myPub}." },
     { "point": "forum.topicToolbar", "kind": "ui", "description": "Rendered ONCE per topic view, above the message list - e.g. Pins' own \"Pinned\" bar. Payload: {services, qu, syncFetch, spaceId, threadId}." }
+  ],
+  "contributes": [
+    { "point": "content.search", "export": "searchForum", "kind": "query" },
+    { "point": "content.searchResultTemplate", "export": "renderSearchResult", "kind": "ui" }
   ]
 }
