@@ -212,26 +212,13 @@ export class SyncEngine {
     // connections rather than initiating/losing one of its own, doesn't).
     if (typeof this.#transport.onReconnect === 'function') {
       this.#transport.onReconnect(() => {
-        // Bumps BEFORE resubscribing - see getGeneration()'s own doc
-        // comment for what this drives downstream (`@qu/services`'
-        // background refresh). Fires on the very FIRST connect too (not
-        // just actual reconnects - see WebSocketClientTransport's own
-        // `onReconnect()` doc comment), which is exactly right: a fresh
-        // page load has the exact same "local storage could be stale, this
-        // session has no idea what it missed" problem a mid-session
-        // reconnect does.
-        this.#generation++;
-        for (const { prefix, targetPeerId } of this.#mySubscriptions.values()) {
-          this.#transport.sendTo(targetPeerId, { type: 'subscribe', path: prefix });
-          // RECIPROCAL CATCH-UP - see fetchPrefix()'s own doc comment for
-          // why this closes the "subscribe only delivers FUTURE writes" gap
-          // for whatever this side missed while disconnected. Fire-and-forget
-          // (never blocks reconnect/resubscribe): a slow or failing catch-up
-          // must not stop the connection from otherwise being usable.
-          this.fetchPrefix(prefix, targetPeerId).catch((err) => {
-            console.warn(`[SyncEngine] reciprocal catch-up for "${prefix}" failed:`, err);
-          });
-        }
+        // Fires on the very FIRST connect too (not just actual reconnects -
+        // see WebSocketClientTransport's own `onReconnect()` doc comment),
+        // which is exactly right: a fresh page load has the exact same
+        // "local storage could be stale, this session has no idea what it
+        // missed" problem a mid-session reconnect does. See
+        // refreshSubscriptions()'s own doc comment for what this actually does.
+        this.refreshSubscriptions();
         // OUTBOX REPLAY - the other half of the offline-robustness story
         // (see outbox.js): resend whatever is still unacknowledged from a
         // PREVIOUS connection, including one that ended in a reload (the
@@ -265,6 +252,55 @@ export class SyncEngine {
   /** Stops listening to local writes. Call when tearing down this SyncEngine. */
   close() {
     this.#unsubscribeLocalWrites();
+  }
+
+  /**
+   * Manually triggers the SAME "bump the generation, resubscribe, reciprocal
+   * catch-up" cycle a genuine transport reconnect already runs internally
+   * (see the constructor's own `onReconnect` wiring, which now just calls
+   * this) - WITHOUT touching the transport connection itself.
+   *
+   * Exists for one case a transport-level reconnect can't reliably detect on
+   * its own: a mobile browser/app backgrounded and later foregrounded again
+   * does NOT necessarily close the underlying socket - the OS may keep it
+   * alive, or a flaky mobile network may let it go silently stale without
+   * either side's TCP stack noticing right away. Either way, the JS event
+   * loop itself was merely suspended while backgrounded, so no transport
+   * 'close'/reconnect event ever fires - yet real time passed, and this
+   * session has no idea what it missed. Confirmed live: a chat room left
+   * mounted through a phone screen lock never picked up messages sent while
+   * it was locked, even after unlocking - only leaving and re-entering the
+   * room (a fresh mount, with its own one-time subscribe+catch-up) did.
+   *
+   * A caller (see `apps/shell/client.js`'s own `document.visibilitychange`
+   * listener) should call this directly whenever the page becomes visible
+   * again, treating that moment exactly like a real reconnect: bumping the
+   * generation gives every Service's own per-generation background refresh
+   * (`@qu/services`' `sync-freshness.js`) a fresh chance to re-verify
+   * whatever it already has cached, and the reciprocal `fetchPrefix()` per
+   * active subscription re-delivers anything a currently-mounted view's
+   * `watchChildren()` missed (its own one-time `syncFetch` already fired
+   * back at mount, long before this moment).
+   *
+   * Deliberately NOT bundled with outbox replay or `onReconnect()`
+   * callbacks (see the constructor) - those are genuinely about a NEW
+   * connection (there is nothing freshly "unacknowledged" to resend, and no
+   * app-level "we just reconnected" signal to fire, just because the tab
+   * became visible again on a connection that, as far as this class can
+   * tell, never actually dropped).
+   */
+  refreshSubscriptions() {
+    this.#generation++;
+    for (const { prefix, targetPeerId } of this.#mySubscriptions.values()) {
+      this.#transport.sendTo(targetPeerId, { type: 'subscribe', path: prefix });
+      // RECIPROCAL CATCH-UP - see fetchPrefix()'s own doc comment for why
+      // this closes the "subscribe only delivers FUTURE writes" gap for
+      // whatever this side missed. Fire-and-forget (never awaited by a
+      // caller): a slow or failing catch-up must never block anything else.
+      this.fetchPrefix(prefix, targetPeerId).catch((err) => {
+        console.warn(`[SyncEngine] refreshSubscriptions(): catch-up for "${prefix}" failed:`, err);
+      });
+    }
   }
 
   /**

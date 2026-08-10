@@ -2056,4 +2056,103 @@ own tests, built bottom-up per the dependency order in
       (dm-invite/listMyDmRequests), extended
       `packages/ui/test/asset-components.test.js` (lightbox open/zoom/
       close)), `npm run build` bundles cleanly.
+- [x] **Real-world usage fixes: chat layout, popup clamping, composer
+      squeeze, mobile catch-up, push notifications, restricted-channel
+      invite resilience** - a round driven by actual usage of the previous
+      one, not a feature request:
+      **Chat's fixed layout rewritten as genuine `position: fixed`**, not a
+      `calc(100vh - ...)` height reverse-engineering the shell's own
+      padding - that calc was fragile by construction and confirmed to
+      overflow the real viewport by a hair, producing a DOUBLE scrollbar
+      (inner AND outer page) with the composer and newest message(s) pushed
+      below the visible area. Fixed positioning (top/bottom insets, no
+      calc()) is immune to that class of drift entirely. Also: sending any
+      message (text/voice/location) now always scrolls to the bottom
+      (`stuckToBottom = true`) even if the user had scrolled away, and the
+      "stuck to bottom" auto-scroll uses `scrollTo({behavior:'smooth'})`
+      instead of an instant jump.
+      **Popup positioning, round 2**: `flipUpIfNeeded()` (`@qu/thread-ui`)
+      now ALSO clamps horizontally (`translateX`, works regardless of a
+      panel's own `left:0`/`right:0` CSS anchor) - the context menu's own
+      `right: 0` anchor was overflowing off the LEFT edge for a trigger near
+      a narrow/mobile viewport's left side, unaddressed by the earlier
+      vertical-only flip. Also now reads `window.visualViewport` instead of
+      `innerWidth`/`innerHeight` when available - a mobile on-screen
+      keyboard shrinks the VISIBLE viewport without changing `innerHeight`,
+      which could make the composer's own emoji picker (opened right when a
+      keyboard is very likely showing) conclude "there's room below" while
+      the keyboard was actually covering that space.
+      **`<qu-asset-upload>`'s in-progress status now floats ABOVE itself**
+      (`position: absolute; bottom: 100%`) instead of sitting inline in the
+      same flex row as a composer's text input - its own min-content width
+      (filename + percentage + an 8rem bar) could easily be wider than the
+      room left over, squeezing the input down to a barely-visible sliver,
+      confirmed live. The FINISHED-attachment preview row (`apps/chat`'s/
+      `apps/forum`'s own `pendingAttachmentEl`) moved from below the input
+      row to above it too, for the same "context for what's about to be
+      sent belongs above, not as a footnote after" reasoning. Attachment
+      images/videos are now also capped to a message-appropriate
+      `max-height` (20rem) in the shared `<qu-asset>` renderer - the
+      lightbox (already built last round) is what full-size viewing is for.
+      **Search's type filter now works standalone**: an image/video filter
+      with no text at all used to show nothing (`apps/search/client.js`
+      required a non-empty query before calling any contributor at all,
+      and `searchChat()`/`searchForum()` required a body-text match before
+      even checking the type - an image message's body is never
+      descriptive text a query could match). Both now treat "at least one
+      of query/types is set" as enough to search, and a type filter alone
+      returns every locally-available match of that type.
+      **Mobile foreground catch-up**: backgrounding a mobile browser/PWA
+      does NOT reliably close the underlying WebSocket (the OS may keep it
+      alive, or a flaky network may let it go silently stale) - a real
+      transport reconnect event, the thing that normally triggers a
+      catch-up fetch, may simply never fire even though real time passed
+      while suspended, confirmed live (a chat room left mounted through a
+      phone screen lock never picked up messages sent while locked, only
+      leaving and re-entering the room did). `SyncEngine` gained a new
+      public `refreshSubscriptions()` - the exact same "bump generation,
+      resubscribe, reciprocal catch-up" cycle a real reconnect already runs
+      internally, callable on demand without touching the transport.
+      `apps/shell/client.js` calls it on every `document.visibilitychange`
+      -> visible, closing the gap for every mounted app's active
+      subscriptions at once, no per-app code needed.
+      **Push notifications**: the actual root cause of "push doesn't work
+      at all, even for a mention" - `apps/shell/sw.js` had NO `push`/
+      `notificationclick` handlers at all (a real, previously-documented
+      gap; the client-side subscribe flow in `apps/profile/client.js`'s
+      Settings subpage already existed and worked, so a user could
+      correctly believe they'd "enabled notifications" while the service
+      worker silently dropped every push event it received). Added both
+      handlers: `push` shows the notification from the relay's own
+      generic `{title, body, url}` payload, `notificationclick` focuses an
+      already-open tab on this origin (navigating it to the notification's
+      target) rather than always spawning a new one.
+      **Restricted-channel invite resilience**: traced a reported
+      `AccessEngine: writer not authorized to write to threads "..."`
+      rejection to `ChannelService.addChannelMember()`'s own topic-growth
+      loop - a plain sequential `for` loop meant ONE topic's membership
+      growth failing silently aborted growing every topic AFTER it in the
+      channel, with the failure never surfaced anywhere (the UI's own
+      `await addChannelMember(...)` call had no `catch` at all - a genuine
+      unhandled rejection). Now `Promise.allSettled()`s every topic (one
+      failure no longer blocks the rest) and throws a descriptive error
+      listing how many topics still need a retry; `apps/forum/client.js`'s
+      invite form catches and displays it instead of failing silently.
+      Verified: full suite green (1175 tests - extended
+      `apps/chat/test/client.test.js` (send-always-scrolls-to-bottom),
+      extended `packages/thread-ui/test/popup-position.test.js`
+      (horizontal clamp, visualViewport), extended
+      `packages/sync/test/sync-engine.test.js` (`refreshSubscriptions()`),
+      extended `apps/chat/test/client.test.js`/`apps/forum/test/client.test.js`
+      (type-only search), extended `packages/services/test/channel-service.test.js`
+      and `apps/forum/test/client.test.js` (partial invite failure)),
+      `npm run build` bundles cleanly. NOT built this round (scoped as
+      explicit follow-ups): link preview cards for URLs (needs a
+      metadata-fetch mechanism, almost certainly server/relay-proxied to
+      avoid leaking a viewer's IP to arbitrary third-party sites on every
+      message render - a genuinely new feature, not a fix); no automated
+      test coverage for `apps/shell/sw.js`'s new `push`/`notificationclick`
+      handlers (this repo has no service-worker test harness at all yet -
+      same pre-existing gap the file's own doc comment already
+      acknowledged for its other event handlers).
 

@@ -596,6 +596,37 @@ test('landing on a message permalink route (#/chat/<peer>/m/<id>) scrolls to and
   }
 });
 
+test('sending a message always scrolls the view to the bottom, even if the user had scrolled away from it (stuckToBottom released)', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
+    const scroll = container.querySelector('.qu-chat-messages-scroll');
+    // Simulate the user having scrolled away from the bottom (releasing
+    // stuckToBottom) - jsdom reports scrollHeight/clientHeight as 0, so the
+    // "am I near the bottom" check (see mountRoomView()'s own scroll
+    // listener) reads as NOT near the bottom once scrollTop is nonzero.
+    scroll.scrollTop = 500;
+    scroll.dispatchEvent(new window.Event('scroll'));
+
+    const scrollToCalls = [];
+    scroll.scrollTo = (opts) => scrollToCalls.push(opts);
+
+    const textarea = container.querySelector('textarea');
+    textarea.value = 'catch up to this';
+    container.querySelector('.qu-chat-composer-action').click();
+
+    await waitFor(() => scrollToCalls.length > 0);
+    assert.equal(scrollToCalls.at(-1).behavior, 'smooth');
+  } finally {
+    stop();
+  }
+});
+
 test('searchChat() and resolveChatReference() both link straight to the specific message, not just the room', async () => {
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');
@@ -613,6 +644,26 @@ test('searchChat() and resolveChatReference() both link straight to the specific
 
   const resolved = await resolveChatReference({ services: alice.services, myPub: alice.myPub, spaceId: CHAT_SPACE_ID, threadId: roomId, messageId: posted.id });
   assert.equal(resolved.href, `#/chat/${bob.myPub}/m/${posted.id}`);
+});
+
+test('searchChat(): a TYPE filter with no text query returns every locally-available match of that type, not just body-text hits', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'just a normal text message' });
+  // An image attachment's own body is never descriptive text a query could
+  // match - exactly the case a type-only filter needs to cover.
+  const withImage = await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, {
+    body: '', extra: { attachment: { assetId: 'a1', mime: 'image/png', name: 'photo.png', size: 100 } },
+  });
+
+  // No query at all - an empty string, matching what apps/search/client.js
+  // sends when the input is blank but a type chip is active.
+  const results = await searchChat({ services: alice.services, apps: CHAT_APPS, myPub: alice.myPub, query: '', types: ['image'], scope: 'subpage', segments: ['chat', bob.myPub] });
+  assert.equal(results.length, 1);
+  assert.equal(results[0].href, `#/chat/${bob.myPub}/m/${withImage.id}`);
+  assert.equal(results[0].contentType, 'image');
 });
 
 test('the room view uses the fixed-layout structure: a back link in the header, and the message list wrapped in a scrollable container', async () => {

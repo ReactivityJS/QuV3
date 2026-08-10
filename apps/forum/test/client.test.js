@@ -12,7 +12,7 @@ import { installDom, waitFor } from '@qu/ui/testing';
 import { register as registerForum } from '../index.js';
 
 installDom();
-const { mount } = await import('../client.js');
+const { mount, searchForum } = await import('../client.js');
 
 function createQu() {
   const qu = new QuStore();
@@ -718,6 +718,23 @@ test('UNREAD-BY-ME: THIS identity\'s own posts never get an unread badge', async
   }
 });
 
+test('searchForum(): a TYPE filter with no text query returns every locally-available match of that type, not just body-text hits', async () => {
+  const ada = await freshEnv('Ada');
+  await ada.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  await ada.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'just a normal post' });
+  const withImage = await ada.services.messages.postMessage(FORUM_SPACE_ID, 'general', {
+    body: '', extra: { attachment: { assetId: 'a1', mime: 'image/png', name: 'photo.png', size: 100 } },
+  });
+
+  const results = await searchForum({
+    services: ada.services, qu: ada.qu, apps: FORUM_APPS, query: '', types: ['image'],
+    scope: 'subpage', segments: TOPIC_SEGMENTS,
+  });
+  assert.equal(results.length, 1);
+  assert.equal(results[0].href, `#/forum/t/general/m/${withImage.id}`);
+  assert.equal(results[0].contentType, 'image');
+});
+
 // Regression: formattedHtml is inserted via innerHTML - a message body
 // containing a <script> tag must render as literal, escaped text, never as
 // an actual executable element (see client.js's own doc comment on why
@@ -1028,6 +1045,32 @@ test('channel view: an OPEN channel shows no invite form; a RESTRICTED one does,
   } finally {
     stopOpen();
     stopRestricted();
+  }
+});
+
+test('channel view: a failed invite (addChannelMember() rejects - e.g. some existing topics failed to grow) surfaces the error instead of failing silently', async () => {
+  const a = await freshEnv('Ada');
+  const restrictedChannel = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Closed', restricted: true, memberPubs: [] });
+  const originalAddChannelMember = a.services.channels.addChannelMember.bind(a.services.channels);
+  a.services.channels.addChannelMember = async () => {
+    throw new Error('ChannelService.addChannelMember: added to the channel, but failed to grow membership for 1/2 existing topic(s) - boom');
+  };
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', restrictedChannel._id] });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-invite-form') !== null);
+    const pubInput = container.querySelector('.qu-forum-invite-form input[type="text"]');
+    pubInput.value = 'some-actor-pub';
+    container.querySelector('.qu-forum-invite-form button').click();
+
+    await waitFor(() => container.querySelector('.qu-forum-invite-error')?.hidden === false);
+    assert.match(container.querySelector('.qu-forum-invite-error').textContent, /1\/2 existing topic/);
+    // the input is NOT cleared on failure - the admin can retry the same submission
+    assert.equal(pubInput.value, 'some-actor-pub');
+  } finally {
+    a.services.channels.addChannelMember = originalAddChannelMember;
+    stop();
   }
 });
 

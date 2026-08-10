@@ -258,23 +258,34 @@ const STYLE = `
   .qu-chat-empty { padding: 1.5rem; text-align: center; opacity: 0.7; }
   .qu-chat-new-group { display: block; margin-top: 0.4rem; opacity: 0.85; }
   .qu-chat-new-group:hover { opacity: 1; }
-  /* ROOM VIEW FIXED LAYOUT - see this file's own top doc comment. A flex
-     COLUMN sized to exactly fill the viewport below the shell's own fixed
-     top header (3.25rem, apps/shell/src/header.js) minus .qu-shell-screen's
-     own 1rem padding (top+bottom = 2rem) - cancelled via the negative
-     margin below so the header/composer bars can span truly edge-to-edge,
-     not just edge-to-edge-of-the-padded-content-box. The dvh unit (where
-     supported) is layered on top of the plain vh one so a mobile browser's
-     collapsing/expanding address bar doesn't hide the composer behind it -
-     see MDN's own "dvh vs vh" note; the plain vh declaration is the
-     fallback for a browser that doesn't recognize dvh at all (a browser
-     ignores a single invalid VALUE while still applying every other valid
-     declaration in the same rule, so the two same-property lines are safe
-     to stack, latter-wins-if-supported). Only the messages-scroll element
-     scrolls internally - the header/composer-wrap are flex-shrink: 0
-     siblings, so they're simply never part of the scrolling region, no
-     position: fixed/sticky needed. */
-  .qu-chat-room-view { display: flex; flex-direction: column; height: calc(100vh - 3.25rem - 2rem); height: calc(100dvh - 3.25rem - 2rem); margin: -1rem; }
+  /* ROOM VIEW FIXED LAYOUT - see this file's own top doc comment. Genuine
+     position: fixed (viewport-relative), NOT a calc(100vh - ...) height
+     against .qu-shell-screen's own padding/box model - a PRIOR version of
+     this rule computed the height that way, plus a canceling negative
+     margin, reverse-engineering the screen's own 1rem padding - fragile by
+     construction (any drift in that padding, an extra wrapping element, or
+     simple accumulated sub-pixel rounding makes the computed box even
+     slightly TALLER than the real remaining viewport), and confirmed live:
+     it produced a DOUBLE scrollbar (the inner messages area AND the outer
+     page both scrolling) with the composer and the newest message(s)
+     pushed below the visible area, needing an extra page-level scroll to
+     reach - scrolling the inner container to its own bottom can't fix
+     that, since the container's own bottom edge was itself past the
+     visible viewport. Fixed positioning sidesteps all of that: its
+     containing block is the VIEWPORT itself, completely independent of any
+     ancestor's padding/margin/box model, and removes this element from the
+     page's normal flow entirely - it can no longer contribute to (or be
+     pushed around by) the page's own scroll height, which is what actually
+     rules out a second, page-level scrollbar. Top AND bottom BOTH set
+     (rather than top plus an explicit height) is deliberate: the browser
+     derives the box's height from the two insets live, on every reflow -
+     including a mobile browser's collapsing/expanding address bar changing
+     the real visible height - with no vh/dvh calc() needed at all (a
+     bottom inset is, by definition, anchored to the ACTUAL current
+     viewport edge). Only the messages-scroll element scrolls internally -
+     the header/composer-wrap are flex-shrink: 0 siblings within this fixed
+     box, so they're simply never part of the scrolling region. */
+  .qu-chat-room-view { position: fixed; top: 3.25rem; right: 0; bottom: 0; left: 0; display: flex; flex-direction: column; background: var(--qu-color-surface, #ffffff); z-index: 10; }
   .qu-chat-header { flex-shrink: 0; display: flex; align-items: center; gap: 0.6rem; padding: 0.6rem 1rem; border-bottom: 1px solid var(--qu-color-border, #8884); background: var(--qu-color-surface, #ffffff); }
   .qu-chat-header-back { flex-shrink: 0; text-decoration: none; color: inherit; font-size: 1.2em; padding: 0.2rem 0.5rem; border-radius: var(--qu-radius-sm, 0.3rem); }
   .qu-chat-header-back:hover { background: var(--qu-color-border, #8884); }
@@ -873,7 +884,14 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   const pendingAttachmentEl = document.createElement('div');
   pendingAttachmentEl.className = 'qu-chat-pending-attachment';
   pendingAttachmentEl.hidden = true;
-  composerWrap.append(replyBanner, composerRow, pendingAttachmentEl);
+  // ABOVE the input row, not below it - a pending attachment is context
+  // for what's about to be sent, not a footnote after the fact; keeping it
+  // above also means it never visually competes with (or gets squeezed by)
+  // the input row itself the way <qu-asset-upload>'s own IN-PROGRESS status
+  // used to (see that element's own doc comment in @qu/ui's
+  // asset-components.js for the "text input barely visible" bug this and
+  // that fix together close).
+  composerWrap.append(replyBanner, pendingAttachmentEl, composerRow);
 
   roomView.append(heading, messagesScroll, composerWrap);
   container.appendChild(roomView);
@@ -967,6 +985,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     actionBtn.disabled = true;
     try {
       const extra = pendingAttachment ? { attachment: pendingAttachment } : {};
+      stuckToBottom = true; // sending a message always means "show me what I just sent" - see the scroll-follow doc comment above
       await services.messages.postMessage(SPACE_ID, roomId, { body, replyTo: replyingTo?.id ?? null, extra });
       composerInput.value = '';
       clearPendingAttachment();
@@ -1024,6 +1043,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
       const assetId = globalThis.crypto.randomUUID();
       const file = new File([blob], `voice-${Date.now()}.webm`, { type: blob.type });
       const meta = await services.assets.upload(SPACE_ID, assetId, file, { readerPubs: memberPubs });
+      stuckToBottom = true;
       await services.messages.postMessage(SPACE_ID, roomId, {
         body: t('voiceMessage'), replyTo: replyingTo?.id ?? null,
         extra: { attachment: { assetId, ...meta }, voice: true },
@@ -1059,6 +1079,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     navigator.geolocation.getCurrentPosition(
       async (position) => {
         try {
+          stuckToBottom = true;
           await services.messages.postMessage(SPACE_ID, roomId, {
             body: t('locationMessage'),
             replyTo: replyingTo?.id ?? null,
@@ -1148,7 +1169,17 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
       }
       stuckToBottom = true; // the permalinked message is gone (deleted?) - fall through to "show latest" below
     }
-    if (stuckToBottom) messagesScroll.scrollTop = messagesScroll.scrollHeight;
+    if (stuckToBottom) {
+      // A smooth scroll (not an instant scrollTop jump) - most noticeable
+      // right after returning from a permalink/highlighted message further
+      // up: without this, "catching up" to the latest message read as an
+      // abrupt jump rather than a natural scroll. jsdom (this repo's test
+      // DOM) has no layout engine and doesn't implement scrollTo() at all -
+      // scrollTop assignment is the fallback there (and for any other host
+      // missing it), functionally equivalent minus the animation.
+      if (messagesScroll.scrollTo) messagesScroll.scrollTo({ top: messagesScroll.scrollHeight, behavior: 'smooth' });
+      else messagesScroll.scrollTop = messagesScroll.scrollHeight;
+    }
   }
 
   /**
@@ -1542,7 +1573,14 @@ function buildSnippet(body, query, radius = 60) {
 export async function searchChat({ services, apps, myPub, query, types, scope, segments = [] }) {
   const SPACE_ID = apps?.find((a) => a.name === 'chat')?.spaceId;
   const q = (query ?? '').trim().toLowerCase();
-  if (!SPACE_ID || !q) return [];
+  // A TYPE filter with no text query is a real, useful search on its own -
+  // "show me every image in this chat" - not something a body-text match
+  // could ever satisfy (an image message's own body is just a placeholder
+  // string, never the image's content). Only bail when NEITHER narrows
+  // anything - `apps/search/client.js`'s own guard mirrors this (it never
+  // even calls a content.search contributor for a genuinely empty query
+  // with no type selected either).
+  if (!SPACE_ID || (!q && !types?.length)) return [];
   myPub ??= await services.actors.whoAmI();
   const [, seg1, seg2] = segments;
 
@@ -1550,9 +1588,9 @@ export async function searchChat({ services, apps, myPub, query, types, scope, s
     const { messages } = await services.messages.listMessages(SPACE_ID, roomId);
     const out = [];
     for (const message of messages) {
-      if (!message.body?.toLowerCase().includes(q)) continue;
       const contentType = classifyMessageContentType(message);
       if (types?.length && !types.includes(contentType)) continue;
+      if (q && !message.body?.toLowerCase().includes(q)) continue;
       out.push({ contentType, ts: message.ts, author: message.author, snippet: buildSnippet(message.body, q), href: `${href}/m/${message.id}`, roomId, roomName });
     }
     return out;

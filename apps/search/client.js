@@ -180,7 +180,11 @@ export function mount(container, ctx) {
   async function runSearch() {
     const token = ++searchToken;
     const query = input.value.trim();
-    if (!query) { renderHint(t('typeToSearch')); return; }
+    // A type filter with no text at all is a real search on its own -
+    // "every image here" - not something requiring a query to anchor to;
+    // see e.g. apps/chat's/apps/forum's own searchChat()/searchForum() doc
+    // comments for the contributor side of this same relaxation.
+    if (!query && activeTypes.size === 0) { renderHint(t('typeToSearch')); return; }
     renderHint(t('searching'));
 
     if (!myPub) myPub = await services.actors.whoAmI();
