@@ -167,8 +167,8 @@ const DICT = {
     edit: 'Edit', save: 'Save', cancel: 'Cancel',
     attachRemove: 'Remove attachment',
     insertEmoji: 'Insert emoji',
-    backToForum: '← Forum', backToChannel: '← {channel}',
     channels: 'Channels',
+    allChannels: 'All channels',
     newChannelPlaceholder: 'New channel name…',
     createChannel: 'Create channel',
     newChannelLink: '+ New channel',
@@ -194,8 +194,8 @@ const DICT = {
     edit: 'Bearbeiten', save: 'Speichern', cancel: 'Abbrechen',
     attachRemove: 'Anhang entfernen',
     insertEmoji: 'Emoji einfügen',
-    backToForum: '← Forum', backToChannel: '← {channel}',
     channels: 'Kanäle',
+    allChannels: 'Alle Kanäle',
     newChannelPlaceholder: 'Name des neuen Kanals…',
     createChannel: 'Kanal erstellen',
     newChannelLink: '+ Neuer Kanal',
@@ -300,8 +300,6 @@ const STYLE = `
   .qu-forum-topic-title { font-weight: 600; }
   .qu-forum-topic-meta { font-size: 0.8em; opacity: 0.7; margin-top: 0.15rem; }
   .qu-forum-channel-heading { display: flex; align-items: center; gap: 0.5rem; }
-  .qu-subpage-back { display: inline-block; margin-bottom: 0.6rem; opacity: 0.75; text-decoration: none; color: inherit; }
-  .qu-subpage-back:hover { opacity: 1; }
 `;
 
 function formatTs(ts) {
@@ -446,8 +444,7 @@ function mountNewChannelView(container, { services, SPACE_ID }) {
   heading.textContent = t('createChannel');
 
   renderSubpage(container, {
-    backHref: '#/forum',
-    backLabel: t('backToForum'),
+    showBackLink: false, // the shell header's own Back/Forward already covers this - see this app's own top doc comment
     render: (content) => content.append(heading, formRoot),
   });
 
@@ -485,8 +482,9 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
   const mainRoot = document.createElement('div');
   layout.append(sidebarRoot, mainRoot);
   container.appendChild(layout);
-  // No active channel - the board view isn't "inside" any one of them.
-  const stopSidebar = mountMiniChannelSidebar(sidebarRoot, { qu, services, syncFetch, SPACE_ID }, null);
+  // 'all' - the board view IS the "All channels" entry, see
+  // mountMiniChannelSidebar()'s own doc comment on that sentinel.
+  const stopSidebar = mountMiniChannelSidebar(sidebarRoot, { qu, services, syncFetch, SPACE_ID }, 'all');
 
   const heading = document.createElement('h1');
   heading.textContent = t('title');
@@ -574,7 +572,11 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
  * No separate "mobile" markup/JS path - the CSS alone reflows it.
  * @param {HTMLElement} root
  * @param {{qu: object, services: object, syncFetch?: Function, SPACE_ID: string}} deps
- * @param {string|null} [activeChannelId] - Highlighted in the list, when known.
+ * @param {string|null} [activeChannelId] - Highlighted in the list, when
+ *   known. The literal sentinel `'all'` (never a real channel id -
+ *   `crypto.randomUUID()` never produces it) highlights the leading
+ *   "All channels" entry instead - passed by the board view, since IT is
+ *   that entry's own destination (`#/forum`).
  * @returns {() => void} stop function
  */
 function mountMiniChannelSidebar(root, { qu, services, syncFetch, SPACE_ID }, activeChannelId = null) {
@@ -600,6 +602,19 @@ function mountMiniChannelSidebar(root, { qu, services, syncFetch, SPACE_ID }, ac
     root.appendChild(title);
     const ul = document.createElement('ul');
     ul.className = 'qu-forum-mini-channels';
+
+    // esoTalk's own "All Channels" entry - the merged recent-activity board
+    // view (#/forum), listed alongside the individual channels rather than
+    // reached only via the shell header's Back button.
+    const allLi = document.createElement('li');
+    const allLink = document.createElement('a');
+    allLink.href = '#/forum';
+    allLink.textContent = t('allChannels');
+    allLink.className = 'qu-forum-mini-all-channels';
+    if (activeChannelId === 'all') allLink.classList.add('qu-forum-mini-channel-active');
+    allLi.appendChild(allLink);
+    ul.appendChild(allLi);
+
     for (const channel of channels) {
       const li = document.createElement('li');
       const a = document.createElement('a');
@@ -659,8 +674,7 @@ function mountChannelView(container, { qu, services, syncFetch, SPACE_ID, channe
   const inviteRoot = document.createElement('div');
 
   renderSubpage(mainRoot, {
-    backHref: '#/forum',
-    backLabel: t('backToForum'),
+    showBackLink: false, // the shell header's own Back/Forward already covers this, and the persistent sidebar's own "All channels" entry covers the rest - see this app's own top doc comment
     render: (content) => content.append(heading, topicsRoot, inviteRoot),
   });
 
@@ -847,33 +861,17 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
   composerWrap.append(composerRow, pendingAttachmentEl);
 
   renderSubpage(mainRoot, {
-    backHref: '#/forum',
-    backLabel: t('backToForum'),
+    showBackLink: false, // the shell header's own Back/Forward already covers this - see this app's own top doc comment
     render: (content) => content.append(heading, pinnedRoot, messagesRoot, composerWrap),
   });
-  // renderSubpage() builds the back link internally and hands back nothing
-  // - re-selected here (by the class it's own doc comment guarantees) so it
-  // can be updated once the topic's real channel is known, below.
-  const backLink = mainRoot.querySelector('.qu-subpage-back');
 
-  // Resolves the topic's own title and its parent channel (for the back
-  // link) - doesn't block the message list itself from loading, both start
-  // independently.
+  // Resolves the topic's own title - doesn't block the message list itself
+  // from loading, both start independently.
   (async () => {
     const topicBit = await qu.get(paths.documentPath(SPACE_ID, topicId));
     if (stopped) return;
     const topic = topicBit?.val;
-    if (topic) {
-      heading.textContent = topic.title;
-      backLink.href = `#/forum/c/${topic.channelId}`;
-      const channelBit = await qu.get(paths.documentPath(SPACE_ID, topic.channelId));
-      if (stopped) return;
-      const channel = channelBit?.val;
-      // Until the channel doc resolves, the link already correctly points
-      // at #/forum/c/<channelId> above - only its LABEL still says
-      // "← Forum" for a moment, never a broken destination.
-      if (channel) backLink.textContent = t('backToChannel', { channel: channel.title });
-    }
+    if (topic) heading.textContent = topic.title;
   })();
 
   // Holds the LAST completed upload until Send is clicked - see this file's

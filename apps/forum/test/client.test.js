@@ -656,8 +656,10 @@ test('board view (#/forum, no sub-segments) lists the migrated "General" channel
   const container = makeContainer();
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
   try {
-    await waitFor(() => container.querySelector('.qu-forum-mini-channels a') !== null);
-    assert.match(container.querySelector('.qu-forum-mini-channels a').textContent, /General/);
+    await waitFor(() => container.querySelector('.qu-forum-mini-all-channels') !== null);
+    assert.equal(container.querySelector('.qu-forum-mini-all-channels').textContent, 'All channels');
+    assert.ok(container.querySelector('.qu-forum-mini-all-channels').classList.contains('qu-forum-mini-channel-active')); // the board view IS "All channels"
+    assert.match(container.querySelector('.qu-forum-mini-channels li:not(:first-child) a').textContent, /General/);
 
     await waitFor(() => container.querySelector('.qu-forum-topic-row a') !== null);
     const topicLink = container.querySelector('.qu-forum-topic-row a');
@@ -816,6 +818,22 @@ test('new channel view: channels.allowMemberRestricted: false hides the restrict
 // ===================================================================
 // CHANNEL VIEW - #/forum/c/<channelId>
 // ===================================================================
+
+test('none of the forum subpages (channel view, topic view, new-channel view) render their own back link - the shell header\'s Back/Forward already covers it', async () => {
+  const a = await freshEnv('Ada');
+  const channel = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Announcements' });
+
+  for (const segments of [['forum', 'c', channel._id], TOPIC_SEGMENTS, ['forum', 'new']]) {
+    const container = makeContainer();
+    const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments });
+    try {
+      await waitFor(() => container.querySelector('.qu-subpage-content') !== null);
+      assert.equal(container.querySelector('.qu-subpage-back'), null, `expected no back link for segments ${segments.join('/')}`);
+    } finally {
+      stop();
+    }
+  }
+});
 
 test('channel view lists its topics with a live reply count, and a "new topic" form creates one', async () => {
   const a = await freshEnv('Ada');
