@@ -20,6 +20,7 @@
   ],
   "contributes": [
     { "point": "content.search", "export": "searchForum", "kind": "query" },
-    { "point": "content.searchResultTemplate", "export": "renderSearchResult", "kind": "ui" }
+    { "point": "content.searchResultTemplate", "export": "renderSearchResult", "kind": "ui" },
+    { "point": "content.resolveReference", "export": "resolveForumReference", "kind": "query" }
   ]
 }

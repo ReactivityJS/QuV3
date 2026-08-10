@@ -173,6 +173,36 @@ test('listReplies() returns only messages whose replyTo matches the given parent
   assert.deepEqual(replies.map((m) => m.body), ['reply 1']);
 });
 
+test('getMessage() returns a single message by id, same shape listMessages() entries have', async () => {
+  const { messages } = await freshSetup();
+  await messages.createThread('board', 'general', THREAD_PRESETS.forum());
+  const { id } = await messages.postMessage('board', 'general', { body: 'hello' });
+
+  const found = await messages.getMessage('board', 'general', id);
+  assert.equal(found.id, id);
+  assert.equal(found.body, 'hello');
+  assert.ok(found.ts > 0);
+});
+
+test('getMessage() returns null for a missing message, no throw', async () => {
+  const { messages } = await freshSetup();
+  await messages.createThread('board', 'general', THREAD_PRESETS.forum());
+  assert.equal(await messages.getMessage('board', 'general', 'nope'), null);
+});
+
+test('getMessage() decrypts a private (reader-restricted) thread\'s message, same as listMessages()', async () => {
+  const { qu, identity, messages } = await freshSetup();
+  const myPub = QuCrypto.toBase64Url((await identity.getMainKey()).publicKey);
+  await identity.publishMainProfile({ name: 'Me' });
+
+  await messages.createThread('board', 'private-room', THREAD_PRESETS.chat([myPub]));
+  const { id } = await messages.postMessage('board', 'private-room', { body: 'secret' });
+
+  const found = await messages.getMessage('board', 'private-room', id);
+  assert.equal(found.body, 'secret');
+  void qu;
+});
+
 test('notify() creates a mail thread and posts one message to it', async () => {
   const { qu, messages } = await freshSetup();
 

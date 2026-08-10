@@ -32,6 +32,26 @@ const log = createLogger('PushDelivery');
  * `resolveNotification` (an explicit `options.resolveNotification` still
  * overrides it). This class itself needed ZERO changes for that to work -
  * exactly the point of the hook existing as a plain function parameter.
+ *
+ * WHO GETS NOTIFIED IS ALSO EXTENSIBLE, the same way: the built-in
+ * readers/mentions logic below is the DEFAULT candidate set, never removed
+ * or special-cased away, but any app can ADD to it via `@qu/foundation`'s
+ * `Registry.hooks` (`registry.hooks.on('notify.threadCandidates', handler)`,
+ * registered inside that app's own `register(qu, manifest, registry)` -
+ * exactly the mechanism that doc comment already names as the server-side
+ * analogue of the client's `contributes`/`ExtensionPointHost`). A handler is
+ * `(payload: {qu, registry, spaceId, threadId, quBit, authorPub, mentions})
+ * -> Array<{actorPub, functionName}> | Promise<...>` - see `deliverThreadMessage()`'s
+ * own `registry.hooks.collect('notify.threadCandidates', ...)` call. NO
+ * concrete hook is registered anywhere in this codebase yet (a deliberate,
+ * documented scope cut - see this branch's own plan notes on "Future Work":
+ * Forum notifying a topic's author on any reply, or anyone watching a topic/
+ * board; Chat giving a group-invite notification its own wording) - this
+ * round only builds the mechanism itself, so that next round is pure
+ * addition (a new `registry.hooks.on(...)` call in an app's own `register()`),
+ * never a `packages/relay` change. With `registry` omitted (or no handler
+ * registered for the point), behavior is BYTE-FOR-BYTE identical to before
+ * this existed - `HookBus.collect()` on an unregistered point returns `[]`.
  */
 export class PushDeliveryService {
   /**
@@ -43,19 +63,27 @@ export class PushDeliveryService {
    * @param {{publicKey: string, privateKey: string, subject: string}|null} deps.vapidKeys -
    *   `null` disables actual Web Push sends (in-app notifications still
    *   happen) - e.g. a relay that hasn't configured/generated VAPID keys yet.
-   * @param {(spaceId: string|number, threadId: string, context: {authorPub: string|null, mention: boolean, mentions: string[]}) => ({appId?: string, functionName?: string, title: string, body: string, url: string}|null|undefined)} [deps.resolveNotification]
+   * @param {(spaceId: string|number, threadId: string, context: {authorPub: string|null, mention: boolean, mentions: string[], functionName: string|null}) => ({appId?: string, functionName?: string, title: string, body: string, url: string}|null|undefined)} [deps.resolveNotification]
    *   See class doc comment. Called once per NOTIFIED candidate (not once
    *   per message) - `mention` varies per candidate, so the resolved
-   *   title/functionName legitimately can too.
+   *   title/functionName legitimately can too. `context.functionName` is
+   *   set when a `notify.threadCandidates` hook already decided this
+   *   candidate's function (see class doc comment) - `null` for a plain
+   *   generic (readers/mentions) candidate.
+   * @param {import('@qu/foundation').Registry} [deps.registry] - Optional -
+   *   see class doc comment's "WHO GETS NOTIFIED IS ALSO EXTENSIBLE"
+   *   section. Omitted (or no handler registered), `notify.threadCandidates`
+   *   simply contributes nothing - existing behavior is unaffected.
    * @param {typeof import('@qu/push').sendWebPush} [deps.sendWebPush] - Injectable for tests.
    */
-  constructor({ messages, notificationPrefs, pushSubscriptions, presence, vapidKeys, resolveNotification = null, sendWebPush = defaultSendWebPush }) {
+  constructor({ messages, notificationPrefs, pushSubscriptions, presence, vapidKeys, resolveNotification = null, registry = null, sendWebPush = defaultSendWebPush }) {
     this.messages = messages;
     this.notificationPrefs = notificationPrefs;
     this.pushSubscriptions = pushSubscriptions;
     this.presence = presence;
     this.vapidKeys = vapidKeys;
     this.resolveNotification = resolveNotification;
+    this.registry = registry;
     this.sendWebPush = sendWebPush;
   }
 
@@ -79,6 +107,15 @@ export class PushDeliveryService {
     // base64url, so this MUST be converted, not compared/looked-up as-is.
     const authorPub = quBit.pub ? QuCrypto.toBase64Url(QuCrypto.fromBase64(quBit.pub)) : null;
     const mentions = Array.isArray(quBit.val?.mentions) ? quBit.val.mentions : [];
+    // `_id` and the path's own messageId segment are guaranteed identical
+    // (see `MessageService.postMessage()`'s own doc comment) - reading it
+    // off the QuBit here avoids a relay.js regex change just to thread it
+    // through. Used only to give a stored notification a live reference back
+    // to its real content (see `#writeInAppNotification()`'s `ref` param) -
+    // `apps/notifications` resolves it via `content.resolveReference` to
+    // render the SAME per-app template Search uses, instead of this file's
+    // own deliberately generic title/body wording (see class doc comment).
+    const messageId = quBit.val?._id ?? null;
 
     /** @type {Array<{actorPub: string, mention: boolean}>} */
     let candidates;
@@ -91,16 +128,41 @@ export class PushDeliveryService {
       candidates = mentions.filter((pub) => pub !== authorPub).map((actorPub) => ({ actorPub, mention: true }));
     }
 
+    // Additional candidates/wording from any app's own `notify.
+    // threadCandidates` hook (see class doc comment) - `[]` when `registry`
+    // is omitted or nothing is registered, making this whole block a no-op.
+    // Merged by actorPub: a hook can either give an EXISTING generic
+    // candidate a more specific `functionName` (e.g. Chat's own invite hook
+    // correcting the wording for a recipient the generic private-thread
+    // logic above already included), or introduce a genuinely NEW actorPub
+    // the generic logic wouldn't have (e.g. a topic's author, or a watcher,
+    // who isn't a "reader" of a public forum thread at all).
+    const hookCandidates = this.registry
+      ? await this.registry.hooks.collect('notify.threadCandidates', { qu: this.messages.qu, registry: this.registry, spaceId, threadId, quBit, authorPub, mentions })
+      : [];
+    const hookFunctionNameByActor = new Map();
+    const knownActors = new Set(candidates.map((c) => c.actorPub));
+    for (const hc of hookCandidates) {
+      if (!hc?.actorPub || hc.actorPub === authorPub) continue;
+      if (hc.functionName) hookFunctionNameByActor.set(hc.actorPub, hc.functionName);
+      if (!knownActors.has(hc.actorPub)) {
+        candidates.push({ actorPub: hc.actorPub, mention: false });
+        knownActors.add(hc.actorPub);
+      }
+    }
+
     for (const { actorPub, mention } of candidates) {
-      const resolved = this.resolveNotification?.(spaceId, threadId, { authorPub, mention, mentions }) ?? this.#genericNotification(spaceId, authorPub, mention);
+      const hookFunctionName = hookFunctionNameByActor.get(actorPub) ?? null;
+      const resolved = this.resolveNotification?.(spaceId, threadId, { authorPub, mention, mentions, functionName: hookFunctionName }) ?? this.#genericNotification(spaceId, authorPub, mention);
       const appId = resolved.appId ?? String(spaceId);
-      const functionName = resolved.functionName ?? (mention ? 'mention' : 'newMessage');
+      const functionName = resolved.functionName ?? hookFunctionName ?? (mention ? 'mention' : 'newMessage');
 
       const prefs = await this.notificationPrefs.getPrefsFor(actorPub);
       if (!NotificationPrefsService.shouldNotify(prefs, { appId, mention, functionName })) continue;
 
       try {
-        await this.#writeInAppNotification(actorPub, { title: resolved.title, body: resolved.body, appId, url: resolved.url });
+        const ref = messageId ? { spaceId, threadId, messageId } : undefined;
+        await this.#writeInAppNotification(actorPub, { title: resolved.title, body: resolved.body, appId, url: resolved.url, ref });
       } catch (err) {
         log.error(`in-app notification write failed for ~${actorPub.slice(0, 10)}…:`, err.message);
       }
@@ -148,15 +210,26 @@ export class PushDeliveryService {
    * has ever opened a Notifications app. `THREAD_PRESETS.notifications()`
    * sets `writers: '*'`, so no special authorization is needed for a
    * system notice, same as any other writer.
+   *
+   * `ref` (additive, optional) is the ONLY thing that carries real content
+   * identity onto an otherwise deliberately generic notification (see class
+   * doc comment) - `apps/notifications` uses it to resolve the real message
+   * via the originating app's OWN `content.resolveReference` contributor and
+   * render it with that SAME app's `content.searchResultTemplate` (the exact
+   * template Search already uses), falling back to this generic title/body
+   * when it's absent (an older notification, predating this field) or
+   * unresolvable. Never sent to Web Push (see `deliverThreadMessage()`'s own
+   * call site) - only the in-app copy gets it, on purpose: a lock-screen
+   * push payload should stay small and never carry a raw content pointer.
    * @param {string} actorPub - The notification's owner/recipient.
-   * @param {{title: string, body: string, appId: string, url: string}} payload
+   * @param {{title: string, body: string, appId: string, url: string, ref?: {spaceId: string|number, threadId: string, messageId: string}}} payload
    */
   async #writeInAppNotification(actorPub, payload) {
     const spaceId = paths.notificationsSpaceId(actorPub);
     await this.messages.createThread(spaceId, paths.NOTIFICATIONS_THREAD_ID, THREAD_PRESETS.notifications(actorPub));
     await this.messages.postMessage(spaceId, paths.NOTIFICATIONS_THREAD_ID, {
       body: payload.body,
-      extra: { title: payload.title, url: payload.url, appId: payload.appId },
+      extra: { title: payload.title, url: payload.url, appId: payload.appId, ...(payload.ref ? { ref: payload.ref } : {}) },
     });
   }
 }
@@ -192,15 +265,26 @@ export class PushDeliveryService {
  * still always wins (see `relay.js`'s own wiring), for a case this
  * manifest-driven convention genuinely can't express.
  *
+ * `context.functionName` (set when a `notify.threadCandidates` hook already
+ * decided this candidate's function - see `PushDeliveryService`'s own doc
+ * comment) is matched by `pushActions[].id` DIRECTLY when present, instead
+ * of the coarse `mention`-derived `type` lookup below - a hook-sourced
+ * functionName (e.g. Forum's future `'reply-own-topic'`) is already exact,
+ * unlike the generic `'mention'`/`'create'` a plain readers/mentions
+ * candidate only ever implies. `null`/absent `functionName` (every
+ * candidate today, since no hook is registered yet) falls through to the
+ * ORIGINAL type-based lookup, unchanged.
+ *
  * @param {import('@qu/loader').QuLoader} loader
- * @returns {(spaceId: string|number, threadId: string, context: {authorPub: string|null, mention: boolean, mentions: string[]}) => ({appId: string, functionName: string, title: string, body: string, url: string}|null)}
+ * @returns {(spaceId: string|number, threadId: string, context: {authorPub: string|null, mention: boolean, mentions: string[], functionName?: string|null}) => ({appId: string, functionName: string, title: string, body: string, url: string}|null)}
  */
 export function createManifestNotificationResolver(loader) {
-  return function resolveNotification(spaceId, _threadId, { authorPub, mention }) {
-    const wantType = mention ? 'mention' : 'create';
+  return function resolveNotification(spaceId, _threadId, { authorPub, mention, functionName = null }) {
     for (const { manifest } of loader.listManifests()) {
       if (manifest.spaceId !== spaceId) continue;
-      const action = (manifest.pushActions ?? []).find((a) => a.type === wantType);
+      const action = functionName
+        ? (manifest.pushActions ?? []).find((a) => a.id === functionName)
+        : (manifest.pushActions ?? []).find((a) => a.type === (mention ? 'mention' : 'create'));
       if (!action) return null;
       const appLabel = manifest.label ?? manifest.name;
       const who = (authorPub ?? 'someone').slice(0, 10);

@@ -1214,10 +1214,17 @@ function classifyMessageContentType(message) {
   return 'post';
 }
 
-/** A short excerpt centered on the first match, so a long message's result row doesn't dump its entire body. */
+/**
+ * A short excerpt centered on the first match, so a long message's result
+ * row doesn't dump its entire body. An empty/falsy `query` (e.g. resolving a
+ * notification's reference, where there's no search term to center on - see
+ * `resolveChatReference()` below) is treated the same as "no match found":
+ * `String.prototype.indexOf('')` returns `0`, not `-1`, so this is checked
+ * explicitly rather than relying on that quirk.
+ */
 function buildSnippet(body, query, radius = 60) {
   if (!body) return '';
-  const idx = body.toLowerCase().indexOf(query);
+  const idx = query ? body.toLowerCase().indexOf(query) : -1;
   if (idx === -1) return body.length > 140 ? `${body.slice(0, 140)}…` : body;
   const start = Math.max(0, idx - radius);
   const end = Math.min(body.length, idx + query.length + radius);
@@ -1277,8 +1284,49 @@ export async function searchChat({ services, apps, myPub, query, types, scope, s
 }
 
 /**
+ * The `content.resolveReference` contributor (see `apps/notifications/
+ * manifest.quapp`'s own doc comment for the full payload contract) -
+ * resolves a stored notification's bare `{spaceId, threadId, messageId}`
+ * reference back into a `content.search`-shaped entry, so the SAME
+ * `renderSearchResult()` below (Search's own template) can render it. A
+ * single `getMessage()` lookup, not a full `listMessages()` scan.
+ * `threadId` here is a room id - `g-...` (group) or `r-...` (1:1, see
+ * `ChatService.roomId()`'s own doc comment on the prefix) - a 1:1 room's
+ * `getConfig().readers` is always exactly `[myPub, peerPub]` (see
+ * `ChatService.ensureRoom()`), so the peer is simply "whichever reader isn't
+ * me", no reverse hash lookup needed.
+ * @param {{services: object, syncFetch?: Function, myPub?: string, spaceId: string|number, threadId: string, messageId: string}} payload
+ * @returns {Promise<object|null>} One entry, or `null` if unresolvable.
+ */
+export async function resolveChatReference({ services, syncFetch, myPub, spaceId, threadId, messageId }) {
+  await syncFetch?.(paths.threadMessagePath(spaceId, threadId, messageId)).catch(() => {});
+  const message = await services.messages.getMessage(spaceId, threadId, messageId);
+  if (!message) return null;
+
+  const config = await services.messages.getConfig(spaceId, threadId);
+  let href, roomName;
+  if (threadId.startsWith('g-')) {
+    href = `#/chat/g/${threadId}`;
+    roomName = config?.name ?? threadId;
+  } else {
+    myPub ??= await services.actors.whoAmI();
+    const peerPub = (config?.readers ?? []).find((pub) => pub !== myPub) ?? null;
+    const profile = peerPub ? await services.profile.getPublicProfile(peerPub) : null;
+    href = peerPub ? `#/chat/${peerPub}` : '#/chat';
+    roomName = peerPub ? formatActorLabel(peerPub, profile ?? {}) : threadId;
+  }
+
+  return {
+    contentType: classifyMessageContentType(message), ts: message.ts, author: message.author,
+    snippet: buildSnippet(message.body, ''),
+    href, roomId: threadId, roomName,
+  };
+}
+
+/**
  * The `content.searchResultTemplate` contributor - renders one row for an
- * entry THIS SAME app returned from `searchChat()` above.
+ * entry THIS SAME app returned from `searchChat()`/`resolveChatReference()`
+ * above (both callers, Search and Notifications, share this one template).
  * @param {HTMLElement} container
  * @param {{entry: object, services: object}} payload
  */

@@ -2,8 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { QuStore, MemoryStoreAdapter, QuCrypto } from '@qu/core';
 import { AccessEngine, ThreadEngine } from '@qu/engines';
-import { QuIdentityEngine } from '@qu/identity';
+import { QuIdentityEngine, actorPath } from '@qu/identity';
 import { ListService, AccessService, MessageService, THREAD_PRESETS, NotificationPrefsService, PushSubscriptionService, paths } from '@qu/services';
+import { Registry } from '@qu/foundation';
 import { PresenceTracker } from '../src/presence-tracker.js';
 import { PushDeliveryService, createManifestNotificationResolver } from '../src/push-delivery.js';
 
@@ -75,6 +76,7 @@ function pushDeliveryFor(env, recipient, overrides = {}) {
     presence: overrides.presence ?? new PresenceTracker(),
     vapidKeys: 'vapidKeys' in overrides ? overrides.vapidKeys : VAPID_KEYS,
     resolveNotification: overrides.resolveNotification ?? null,
+    registry: overrides.registry ?? null,
     sendWebPush: overrides.sendWebPush ?? fakeSendWebPush(),
   });
 }
@@ -101,6 +103,35 @@ async function postAndDeliver(env, delivery, spaceId, threadId, params) {
 async function inAppNotificationCount(env, actorPub) {
   const entries = await env.qu.getChildren(paths.threadMessagesParentPath(`notifications-${actorPub}`, 'notifications'));
   return entries.filter((e) => e.quBit.val).length;
+}
+
+/**
+ * Reads a recipient's own notification thread DECRYPTED, for tests that
+ * need to inspect `ref`/`title`/etc, not just count entries (see
+ * `inAppNotificationCount()`'s own doc comment on why the RELAY's own
+ * `env.messages` can't decrypt these). Mirrors each QuBit from `env.qu`
+ * (where the relay physically wrote it) into the recipient's OWN store via
+ * `putSealed()` - the same "as if sync had already delivered it" technique
+ * `apps/forum/test/client.test.js`'s own `mirrorThreadInto()` uses - then
+ * reads it back through a `MessageService` bound to the recipient's own
+ * identity, exactly like a real client would after a real sync. Also
+ * mirrors the SENDER's (the relay's own `env.identity`) published profile
+ * into the recipient's store - `#writeInAppNotification()` signs/encrypts
+ * as `env.identity`, so decrypting needs the sender's X25519 key resolvable
+ * too, same as any other private-thread read (see `message-service.test.js`'s
+ * own reader-restricted-thread tests for the identical requirement).
+ */
+async function readOwnNotifications(env, recipient) {
+  const spaceId = `notifications-${recipient.pub}`;
+  const senderPub = QuCrypto.toBase64Url((await env.identity.getMainKey()).publicKey);
+  const senderProfile = await env.qu.get(actorPath(senderPub, 'profile'));
+  if (senderProfile) await recipient.qu.putSealed(actorPath(senderPub, 'profile'), senderProfile);
+
+  const entries = await env.qu.getChildren(paths.threadMessagesParentPath(spaceId, 'notifications'));
+  for (const { path, quBit } of entries) await recipient.qu.putSealed(path, quBit);
+  const messages = new MessageService(recipient.qu, recipient.identity, new ListService(recipient.qu), new AccessService(recipient.qu, recipient.identity));
+  const { messages: msgs } = await messages.listMessages(spaceId, 'notifications');
+  return msgs;
 }
 
 test('a mention on a PUBLIC thread notifies the mentioned actor', async () => {
@@ -135,6 +166,32 @@ test('on a PRIVATE (reader-restricted) thread, every OTHER reader is notified re
   await postAndDeliver(env, delivery, 'board', 'dm', { body: 'just for us, no @mention needed' });
 
   assert.equal(await inAppNotificationCount(env, recipient.pub), 1);
+});
+
+test('a delivered notification carries a live {spaceId, threadId, messageId} ref, matching the real message', async () => {
+  const env = await freshEnv();
+  const recipient = await freshRecipient(env);
+  await env.messages.createThread('board', 'general', THREAD_PRESETS.forum());
+  const delivery = pushDeliveryFor(env, recipient);
+
+  const posted = await postAndDeliver(env, delivery, 'board', 'general', { body: `hi @${recipient.pub}`, extra: { mentions: [recipient.pub] } });
+
+  const [notification] = await readOwnNotifications(env, recipient);
+  assert.deepEqual(notification.ref, { spaceId: 'board', threadId: 'general', messageId: posted.id });
+});
+
+test('the Web Push payload never includes ref, only the in-app copy does', async () => {
+  const env = await freshEnv();
+  const recipient = await freshRecipient(env);
+  await recipient.pushSubscriptions.subscribe({ endpoint: 'https://push.example.com/x', keys: { p256dh: 'a', auth: 'b' } });
+  await env.messages.createThread('board', 'general', THREAD_PRESETS.forum());
+  const send = fakeSendWebPush();
+  const delivery = pushDeliveryFor(env, recipient, { sendWebPush: send });
+
+  await postAndDeliver(env, delivery, 'board', 'general', { body: `hi @${recipient.pub}`, extra: { mentions: [recipient.pub] } });
+
+  assert.equal(send.calls.length, 1);
+  assert.equal('ref' in send.calls[0].payload, false);
 });
 
 test('the message AUTHOR is never notified about their own message', async () => {
@@ -388,4 +445,68 @@ test('INTEGRATION: PushDeliveryService, with the manifest-driven resolver as its
   // Also confirms the write itself happened (see inAppNotificationCount()'s
   // own doc comment for why its content can't be decrypted from here).
   assert.equal(await inAppNotificationCount(env, recipient.pub), 1);
+});
+
+// ===== registry.hooks.collect('notify.threadCandidates', ...) - the extensible trigger mechanism =====
+
+test('a registry with NO handler registered for notify.threadCandidates changes nothing (backward compatible)', async () => {
+  const env = await freshEnv();
+  const recipient = await freshRecipient(env);
+  const registry = new Registry(); // real Registry, real HookBus, zero handlers - see push-delivery.js's own doc comment
+  const delivery = pushDeliveryFor(env, recipient, { registry });
+  await env.messages.createThread('board', 'general', THREAD_PRESETS.forum());
+
+  await postAndDeliver(env, delivery, 'board', 'general', { body: `hi @${recipient.pub}`, extra: { mentions: [recipient.pub] } });
+
+  assert.equal(await inAppNotificationCount(env, recipient.pub), 1); // exactly the plain mention behavior, unaffected
+});
+
+test('a notify.threadCandidates hook can ADD a candidate the generic readers/mentions logic would never include', async () => {
+  const env = await freshEnv();
+  const watcher = await freshRecipient(env);
+  const registry = new Registry();
+  registry.hooks.on('notify.threadCandidates', () => [{ actorPub: watcher.pub, functionName: 'watched' }]);
+  const delivery = pushDeliveryFor(env, watcher, { registry });
+  await env.messages.createThread('board', 'general', THREAD_PRESETS.forum()); // public thread, watcher never mentioned
+
+  await postAndDeliver(env, delivery, 'board', 'general', { body: 'no mention, but someone is watching this board' });
+
+  assert.equal(await inAppNotificationCount(env, watcher.pub), 1);
+});
+
+test('a notify.threadCandidates hook\'s functionName overrides the generic default for an EXISTING candidate, passed through to resolveNotification', async () => {
+  const env = await freshEnv();
+  const recipient = await freshRecipient(env);
+  const registry = new Registry();
+  registry.hooks.on('notify.threadCandidates', () => [{ actorPub: recipient.pub, functionName: 'reply-own-topic' }]);
+  const seenFunctionNames = [];
+  const resolveNotification = (spaceId, threadId, ctx) => {
+    seenFunctionNames.push(ctx.functionName);
+    return null; // fall through to the generic default - this test only cares what CONTEXT resolveNotification was called with
+  };
+  const delivery = pushDeliveryFor(env, recipient, { registry, resolveNotification });
+  // A private thread so the generic logic ALSO produces this same actorPub as a candidate (mention: false) - the hook's functionName must win over that generic default, not just get appended as a duplicate.
+  const myPub = QuCrypto.toBase64Url((await env.identity.getMainKey()).publicKey);
+  await env.messages.createThread('board', 'dm', { writers: '*', readers: [myPub, recipient.pub] });
+
+  await postAndDeliver(env, delivery, 'board', 'dm', { body: 'just for us' });
+
+  assert.deepEqual(seenFunctionNames, ['reply-own-topic']);
+  assert.equal(await inAppNotificationCount(env, recipient.pub), 1); // exactly one notification, not a duplicate
+});
+
+test('createManifestNotificationResolver(): an explicit functionName matches pushActions by id, not the coarse mention/create type', () => {
+  const manifest = {
+    name: 'forum', spaceId: 'forum-space-uuid', label: 'Forum',
+    pushActions: [
+      { id: 'mention', label: 'Mentions', type: 'mention' },
+      { id: 'reply-own-topic', label: 'Replies to your topics', type: 'custom' },
+    ],
+  };
+  const resolve = createManifestNotificationResolver(fakeLoader([manifest]));
+
+  // mention: false would normally pick "create" (no match here) - but an explicit functionName bypasses that entirely.
+  const result = resolve('forum-space-uuid', 'general', { authorPub: 'Alice', mention: false, mentions: [], functionName: 'reply-own-topic' });
+  assert.equal(result.functionName, 'reply-own-topic');
+  assert.equal(result.title, 'Replies to your topics — Forum');
 });

@@ -23,6 +23,23 @@
  * `packages/relay/src/push-delivery.js`) or the generic fallback, `url` a
  * real in-app hash route to jump straight to the relevant app.
  *
+ * RICH RENDERING (`content.resolveReference`/`content.searchResultTemplate`,
+ * the SAME two-point contract `apps/search` already established): a
+ * notification MAY also carry a live `ref: {spaceId, threadId, messageId}`
+ * (additive - see `PushDeliveryService#writeInAppNotification()`'s own doc
+ * comment; an older notification, or one from an app with no contributor
+ * for either point, simply lacks it or fails to resolve). When it does,
+ * `renderItem()` resolves it via `extensionPoints.collect('content.
+ * resolveReference', ..., {onlyAppId: message.appId})` into the SAME entry
+ * shape `content.search` produces, then hands it to that SAME app's own
+ * `content.searchResultTemplate` contributor via `extensionPoints.
+ * renderFrom(...)` - the exact template Search already uses to render a
+ * Forum/Chat result row, reused here unchanged. This app never learns
+ * Forum's/Chat's data shape either way; it only ever asks "does this
+ * notification's own app know how to show itself?" and falls back to the
+ * generic title/body/url rendering above when the answer is no - disabled
+ * app, deleted message, or simply no `ref` at all.
+ *
  * READ TRACKING: `MessageService.markRead()`/`.getLastReadAt()` (a generic,
  * per-identity, PRIVATE, thread-level read marker - see either's own doc
  * comment) is exactly the right granularity here - ONE marker for the
@@ -77,14 +94,15 @@ const STYLE = `
  * app in this codebase follows (`apps/shell/client.js`'s own composition
  * root is the one deliberate exception, not a second precedent).
  * @param {HTMLElement} container
- * @param {{qu: import('@qu/core').QuStore, services: object, subscribe?: (prefix: string) => void, syncFetch?: (prefix: string) => Promise<*>}} deps
+ * @param {{qu: import('@qu/core').QuStore, services: object, subscribe?: (prefix: string) => void, syncFetch?: (prefix: string) => Promise<*>, extensionPoints?: import('@qu/foundation').ExtensionPointHost}} deps
  * @returns {() => void}
  */
-export function mount(container, { qu, services, subscribe, syncFetch }) {
+export function mount(container, { qu, services, subscribe, syncFetch, extensionPoints }) {
   ensureTheme();
   injectStyle(STYLE_ID, STYLE);
   let stopped = false;
   let off = null;
+  let myPub = null;
 
   const heading = document.createElement('h1');
   heading.textContent = t('title');
@@ -115,8 +133,20 @@ export function mount(container, { qu, services, subscribe, syncFetch }) {
     ]);
     if (stopped || token !== renderToken) return;
 
+    let items = null;
+    if (messages.length > 0) {
+      // All the (potentially async, rich-rendering) per-item work happens
+      // BEFORE anything touches the DOM, same "build first, mount once
+      // behind one token check" discipline the rest of this function
+      // already follows for its own listMessages()/getLastReadAt() pair -
+      // a resolveReference()/renderFrom() round trip per item must not let
+      // a newer render() interleave partial DOM updates with an older one.
+      items = await Promise.all(messages.map((message) => renderItem(message, lastReadAt, { extensionPoints, services, qu, syncFetch, myPub })));
+    }
+    if (stopped || token !== renderToken) return;
+
     listRoot.textContent = '';
-    if (messages.length === 0) {
+    if (!items) {
       const p = document.createElement('p');
       p.className = 'qu-notifications-empty';
       p.textContent = t('empty');
@@ -124,7 +154,7 @@ export function mount(container, { qu, services, subscribe, syncFetch }) {
     } else {
       const ul = document.createElement('ul');
       ul.className = 'qu-notifications-list';
-      for (const message of messages) ul.appendChild(renderItem(message, lastReadAt));
+      for (const li of items) ul.appendChild(li);
       listRoot.appendChild(ul);
     }
 
@@ -135,7 +165,7 @@ export function mount(container, { qu, services, subscribe, syncFetch }) {
   }
 
   (async () => {
-    const myPub = await services.actors.whoAmI();
+    myPub = await services.actors.whoAmI();
     if (stopped) return;
     const spaceId = paths.notificationsSpaceId(myPub);
 
@@ -154,10 +184,39 @@ export function mount(container, { qu, services, subscribe, syncFetch }) {
   };
 }
 
-function renderItem(message, lastReadAt) {
+/**
+ * @param {object} message
+ * @param {number} lastReadAt
+ * @param {{extensionPoints?: import('@qu/foundation').ExtensionPointHost, services: object, qu: object, syncFetch?: Function, myPub: string|null}} ctx
+ * @returns {Promise<HTMLElement>}
+ */
+async function renderItem(message, lastReadAt, { extensionPoints, services, qu, syncFetch, myPub }) {
   const li = document.createElement('li');
   li.className = 'qu-notifications-item';
   if (message.ts > lastReadAt) li.classList.add('qu-notifications-unread');
+
+  // See this file's own top doc comment's "RICH RENDERING" section - only
+  // attempted when there's an ExtensionPointHost to ask AND a live
+  // reference to resolve; any failure along the way (no contributor for
+  // this appId, the message/thread no longer resolvable, etc.) falls
+  // through to the plain rendering below exactly as if `ref` were absent.
+  if (message.ref && extensionPoints) {
+    try {
+      const [entry] = await extensionPoints.collect(
+        'content.resolveReference',
+        { services, qu, syncFetch, myPub, ...message.ref },
+        { onlyAppId: message.appId }
+      );
+      if (entry) {
+        const row = document.createElement('div');
+        await extensionPoints.renderFrom('content.searchResultTemplate', message.appId, row, { entry, services });
+        if (row.childNodes.length > 0) {
+          li.appendChild(row);
+          return li;
+        }
+      }
+    } catch { /* resolution/rendering failed - fall through to the generic rendering below */ }
+  }
 
   // `MessageService.postMessage()` SPREADS its `extra` param directly onto
   // the stored message (`{ ..., ...extra }`, see its own doc comment) - by

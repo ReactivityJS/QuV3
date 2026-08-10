@@ -83,6 +83,50 @@ test('notify() swallows a handler throwing SYNCHRONOUSLY too', async () => {
   assert.deepEqual(ran, ['survived']);
 });
 
+test('collect(): gathers every handler\'s returned value into one flat array', async () => {
+  const bus = new HookBus();
+  bus.on('notify.threadCandidates', () => ({ actorPub: 'a', functionName: 'reply' }));
+  bus.on('notify.threadCandidates', () => ({ actorPub: 'b', functionName: 'watched' }));
+
+  const result = await bus.collect('notify.threadCandidates', {});
+  assert.deepEqual(result, [
+    { actorPub: 'a', functionName: 'reply' },
+    { actorPub: 'b', functionName: 'watched' },
+  ]);
+});
+
+test('collect(): a handler returning an ARRAY has each item concatenated in, not nested', async () => {
+  const bus = new HookBus();
+  bus.on('x', () => [{ id: 1 }, { id: 2 }]);
+  bus.on('x', () => ({ id: 3 }));
+
+  const result = await bus.collect('x', {});
+  assert.deepEqual(result, [{ id: 1 }, { id: 2 }, { id: 3 }]);
+});
+
+test('collect(): a handler returning nothing (undefined/null) contributes nothing, no error', async () => {
+  const bus = new HookBus();
+  bus.on('x', () => undefined);
+  bus.on('x', () => null);
+  bus.on('x', () => ({ id: 1 }));
+
+  assert.deepEqual(await bus.collect('x', {}), [{ id: 1 }]);
+});
+
+test('collect(): a throwing handler is skipped, others still contribute (fault isolation)', async () => {
+  const bus = new HookBus();
+  bus.on('x', () => { throw new Error('boom'); });
+  bus.on('x', () => ({ id: 'survived' }));
+
+  const result = await bus.collect('x', {});
+  assert.deepEqual(result, [{ id: 'survived' }]);
+});
+
+test('collect(): a name with no registered handlers returns an empty array', async () => {
+  const bus = new HookBus();
+  assert.deepEqual(await bus.collect('nothing-registered', {}), []);
+});
+
 test('handlers run in `order` (lower first), registration order breaking ties', async () => {
   const bus = new HookBus();
   const calls = [];

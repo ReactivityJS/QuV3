@@ -1,3 +1,5 @@
+import { createLogger } from '@qu/log';
+
 /**
  * HOOK BUS — the imperative counterpart to Registry's declarative
  * capability idea (see registry.js's own doc comment): where a Capability
@@ -14,6 +16,8 @@
  * beforePostMessage` runs entirely in the browser, well before anything
  * reaches the relay; nothing here crosses that boundary.
  */
+const log = createLogger('hooks');
+
 export class HookBus {
   /** @type {Map<string, Array<{handler: Function, order: number}>>} */
   #handlers = new Map();
@@ -29,6 +33,34 @@ export class HookBus {
     list.push({ handler, order });
     list.sort((a, b) => a.order - b.order);
     this.#handlers.set(name, list);
+  }
+
+  /**
+   * Runs every handler registered for `name` IN ORDER, gathering their
+   * return values into one flat array - the server-side counterpart to
+   * `@qu/foundation`'s own `ExtensionPointHost.collect()` (same "concatenate
+   * every contributor's array/single-object result, tag nothing, isolate
+   * faults" shape), for exactly the case `run()`/`notify()` don't cover: a
+   * caller that wants to GATHER answers back (e.g. "who should be notified
+   * about this thread event", `packages/relay`'s `PushDeliveryService`),
+   * not transform a shared payload (`run()`) or fire side effects with no
+   * return value (`notify()`). A handler that throws is logged and skipped -
+   * one app's broken hook must never break every other app's contribution
+   * to the same point.
+   * @param {string} name @param {*} payload
+   * @returns {Promise<Array<*>>}
+   */
+  async collect(name, payload) {
+    const out = [];
+    for (const { handler } of this.#handlers.get(name) ?? []) {
+      try {
+        const items = await handler(payload);
+        if (items) for (const item of [].concat(items)) out.push(item);
+      } catch (err) {
+        log.error(`a "${name}" hook handler failed:`, err.message);
+      }
+    }
+    return out;
   }
 
   /** @param {string} name @param {Function} handler */
