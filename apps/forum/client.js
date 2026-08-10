@@ -168,8 +168,8 @@
  * scale past it).
  */
 import { watchChildren, watch } from '@qu/reactive';
-import { paths, formatActorLabel } from '@qu/services';
 import { rankFor } from '@qu/foundation';
+import { paths, formatActorLabel, detectLinks } from '@qu/services';
 import { createI18n } from '@qu/i18n';
 import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage } from '@qu/ui';
 import { renderEmojiPicker, renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, insertAtCursor } from '@qu/thread-ui';
@@ -194,8 +194,8 @@ const DICT = {
     moreActions: 'More actions',
     attachRemove: 'Remove attachment',
     insertEmoji: 'Insert emoji',
-    backToForum: '← Forum', backToChannel: '← {channel}',
     channels: 'Channels',
+    allChannels: 'All channels',
     newChannelPlaceholder: 'New channel name…',
     createChannel: 'Create channel',
     newChannelLink: '+ New channel',
@@ -212,6 +212,7 @@ const DICT = {
     restrictedBadge: '🔒 Restricted',
     replies: '{count} replies', // no singular/plural distinction - @qu/i18n has no plural-rules engine by design (see its own doc comment), matches QuV2's own identical "{count} replies" convention
     lastPostBy: 'by {name}',
+    searchResultIn: 'in "{topic}"',
   },
   de: {
     title: 'Forum',
@@ -222,8 +223,8 @@ const DICT = {
     moreActions: 'Weitere Aktionen',
     attachRemove: 'Anhang entfernen',
     insertEmoji: 'Emoji einfügen',
-    backToForum: '← Forum', backToChannel: '← {channel}',
     channels: 'Kanäle',
+    allChannels: 'Alle Kanäle',
     newChannelPlaceholder: 'Name des neuen Kanals…',
     createChannel: 'Kanal erstellen',
     newChannelLink: '+ Neuer Kanal',
@@ -240,6 +241,7 @@ const DICT = {
     restrictedBadge: '🔒 Geschützt',
     replies: '{count} Antworten',
     lastPostBy: 'von {name}',
+    searchResultIn: 'in „{topic}“',
   },
 };
 const { t } = createI18n(DICT);
@@ -330,8 +332,10 @@ const STYLE = `
   .qu-forum-topic-title { font-weight: 600; }
   .qu-forum-topic-meta { font-size: 0.8em; opacity: 0.7; margin-top: 0.15rem; }
   .qu-forum-channel-heading { display: flex; align-items: center; gap: 0.5rem; }
-  .qu-subpage-back { display: inline-block; margin-bottom: 0.6rem; opacity: 0.75; text-decoration: none; color: inherit; }
-  .qu-subpage-back:hover { opacity: 1; }
+  .qu-forum-search-result { display: block; padding: 0.6rem 0.8rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); text-decoration: none; color: inherit; }
+  .qu-forum-search-result:hover { background: var(--qu-color-surface, #8882); }
+  .qu-forum-search-result-meta { font-size: 0.8em; opacity: 0.7; }
+  .qu-forum-search-result-snippet { margin: 0.25rem 0 0; overflow-wrap: anywhere; }
 `;
 
 function formatTs(ts) {
@@ -476,8 +480,7 @@ function mountNewChannelView(container, { services, SPACE_ID }) {
   heading.textContent = t('createChannel');
 
   renderSubpage(container, {
-    backHref: '#/forum',
-    backLabel: t('backToForum'),
+    showBackLink: false, // the shell header's own Back/Forward already covers this - see this app's own top doc comment
     render: (content) => content.append(heading, formRoot),
   });
 
@@ -515,8 +518,9 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
   const mainRoot = document.createElement('div');
   layout.append(sidebarRoot, mainRoot);
   container.appendChild(layout);
-  // No active channel - the board view isn't "inside" any one of them.
-  const stopSidebar = mountMiniChannelSidebar(sidebarRoot, { qu, services, syncFetch, SPACE_ID }, null);
+  // 'all' - the board view IS the "All channels" entry, see
+  // mountMiniChannelSidebar()'s own doc comment on that sentinel.
+  const stopSidebar = mountMiniChannelSidebar(sidebarRoot, { qu, services, syncFetch, SPACE_ID }, 'all');
 
   const heading = document.createElement('h1');
   heading.textContent = t('title');
@@ -604,7 +608,11 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
  * No separate "mobile" markup/JS path - the CSS alone reflows it.
  * @param {HTMLElement} root
  * @param {{qu: object, services: object, syncFetch?: Function, SPACE_ID: string}} deps
- * @param {string|null} [activeChannelId] - Highlighted in the list, when known.
+ * @param {string|null} [activeChannelId] - Highlighted in the list, when
+ *   known. The literal sentinel `'all'` (never a real channel id -
+ *   `crypto.randomUUID()` never produces it) highlights the leading
+ *   "All channels" entry instead - passed by the board view, since IT is
+ *   that entry's own destination (`#/forum`).
  * @returns {() => void} stop function
  */
 function mountMiniChannelSidebar(root, { qu, services, syncFetch, SPACE_ID }, activeChannelId = null) {
@@ -630,6 +638,19 @@ function mountMiniChannelSidebar(root, { qu, services, syncFetch, SPACE_ID }, ac
     root.appendChild(title);
     const ul = document.createElement('ul');
     ul.className = 'qu-forum-mini-channels';
+
+    // esoTalk's own "All Channels" entry - the merged recent-activity board
+    // view (#/forum), listed alongside the individual channels rather than
+    // reached only via the shell header's Back button.
+    const allLi = document.createElement('li');
+    const allLink = document.createElement('a');
+    allLink.href = '#/forum';
+    allLink.textContent = t('allChannels');
+    allLink.className = 'qu-forum-mini-all-channels';
+    if (activeChannelId === 'all') allLink.classList.add('qu-forum-mini-channel-active');
+    allLi.appendChild(allLink);
+    ul.appendChild(allLi);
+
     for (const channel of channels) {
       const li = document.createElement('li');
       const a = document.createElement('a');
@@ -689,8 +710,7 @@ function mountChannelView(container, { qu, services, syncFetch, SPACE_ID, channe
   const inviteRoot = document.createElement('div');
 
   renderSubpage(mainRoot, {
-    backHref: '#/forum',
-    backLabel: t('backToForum'),
+    showBackLink: false, // the shell header's own Back/Forward already covers this, and the persistent sidebar's own "All channels" entry covers the rest - see this app's own top doc comment
     render: (content) => content.append(heading, topicsRoot, inviteRoot),
   });
 
@@ -877,33 +897,17 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
   composerWrap.append(composerRow, pendingAttachmentEl);
 
   renderSubpage(mainRoot, {
-    backHref: '#/forum',
-    backLabel: t('backToForum'),
+    showBackLink: false, // the shell header's own Back/Forward already covers this - see this app's own top doc comment
     render: (content) => content.append(heading, pinnedRoot, messagesRoot, composerWrap),
   });
-  // renderSubpage() builds the back link internally and hands back nothing
-  // - re-selected here (by the class it's own doc comment guarantees) so it
-  // can be updated once the topic's real channel is known, below.
-  const backLink = mainRoot.querySelector('.qu-subpage-back');
 
-  // Resolves the topic's own title and its parent channel (for the back
-  // link) - doesn't block the message list itself from loading, both start
-  // independently.
+  // Resolves the topic's own title - doesn't block the message list itself
+  // from loading, both start independently.
   (async () => {
     const topicBit = await qu.get(paths.documentPath(SPACE_ID, topicId));
     if (stopped) return;
     const topic = topicBit?.val;
-    if (topic) {
-      heading.textContent = topic.title;
-      backLink.href = `#/forum/c/${topic.channelId}`;
-      const channelBit = await qu.get(paths.documentPath(SPACE_ID, topic.channelId));
-      if (stopped) return;
-      const channel = channelBit?.val;
-      // Until the channel doc resolves, the link already correctly points
-      // at #/forum/c/<channelId> above - only its LABEL still says
-      // "← Forum" for a moment, never a broken destination.
-      if (channel) backLink.textContent = t('backToChannel', { channel: channel.title });
-    }
+    if (topic) heading.textContent = topic.title;
   })();
 
   // Holds the LAST completed upload until Send is clicked - see this file's
@@ -1199,4 +1203,115 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     stopComposerEmoji();
     stopSidebar();
   };
+}
+
+// ===================================================================
+// SEARCH - `content.search`/`content.searchResultTemplate` contributor
+// (apps/search's own extension points, see that app's manifest.quapp for
+// the full payload contract). Forum never imports apps/search; apps/search
+// never imports Forum - both only agree on these two point strings, same
+// "host defines, contributor implements" shape as content.messageActions/
+// content.messageReactions above.
+// ===================================================================
+
+/** @param {object} message @returns {'post'|'image'|'video'|'file'|'link'} */
+function classifyMessageContentType(message) {
+  const mime = message.attachment?.mime ?? '';
+  if (mime.startsWith('image/')) return 'image';
+  if (mime.startsWith('video/')) return 'video';
+  if (message.attachment) return 'file';
+  if (detectLinks(message.body ?? '').some((seg) => seg.type === 'link')) return 'link';
+  return 'post';
+}
+
+/** A short excerpt centered on the first match, so a long message's result row doesn't dump its entire body. */
+function buildSnippet(body, query, radius = 60) {
+  if (!body) return '';
+  const idx = body.toLowerCase().indexOf(query);
+  if (idx === -1) return body.length > 140 ? `${body.slice(0, 140)}…` : body;
+  const start = Math.max(0, idx - radius);
+  const end = Math.min(body.length, idx + query.length + radius);
+  return `${start > 0 ? '…' : ''}${body.slice(start, end)}${end < body.length ? '…' : ''}`;
+}
+
+/**
+ * The `content.search` contributor.
+ * @param {{services: object, qu: object, apps: object[], query: string, types: string[]|null, scope: 'global'|'app'|'subpage', segments?: string[]}} payload -
+ *   `segments` is the ORIGINAL `#/forum/...` route's segments (see this
+ *   file's own router doc comment on `mount()`) - only consulted for
+ *   `scope: 'subpage'`; `'app'`/`'global'` both mean "search the whole
+ *   forum" from THIS contributor's point of view (the search app itself is
+ *   what decides whether to call every app's contributor or just this one -
+ *   see `ExtensionPointHost.collect()`'s own `{onlyAppId}` doc comment).
+ * @returns {Promise<Array<object>>}
+ */
+export async function searchForum({ services, qu, apps, query, types, scope, segments = [] }) {
+  const SPACE_ID = apps?.find((a) => a.name === 'forum')?.spaceId;
+  const q = (query ?? '').trim().toLowerCase();
+  if (!SPACE_ID || !q) return [];
+  const [, kindSeg, idSeg] = segments;
+
+  async function messagesOfTopic(topicId, channelId, topicTitle) {
+    const { messages } = await services.messages.listMessages(SPACE_ID, topicId);
+    const out = [];
+    for (const message of messages) {
+      if (!message.body?.toLowerCase().includes(q)) continue;
+      const contentType = classifyMessageContentType(message);
+      if (types?.length && !types.includes(contentType)) continue;
+      out.push({
+        contentType, ts: message.ts, author: message.author,
+        snippet: buildSnippet(message.body, q),
+        href: `#/forum/t/${topicId}`,
+        topicId, channelId, topicTitle: topicTitle ?? topicId,
+      });
+    }
+    return out;
+  }
+
+  if (scope === 'subpage' && kindSeg === 't' && idSeg) {
+    const topicBit = await qu.get(paths.documentPath(SPACE_ID, idSeg));
+    return messagesOfTopic(idSeg, topicBit?.val?.channelId ?? null, topicBit?.val?.title);
+  }
+  if (scope === 'subpage' && kindSeg === 'c' && idSeg) {
+    const topics = await services.channels.listTopics(SPACE_ID, idSeg);
+    const perTopic = await Promise.all(topics.map((topic) => messagesOfTopic(topic._id, idSeg, topic.title)));
+    return perTopic.flat();
+  }
+  // 'app'/'global', or 'subpage' with no specific channel/topic (the board home) - the whole forum.
+  const channels = await services.channels.listChannels(SPACE_ID);
+  const perChannel = await Promise.all(channels.map(async (channel) => {
+    const topics = await services.channels.listTopics(SPACE_ID, channel._id);
+    const perTopic = await Promise.all(topics.map((topic) => messagesOfTopic(topic._id, channel._id, topic.title)));
+    return perTopic.flat();
+  }));
+  return perChannel.flat();
+}
+
+/**
+ * The `content.searchResultTemplate` contributor - renders one row for an
+ * entry THIS SAME app returned from `searchForum()` above.
+ * @param {HTMLElement} container
+ * @param {{entry: object, services: object}} payload
+ */
+export async function renderSearchResult(container, { entry, services }) {
+  const wrap = document.createElement('a');
+  wrap.className = 'qu-forum-search-result';
+  wrap.href = entry.href;
+
+  let authorLabel = entry.author ?? '';
+  try {
+    const profile = entry.author ? await services.profile.getPublicProfile(entry.author) : null;
+    if (profile) authorLabel = formatActorLabel(entry.author, profile);
+  } catch { /* offline/unresolvable - falls back to the raw pubkey */ }
+
+  const meta = document.createElement('div');
+  meta.className = 'qu-forum-search-result-meta';
+  meta.textContent = `${authorLabel} · ${t('searchResultIn', { topic: entry.topicTitle ?? entry.topicId ?? '' })} · ${formatTs(entry.ts)}`;
+
+  const snippet = document.createElement('p');
+  snippet.className = 'qu-forum-search-result-snippet';
+  snippet.textContent = entry.snippet ?? '';
+
+  wrap.append(meta, snippet);
+  container.appendChild(wrap);
 }

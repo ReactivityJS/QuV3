@@ -190,3 +190,59 @@ test('the returned stop function tears down cleanly - no error thrown', async (t
   await waitForOwnName(container);
   assert.doesNotThrow(() => stop());
 });
+
+// ===== shell.headerAction slot (search icon, or any future header contribution) =====
+
+const HEADER_PLUGIN_URL = new URL('./fixtures/header-search-plugin.js', import.meta.url).href;
+
+test('shell.headerAction: a contributor mounts once, reflecting the CURRENT route context', async (t) => {
+  const { qu, services } = await freshEnv();
+  t.mock.method(globalThis, 'fetch', mockAppsFetch());
+  window.location.hash = '#/forum/t/abc123';
+  const apps = [{ name: 'search', clientMainUrl: HEADER_PLUGIN_URL, contributes: [{ point: 'shell.headerAction', export: 'renderHeaderSearch' }] }];
+  const container = makeContainer();
+  const stop = mountHeader(container, { qu, services, subscribe: noopSubscribe, apps });
+  try {
+    await waitFor(() => container.querySelector('[data-test-header-action]') !== null);
+    assert.equal(container.querySelector('[data-test-header-action]').textContent, 'search:forum:forum,t,abc123');
+  } finally {
+    stop();
+    window.location.hash = '';
+  }
+});
+
+test('shell.headerAction: a contributor updates live on hashchange, without remounting', async (t) => {
+  const { qu, services } = await freshEnv();
+  t.mock.method(globalThis, 'fetch', mockAppsFetch());
+  window.location.hash = '#/forum';
+  const apps = [{ name: 'search', clientMainUrl: HEADER_PLUGIN_URL, contributes: [{ point: 'shell.headerAction', export: 'renderHeaderSearch' }] }];
+  const container = makeContainer();
+  const stop = mountHeader(container, { qu, services, subscribe: noopSubscribe, apps });
+  try {
+    await waitFor(() => container.querySelector('[data-test-header-action]') !== null);
+    const link = container.querySelector('[data-test-header-action]');
+    assert.equal(link.textContent, 'search:forum:forum');
+
+    window.location.hash = '#/chat/somepeer';
+    window.dispatchEvent(new window.Event('hashchange'));
+    await waitFor(() => link.textContent === 'search:chat:chat,somepeer');
+    // Still the SAME element - a route change updates the existing contribution in place, no re-render/re-import.
+    assert.equal(container.querySelector('[data-test-header-action]'), link);
+  } finally {
+    stop();
+    window.location.hash = '';
+  }
+});
+
+test('shell.headerAction: no apps catalog (default []) renders no contribution, no error', async (t) => {
+  const { qu, services } = await freshEnv();
+  t.mock.method(globalThis, 'fetch', mockAppsFetch());
+  const container = makeContainer();
+  const stop = mountHeader(container, { qu, services, subscribe: noopSubscribe });
+  try {
+    await waitForOwnName(container);
+    assert.equal(container.querySelector('[data-test-header-action]'), null);
+  } finally {
+    stop();
+  }
+});

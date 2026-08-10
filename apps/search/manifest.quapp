@@ -1,0 +1,18 @@
+{
+  "name": "search",
+  "version": "1.0.0",
+  "kind": "app",
+  "main": "./index.js",
+  "clientMain": "./dist/client.js",
+  "label": "Search",
+  "icon": "🔍",
+  "navOrder": 4,
+  "requires": [],
+  "definesExtensionPoints": [
+    { "point": "content.search", "kind": "query", "description": "Contributes this app's own LOCAL search results for a text query - one contributor per app that owns searchable content (e.g. Forum, Chat). Payload: {services, qu, syncFetch, apps, myPub, query, types, scope, segments}. `types` is null (any) or an array of 'post'|'image'|'video'|'file'|'link'. `scope` is 'global'|'app'|'subpage' - for 'app'/'subpage' this is the ONLY contributor called (ExtensionPointHost.collect(point, payload, {onlyAppId})), so it should search everything it owns for 'app' and narrow to `segments` for 'subpage'; for 'global' every contributor is called and should search everything it owns, ignoring `segments`. `segments` is the CONTRIBUTING app's own route segments (e.g. ['forum','t','<topicId>']), parsed the same way that app's own mount() already parses `ctx.segments`. Returns Array<{contentType, ts, href, snippet, author, ...}> - `appId` is added by collect() itself, never set by the contributor." },
+    { "point": "content.searchResultTemplate", "kind": "ui", "description": "Renders ONE search result row for an entry this SAME app contributed via content.search - resolved by entry.appId via ExtensionPointHost.renderFrom(point, appId, container, payload), never fanned out to every contributor (a contributor has no idea what to do with an entry it didn't produce). Payload: {entry, services}." }
+  ],
+  "contributes": [
+    { "point": "shell.headerAction", "export": "renderHeaderSearch", "kind": "ui", "order": 0 }
+  ]
+}

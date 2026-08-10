@@ -61,14 +61,28 @@ const log = createLogger('extension-points');
  *     (a fresh child element created per contributor, so contributors can't
  *     stomp each other's DOM). `QuEvents` itself provides the ordering
  *     (`contributes[].order`) and per-listener fault isolation.
- *   - `collect(point, payload)` - context menu / data-returning extension:
- *     `export`'s function is `(payload) -> Array<{id, label, icon?, onClick}>
- *     | Promise<...>`, results from every contributor concatenated and
- *     returned. Deliberately NOT built on `QuEvents.emit()` - `QuEvents`
- *     is fire-and-forget fan-out by design (return values are documented as
- *     "simply ignored, not chained"), and gathering answers back is a
- *     genuinely different primitive, so this one case keeps its own small
- *     loop rather than forcing a shape that doesn't fit.
+ *   - `collect(point, payload, {onlyAppId?})` - context menu / data-returning
+ *     extension: `export`'s function is `(payload) -> Array<{id, label,
+ *     icon?, onClick}> | Promise<...>`, results from every contributor
+ *     concatenated and returned. Deliberately NOT built on `QuEvents.emit()` -
+ *     `QuEvents` is fire-and-forget fan-out by design (return values are
+ *     documented as "simply ignored, not chained"), and gathering answers
+ *     back is a genuinely different primitive, so this one case keeps its
+ *     own small loop rather than forcing a shape that doesn't fit. The same
+ *     loop also backs `kind: 'query'` points (e.g. a search app's
+ *     `content.search`, one contributor per app owning its own content) -
+ *     `onlyAppId` lets a caller that already knows WHICH app it wants (a
+ *     "search only within Forum" scope, as opposed to "search everywhere")
+ *     call just that one contributor without paying for (or getting results
+ *     from) every other one.
+ *   - `renderFrom(point, appId, container, payload)` - like `renderSlot()`,
+ *     but resolves and calls exactly ONE contributor (the one matching
+ *     `appId`) instead of every contributor for `point`. For a point where
+ *     each contributor renders something ONLY IT knows how to (e.g. a search
+ *     result this SAME app already produced via a `kind: 'query'` point,
+ *     versus `renderSlot()`'s "every contributor adds its own widget to the
+ *     same row" shape, which would be wrong here - the other contributors
+ *     have no idea what to do with an entry they didn't produce).
  *
  * NOT this class's job: WHICH apps get dynamically imported here is entirely
  * a function of the trusted apps catalog (`ctx.apps`, already vetted the
@@ -134,11 +148,15 @@ export class ExtensionPointHost {
   /**
    * @param {string} point
    * @param {*} payload
+   * @param {{onlyAppId?: string}} [options] - `onlyAppId` restricts this call
+   *   to a single contributing app (e.g. "search only within Forum") instead
+   *   of fanning out to every contributor of `point` - see class doc comment.
    * @returns {Promise<Array<object>>}
    */
-  async collect(point, payload) {
+  async collect(point, payload, { onlyAppId } = {}) {
     const out = [];
     for (const contributor of this.#contributorsFor(point)) {
+      if (onlyAppId && contributor.appId !== onlyAppId) continue;
       const fn = await this.#load(contributor);
       if (!fn) continue;
       try {
@@ -149,6 +167,28 @@ export class ExtensionPointHost {
       }
     }
     return out;
+  }
+
+  /**
+   * Like `renderSlot()`, but resolves and calls exactly ONE contributor (the
+   * one whose `appId` matches) instead of every contributor of `point` - see
+   * class doc comment for why `renderSlot()`'s "every contributor adds its
+   * own widget" shape is wrong for this case.
+   * @param {string} point
+   * @param {string} appId
+   * @param {HTMLElement} container
+   * @param {*} payload
+   */
+  async renderFrom(point, appId, container, payload) {
+    const contributor = this.#contributorsFor(point).find((c) => c.appId === appId);
+    if (!contributor) return;
+    const fn = await this.#load(contributor);
+    if (!fn) return;
+    try {
+      await fn(container, payload);
+    } catch (err) {
+      log.error(`contributor "${appId}" failed rendering "${point}":`, err);
+    }
   }
 
   #contributorsFor(point) {

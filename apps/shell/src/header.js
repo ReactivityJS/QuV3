@@ -45,11 +45,30 @@
  *      comment's "DELIBERATELY NOT BUILT" list) - the link degrades to the
  *      same graceful "app not found" placeholder every other not-yet-loaded
  *      catalog entry already does.
+ *
+ * SEARCH SLOT (`shell.headerAction`): the header itself defines this one
+ * extension point (`@qu/foundation`'s `ExtensionPointHost.renderSlot()`,
+ * same mechanism `apps/forum`'s `content.messageActions`/etc. already use,
+ * just with the HOST being this file instead of an app) and renders it
+ * ONCE, unlike the per-route `extensionPoints` `apps/shell/client.js`
+ * rebuilds on every navigation - this header is mounted exactly once for
+ * the whole session, so its OWN `ExtensionPointHost` lives for that long
+ * too. `apps/search` is the one contributor today (its `renderHeaderSearch`
+ * mounts a single 🔍 icon), but nothing here is search-specific - any app
+ * could contribute a second header icon the same way. Since the contributed
+ * widget is mounted once but the ROUTE changes on every navigation, the
+ * payload carries a live `getContext()`/`onContextChange()` pair (a plain
+ * mutable `{appId, segments}` object plus a listener list this file updates
+ * on every `hashchange`) instead of a fresh payload per render - cheap
+ * (a plain object mutation and a DOM attribute write, no re-import, no DOM
+ * churn) and avoids a second, ad hoc "watch the route" mechanism.
  */
 import { watchChildren } from '@qu/reactive';
 import { paths, formatActorLabel } from '@qu/services';
 import { createI18n } from '@qu/i18n';
 import { injectStyle, ensureTheme, renderAvatarOrAsset } from '@qu/ui';
+import { ExtensionPointHost } from '@qu/foundation';
+import { parseHash } from './router.js';
 
 const DICT = {
   en: {
@@ -75,6 +94,7 @@ const STYLE = `
   .qu-shell-histbtn { background: none; border: none; cursor: pointer; font-size: 1.15em; line-height: 1; padding: 0.4rem 0.5rem; border-radius: var(--qu-radius-sm, 0.3rem); color: inherit; opacity: 0.75; }
   .qu-shell-histbtn:hover { background: var(--qu-color-surface, #8882); opacity: 1; }
   .qu-shell-header-spacer { flex: 1; }
+  .qu-shell-header-slot { display: flex; align-items: center; }
   .qu-shell-bell { position: relative; display: inline-flex; background: none; border: none; cursor: pointer; text-decoration: none; color: inherit; font-size: 1.2em; padding: 0.35rem 0.55rem; border-radius: var(--qu-radius-sm, 0.3rem); }
   .qu-shell-bell:hover { background: var(--qu-color-surface, #8882); }
   .qu-shell-badge { position: absolute; top: 0.05rem; right: 0.05rem; min-width: 1rem; height: 1rem; padding: 0 0.2rem; border-radius: 999px; background: var(--qu-color-danger, #c00); color: #fff; font-size: 0.62rem; font-weight: 700; line-height: 1rem; text-align: center; }
@@ -97,10 +117,14 @@ const STYLE = `
 
 /**
  * @param {HTMLElement} container
- * @param {{qu: import('@qu/core').QuStore, services: object, adminPubs?: string[], subscribe?: (prefix: string) => void, syncFetch?: (prefix: string) => Promise<*>}} deps
+ * @param {{qu: import('@qu/core').QuStore, services: object, adminPubs?: string[], subscribe?: (prefix: string) => void, syncFetch?: (prefix: string) => Promise<*>, apps?: object[]}} deps -
+ *   `apps` is the SAME manifest catalog every routed app already receives as
+ *   `ctx.apps` (see this file's own "SEARCH SLOT" doc comment) - defaults to
+ *   `[]` so an existing caller that doesn't pass it yet just renders no
+ *   `shell.headerAction` contributors, never throws.
  * @returns {() => void} A stop function.
  */
-export function mountHeader(container, { qu, services, adminPubs = [], subscribe, syncFetch }) {
+export function mountHeader(container, { qu, services, adminPubs = [], subscribe, syncFetch, apps = [] }) {
   ensureTheme();
   injectStyle(STYLE_ID, STYLE);
   let stopped = false;
@@ -137,6 +161,9 @@ export function mountHeader(container, { qu, services, adminPubs = [], subscribe
   const spacer = document.createElement('div');
   spacer.className = 'qu-shell-header-spacer';
 
+  const headerSlot = document.createElement('div');
+  headerSlot.className = 'qu-shell-header-slot';
+
   const bell = document.createElement('a');
   bell.className = 'qu-shell-bell';
   bell.href = '#/notifications';
@@ -171,8 +198,31 @@ export function mountHeader(container, { qu, services, adminPubs = [], subscribe
   menu.hidden = true;
 
   userWrap.append(userBtn, menu);
-  header.append(home, backBtn, forwardBtn, spacer, bell, userWrap);
+  header.append(home, backBtn, forwardBtn, spacer, headerSlot, bell, userWrap);
   container.appendChild(header);
+
+  // See this file's own "SEARCH SLOT" doc comment above - one
+  // ExtensionPointHost for this header's whole lifetime, one renderSlot()
+  // call (contributors mount their own DOM once), route changes propagated
+  // via routeContext + contextListeners instead of a re-render per navigation.
+  const extensionPoints = new ExtensionPointHost(apps);
+  const routeContext = { appId: null, segments: [] };
+  const contextListeners = new Set();
+  function getContext() {
+    return routeContext;
+  }
+  function onContextChange(cb) {
+    contextListeners.add(cb);
+  }
+  function updateRouteContext() {
+    const { appId, segments } = parseHash(window.location.hash);
+    routeContext.appId = appId;
+    routeContext.segments = segments;
+    for (const cb of contextListeners) cb();
+  }
+  updateRouteContext();
+  window.addEventListener('hashchange', updateRouteContext);
+  extensionPoints.renderSlot('shell.headerAction', headerSlot, { getContext, onContextChange });
 
   function closeMenu() {
     menu.hidden = true;
@@ -312,6 +362,7 @@ export function mountHeader(container, { qu, services, adminPubs = [], subscribe
     document.removeEventListener('click', onDocClick);
     document.removeEventListener('keydown', onKeydown);
     window.removeEventListener('qu:flag-changed', onFlagChanged);
+    window.removeEventListener('hashchange', updateRouteContext);
     off?.();
   };
 }
