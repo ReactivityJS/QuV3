@@ -12,8 +12,8 @@
  *
  * ROUTING (`ctx.segments`, `segments[0]` always `'forum'` - see
  * `docs/building-an-app.md` §5.1):
- *   - `#/forum` - every channel (sidebar) + a merged recent-activity topic
- *     feed across all of them, newest first.
+ *   - `#/forum` - a merged recent-activity topic feed across every channel,
+ *     newest first.
  *   - `#/forum/c/<channelId>` - one channel's topic list, a "new topic"
  *     form, and (if restricted) an "invite member" field.
  *   - `#/forum/t/<topicId>` - one topic's thread: message list, composer,
@@ -22,6 +22,18 @@
  *     POINTS below) - everything this app already had before Channels/
  *     Topics existed, now parametrized by `topicId` instead of a single
  *     hardcoded thread id.
+ *   - `#/forum/new` - the "create a channel" form, its own subpage (moved
+ *     out of the board view - see `mountMiniChannelSidebar()`'s own doc
+ *     comment on why), policy-gated the same way the sidebar's own "+ New
+ *     channel" link is.
+ *
+ * EVERY view above shares ONE persistent channel list (`mountMiniChannelSidebar()`),
+ * not just the board view - esoTalk's own "the channel list never disappears,
+ * no matter how deep you've drilled in" idiom. A narrow/mobile viewport
+ * collapses it from a sidebar into a horizontal, scrollable tab bar above
+ * the content instead of stacking a tall list on top (see this file's own
+ * `@media` rules) - a compact single row, not a second full-height list to
+ * scroll past before reaching the actual content.
  *
  * MIGRATION: `apps/forum/index.js`'s `register()` wraps the ORIGINAL flat
  * public thread (from before this round) in a real "General" channel/topic,
@@ -157,9 +169,10 @@ const DICT = {
     insertEmoji: 'Insert emoji',
     backToForum: '← Forum', backToChannel: '← {channel}',
     channels: 'Channels',
-    noChannelsYet: 'No channels yet - create one below.',
     newChannelPlaceholder: 'New channel name…',
     createChannel: 'Create channel',
+    newChannelLink: '+ New channel',
+    notAllowedToCreateChannel: 'This relay does not allow you to create a channel right now - ask an admin.',
     restrictedChannel: 'Restricted (only invited members)',
     membersPlaceholder: 'Member pubkeys, comma-separated',
     recentActivity: 'Recent activity',
@@ -183,9 +196,10 @@ const DICT = {
     insertEmoji: 'Emoji einfügen',
     backToForum: '← Forum', backToChannel: '← {channel}',
     channels: 'Kanäle',
-    noChannelsYet: 'Noch keine Kanäle - leg unten einen an.',
     newChannelPlaceholder: 'Name des neuen Kanals…',
     createChannel: 'Kanal erstellen',
+    newChannelLink: '+ Neuer Kanal',
+    notAllowedToCreateChannel: 'Auf diesem Relay darfst du aktuell keinen Kanal anlegen - wende dich an einen Admin.',
     restrictedChannel: 'Geschützt (nur eingeladene Mitglieder)',
     membersPlaceholder: 'Mitglieder-Pubkeys, kommagetrennt',
     recentActivity: 'Neueste Aktivität',
@@ -244,15 +258,12 @@ const STYLE = `
   .qu-forum-pending-attachment[hidden] { display: none; }
   .qu-forum-pending-attachment button { background: none; border: none; cursor: pointer; opacity: 0.7; font: inherit; padding: 0; }
   .qu-forum-message-attachment { margin-top: 0.5rem; max-width: 18rem; }
-  .qu-forum-board { display: flex; flex-direction: column; gap: 1.2rem; }
-  .qu-forum-channels { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
-  .qu-forum-channel-row a { display: flex; align-items: center; gap: 0.4rem; padding: 0.4rem 0.6rem; border-radius: var(--qu-radius-md, 0.4rem); text-decoration: none; color: inherit; }
-  .qu-forum-channel-row a:hover { background: var(--qu-color-border, #8884); }
   .qu-forum-restricted-badge { font-size: 0.75em; opacity: 0.75; }
-  /* Channel/topic view layout: a persistent mini channel list alongside the
-     main content - esoTalk's own "the channel list never disappears, no
-     matter how deep you've drilled in" idiom (see this app's own top doc
-     comment / this section's own doc comment on mountMiniChannelSidebar()). */
+  /* Board/channel/topic view layout: ONE persistent mini channel list
+     alongside the main content, on every view - esoTalk's own "the channel
+     list never disappears, no matter how deep you've drilled in" idiom (see
+     this app's own top doc comment / mountMiniChannelSidebar()'s own doc
+     comment). */
   .qu-forum-layout { display: flex; gap: 1.2rem; align-items: flex-start; }
   .qu-forum-layout > aside { flex: 0 0 12rem; min-width: 0; }
   .qu-forum-layout > div { flex: 1; min-width: 0; }
@@ -261,11 +272,22 @@ const STYLE = `
   .qu-forum-mini-channels a { display: flex; align-items: center; gap: 0.3rem; padding: 0.3rem 0.5rem; border-radius: var(--qu-radius-md, 0.4rem); text-decoration: none; color: inherit; font-size: 0.9em; }
   .qu-forum-mini-channels a:hover { background: var(--qu-color-border, #8884); }
   .qu-forum-mini-channel-active { background: color-mix(in srgb, var(--qu-color-accent, #5b5bd6) 15%, transparent); font-weight: 600; }
-  /* Below this width the two columns no longer have room to sit side by
-     side - stack instead of squeezing the message list into a sliver. */
+  .qu-forum-mini-new-channel { opacity: 0.8; }
+  .qu-forum-mini-new-channel:hover { opacity: 1; }
+  /* Below this width there's no room for a side-by-side sidebar column -
+     esoTalk's own mobile pattern (tabs, not a tree) rather than a tall list
+     pushing the actual content below the fold: the sidebar collapses into a
+     single-row, horizontally scrollable tab bar ABOVE the content instead
+     of stacking a full-height list on top of it. Same DOM either way -
+     mountMiniChannelSidebar() has no separate "mobile" code path, this is
+     CSS-only. */
   @media (max-width: 40rem) {
-    .qu-forum-layout { flex-direction: column; }
+    .qu-forum-layout { flex-direction: column; gap: 0.6rem; }
     .qu-forum-layout > aside { flex-basis: auto; width: 100%; }
+    .qu-forum-mini-sidebar h2 { display: none; }
+    .qu-forum-mini-channels { flex-direction: row; flex-wrap: nowrap; overflow-x: auto; gap: 0.4rem; padding-bottom: 0.2rem; -webkit-overflow-scrolling: touch; }
+    .qu-forum-mini-channels li { flex: 0 0 auto; }
+    .qu-forum-mini-channels a { white-space: nowrap; border: 1px solid var(--qu-color-border, #8884); border-radius: 999px; padding: 0.3rem 0.7rem; }
   }
   .qu-forum-new-channel-form, .qu-forum-new-topic-form, .qu-forum-invite-form { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.6rem; max-width: 26rem; }
   .qu-forum-new-channel-form input[type="text"], .qu-forum-new-topic-form input[type="text"], .qu-forum-invite-form input[type="text"] { font: inherit; padding: 0.4rem 0.6rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); }
@@ -321,10 +343,132 @@ export function mount(container, ctx) {
     stopView = mountTopicView(container, { ...viewCtx, topicId: idSeg });
   } else if (kindSeg === 'c' && idSeg) {
     stopView = mountChannelView(container, { ...viewCtx, channelId: idSeg });
+  } else if (kindSeg === 'new') {
+    stopView = mountNewChannelView(container, viewCtx);
   } else {
     stopView = mountBoardView(container, viewCtx);
   }
   return () => stopView?.();
+}
+
+/**
+ * Resolves this identity's channel-creation policy (relay-settings.js'
+ * `channels.allowMemberCreate`/`allowMemberRestricted`) + whether it's one
+ * of this relay's own admins - shared by `mountMiniChannelSidebar()` (to
+ * decide whether to show the "+ New channel" link at all) and
+ * `mountNewChannelView()` (to decide whether to render the form, and
+ * whether the restricted-channel checkbox is available). See
+ * `packages/relay/src/relay-settings.js`'s own doc comment on `channels`
+ * for exactly why this is CLIENT-SIDE only - it hides/shows UI, it does not
+ * (yet) stop a modified client from calling `services.channels.
+ * createChannel()` directly.
+ * @param {object} services
+ * @returns {Promise<{channelPolicy: {allowMemberCreate: boolean, allowMemberRestricted: boolean}, isAdmin: boolean}>}
+ */
+async function fetchChannelPolicy(services) {
+  let channelPolicy = { allowMemberCreate: true, allowMemberRestricted: false };
+  let isAdmin = false;
+  try {
+    const res = await fetch('/config.json');
+    if (res.ok) {
+      const data = await res.json();
+      if (data.settings?.channels) channelPolicy = data.settings.channels;
+      const myPub = await services.actors.whoAmI();
+      isAdmin = (data.adminPubs ?? []).includes(myPub);
+    }
+  } catch { /* offline/unreachable - falls back to the permissive defaults above, matching DEFAULT_RELAY_SETTINGS */ }
+  return { channelPolicy, isAdmin };
+}
+
+/**
+ * The "create a channel" form - a standalone builder (not a closure over
+ * any one view) so both `mountNewChannelView()` (the only real caller
+ * today) and any future embedding can reuse it without duplicating the
+ * double-submit guard / restricted-checkbox wiring.
+ * @param {{services: object, SPACE_ID: string, allowRestricted: boolean, onCreated?: (channel: object) => void}} options
+ * @returns {HTMLFormElement}
+ */
+function buildChannelForm({ services, SPACE_ID, allowRestricted, onCreated }) {
+  const form = document.createElement('form');
+  form.className = 'qu-forum-new-channel-form';
+  const titleInput = document.createElement('input');
+  titleInput.type = 'text';
+  titleInput.placeholder = t('newChannelPlaceholder');
+  titleInput.required = true;
+
+  const restrictedLabel = document.createElement('label');
+  const restrictedInput = document.createElement('input');
+  restrictedInput.type = 'checkbox';
+  restrictedLabel.append(restrictedInput, document.createTextNode(t('restrictedChannel')));
+  restrictedLabel.hidden = !allowRestricted;
+
+  const membersInput = document.createElement('input');
+  membersInput.type = 'text';
+  membersInput.placeholder = t('membersPlaceholder');
+  membersInput.hidden = true;
+  restrictedInput.addEventListener('change', () => { membersInput.hidden = !restrictedInput.checked; });
+
+  const submit = document.createElement('button');
+  submit.type = 'submit';
+  submit.textContent = t('createChannel');
+  form.append(titleInput, restrictedLabel, membersInput, submit);
+
+  // The actual fix for "double-clicking Create sometimes makes two boards"
+  // (see this file's own top doc comment) - disable for the duration of the
+  // create call, same convention `sendBtn` already uses for posting a message.
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const title = titleInput.value.trim();
+    if (!title) return;
+    submit.disabled = true;
+    try {
+      const memberPubs = membersInput.value.split(',').map((s) => s.trim()).filter(Boolean);
+      const channel = await services.channels.createChannel(SPACE_ID, { title, restricted: restrictedInput.checked, memberPubs });
+      onCreated?.(channel);
+    } finally {
+      submit.disabled = false;
+    }
+  });
+  return form;
+}
+
+// ===================================================================
+// NEW CHANNEL VIEW - #/forum/new: the (policy-gated) create-channel form,
+// its own subpage - moved out of the board view so browsing channels never
+// has to scroll past a form most visits never touch (see
+// `mountMiniChannelSidebar()`'s own doc comment).
+// ===================================================================
+
+function mountNewChannelView(container, { services, SPACE_ID }) {
+  let stopped = false;
+  const formRoot = document.createElement('div');
+  const heading = document.createElement('h1');
+  heading.textContent = t('createChannel');
+
+  renderSubpage(container, {
+    backHref: '#/forum',
+    backLabel: t('backToForum'),
+    render: (content) => content.append(heading, formRoot),
+  });
+
+  (async () => {
+    const { channelPolicy, isAdmin } = await fetchChannelPolicy(services);
+    if (stopped) return;
+    if (!isAdmin && !channelPolicy.allowMemberCreate) {
+      const p = document.createElement('p');
+      p.className = 'qu-forum-empty';
+      p.textContent = t('notAllowedToCreateChannel');
+      formRoot.appendChild(p);
+      return;
+    }
+    const form = buildChannelForm({
+      services, SPACE_ID, allowRestricted: isAdmin || channelPolicy.allowMemberRestricted,
+      onCreated: (channel) => { window.location.hash = `#/forum/c/${channel._id}`; },
+    });
+    formRoot.appendChild(form);
+  })();
+
+  return () => { stopped = true; };
 }
 
 // ===================================================================
@@ -335,38 +479,19 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
   let stopped = false;
   container.textContent = '';
 
+  const layout = document.createElement('div');
+  layout.className = 'qu-forum-layout';
+  const sidebarRoot = document.createElement('aside');
+  const mainRoot = document.createElement('div');
+  layout.append(sidebarRoot, mainRoot);
+  container.appendChild(layout);
+  // No active channel - the board view isn't "inside" any one of them.
+  const stopSidebar = mountMiniChannelSidebar(sidebarRoot, { qu, services, syncFetch, SPACE_ID }, null);
+
   const heading = document.createElement('h1');
   heading.textContent = t('title');
-  const channelsRoot = document.createElement('div');
   const activityRoot = document.createElement('div');
-  container.append(heading, channelsRoot, activityRoot);
-
-  // Admin-configurable channel-creation policy (relay-settings.js'
-  // `channels.allowMemberCreate`/`allowMemberRestricted`) - CLIENT-SIDE
-  // ONLY: this hides/adjusts the create-channel form, it does not (yet)
-  // stop a modified client from calling `services.channels.createChannel()`
-  // directly. See `packages/relay/src/relay-settings.js`'s own doc comment
-  // on `channels` for exactly why real engine-level enforcement isn't done
-  // here - channel documents and topic documents share the same generic
-  // `documentPath()` "docs" kind, with no path-level way yet to tell them
-  // apart for a pipeline Engine to gate on. `adminPubs` always bypasses this
-  // policy - an admin is never locked out by their own setting. Read once
-  // per mount (a policy change takes effect on next navigation, same
-  // "settings apply on next relevant fetch" convention `apps/shell/client.js`'s
-  // own `adminPubs` read already has for the header's Relay Admin link).
-  let channelPolicy = { allowMemberCreate: true, allowMemberRestricted: false };
-  let isChannelPolicyAdmin = false;
-  (async () => {
-    try {
-      const res = await fetch('/config.json');
-      if (!res.ok) return;
-      const data = await res.json();
-      if (data.settings?.channels) channelPolicy = data.settings.channels;
-      const myPub = await services.actors.whoAmI();
-      isChannelPolicyAdmin = (data.adminPubs ?? []).includes(myPub);
-    } catch { /* offline/unreachable - falls back to the permissive defaults above, matching DEFAULT_RELAY_SETTINGS */ }
-    if (!stopped) render();
-  })();
+  mainRoot.append(heading, activityRoot);
 
   let renderToken = 0;
   async function render() {
@@ -377,104 +502,12 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
     const topicsPerChannel = await Promise.all(channels.map((c) => services.channels.listTopics(SPACE_ID, c._id)));
     if (stopped || token !== renderToken) return;
 
-    renderChannelsSidebar(channelsRoot, channels);
-
     const merged = [];
     channels.forEach((channel, i) => {
       for (const topic of topicsPerChannel[i]) merged.push({ ...topic, channelTitle: channel.title });
     });
     merged.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
     renderActivityFeed(activityRoot, merged);
-  }
-
-  function renderChannelsSidebar(root, channels) {
-    root.textContent = '';
-    const title = document.createElement('h2');
-    title.textContent = t('channels');
-    root.appendChild(title);
-
-    if (channels.length === 0) {
-      const empty = document.createElement('p');
-      empty.className = 'qu-forum-empty';
-      empty.textContent = t('noChannelsYet');
-      root.appendChild(empty);
-    } else {
-      const ul = document.createElement('ul');
-      ul.className = 'qu-forum-channels';
-      for (const channel of channels) {
-        const li = document.createElement('li');
-        li.className = 'qu-forum-channel-row';
-        const a = document.createElement('a');
-        a.href = `#/forum/c/${channel._id}`;
-        a.textContent = channel.title;
-        if (channel.restricted) {
-          const badge = document.createElement('span');
-          badge.className = 'qu-forum-restricted-badge';
-          badge.textContent = '🔒';
-          a.appendChild(badge);
-        }
-        li.appendChild(a);
-        ul.appendChild(li);
-      }
-      root.appendChild(ul);
-    }
-    const form = newChannelForm();
-    if (form) root.appendChild(form);
-  }
-
-  /** @returns {HTMLFormElement|null} `null` when this identity isn't allowed to create a channel at all. */
-  function newChannelForm() {
-    if (!isChannelPolicyAdmin && !channelPolicy.allowMemberCreate) return null;
-    const allowRestricted = isChannelPolicyAdmin || channelPolicy.allowMemberRestricted;
-
-    const form = document.createElement('form');
-    form.className = 'qu-forum-new-channel-form';
-    const titleInput = document.createElement('input');
-    titleInput.type = 'text';
-    titleInput.placeholder = t('newChannelPlaceholder');
-    titleInput.required = true;
-
-    const restrictedLabel = document.createElement('label');
-    const restrictedInput = document.createElement('input');
-    restrictedInput.type = 'checkbox';
-    restrictedLabel.append(restrictedInput, document.createTextNode(t('restrictedChannel')));
-    restrictedLabel.hidden = !allowRestricted;
-
-    const membersInput = document.createElement('input');
-    membersInput.type = 'text';
-    membersInput.placeholder = t('membersPlaceholder');
-    membersInput.hidden = true;
-    restrictedInput.addEventListener('change', () => { membersInput.hidden = !restrictedInput.checked; });
-
-    const submit = document.createElement('button');
-    submit.type = 'submit';
-    submit.textContent = t('createChannel');
-    form.append(titleInput, restrictedLabel, membersInput, submit);
-
-    // The actual fix for "double-clicking Create sometimes makes two
-    // boards" (see this file's own top doc comment) - disable for the
-    // duration of the create call, same convention `sendBtn` already uses
-    // for posting a message.
-    form.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const title = titleInput.value.trim();
-      if (!title) return;
-      submit.disabled = true;
-      try {
-        const memberPubs = membersInput.value.split(',').map((s) => s.trim()).filter(Boolean);
-        await services.channels.createChannel(SPACE_ID, { title, restricted: restrictedInput.checked, memberPubs });
-        titleInput.value = '';
-        restrictedInput.checked = false;
-        membersInput.value = '';
-        membersInput.hidden = true;
-        // No manual render() call - the channels-list watch() below
-        // already covers this, exactly like the topic view never manually
-        // reloads after postMessage().
-      } finally {
-        submit.disabled = false;
-      }
-    });
-    return form;
   }
 
   function renderActivityFeed(root, topics) {
@@ -519,20 +552,26 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
   return () => {
     stopped = true;
     off();
+    stopSidebar();
   };
 }
 
 /**
- * A read-only, always-visible channel list - esoTalk's own "channel tabs
- * stay visible no matter how deep you've drilled in" idiom (see
- * `docs/`-adjacent research this round: esoTalk's persistent channel
- * sidebar/tabs bar, kept up regardless of which conversation you're
- * reading). Deliberately NOT the same function as the board view's own
- * `renderChannelsSidebar()` above - that one also owns the (policy-gated)
- * create-channel form, which stays exclusive to the board view (the one
- * true "browse/manage every channel" screen) rather than duplicating that
- * gating logic into every other view that merely wants quick cross-channel
- * navigation.
+ * THE one persistent channel list, shared by all three views (board,
+ * channel, topic) - esoTalk's own "channel tabs stay visible no matter how
+ * deep you've drilled in" idiom. The board view used to render its OWN,
+ * separate copy of this list (with the create-channel form built directly
+ * into it); now every view mounts this exact same function, and channel
+ * creation lives on its own subpage (`mountNewChannelView()`, `#/forum/new`)
+ * linked from the "+ New channel" affordance at the end of this list -
+ * policy-gated the identical way that subpage itself is (`fetchChannelPolicy()`),
+ * so a relay where members can't create channels simply never shows the
+ * link, rather than showing it and then rejecting the click.
+ *
+ * RESPONSIVE: this same DOM (an `<h2>` + `<ul>` of links) is what collapses
+ * from a vertical sidebar into a horizontal, scrollable tab bar on a narrow
+ * viewport - see this file's own `@media` rules under `.qu-forum-mini-*`.
+ * No separate "mobile" markup/JS path - the CSS alone reflows it.
  * @param {HTMLElement} root
  * @param {{qu: object, services: object, syncFetch?: Function, SPACE_ID: string}} deps
  * @param {string|null} [activeChannelId] - Highlighted in the list, when known.
@@ -541,6 +580,15 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
 function mountMiniChannelSidebar(root, { qu, services, syncFetch, SPACE_ID }, activeChannelId = null) {
   root.className = 'qu-forum-mini-sidebar';
   let stopped = false;
+
+  // Resolved once per mount, independent of the (possibly repeated)
+  // channel-list render() below - same reasoning as mountNewChannelView()'s
+  // own fetch: a relay's policy doesn't change mid-session.
+  let policy = null;
+  (async () => {
+    policy = await fetchChannelPolicy(services);
+    if (!stopped) render();
+  })();
 
   async function render() {
     if (stopped) return;
@@ -566,6 +614,15 @@ function mountMiniChannelSidebar(root, { qu, services, syncFetch, SPACE_ID }, ac
       }
       li.appendChild(a);
       ul.appendChild(li);
+    }
+    if (policy && (policy.isAdmin || policy.channelPolicy.allowMemberCreate)) {
+      const newLi = document.createElement('li');
+      const newLink = document.createElement('a');
+      newLink.href = '#/forum/new';
+      newLink.className = 'qu-forum-mini-new-channel';
+      newLink.textContent = t('newChannelLink');
+      newLi.appendChild(newLink);
+      ul.appendChild(newLi);
     }
     root.appendChild(ul);
   }

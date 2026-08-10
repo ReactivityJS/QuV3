@@ -649,15 +649,15 @@ test('the returned stop function tears down cleanly - no error thrown', async ()
 // BOARD VIEW - #/forum
 // ===================================================================
 
-test('board view (#/forum, no sub-segments) lists the migrated "General" channel and its topic in the recent-activity feed', async () => {
+test('board view (#/forum, no sub-segments) lists the migrated "General" channel in the persistent sidebar and its topic in the recent-activity feed', async () => {
   const a = await freshEnv('Ada');
   await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'first ever post' });
 
   const container = makeContainer();
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
   try {
-    await waitFor(() => container.querySelector('.qu-forum-channel-row a') !== null);
-    assert.match(container.querySelector('.qu-forum-channel-row a').textContent, /General/);
+    await waitFor(() => container.querySelector('.qu-forum-mini-channels a') !== null);
+    assert.match(container.querySelector('.qu-forum-mini-channels a').textContent, /General/);
 
     await waitFor(() => container.querySelector('.qu-forum-topic-row a') !== null);
     const topicLink = container.querySelector('.qu-forum-topic-row a');
@@ -668,10 +668,58 @@ test('board view (#/forum, no sub-segments) lists the migrated "General" channel
   }
 });
 
-test('board view: creating a channel via the form adds it live to the sidebar', async () => {
+test('board view: a restricted channel shows a 🔒 badge in the persistent sidebar', async () => {
   const a = await freshEnv('Ada');
+  await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Secret Stuff', restricted: true, memberPubs: [] });
+
   const container = makeContainer();
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
+  try {
+    await waitFor(() => [...container.querySelectorAll('.qu-forum-mini-channels a')].some((a2) => a2.textContent.includes('Secret Stuff')));
+    const row = [...container.querySelectorAll('.qu-forum-mini-channels a')].find((a2) => a2.textContent.includes('Secret Stuff'));
+    assert.match(row.textContent, /🔒/);
+  } finally {
+    stop();
+  }
+});
+
+test('the persistent sidebar\'s "+ New channel" link is hidden when channels.allowMemberCreate is false for a non-admin', async (t) => {
+  const a = await freshEnv('Ada');
+  t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ adminPubs: [], settings: { channels: { allowMemberCreate: false, allowMemberRestricted: false } } }), { status: 200 }));
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-mini-channels') !== null);
+    await new Promise((resolve) => setTimeout(resolve, 30)); // let the /config.json fetch + re-render settle
+    assert.equal(container.querySelector('.qu-forum-mini-new-channel'), null);
+  } finally {
+    stop();
+  }
+});
+
+test('the persistent sidebar\'s "+ New channel" link still shows for this relay\'s own admin even when channels.allowMemberCreate is false', async (t) => {
+  const a = await freshEnv('Ada');
+  t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ adminPubs: [a.myPub], settings: { channels: { allowMemberCreate: false, allowMemberRestricted: false } } }), { status: 200 }));
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-mini-new-channel') !== null);
+    assert.equal(container.querySelector('.qu-forum-mini-new-channel').getAttribute('href'), '#/forum/new');
+  } finally {
+    stop();
+  }
+});
+
+// ===================================================================
+// NEW CHANNEL VIEW - #/forum/new
+// ===================================================================
+
+test('new channel view: creating a channel via the form navigates to the new channel\'s own page, live in the persistent sidebar', async () => {
+  const a = await freshEnv('Ada');
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'new'] });
   try {
     await waitFor(() => container.querySelector('.qu-forum-new-channel-form') !== null);
     const titleInput = container.querySelector('.qu-forum-new-channel-form input[type="text"]');
@@ -679,15 +727,17 @@ test('board view: creating a channel via the form adds it live to the sidebar', 
     const submit = container.querySelector('.qu-forum-new-channel-form button');
     submit.click();
 
-    await waitFor(() => [...container.querySelectorAll('.qu-forum-channel-row a')].some((a2) => a2.textContent.includes('Off-topic')));
+    await waitFor(() => window.location.hash.startsWith('#/forum/c/'));
     const channels = await a.services.channels.listChannels(FORUM_SPACE_ID);
-    assert.ok(channels.some((c) => c.title === 'Off-topic'));
+    const created = channels.find((c) => c.title === 'Off-topic');
+    assert.ok(created);
+    assert.equal(window.location.hash, `#/forum/c/${created._id}`);
   } finally {
     stop();
   }
 });
 
-test('board view: double-clicking "Create channel" before the first call resolves creates only ONE channel (regression: QuV2\'s missing double-submit guard)', async () => {
+test('new channel view: double-clicking "Create channel" before the first call resolves creates only ONE channel (regression: QuV2\'s missing double-submit guard)', async () => {
   const a = await freshEnv('Ada');
   // Slow down createChannel() so the button is provably still mid-flight
   // when the second click is attempted.
@@ -700,7 +750,7 @@ test('board view: double-clicking "Create channel" before the first call resolve
   };
 
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'new'] });
   try {
     await waitFor(() => container.querySelector('.qu-forum-new-channel-form') !== null);
     const titleInput = container.querySelector('.qu-forum-new-channel-form input[type="text"]');
@@ -720,42 +770,27 @@ test('board view: double-clicking "Create channel" before the first call resolve
   }
 });
 
-test('board view: a restricted channel shows a 🔒 badge in the sidebar', async () => {
-  const a = await freshEnv('Ada');
-  await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Secret Stuff', restricted: true, memberPubs: [] });
-
-  const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
-  try {
-    await waitFor(() => [...container.querySelectorAll('.qu-forum-channel-row a')].some((a2) => a2.textContent.includes('Secret Stuff')));
-    const row = [...container.querySelectorAll('.qu-forum-channel-row a')].find((a2) => a2.textContent.includes('Secret Stuff'));
-    assert.match(row.textContent, /🔒/);
-  } finally {
-    stop();
-  }
-});
-
-test('board view: channels.allowMemberCreate: false hides the create-channel form for a non-admin', async (t) => {
+test('new channel view: channels.allowMemberCreate: false shows "not allowed" instead of the form for a non-admin', async (t) => {
   const a = await freshEnv('Ada');
   t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ adminPubs: [], settings: { channels: { allowMemberCreate: false, allowMemberRestricted: false } } }), { status: 200 }));
 
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'new'] });
   try {
-    await waitFor(() => container.querySelector('.qu-forum-channels, .qu-forum-empty') !== null);
-    await new Promise((resolve) => setTimeout(resolve, 30)); // let the /config.json fetch + re-render settle
+    await waitFor(() => container.textContent.length > 0);
+    await new Promise((resolve) => setTimeout(resolve, 30));
     assert.equal(container.querySelector('.qu-forum-new-channel-form'), null);
   } finally {
     stop();
   }
 });
 
-test('board view: channels.allowMemberCreate: false still shows the form for this relay\'s own admin', async (t) => {
+test('new channel view: channels.allowMemberCreate: false still shows the form for this relay\'s own admin', async (t) => {
   const a = await freshEnv('Ada');
   t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ adminPubs: [a.myPub], settings: { channels: { allowMemberCreate: false, allowMemberRestricted: false } } }), { status: 200 }));
 
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'new'] });
   try {
     await waitFor(() => container.querySelector('.qu-forum-new-channel-form') !== null);
   } finally {
@@ -763,12 +798,12 @@ test('board view: channels.allowMemberCreate: false still shows the form for thi
   }
 });
 
-test('board view: channels.allowMemberRestricted: false hides the restricted checkbox for a non-admin, but the form itself still allows an OPEN channel', async (t) => {
+test('new channel view: channels.allowMemberRestricted: false hides the restricted checkbox for a non-admin, but the form itself still allows an OPEN channel', async (t) => {
   const a = await freshEnv('Ada');
   t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ adminPubs: [], settings: { channels: { allowMemberCreate: true, allowMemberRestricted: false } } }), { status: 200 }));
 
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'new'] });
   try {
     await waitFor(() => container.querySelector('.qu-forum-new-channel-form') !== null);
     await new Promise((resolve) => setTimeout(resolve, 30));
