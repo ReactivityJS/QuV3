@@ -213,6 +213,7 @@ const DICT = {
     decline: 'Decline',
     newMessagesBelow: '↓ New message',
     scrollToBottomButton: '↓',
+    originalMessageUnavailable: 'Original message',
   },
   de: {
     title: 'Chats',
@@ -255,6 +256,7 @@ const DICT = {
     decline: 'Ablehnen',
     newMessagesBelow: '↓ Neue Nachricht',
     scrollToBottomButton: '↓',
+    originalMessageUnavailable: 'Ursprüngliche Nachricht',
   },
 };
 const { t } = createI18n(DICT);
@@ -356,7 +358,8 @@ const STYLE = `
   .qu-chat-bubble { max-width: 75%; padding: 0.45rem 0.7rem; border-radius: var(--qu-radius-lg, 0.9rem) var(--qu-radius-lg, 0.9rem) var(--qu-radius-lg, 0.9rem) var(--qu-radius-sm, 0.25rem); background: var(--qu-color-surface, #8882); box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
   .qu-chat-bubble-mine { background: color-mix(in srgb, var(--qu-color-accent, #5b5bd6) 25%, transparent); border-radius: var(--qu-radius-lg, 0.9rem) var(--qu-radius-lg, 0.9rem) var(--qu-radius-sm, 0.25rem) var(--qu-radius-lg, 0.9rem); }
   .qu-chat-bubble-author { font-size: 0.78em; font-weight: 600; opacity: 0.8; margin-bottom: 0.1rem; }
-  .qu-chat-bubble-reply { border-left: 2px solid var(--qu-color-accent, #5b5bd6); padding-left: 0.4rem; margin-bottom: 0.25rem; font-size: 0.82em; opacity: 0.75; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .qu-chat-bubble-reply { display: block; border-left: 2px solid var(--qu-color-accent, #5b5bd6); padding-left: 0.4rem; margin-bottom: 0.25rem; font-size: 0.82em; opacity: 0.75; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; text-decoration: none; cursor: pointer; }
+  .qu-chat-bubble-reply:hover { opacity: 1; text-decoration: underline; }
   .qu-chat-bubble-text { overflow-wrap: anywhere; white-space: pre-wrap; }
   .qu-chat-bubble-text a { color: inherit; }
   .qu-chat-bubble-location { margin-top: 0.2rem; }
@@ -1084,6 +1087,29 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     ? new ResizeObserver(() => scrollToBottom(false, true))
     : null;
   resizeObserver?.observe(messagesRoot);
+  // VISUAL-VIEWPORT SHRINK (mobile on-screen keyboard opening - most
+  // commonly the instant the composer autofocuses on room entry - or a
+  // mobile browser's own chrome collapsing/expanding) - a SEPARATE, real
+  // gap the ResizeObserver above can't cover: it only watches messagesRoot's
+  // own CONTENT height, never the SCROLL CONTAINER's available (client)
+  // height. When the visual viewport shrinks, `messagesScroll.scrollTop`
+  // stays numerically the same but `clientHeight` shrinks with it, so
+  // "distance from bottom" silently grows and the newest message(s) end up
+  // scrolled out of view (or hidden behind the now-relatively-taller fixed
+  // composer) with nothing ever correcting it - confirmed live (and via a
+  // simulated viewport resize in this app's own test) as exactly "entering
+  // a room lands one message short of the bottom." `visualViewport` (not
+  // the bare `window` 'resize' event) is the correct, purpose-built API for
+  // this - it fires precisely when the KEYBOARD (or pinch-zoom) changes the
+  // visible area, independent of the LAYOUT viewport `position: fixed`
+  // itself already tracks (see this file's own ROOM VIEW FIXED LAYOUT doc
+  // comment) - falls back to `window` for a host with no `visualViewport`
+  // at all (jsdom, this repo's test DOM, included). Same `correcting: true`
+  // guard as the image-driven case above: only re-snaps while already stuck
+  // to the bottom, never yanking the view while the user is reading further up.
+  const viewportResizeTarget = window.visualViewport ?? window;
+  const onViewportResize = () => scrollToBottom(false, true);
+  viewportResizeTarget.addEventListener('resize', onViewportResize);
   /**
    * Shows/hides/labels the persistent "scroll to bottom" button - visible
    * whenever the user ISN'T at the bottom, for ANY reason (scrolled up
@@ -1663,10 +1689,21 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     }
 
     if (message.replyTo) {
+      // Clickable, not just a text snippet - the SAME permalink route the
+      // timestamp link below already uses (messagePermalink()), so it reuses
+      // the exact same, already-working "jump to this message and scroll it
+      // into view" mechanism (mountRoomView()'s own pendingScrollTarget +
+      // highlight - see that doc comment) rather than a second, parallel
+      // implementation. `parent` may be unresolved (paginated out of the
+      // currently-loaded window) - still links to `message.replyTo`'s own
+      // id either way; renderMessages() itself already falls back to
+      // "show latest" if the target row turns out not to be locally
+      // rendered (see its own `effectiveStuck` fallback).
       const parent = byId.get(message.replyTo);
-      const replyEl = document.createElement('div');
+      const replyEl = document.createElement('a');
       replyEl.className = 'qu-chat-bubble-reply';
-      replyEl.textContent = parent?.body ?? '…';
+      replyEl.href = messagePermalink({ id: message.replyTo });
+      replyEl.textContent = parent?.body ?? t('originalMessageUnavailable');
       bubble.appendChild(replyEl);
     }
 
@@ -1957,6 +1994,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     stopComposerMentions();
     stopComposerEmoji();
     resizeObserver?.disconnect();
+    viewportResizeTarget.removeEventListener('resize', onViewportResize);
     stopVoiceTimer();
     for (const track of mediaStream?.getTracks() ?? []) track.stop();
     if (recordedObjectUrl) URL.revokeObjectURL(recordedObjectUrl);

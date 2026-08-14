@@ -82,6 +82,30 @@ test('renderPinnedBar(): lists every pinned message\'s stored body, with an unpi
   assert.deepEqual(await env.services.pins.listPinned('forum-space', 'topic1'), []);
 });
 
+test('renderPinnedBar(): when the host supplies messagePermalink, the pinned row is a real link built from it - clicking it should scroll to the original post', async () => {
+  const env = await freshEnv();
+  await env.qu.put(paths.threadMessagePath('forum-space', 'topic1', 'msg1'), { body: 'pin me' });
+  await env.services.pins.setPinned('forum-space', 'topic1', 'msg1', true);
+
+  const container = makeContainer();
+  await renderPinnedBar(container, { ...basePayload(env), messagePermalink: (messageId) => `#/forum/t/topic1/m/${messageId}` });
+  await waitFor(() => container.querySelector('.qu-pins-bar-row-text') !== null);
+  const link = container.querySelector('.qu-pins-bar-row-text');
+  assert.equal(link.tagName, 'A');
+  assert.equal(link.getAttribute('href'), '#/forum/t/topic1/m/msg1');
+});
+
+test('renderPinnedBar(): without messagePermalink (no host route to build one from), the row falls back to a plain, unclickable span', async () => {
+  const env = await freshEnv();
+  await env.qu.put(paths.threadMessagePath('forum-space', 'topic1', 'msg1'), { body: 'pin me' });
+  await env.services.pins.setPinned('forum-space', 'topic1', 'msg1', true);
+
+  const container = makeContainer();
+  await renderPinnedBar(container, basePayload(env));
+  await waitFor(() => container.querySelector('.qu-pins-bar-row-text') !== null);
+  assert.equal(container.querySelector('.qu-pins-bar-row-text').tagName, 'SPAN');
+});
+
 test('renderPinnedBar(): a pin added elsewhere in the SAME store appears live', async () => {
   const env = await freshEnv();
   const container = makeContainer();

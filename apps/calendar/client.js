@@ -527,6 +527,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
   let myActorPub = null;
   let sidebarOpen = false;
   let pickerCleanups = [];
+  let pendingInvitesChecked = false; // discoverPendingInvites() - see its own doc comment; runs once per mount
 
   const calId = segments[1] ?? null;
   const sub = segments[2] ?? null; // null | 'share' | 'new' | <eventId>
@@ -584,6 +585,47 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     return services.flags.listPrivate('calendar', 'calendar');
   }
 
+  async function starIfMember(id, meta) {
+    if (!roleOf(meta, myActorPub)) return false;
+    if (await services.flags.hasPrivate('calendar', 'calendar', id)) return false;
+    await services.flags.setPrivate('calendar', 'calendar', id, true, {});
+    return true;
+  }
+
+  /**
+   * `inviteMember()` posts `{calendarId, calendarTitle}` into this identity's
+   * own `invite-<myActorPub>` mailbox (see that function's own doc comment)
+   * purely to trigger a push/in-app notification - but a notification's own
+   * click-through URL is always the GENERIC, manifest-driven `#/calendar`
+   * (`@qu/relay`'s `createManifestNotificationResolver()` only ever knows an
+   * app's fixed `manifest.spaceId` -> `#/<name>` route, nothing about a
+   * specific calendar id inside it), so following it alone never reaches the
+   * one THIS-invite-specific route (`#/calendar/<calId>`) that would
+   * actually star the calendar in on its own (`handleInviteLink()`). Without
+   * this, an invited member sees the notification (real, delivered) but the
+   * shared calendar itself never appears anywhere they can click - it was
+   * never discoverable other than by guessing/being told its raw UUID.
+   *
+   * Run once per mount (`renderMain()`'s own `pendingInvitesChecked` guard):
+   * re-reads this identity's own invite mailbox, and stars every calendar
+   * mentioned there that this identity is CURRENTLY a member of (mirroring
+   * `handleInviteLink()`'s own real-membership check - an invite message is
+   * just a notification trace, not proof of standing access; the owner may
+   * since have removed them). Already-starred calendars are skipped
+   * (`starIfMember()`'s own `hasPrivate` check) - O(1) per invite on every
+   * later visit, not a growing re-scan cost.
+   */
+  async function discoverPendingInvites() {
+    const threadId = `invite-${myActorPub}`;
+    if (syncFetch) await syncFetch(paths.threadMessagesParentPath(SPACE_ID, threadId)).catch(() => {});
+    const { messages } = await services.messages.listMessages(SPACE_ID, threadId).catch(() => ({ messages: [] }));
+    const calIds = [...new Set(messages.map((m) => m.calendarId).filter(Boolean))];
+    for (const calId of calIds) {
+      const meta = await fetchMeta(calId);
+      await starIfMember(calId, meta);
+    }
+  }
+
   function backLink() {
     const a = document.createElement('a');
     a.className = 'qu-cal-back-link';
@@ -607,7 +649,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
       return;
     }
     if (roleOf(meta, myActorPub)) {
-      if (!(await services.flags.hasPrivate('calendar', 'calendar', id))) await services.flags.setPrivate('calendar', 'calendar', id, true, {});
+      await starIfMember(id, meta);
       window.location.hash = '#/calendar';
       return;
     }
@@ -627,6 +669,11 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
   async function renderMain() {
     if (stopped) return;
     subscribe?.(paths.spacePath(SPACE_ID)); // every calendar's docs/threads live under this ONE app space
+    if (!pendingInvitesChecked) {
+      pendingInvitesChecked = true;
+      await discoverPendingInvites();
+      if (stopped) return;
+    }
     const mine = await listMine();
     if (stopped) return;
 
@@ -718,14 +765,33 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
       empty.textContent = t('noCalendars');
       main.appendChild(empty);
     } else if (checked.size === 0) {
-      main.appendChild(toolbar(infos));
+      // Nothing to filter with every calendar hidden - just keep the typed
+      // text (no re-render needed, the empty message doesn't depend on it),
+      // so the filter input stays usable instead of throwing on the
+      // otherwise-required onFilterChange callback.
+      main.appendChild(toolbar(infos, (value) => { filterText = value; }));
       const empty = document.createElement('p');
       empty.className = 'qu-cal-empty';
       empty.textContent = t('allHidden');
       main.appendChild(empty);
     } else {
-      main.appendChild(toolbar(infos));
-      main.appendChild(viewEl(events, infos));
+      // The filter input lives inside toolbar(infos), rendered ONCE per
+      // renderMain() call - typing into it must NOT trigger a full
+      // renderMain() rebuild (that recreates the <input> element itself
+      // from scratch on every keystroke, dropping focus/cursor position
+      // after every single character, confirmed live). Only the view
+      // portion below the toolbar is swapped on a filter change instead,
+      // via this closure's own onFilterChange callback - the toolbar
+      // (and its input) is never touched again until the next REAL
+      // renderMain() (a view/nav/calendar-visibility change).
+      const viewContainer = document.createElement('div');
+      main.appendChild(toolbar(infos, (value) => {
+        filterText = value;
+        viewContainer.textContent = '';
+        viewContainer.appendChild(viewEl(events, infos));
+      }));
+      viewContainer.appendChild(viewEl(events, infos));
+      main.appendChild(viewContainer);
     }
     layout.appendChild(main);
 
@@ -841,7 +907,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
   // ---------------------------------------------------------------------
   // Toolbar
   // ---------------------------------------------------------------------
-  function toolbar(infos) {
+  function toolbar(infos, onFilterChange) {
     const bar = document.createElement('div');
     bar.className = 'qu-cal-toolbar';
 
@@ -850,7 +916,10 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
       filterInput.className = 'qu-cal-filter';
       filterInput.placeholder = t('filterPlaceholder');
       filterInput.value = filterText;
-      filterInput.addEventListener('input', () => { filterText = filterInput.value; renderMain(); });
+      // Updates only the view below the toolbar in place - see this
+      // function's own caller (renderMain()) for why a full renderMain()
+      // rebuild here would drop focus on every keystroke.
+      filterInput.addEventListener('input', () => onFilterChange(filterInput.value));
       bar.appendChild(filterInput);
     }
 

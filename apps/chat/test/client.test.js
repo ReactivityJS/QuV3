@@ -706,6 +706,47 @@ test('a message\'s timestamp IS its permalink - #/chat/<peer>/m/<id> for a 1:1 r
   }
 });
 
+test('a reply quote is a real link to its parent message\'s own permalink, not just a text snippet - regression: it used to be a plain, unclickable <div>', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  const original = await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'the original message' });
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'a reply', replyTo: original.id });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-bubble-reply') !== null);
+    const quote = container.querySelector('.qu-chat-bubble-reply');
+    assert.equal(quote.tagName, 'A');
+    assert.equal(quote.getAttribute('href'), `#/chat/${bob.myPub}/m/${original.id}`);
+    assert.equal(quote.textContent, 'the original message');
+  } finally {
+    stop();
+  }
+});
+
+test('a reply quote still links correctly even when its parent message isn\'t locally resolved (e.g. paginated out) - falls back to a generic label, not a broken/missing link', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  const unresolvedParentId = 'not-actually-loaded';
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'a reply to something unresolved', replyTo: unresolvedParentId });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-bubble-reply') !== null);
+    const quote = container.querySelector('.qu-chat-bubble-reply');
+    assert.equal(quote.getAttribute('href'), `#/chat/${bob.myPub}/m/${unresolvedParentId}`);
+    assert.equal(quote.textContent, 'Original message');
+  } finally {
+    stop();
+  }
+});
+
 test('landing on a message permalink route (#/chat/<peer>/m/<id>) scrolls to and highlights that message only', async () => {
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');
@@ -875,6 +916,33 @@ test('a new message from someone else while AT the bottom scrolls smoothly to it
     assert.equal(container.querySelector('.qu-chat-scroll-bottom-btn').hidden, true);
     await waitFor(() => scrollToCalls.length > 0);
     assert.equal(scrollToCalls.at(-1).behavior, 'smooth');
+  } finally {
+    stop();
+  }
+});
+
+test('a visual-viewport resize (mobile keyboard opening, or a browser chrome collapse/expand) re-snaps to the bottom while stuck to it - regression: the ResizeObserver above only watches content height, never the scroll CONTAINER\'s own available height, so a keyboard opening left the newest message(s) scrolled out of view with nothing correcting it', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'first' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-bubble-text')?.textContent.includes('first'));
+    const scroll = container.querySelector('.qu-chat-messages-scroll');
+    const scrollToCalls = [];
+    scroll.scrollTo = (opts) => scrollToCalls.push(opts);
+
+    // jsdom (this repo's test DOM) has no `window.visualViewport` at all -
+    // exercises the mountRoomView() fallback (`window.visualViewport ??
+    // window`) the same way a real browser without it would.
+    window.dispatchEvent(new window.Event('resize'));
+
+    await waitFor(() => scrollToCalls.length > 0);
+    assert.equal(scrollToCalls.at(-1).behavior, 'auto'); // instant, not smooth - a correction, not a user-visible "scroll to bottom" action
   } finally {
     stop();
   }
