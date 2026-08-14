@@ -55,7 +55,7 @@
  * per submit - two submits before the first finished meant two genuinely
  * different, both-valid channel documents, not a storage-layer race
  * `ListService.addCurated()`'s own retry logic was ever meant to catch).
- * Matches this file's own pre-existing `sendBtn.disabled = true` convention
+ * Matches this file's own pre-existing `actionBtn.disabled = true` convention
  * for posting a message.
  *
  * SCOPE - what this round's board/channel views deliberately do NOT do:
@@ -217,6 +217,8 @@ const DICT = {
     searchResultIn: 'in "{topic}"',
     permalink: 'Link to this post',
     unread: 'New',
+    newMessagesBelow: '↓ New posts',
+    scrollToBottomButton: '↓',
   },
   de: {
     title: 'Forum',
@@ -250,6 +252,8 @@ const DICT = {
     searchResultIn: 'in „{topic}“',
     permalink: 'Link zu diesem Beitrag',
     unread: 'Neu',
+    newMessagesBelow: '↓ Neue Beiträge',
+    scrollToBottomButton: '↓',
   },
 };
 const { t } = createI18n(DICT);
@@ -261,13 +265,7 @@ function formatReplies(count) {
 const STYLE_ID = 'qu-forum-style';
 const STYLE = `
   .qu-forum-messages { list-style: none; margin: 0 0 0.8rem; padding: 0; display: flex; flex-direction: column; gap: 0.6rem; }
-  /* scroll-margin-top clears the shell's own fixed top header (3.25rem,
-     apps/shell/src/header.js) when a permalink's scrollIntoView() lands a
-     post at the very top of the viewport - see mountTopicView()'s own
-     "PERMALINKS" doc comment for why this is a plain page scroll (no
-     internal scroll container the way apps/chat's own room view has one)
-     and so needs this CSS-only equivalent instead of a JS offset. */
-  .qu-forum-message { display: flex; gap: 0.6rem; padding: 0.55rem 0.75rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-lg, 0.7rem); background: var(--qu-color-surface, transparent); box-shadow: 0 1px 2px rgba(0,0,0,0.06); scroll-margin-top: 4rem; }
+  .qu-forum-message { display: flex; gap: 0.6rem; padding: 0.55rem 0.75rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-lg, 0.7rem); background: var(--qu-color-surface, transparent); box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
   @keyframes qu-forum-message-highlight-fade { from { outline-color: var(--qu-color-accent, #5b5bd6); } to { outline-color: transparent; } }
   .qu-forum-message-highlight { outline: 2px solid var(--qu-color-accent, #5b5bd6); outline-offset: 2px; animation: qu-forum-message-highlight-fade 2s ease forwards; }
   /* UNREAD-BY-ME - see renderMessage()'s own doc comment. A left accent bar
@@ -303,17 +301,26 @@ const STYLE = `
   .qu-forum-edit-row { display: flex; flex-direction: column; gap: 0.4rem; position: relative; }
   .qu-forum-edit-row textarea { font: inherit; padding: 0.4rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); resize: vertical; }
   .qu-forum-edit-row-buttons { display: flex; gap: 0.4rem; }
-  /* position: relative - @qu/thread-ui's mountMentionAutocomplete() appends
-     its dropdown into the textarea's own parentNode as position: absolute;
-     without this the dropdown would anchor to the nearest ANCESTOR that
-     happens to be positioned instead (typically the page root), landing far
-     from the composer. */
-  .qu-forum-composer { display: flex; gap: 0.5rem; position: relative; }
-  .qu-forum-composer textarea { flex: 1; font: inherit; padding: 0.5rem 0.6rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); resize: vertical; min-height: 2.4rem; }
-  .qu-forum-composer button { padding: 0 1rem; border-radius: var(--qu-radius-md, 0.4rem); border: none; background: var(--qu-color-accent, #5b5bd6); color: white; cursor: pointer; font: inherit; }
-  .qu-forum-composer button:disabled { opacity: 0.6; cursor: default; }
+  /* The composer: a tool cluster (attach), a rounded PILL holding the
+     textarea + emoji trigger, and one circular send button - the SAME
+     visual language apps/chat/client.js's own composer uses (see that
+     file's own STYLE comment), minus the mic morph (Forum has no voice
+     messages - see mountTopicView()'s own top doc comment). position:
+     relative on .qu-forum-composer itself (NOT .qu-forum-composer-input-wrap,
+     the textarea's own direct parent) - @qu/thread-ui's
+     mountMentionAutocomplete() appends its dropdown into the textarea's
+     parentNode as position: absolute, which anchors to the nearest
+     POSITIONED ancestor, not necessarily the direct parent - exactly
+     apps/chat/client.js's own identical setup, already proven to work. */
+  .qu-forum-composer { display: flex; align-items: flex-end; gap: 0.4rem; position: relative; }
+  .qu-forum-composer-tools { display: flex; align-items: center; gap: 0.2rem; padding-bottom: 0.35rem; }
+  .qu-forum-composer-input-wrap { flex: 1; min-width: 0; display: flex; align-items: flex-end; gap: 0.3rem; background: var(--qu-color-surface, #8882); border: 1px solid var(--qu-color-border, #8884); border-radius: 1.3rem; padding: 0.4rem 0.6rem; }
+  .qu-forum-composer-input-wrap textarea { flex: 1; min-width: 0; font: inherit; border: none; background: transparent; resize: none; min-height: 1.4rem; max-height: 8rem; padding: 0.15rem 0; }
+  .qu-forum-composer-input-wrap textarea:focus { outline: none; }
+  .qu-forum-composer-action { flex-shrink: 0; width: 2.6rem; height: 2.6rem; border-radius: 50%; border: none; background: var(--qu-color-accent, #5b5bd6); color: white; cursor: pointer; font-size: 1.1em; line-height: 1; }
+  .qu-forum-composer-action:disabled { opacity: 0.6; cursor: default; }
   .qu-forum-empty { padding: 1.5rem; text-align: center; opacity: 0.7; }
-  .qu-forum-composer-wrap { display: flex; flex-direction: column; gap: 0.4rem; }
+  .qu-forum-composer-wrap { flex-shrink: 0; display: flex; flex-direction: column; gap: 0.4rem; padding: 0.6rem 1rem 1rem; border-top: 1px solid var(--qu-color-border, #8884); }
   .qu-forum-reply-banner { display: flex; justify-content: space-between; align-items: center; padding: 0.3rem 0.6rem; border-left: 3px solid var(--qu-color-accent, #5b5bd6); background: var(--qu-color-surface, #8882); border-radius: var(--qu-radius-sm, 0.3rem); font-size: 0.85em; }
   .qu-forum-reply-banner button { background: none; border: none; cursor: pointer; opacity: 0.7; font: inherit; }
   .qu-forum-reply-banner[hidden] { display: none; }
@@ -335,6 +342,31 @@ const STYLE = `
   .qu-forum-layout { display: flex; gap: 1.2rem; align-items: flex-start; }
   .qu-forum-layout > aside { flex: 0 0 12rem; min-width: 0; }
   .qu-forum-layout > div { flex: 1; min-width: 0; }
+  /* TOPIC VIEW ROOM LAYOUT - see mountTopicView()'s own top doc comment.
+     .qu-forum-layout-room is an ADDITIONAL class alongside the base
+     .qu-forum-layout above (never a replacement) - a topic view's own
+     layout element carries BOTH, so it still gets the base flex-row AND
+     the mobile collapse-to-tab-bar media query below "for free", with only
+     position: fixed/align-items: stretch overridden here via the
+     combined-class selector's higher specificity. Board/channel views only
+     ever carry the base class alone and stay completely unaffected. Same
+     position: fixed technique (and the same "why fixed, not vh/dvh calc()"
+     reasoning) as apps/chat/client.js's own .qu-chat-room-view - see that
+     file's own STYLE comment for the full explanation. */
+  .qu-forum-layout.qu-forum-layout-room { position: fixed; top: 3.25rem; right: 0; bottom: 0; left: 0; margin: 0; align-items: stretch; z-index: 10; background: var(--qu-color-surface, #ffffff); }
+  .qu-forum-layout-room > aside { overflow-y: auto; padding: 1rem 0 1rem 1rem; }
+  .qu-forum-room-view { display: flex; flex-direction: column; min-height: 0; }
+  .qu-forum-topic-header { flex-shrink: 0; padding: 0.6rem 1rem 0.4rem; border-bottom: 1px solid var(--qu-color-border, #8884); }
+  .qu-forum-topic-header h1 { margin: 0 0 0.3rem; font-size: 1.2em; }
+  .qu-forum-messages-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 1rem; }
+  /* Persistent scroll-to-bottom button - see apps/chat/client.js's own
+     identical .qu-chat-scroll-bottom-btn for the full reasoning (position:
+     sticky pins it near the bottom of the VISIBLE scroll area with zero JS
+     position math). */
+  .qu-forum-scroll-bottom-btn { position: sticky; bottom: 1rem; left: 50%; transform: translateX(-50%); display: block; width: fit-content; padding: 0.4rem 0.9rem; border: none; border-radius: 999px; background: var(--qu-color-accent, #5b5bd6); color: white; font: inherit; font-size: 0.85em; cursor: pointer; box-shadow: 0 0.2rem 0.6rem rgba(0,0,0,0.25); }
+  .qu-forum-scroll-bottom-btn:hover { filter: brightness(1.08); }
+  .qu-forum-scroll-bottom-btn[hidden] { display: none; }
+  .qu-forum-scroll-bottom-btn-unseen { background: var(--qu-color-danger, #d64545); }
   .qu-forum-mini-sidebar h2 { font-size: 0.85em; opacity: 0.75; margin: 0 0 0.4rem; }
   .qu-forum-mini-channels { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.15rem; }
   .qu-forum-mini-channels a { display: flex; align-items: center; gap: 0.3rem; padding: 0.3rem 0.5rem; border-radius: var(--qu-radius-md, 0.4rem); text-decoration: none; color: inherit; font-size: 0.9em; }
@@ -491,7 +523,7 @@ function buildChannelForm({ services, SPACE_ID, allowRestricted, onCreated }) {
 
   // The actual fix for "double-clicking Create sometimes makes two boards"
   // (see this file's own top doc comment) - disable for the duration of the
-  // create call, same convention `sendBtn` already uses for posting a message.
+  // create call, same convention `actionBtn` already uses for posting a message.
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const title = titleInput.value.trim();
@@ -892,31 +924,43 @@ function mountChannelView(container, { qu, services, syncFetch, SPACE_ID, channe
 // ===================================================================
 
 /**
+ * TOPIC VIEW - a fixed "room" layout, the exact same technique
+ * `apps/chat/client.js`'s own `mountRoomView()` uses (that file's own STYLE
+ * has the full "why fixed positioning, not vh/dvh calc()" reasoning) -
+ * ported over per explicit request ("the base for Forum and Chat really is
+ * identical - Forum just doesn't need voice messages"). A topic's message
+ * list and composer never scroll away, no double-scrollbar, and it gets the
+ * exact same scroll-follow/persistent-scroll-to-bottom/true-bottom-
+ * correction machinery Chat has (see the "SCROLL-FOLLOW" block below). The
+ * channel sidebar (`mountMiniChannelSidebar()`) stays a FLEX SIBLING inside
+ * the SAME fixed box, not a separate fixed element of its own - this app's
+ * own "the channel list never disappears, no matter how deep you've drilled
+ * in" idiom (top doc comment) still holds exactly as before. Board/channel
+ * views keep the OLDER plain page-scroll `.qu-forum-layout` completely
+ * unchanged (see STYLE's own `.qu-forum-layout-room` modifier doc comment)
+ * - only a topic's actual thread benefits from being pinned, the same way
+ * only a chat ROOM (never the room list) is pinned in `apps/chat/client.js`.
+ *
  * PERMALINKS - a post's timestamp (see `buildMessageFooter()`) IS its
  * permalink, `#/forum/t/<topicId>/m/<messageId>` - clicking it, or landing
- * on one from Search/a notification (see `resolveForumReference()`... no,
- * see this file's own `content.resolveReference` contributor below),
- * scrolls that post into view and briefly highlights it
- * (`.qu-forum-message-highlight`). Unlike `apps/chat/client.js`'s OWN
- * permalink handling, this is a PLAIN PAGE scroll (`scrollIntoView()` on
- * the post's own `<li>`, no internal scroll container) - `scroll-margin-
- * top` (see STYLE) is what keeps the shell's own fixed top header from
- * covering the target post once native scroll-into-view settles there,
- * the CSS-only equivalent of the pixel-offset math a JS-driven scroll
- * would otherwise need. No "stuck to bottom" state machine here either
- * (chat's own `apps/chat/client.js` doc comment covers why it needs one) -
- * a Topic reads oldest-to-newest like an ordinary thread/forum post list,
- * never auto-follows to "the newest reply" the way a live chat room does.
+ * on one from Search/a notification (see this file's own
+ * `content.resolveReference` contributor below), scrolls that post into
+ * view (inside the internal scroll container now, not the page) and
+ * briefly highlights it (`.qu-forum-message-highlight`).
  */
 function mountTopicView(container, { qu, services, subscribe, syncFetch, extensionPoints, SPACE_ID, topicId, messageId = null }) {
   let stopped = false;
-  let pendingScrollTarget = messageId;
   container.textContent = '';
+
   const layout = document.createElement('div');
-  layout.className = 'qu-forum-layout';
+  // `qu-forum-layout-room` is an ADDITIONAL class alongside the base
+  // `qu-forum-layout` (never a replacement) - see STYLE's own doc comment
+  // on that modifier for why board/channel views stay entirely unaffected.
+  layout.className = 'qu-forum-layout qu-forum-layout-room';
   const sidebarRoot = document.createElement('aside');
-  const mainRoot = document.createElement('div');
-  layout.append(sidebarRoot, mainRoot);
+  const roomView = document.createElement('div');
+  roomView.className = 'qu-forum-room-view';
+  layout.append(sidebarRoot, roomView);
   container.appendChild(layout);
   // No activeChannelId yet - a topic only knows its own parent channel
   // after the async lookup below resolves, and this list is cheap enough
@@ -926,10 +970,12 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
   // (unlike the channel view, which has its `channelId` synchronously).
   const stopSidebar = mountMiniChannelSidebar(sidebarRoot, { qu, services, syncFetch, SPACE_ID }, null);
 
+  const header = document.createElement('div');
+  header.className = 'qu-forum-topic-header';
   const heading = document.createElement('h1');
   heading.textContent = t('title');
-
   const pinnedRoot = document.createElement('div');
+  header.append(heading, pinnedRoot);
   // Rendered ONCE - unlike the per-message slots in renderMessage(), this
   // point's own contributor (Pins' `renderPinnedBar()`) self-manages its
   // own live updates (a Custom Element watching the topic's pins path
@@ -945,28 +991,60 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
       messagePermalink: (messageId) => `#/forum/t/${topicId}/m/${messageId}`,
     });
   }
+
+  const messagesScroll = document.createElement('div');
+  messagesScroll.className = 'qu-forum-messages-scroll';
   const messagesRoot = document.createElement('div');
+  // A SIBLING of messagesRoot, never touched by renderMessages()'s own
+  // clear-and-rebuild of messagesRoot - exactly `apps/chat/client.js`'s own
+  // `scrollToBottomBtn` (see that file's own doc comment for the full
+  // reasoning: persistent whenever not at the bottom, for ANY reason, never
+  // a one-shot toast).
+  const scrollToBottomBtn = document.createElement('button');
+  scrollToBottomBtn.type = 'button';
+  scrollToBottomBtn.className = 'qu-forum-scroll-bottom-btn';
+  scrollToBottomBtn.hidden = true;
+  messagesScroll.append(messagesRoot, scrollToBottomBtn);
+
   const composerWrap = document.createElement('div');
   composerWrap.className = 'qu-forum-composer-wrap';
   const replyBanner = document.createElement('div');
   replyBanner.className = 'qu-forum-reply-banner';
   replyBanner.hidden = true;
+
+  // The composer is a rounded "pill" (textarea + emoji trigger) plus a tool
+  // cluster (attach) and one circular send button - the SAME visual
+  // language `apps/chat/client.js`'s own composer uses (see that file's own
+  // top doc comment's "COMPOSER" section), minus the mic/morph-to-mic
+  // behavior entirely: Forum has no voice messages (see this function's own
+  // top doc comment), so this action button is ALWAYS "send".
   const composerRow = document.createElement('div');
   composerRow.className = 'qu-forum-composer';
-  const composerInput = document.createElement('textarea');
-  composerInput.placeholder = t('composerPlaceholder');
+  const composerTools = document.createElement('div');
+  composerTools.className = 'qu-forum-composer-tools';
   const attachUpload = document.createElement('qu-asset-upload');
   attachUpload.setAttribute('space-id', SPACE_ID);
   attachUpload.setAttribute('label', '📎');
-  const sendBtn = document.createElement('button');
-  sendBtn.type = 'button';
-  sendBtn.textContent = t('send');
+  composerTools.appendChild(attachUpload);
+
+  const inputWrap = document.createElement('div');
+  inputWrap.className = 'qu-forum-composer-input-wrap';
+  const composerInput = document.createElement('textarea');
+  composerInput.placeholder = t('composerPlaceholder');
   const emojiPicker = renderEmojiPicker({
     onPick: (emoji) => insertAtCursor(composerInput, emoji),
     trigger: '😀',
     triggerTitle: t('insertEmoji'),
   });
-  composerRow.append(composerInput, emojiPicker, attachUpload, sendBtn);
+  inputWrap.append(composerInput, emojiPicker);
+
+  const actionBtn = document.createElement('button');
+  actionBtn.type = 'button';
+  actionBtn.className = 'qu-forum-composer-action';
+  actionBtn.textContent = '➤';
+  actionBtn.title = t('send');
+
+  composerRow.append(composerTools, inputWrap, actionBtn);
 
   // @mention completion (by alias or pub, from the 2nd typed character) and
   // :shortcode: emoji completion, both from the 2nd typed character - wire-
@@ -983,10 +1061,7 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
   // context for what's about to be sent, not a footnote after the fact).
   composerWrap.append(replyBanner, pendingAttachmentEl, composerRow);
 
-  renderSubpage(mainRoot, {
-    showBackLink: false, // the shell header's own Back/Forward already covers this - see this app's own top doc comment
-    render: (content) => content.append(heading, pinnedRoot, messagesRoot, composerWrap),
-  });
+  roomView.append(header, messagesScroll, composerWrap);
 
   // Resolves the topic's own title - doesn't block the message list itself
   // from loading, both start independently.
@@ -996,6 +1071,82 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     const topic = topicBit?.val;
     if (topic) heading.textContent = topic.title;
   })();
+
+  // ---- PERMALINKS + scroll-follow - the exact same state machine
+  // `apps/chat/client.js`'s own `mountRoomView()` uses (see that file's own
+  // doc comments at each of these for the full "why" - reproduced only
+  // briefly here to avoid duplicating hundreds of lines of reasoning
+  // verbatim): `pendingScrollTarget` is a ONE-TIME scroll target consumed by
+  // the very first renderMessages() call after mount; `stuckToBottom`
+  // mirrors "is the user currently looking at the newest post" (true by
+  // default, false when landing on an older permalinked one); a persistent
+  // `scrollToBottomBtn` is shown whenever NOT at the bottom, for any reason
+  // (scrolled up, or a permalink further up), not just reactively when a
+  // new post arrives.
+  let pendingScrollTarget = messageId;
+  let stuckToBottom = !pendingScrollTarget;
+  // Whether a post arrived while NOT stuck to the bottom - purely cosmetic
+  // (see syncScrollToBottomButton()'s own doc comment), never what decides
+  // the button's visibility.
+  let hasUnseenMessage = false;
+  let lastRenderedSnapshot = [];
+  let hasRenderedOnce = false;
+  const BOTTOM_FOLLOW_THRESHOLD_PX = 80;
+  /**
+   * @param {boolean} smooth
+   * @param {boolean} [correcting] - true for a RESIZE-triggered correction
+   *   (see the ResizeObserver below), never a caller-visible "scroll to
+   *   bottom" action in its own right - skipped once the user has since
+   *   scrolled away again.
+   */
+  function scrollToBottom(smooth, correcting = false) {
+    if (correcting && !stuckToBottom) return;
+    if (messagesScroll.scrollTo) messagesScroll.scrollTo({ top: messagesScroll.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
+    else messagesScroll.scrollTop = messagesScroll.scrollHeight; // jsdom (this repo's test DOM) has no scrollTo() at all
+  }
+  // TRUE BOTTOM, EVEN WITH LATE-LOADING CONTENT - see apps/chat/client.js's
+  // own identical ResizeObserver for the full reasoning (an attachment's
+  // <qu-asset> resolves and inserts its real <img>/<video> asynchronously,
+  // well after renderMessage() already returned).
+  const resizeObserver = typeof ResizeObserver !== 'undefined'
+    ? new ResizeObserver(() => scrollToBottom(false, true))
+    : null;
+  resizeObserver?.observe(messagesRoot);
+  /** Shows/hides/labels the persistent scroll-to-bottom button - see apps/chat/client.js's own identical function for the full reasoning. */
+  function syncScrollToBottomButton() {
+    scrollToBottomBtn.hidden = stuckToBottom;
+    scrollToBottomBtn.textContent = hasUnseenMessage ? t('newMessagesBelow') : t('scrollToBottomButton');
+    scrollToBottomBtn.classList.toggle('qu-forum-scroll-bottom-btn-unseen', hasUnseenMessage);
+  }
+  function topicHash() {
+    return `#/forum/t/${topicId}`;
+  }
+  function messagePermalink(message) {
+    return `${topicHash()}/m/${message.id}`;
+  }
+  // Landing back at the very bottom RELEASES a permalink anchor still
+  // sitting in the URL - see apps/chat/client.js's own identical
+  // `releasePermalinkAnchor()` for the full reasoning.
+  function releasePermalinkAnchor() {
+    const plainHash = topicHash();
+    if (window.location.hash !== plainHash) window.history.replaceState(null, '', plainHash);
+  }
+  scrollToBottomBtn.addEventListener('click', () => {
+    stuckToBottom = true;
+    hasUnseenMessage = false;
+    syncScrollToBottomButton();
+    scrollToBottom(true);
+    releasePermalinkAnchor();
+  });
+  messagesScroll.addEventListener('scroll', () => {
+    const nowAtBottom = messagesScroll.scrollHeight - messagesScroll.scrollTop - messagesScroll.clientHeight < BOTTOM_FOLLOW_THRESHOLD_PX;
+    if (nowAtBottom && !stuckToBottom) {
+      releasePermalinkAnchor();
+      hasUnseenMessage = false;
+    }
+    stuckToBottom = nowAtBottom;
+    syncScrollToBottomButton();
+  });
 
   // Holds the LAST completed upload until Send is clicked - see this file's
   // own top doc comment's "ATTACHMENTS" section for why uploading starts
@@ -1078,6 +1229,25 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
   // the DOM.
   let renderToken = 0;
 
+  /** @param {object[]} messages @returns {{id: string, editedAt: number|null}[]} */
+  function snapshotOf(messages) {
+    return messages.map((m) => ({ id: m.id, editedAt: m.editedAt ?? null }));
+  }
+  /**
+   * True when `current` is `previous` with ONLY new posts appended after
+   * it - same ids, same `editedAt`, in the same order, for the whole
+   * `previous` prefix. Exactly `apps/chat/client.js`'s own `isSimpleAppend()`
+   * (see that file's own doc comment for the full "why": avoids the
+   * DOM-clear-induced scroll-position corruption a full rebuild causes).
+   */
+  function isSimpleAppend(previous, current) {
+    if (previous.length === 0 || current.length <= previous.length) return false;
+    for (let i = 0; i < previous.length; i++) {
+      if (previous[i].id !== current[i].id || previous[i].editedAt !== current[i].editedAt) return false;
+    }
+    return true;
+  }
+
   async function renderMessages() {
     const token = ++renderToken;
     if (stopped) return;
@@ -1098,8 +1268,42 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     if (messages.length) await services.messages.markRead(SPACE_ID, topicId).catch(() => {});
     if (stopped || token !== renderToken) return;
 
+    // See this function's own "INCREMENTAL APPEND" reasoning - the same
+    // apps/chat/client.js's own renderMessages() already established.
+    const wasStuckToBottom = stuckToBottom;
+    const currentSnapshot = snapshotOf(messages);
+
+    // INCREMENTAL APPEND - the common case (a plain new post, nothing else
+    // changed) only appends to the EXISTING <ul>, never touching or
+    // rebuilding anything already on screen, so nothing above it can ever
+    // collapse/get re-clamped by the browser the way a full DOM clear does.
+    if (!pendingScrollTarget && isSimpleAppend(lastRenderedSnapshot, currentSnapshot)) {
+      const appended = messages.slice(lastRenderedSnapshot.length);
+      const ul = messagesRoot.querySelector('.qu-forum-messages');
+      for (const message of appended) {
+        const li = await renderMessage(message, myPub, lastReadAt);
+        if (stopped || token !== renderToken) return;
+        ul.appendChild(li);
+      }
+      lastRenderedSnapshot = currentSnapshot;
+      hasRenderedOnce = true;
+      if (wasStuckToBottom) {
+        hasUnseenMessage = false;
+        syncScrollToBottomButton();
+        scrollToBottom(true);
+      } else {
+        hasUnseenMessage = true;
+        syncScrollToBottomButton();
+      }
+      return;
+    }
+
+    const previousScrollTop = messagesScroll.scrollTop; // restored below when this render must not move the view
+    const isFirstRender = !hasRenderedOnce;
     clearMessageWatchers();
     messagesRoot.textContent = '';
+    lastRenderedSnapshot = currentSnapshot;
+    hasRenderedOnce = true;
     if (messages.length === 0) {
       const p = document.createElement('p');
       p.className = 'qu-forum-empty';
@@ -1124,19 +1328,39 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     }
     messagesRoot.appendChild(ul);
 
-    // See this function's own "PERMALINKS" doc comment on mountTopicView().
+    // See this function's own "PERMALINKS + scroll-follow" doc comment on
+    // mountTopicView().
+    let effectiveStuck = wasStuckToBottom;
     if (pendingScrollTarget) {
       const targetLi = [...messagesRoot.querySelectorAll('.qu-forum-message')].find((el) => el.dataset.messageId === pendingScrollTarget);
       pendingScrollTarget = null;
       if (targetLi) {
+        // A permalink target is, by definition, not the bottom - the
+        // button must show here so there's a way back down.
+        hasUnseenMessage = false;
         // jsdom (this repo's test DOM) has no layout engine and doesn't
         // implement scrollIntoView() at all - optional-chained so tests
         // exercise every line around it without stubbing it out.
         targetLi.scrollIntoView?.({ block: 'start' });
         targetLi.classList.add('qu-forum-message-highlight');
         setTimeout(() => targetLi.classList.remove('qu-forum-message-highlight'), 2000);
+        stuckToBottom = false;
+        syncScrollToBottomButton();
+        return;
       }
+      effectiveStuck = true; // the permalinked post is gone (deleted?) - fall through to "show latest" below
     }
+    stuckToBottom = effectiveStuck;
+    if (effectiveStuck) {
+      hasUnseenMessage = false;
+      // A smooth scroll (not an instant jump) except on the very first
+      // render of this mount - see apps/chat/client.js's own identical
+      // scrollToBottom(!isFirstRender) call for the full reasoning.
+      scrollToBottom(!isFirstRender);
+    } else {
+      messagesScroll.scrollTop = previousScrollTop;
+    }
+    syncScrollToBottomButton();
   }
 
   async function renderMessage(message, myPub, lastReadAt, byId) {
@@ -1240,7 +1464,7 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
           // mountTopicView()'s own "PERMALINKS" doc comment.
           const link = document.createElement('a');
           link.className = 'qu-forum-message-ts';
-          link.href = `#/forum/t/${topicId}/m/${message.id}`;
+          link.href = messagePermalink(message);
           link.title = t('permalink');
           link.textContent = message.editedAt ? `${formatTs(message.ts)} (${t('edit').toLowerCase()})` : formatTs(message.ts);
           el.appendChild(link);
@@ -1373,18 +1597,20 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
   // `buildMessageFooter()` above) and the once-per-topic `forum.topicToolbar`
   // slot (`mountTopicView()`'s own setup below).
 
-  sendBtn.addEventListener('click', async () => {
+  actionBtn.addEventListener('click', async () => {
     const body = composerInput.value.trim();
     if (!body) return;
-    sendBtn.disabled = true;
+    actionBtn.disabled = true;
     try {
       const extra = pendingAttachment ? { attachment: pendingAttachment } : {};
+      //await services.messages.postMessage(SPACE_ID, topicId, { body, extra });
       await services.messages.postMessage(SPACE_ID, topicId, { body, replyTo: replyingTo?.id ?? null, extra });
+      stuckToBottom = true; // sending a post always means "show me what I just sent" - see apps/chat/client.js's own identical rule
       composerInput.value = '';
       clearPendingAttachment();
       setReplyingTo(null);
     } finally {
-      sendBtn.disabled = false;
+      actionBtn.disabled = false;
     }
   });
 
@@ -1392,6 +1618,7 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
 
   return () => {
     stopped = true;
+    resizeObserver?.disconnect();
     clearMessageWatchers();
     offMessages();
     stopComposerMentions();
