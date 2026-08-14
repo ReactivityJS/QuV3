@@ -170,6 +170,14 @@ function makeContainer() {
   return el;
 }
 
+/** jsdom's own scrollHeight/clientHeight are fixed getter-only 0s - same helper as apps/chat/test/client.test.js's own identical simulateScroll(), needed to give the geometry-based scroll listener real numbers to compare. */
+function simulateScroll(scrollEl, { scrollTop = 0, scrollHeight = 0, clientHeight = 0 } = {}) {
+  Object.defineProperty(scrollEl, 'scrollHeight', { value: scrollHeight, configurable: true });
+  Object.defineProperty(scrollEl, 'clientHeight', { value: clientHeight, configurable: true });
+  scrollEl.scrollTop = scrollTop;
+  scrollEl.dispatchEvent(new window.Event('scroll'));
+}
+
 test('renders the empty state when the thread has no messages yet', async () => {
   const a = await freshEnv('Ada');
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
@@ -245,7 +253,7 @@ test('the composer posts a message and clears the input afterward', async () => 
     await waitFor(() => container.querySelector('textarea') !== null);
     const textarea = container.querySelector('textarea');
     textarea.value = 'Posted from the composer';
-    const sendBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === 'Send');
+    const sendBtn = container.querySelector('.qu-forum-composer-action');
     sendBtn.click();
 
     await waitFor(() => container.querySelector('.qu-forum-message-text')?.textContent.includes('Posted from the composer'));
@@ -278,7 +286,7 @@ test('attaching a file via the composer\'s <qu-asset-upload> sends it along with
 
     const textarea = container.querySelector('textarea');
     textarea.value = 'Check out this photo';
-    const sendBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === 'Send');
+    const sendBtn = container.querySelector('.qu-forum-composer-action');
     sendBtn.click();
 
     await waitFor(() => container.querySelector('.qu-forum-message-attachment') !== null, { timeout: 5000 });
@@ -350,7 +358,7 @@ test('the composer\'s @mention autocomplete inserts a full pub, and the posted m
     container.querySelector('.qu-thread-ui-mention-item').dispatchEvent(new CustomEvent('mousedown', { bubbles: true, cancelable: true }));
     assert.equal(textarea.value, `hey @${a.myPub}`);
 
-    const sendBtn = [...container.querySelectorAll('button')].find((btn) => btn.textContent === 'Send');
+    const sendBtn = container.querySelector('.qu-forum-composer-action');
     sendBtn.click();
     await waitFor(() => container.querySelector('.qu-forum-message-text') !== null);
 
@@ -705,6 +713,152 @@ test('a post\'s timestamp is its permalink (#/forum/t/<topicId>/m/<id>); landing
   }
 });
 
+test('landing on a post permalink shows the persistent scroll-to-bottom button (ported from apps/chat/client.js)', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  const target = await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'find me' });
+  await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'later one' });
+
+  const container = makeContainer();
+  const stop = mount(container, {
+    qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe,
+    segments: [...TOPIC_SEGMENTS, 'm', target.id],
+  });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-message-highlight') !== null);
+    assert.equal(container.querySelector('.qu-forum-scroll-bottom-btn').hidden, false);
+    assert.equal(container.querySelector('.qu-forum-scroll-bottom-btn').classList.contains('qu-forum-scroll-bottom-btn-unseen'), false);
+  } finally {
+    stop();
+  }
+});
+
+test('scrolling back down to the bottom after a permalink releases the anchor from the URL', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  const target = await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'old one' });
+
+  const container = makeContainer();
+  const stop = mount(container, {
+    qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe,
+    segments: [...TOPIC_SEGMENTS, 'm', target.id],
+  });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-message-highlight') !== null);
+    const scroll = container.querySelector('.qu-forum-messages-scroll');
+    simulateScroll(scroll, { scrollTop: 1500, scrollHeight: 2000, clientHeight: 500 }); // "at the bottom"
+    assert.equal(window.location.hash, '#/forum/t/general');
+  } finally {
+    stop();
+  }
+});
+
+test('a new post while NOT at the bottom does not scroll or rebuild the view - marks the persistent scroll-to-bottom button as unseen instead', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'first' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-message-text')?.textContent.includes('first'));
+    const firstLi = container.querySelector('.qu-forum-message');
+    assert.ok(firstLi);
+    assert.equal(container.querySelector('.qu-forum-scroll-bottom-btn').hidden, true);
+
+    const scroll = container.querySelector('.qu-forum-messages-scroll');
+    simulateScroll(scroll, { scrollTop: 0, scrollHeight: 2000, clientHeight: 500 }); // release stuckToBottom
+    assert.equal(container.querySelector('.qu-forum-scroll-bottom-btn').hidden, false); // persistent button appears just from scrolling up, no new post needed
+    const scrollToCalls = [];
+    scroll.scrollTo = (opts) => scrollToCalls.push(opts);
+
+    await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'second' });
+
+    await waitFor(() => container.querySelector('.qu-forum-scroll-bottom-btn')?.classList.contains('qu-forum-scroll-bottom-btn-unseen'));
+    assert.equal(scrollToCalls.length, 0); // never auto-scrolled away from what the user was reading
+    // INCREMENTAL APPEND, not a full rebuild - the FIRST post's own DOM node is the exact same element reference as before, never torn down.
+    assert.equal(container.querySelector('.qu-forum-message'), firstLi);
+    assert.equal(container.querySelectorAll('.qu-forum-message').length, 2);
+  } finally {
+    stop();
+  }
+});
+
+test('a new post while AT the bottom scrolls smoothly to it, via incremental append (not a full rebuild)', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'first' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-message-text')?.textContent.includes('first'));
+    const firstLi = container.querySelector('.qu-forum-message');
+    const scroll = container.querySelector('.qu-forum-messages-scroll');
+    const scrollToCalls = [];
+    scroll.scrollTo = (opts) => scrollToCalls.push(opts);
+
+    await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'second' });
+
+    await waitFor(() => container.querySelectorAll('.qu-forum-message').length === 2);
+    assert.equal(container.querySelector('.qu-forum-message'), firstLi); // incremental append, first post untouched
+    assert.equal(container.querySelector('.qu-forum-scroll-bottom-btn').hidden, true);
+    await waitFor(() => scrollToCalls.length > 0);
+    assert.equal(scrollToCalls.at(-1).behavior, 'smooth');
+  } finally {
+    stop();
+  }
+});
+
+test('clicking the persistent scroll-to-bottom button scrolls to the bottom and hides it', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'first' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-message-text')?.textContent.includes('first'));
+    const scroll = container.querySelector('.qu-forum-messages-scroll');
+    simulateScroll(scroll, { scrollTop: 0, scrollHeight: 2000, clientHeight: 500 });
+    const scrollToCalls = [];
+    scroll.scrollTo = (opts) => scrollToCalls.push(opts);
+
+    await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'second' });
+    await waitFor(() => container.querySelector('.qu-forum-scroll-bottom-btn')?.hidden === false);
+
+    container.querySelector('.qu-forum-scroll-bottom-btn').click();
+    assert.equal(container.querySelector('.qu-forum-scroll-bottom-btn').hidden, true);
+    assert.equal(scrollToCalls.at(-1).behavior, 'smooth');
+  } finally {
+    stop();
+  }
+});
+
+test('sending a post always scrolls the view to the bottom, even if the user had scrolled away from it (stuckToBottom released)', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-empty') !== null);
+    const scroll = container.querySelector('.qu-forum-messages-scroll');
+    simulateScroll(scroll, { scrollTop: 0, scrollHeight: 2000, clientHeight: 500 }); // release stuckToBottom
+    const scrollToCalls = [];
+    scroll.scrollTo = (opts) => scrollToCalls.push(opts);
+
+    const textarea = container.querySelector('textarea');
+    textarea.value = 'sent while scrolled away';
+    container.querySelector('.qu-forum-composer-action').click();
+
+    await waitFor(() => scrollToCalls.length > 0);
+    assert.equal(container.querySelector('.qu-forum-scroll-bottom-btn').hidden, true);
+  } finally {
+    stop();
+  }
+});
+
 test('UNREAD-BY-ME: another author\'s post shows an unread badge the first time this identity views the topic, and not again after', async () => {
   const ada = await freshEnv('Ada');
   const bob = await freshEnv('Bob');
@@ -977,7 +1131,12 @@ test('none of the forum subpages (channel view, topic view, new-channel view) re
   const a = await freshEnv('Ada');
   const channel = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Announcements' });
 
-  for (const segments of [['forum', 'c', channel._id], TOPIC_SEGMENTS, ['forum', 'new']]) {
+  // Channel view and the new-channel form still go through renderSubpage()
+  // (`.qu-subpage-content`) - the topic view no longer does, since it's
+  // its own fixed "room" layout now (see mountTopicView()'s own top doc
+  // comment) with no page-level back-link concept to begin with, so it's
+  // checked separately below via its own always-present marker instead.
+  for (const segments of [['forum', 'c', channel._id], ['forum', 'new']]) {
     const container = makeContainer();
     const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments });
     try {
@@ -986,6 +1145,15 @@ test('none of the forum subpages (channel view, topic view, new-channel view) re
     } finally {
       stop();
     }
+  }
+
+  const topicContainer = makeContainer();
+  const stopTopic = mount(topicContainer, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => topicContainer.querySelector('.qu-forum-room-view') !== null);
+    assert.equal(topicContainer.querySelector('.qu-subpage-back'), null);
+  } finally {
+    stopTopic();
   }
 });
 

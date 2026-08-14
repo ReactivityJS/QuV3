@@ -2343,4 +2343,47 @@ own tests, built bottom-up per the dependency order in
       link" + "no link, no card") and `apps/relay-admin/test/client.test.js`
       (pre-population, save payload, the new section's own toggle-and-save
       round trip), `npm run build` bundles cleanly.
+- [x] **Forum topic view: ported onto Chat's fixed "room" layout (base
+      unification, minus voice)** - explicit ask: "the base for Forum and
+      Chat really is identical - Forum just doesn't need voice messages,
+      but should get the same scrolling/message/composer improvements".
+      `mountTopicView()`'s topic thread was a plain page-scroll view (its
+      own OLD doc comment: "no internal scroll container the way
+      apps/chat's own room view has one"); it's now the exact same fixed
+      viewport-below-the-shell-header layout `apps/chat/client.js`'s
+      `mountRoomView()` already uses, complete with the SAME
+      `isSimpleAppend()`-driven incremental append (no more DOM-clear-
+      induced scroll jump), the SAME persistent `scrollToBottomBtn` +
+      `hasUnseenMessage`/`stuckToBottom` state machine, and the SAME
+      `ResizeObserver` true-bottom correction for late-loading image/video
+      attachments. The persistent mini-channel sidebar (this app's own
+      "the channel list never disappears" idiom) is a FLEX SIBLING inside
+      the SAME fixed box, not lost or covered - a new `.qu-forum-layout-room`
+      modifier class (`qu-forum-layout-room`, added ALONGSIDE the base
+      `.qu-forum-layout`, never replacing it) means board/channel views
+      keep their older plain page-scroll layout completely unchanged; only
+      a topic's actual thread is pinned, mirroring "only a chat ROOM, never
+      the room list, is pinned" in `apps/chat/client.js`. Composer redesigned
+      to match Chat's rounded-pill/tool-cluster/circular-action-button
+      visual language, minus the mic and its morph behavior entirely -
+      Forum's action button is simply always "send". Sending a post, same
+      as Chat, always scrolls to the bottom even if the user had scrolled
+      away. **Incidental find while testing**: none, this round's own
+      earlier `markRead()`-await fix already closed the one real bug
+      surfaced along the way.
+      Verified: full suite green (1234 tests - rewrote
+      `apps/forum/test/client.test.js`'s composer-button lookups (class-
+      based, not `.textContent === 'Send'`, since the button is now a
+      bare "➤" glyph with a `title`) and its "no back link" test (the
+      topic view no longer goes through `renderSubpage()`), added 6 new
+      tests mirroring `apps/chat/test/client.test.js`'s own scroll-follow
+      coverage (permalink shows the button, scroll-to-bottom releases the
+      URL anchor, incremental append while not/while at the bottom, click-
+      to-catch-up, send-always-scrolls), `npm run build` bundles cleanly.
+      Also manually verified live in a real headless-Chromium browser
+      (relay + shell, not just jsdom) at both desktop and mobile viewport
+      widths: fixed header/scroll/composer, the persistent scroll-to-bottom
+      button appearing/disappearing correctly, the sidebar collapsing to a
+      horizontal tab bar on narrow viewports, unread badges, and zero
+      console errors.
 
