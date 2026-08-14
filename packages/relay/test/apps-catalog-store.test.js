@@ -75,9 +75,9 @@ test('publishAppsCatalog() returns the same catalog shape buildAppsCatalog() pro
   const { qu, identity } = await freshEnv();
   const loader = fakeLoader([{ name: 'notes', clientMain: './dist/client.js', label: 'Notes', icon: '📝', navOrder: 1, pushActions: [], actions: [] }]);
 
-  const [entry] = await publishAppsCatalog(qu, identity, loader, { disabledApps: [] });
+  const [entry] = await publishAppsCatalog(qu, identity, loader, { disabledApps: [], hiddenFromAppList: [] });
   assert.deepEqual(Object.keys(entry).sort(), [
     'actions', 'clientIntegrity', 'clientMainUrl', 'clientSignature', 'contributes', 'definesExtensionPoints',
-    'enabled', 'icon', 'label', 'name', 'navOrder', 'pushActions', 'spaceId',
+    'enabled', 'hiddenFromList', 'icon', 'label', 'name', 'navOrder', 'pushActions', 'spaceId',
   ].sort());
 });

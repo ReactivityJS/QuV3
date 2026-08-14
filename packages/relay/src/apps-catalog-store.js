@@ -30,12 +30,12 @@ import { buildAppsCatalog } from './apps-catalog.js';
  * @param {import('@qu/core').QuStore} qu
  * @param {import('@qu/identity').QuIdentityEngine} identity - This relay's OWN identity (never an end user's - see `relay.js`'s own doc comment on that distinction).
  * @param {import('@qu/loader').QuLoader} loader
- * @param {{disabledApps: string[]}} settings
+ * @param {{disabledApps: string[], hiddenFromAppList?: string[]}} settings
  * @returns {Promise<Array<object>>} The catalog entries just published (same shape `buildAppsCatalog()` returns).
  */
 export async function publishAppsCatalog(qu, identity, loader, settings) {
   const mainKey = await identity.getMainKey();
-  const catalog = buildAppsCatalog(loader, settings.disabledApps);
+  const catalog = buildAppsCatalog(loader, settings.disabledApps, settings.hiddenFromAppList);
   for (const entry of catalog) {
     await qu.put(appCatalogEntryPath(entry.name), entry, {
       signWith: mainKey.privateKeyPkcs8,

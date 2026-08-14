@@ -115,6 +115,8 @@ const DICT = {
     maxMessagesPerMinute: 'Rate limit (messages/minute, 0 = unlimited)',
     apps: 'Apps',
     appsHint: 'Unchecking an app disables it for everyone on this relay - it stops loading (and, for a UI plugin, stops contributing) immediately, no restart needed.',
+    hideFromList: 'Hide from App List',
+    hideFromListHint: 'Keeps an app fully enabled and reachable, just off apps/app-list\'s own browse page - for a widget-only plugin with no standalone page of its own (e.g. Pins), which has nothing to show if someone lands on its route directly.',
     channels: 'Channels',
     allowMemberCreate: 'Members may create channels',
     allowMemberRestricted: 'Members may create restricted (private) channels',
@@ -150,6 +152,8 @@ const DICT = {
     maxMessagesPerMinute: 'Ratenlimit (Nachrichten/Minute, 0 = unbegrenzt)',
     apps: 'Apps',
     appsHint: 'Eine App abwählen deaktiviert sie sofort für alle auf diesem Relay - kein Neustart nötig.',
+    hideFromList: 'Aus App-Liste ausblenden',
+    hideFromListHint: 'Die App bleibt vollständig aktiv und erreichbar, erscheint aber nicht mehr auf der App-Liste-Übersichtsseite - für reine Widget-Plugins ohne eigene Seite (z. B. Pins), die nichts anzuzeigen haben, wenn jemand direkt auf ihrer Route landet.',
     channels: 'Kanäle',
     allowMemberCreate: 'Mitglieder dürfen Kanäle anlegen',
     allowMemberRestricted: 'Mitglieder dürfen private (restricted) Kanäle anlegen',
@@ -188,6 +192,9 @@ const STYLE = `
   .qu-relay-admin label { display: flex; align-items: center; gap: 0.4rem; margin: 0.3rem 0; }
   .qu-relay-admin input[type="text"], .qu-relay-admin input[type="number"], .qu-relay-admin select { font: inherit; padding: 0.3rem 0.5rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); }
   .qu-relay-admin-apps-list { display: flex; flex-direction: column; gap: 0.1rem; }
+  .qu-relay-admin-apps-row { display: flex; align-items: center; gap: 1rem; padding: 0.15rem 0; flex-wrap: wrap; }
+  .qu-relay-admin-apps-row label { margin: 0; }
+  .qu-relay-admin-apps-row-hide { opacity: 0.8; font-size: 0.92em; }
   .qu-relay-admin-flagtypes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; }
   .qu-relay-admin-status { margin-top: 0.6rem; font-size: 0.9em; }
   .qu-relay-admin-status.qu-relay-admin-status-error { color: var(--qu-color-danger, #d64545); }
@@ -352,17 +359,33 @@ export async function mount(container, { identity, services, apps }) {
   const appsList = document.createElement('div');
   appsList.className = 'qu-relay-admin-apps-list';
   const disabledApps = new Set(settings.disabledApps ?? []);
+  const hiddenFromAppList = new Set(settings.hiddenFromAppList ?? []);
   const appCheckboxes = [];
   for (const app of [...apps].sort((a2, b2) => a2.name.localeCompare(b2.name))) {
+    const row = document.createElement('div');
+    row.className = 'qu-relay-admin-apps-row';
+
     const label = document.createElement('label');
     const checkbox = document.createElement('input');
     checkbox.type = 'checkbox';
     checkbox.checked = !disabledApps.has(app.name);
     label.append(checkbox, document.createTextNode(`${app.icon ?? '🧩'} ${app.label ?? app.name} (${app.name})`));
-    appsList.appendChild(label);
-    appCheckboxes.push({ name: app.name, checkbox });
+
+    const hideLabel = document.createElement('label');
+    hideLabel.className = 'qu-relay-admin-apps-row-hide';
+    const hideCheckbox = document.createElement('input');
+    hideCheckbox.type = 'checkbox';
+    hideCheckbox.checked = hiddenFromAppList.has(app.name);
+    hideLabel.append(hideCheckbox, document.createTextNode(t('hideFromList')));
+
+    row.append(label, hideLabel);
+    appsList.appendChild(row);
+    appCheckboxes.push({ name: app.name, checkbox, hideCheckbox });
   }
-  appsSection.append(appsTitle, appsHint, appsList);
+  const hideFromListHint = document.createElement('p');
+  hideFromListHint.className = 'qu-relay-admin-hint';
+  hideFromListHint.textContent = t('hideFromListHint');
+  appsSection.append(appsTitle, appsHint, appsList, hideFromListHint);
 
   // ---- Channels ----
   const channelsSection = document.createElement('section');
@@ -452,10 +475,12 @@ export async function mount(container, { identity, services, apps }) {
     status.hidden = true;
     try {
       const newDisabledApps = appCheckboxes.filter(({ checkbox }) => !checkbox.checked).map(({ name }) => name);
+      const newHiddenFromAppList = appCheckboxes.filter(({ hideCheckbox }) => hideCheckbox.checked).map(({ name }) => name);
       const patch = {
         defaultLocale: localeSelect.value,
         rateLimits: { maxMessagesPerMinute: Number(rateLimitInput.value) || 0 },
         disabledApps: newDisabledApps,
+        hiddenFromAppList: newHiddenFromAppList,
         channels: { allowMemberCreate: allowCreateInput.checked, allowMemberRestricted: allowRestrictedInput.checked },
         chat: { allowMemberCreateGroup: allowCreateGroupInput.checked },
         linkPreviews: { enabled: linkPreviewsEnabledInput.checked },

@@ -62,6 +62,20 @@ test('disabledAppNames does not affect a DIFFERENT app', () => {
   assert.equal(entry.enabled, true);
 });
 
+test('hiddenFromAppListNames marks a matching app hiddenFromList: true without disabling it', () => {
+  const loader = fakeLoader([{ manifest: { name: 'pins', version: '1.0.0', main: './index.js', clientMain: './client.js' }, originUrl: null }]);
+  const [entry] = buildAppsCatalog(loader, [], ['pins']);
+  assert.equal(entry.hiddenFromList, true);
+  assert.equal(entry.enabled, true); // independent of disabledAppNames
+});
+
+test('an app absent from BOTH lists defaults to enabled and visible', () => {
+  const loader = fakeLoader([{ manifest: { name: 'forum', version: '1.0.0', main: './index.js', clientMain: './client.js' }, originUrl: null }]);
+  const [entry] = buildAppsCatalog(loader);
+  assert.equal(entry.enabled, true);
+  assert.equal(entry.hiddenFromList, false);
+});
+
 test('pushActions and actions default to empty arrays when the manifest omits them', () => {
   const loader = fakeLoader([{ manifest: { name: 'forum', version: '1.0.0', main: './index.js', clientMain: './client.js' }, originUrl: null }]);
   const [entry] = buildAppsCatalog(loader);

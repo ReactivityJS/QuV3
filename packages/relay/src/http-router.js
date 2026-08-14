@@ -70,7 +70,7 @@ export class HttpRouter {
       // `disabledApps` setting.
       if (req.url === '/apps.json') {
         const settings = await getSettings(this.qu);
-        const body = JSON.stringify(buildAppsCatalog(this.loader, settings.disabledApps));
+        const body = JSON.stringify(buildAppsCatalog(this.loader, settings.disabledApps, settings.hiddenFromAppList));
         res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }).end(body);
         return;
       }

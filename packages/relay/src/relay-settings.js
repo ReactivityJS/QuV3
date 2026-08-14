@@ -20,6 +20,18 @@ export const DEFAULT_RELAY_SETTINGS = Object.freeze({
   defaultLocale: 'en',
   rateLimits: Object.freeze({ maxMessagesPerMinute: 0 }), // 0 = unlimited
   disabledApps: Object.freeze([]),
+  // Apps still fully enabled (loaded, reachable at #/<name>, its
+  // contributions still active) but hidden from apps/app-list's own browse
+  // page - for an app with no genuine standalone page of its own (a plugin
+  // that only ever renders through another app's extension point, e.g.
+  // apps/pins - it declares a `clientMain` because ExtensionPointHost needs
+  // one to dynamically import it as a CONTRIBUTOR, not because it has
+  // anything useful to show if a user actually navigates to `#/pins`
+  // directly - no `mount()` export at all, in fact). Distinct from
+  // `disabledApps`: hiding is purely a discoverability/declutter concern
+  // (still fully functional wherever it's actually used), disabling turns
+  // the app off entirely.
+  hiddenFromAppList: Object.freeze([]),
   // Admin-editable Flag TYPE catalog - what a "flag" even IS is data, not
   // code, same reasoning as `disabledApps`. Shipped with a sane starter set
   // so liking/favoriting works out of the box with zero admin action; the
@@ -87,7 +99,7 @@ export const DEFAULT_RELAY_SETTINGS = Object.freeze({
 
 /**
  * @param {import('@qu/core').QuStore} qu
- * @returns {Promise<{defaultLocale: string, rateLimits: {maxMessagesPerMinute: number}, disabledApps: string[], flagTypes: Array<{id: string, label: string, icon: string, mode: string, entityKinds: string[]}>, channels: {allowMemberCreate: boolean, allowMemberRestricted: boolean}, chat: {allowMemberCreateGroup: boolean}, extensionOrder: Record<string, string[]>, linkPreviews: {enabled: boolean}}>}
+ * @returns {Promise<{defaultLocale: string, rateLimits: {maxMessagesPerMinute: number}, disabledApps: string[], hiddenFromAppList: string[], flagTypes: Array<{id: string, label: string, icon: string, mode: string, entityKinds: string[]}>, channels: {allowMemberCreate: boolean, allowMemberRestricted: boolean}, chat: {allowMemberCreateGroup: boolean}, extensionOrder: Record<string, string[]>, linkPreviews: {enabled: boolean}}>}
  *   Always fully populated - missing fields fall back to `DEFAULT_RELAY_SETTINGS`.
  */
 export async function getSettings(qu) {

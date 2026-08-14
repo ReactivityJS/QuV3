@@ -124,10 +124,11 @@ export class AdminHttp {
 
     const merged = await saveSettings(this.qu, settings);
     if (settings.rateLimits) this.state.transport?.setRateLimit(merged.rateLimits.maxMessagesPerMinute);
-    // An enable/disable takes effect for every connected client immediately -
-    // re-publishing is what a <qu-list parent="/store/apps/catalog"> reacts
-    // to, no relay restart needed (see apps-catalog-store.js's own doc comment).
-    if (settings.disabledApps) await publishAppsCatalog(this.qu, this.identity, this.loader, merged);
+    // An enable/disable (or app-list visibility) change takes effect for
+    // every connected client immediately - re-publishing is what a
+    // <qu-list parent="/store/apps/catalog"> reacts to, no relay restart
+    // needed (see apps-catalog-store.js's own doc comment).
+    if (settings.disabledApps || settings.hiddenFromAppList) await publishAppsCatalog(this.qu, this.identity, this.loader, merged);
 
     log.info(`settings updated by ~${actorPub.slice(0, 10)}…:`, Object.keys(settings).join(', '));
     res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(merged));

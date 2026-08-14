@@ -19,12 +19,18 @@
  *   Relay Admin needs to see and re-enable them), just marked
  *   `enabled: false`. A consumer of this catalog is expected to filter on
  *   that flag itself, same as it would for any other app-specific override.
+ * @param {string[]} [hiddenFromAppListNames] - Names an admin has marked
+ *   hidden from `apps/app-list`'s own browse page (see `relay-settings.js`'s
+ *   own doc comment on `hiddenFromAppList` - typically a widget-only plugin
+ *   with no standalone page of its own, e.g. `apps/pins`) - still fully
+ *   loaded/enabled/reachable, this is a discoverability flag ONLY, a
+ *   consumer filters on it the same way it would `enabled`.
  * @returns {Array<object>} One entry per loaded app with a `clientMain`
  *   (apps without one - pure server-side Engines/Services/apps, e.g. a
  *   thread-auto-provisioning app with no UI of its own - are omitted;
  *   there's nothing for a shell to mount for them).
  */
-export function buildAppsCatalog(loader, disabledAppNames = []) {
+export function buildAppsCatalog(loader, disabledAppNames = [], hiddenFromAppListNames = []) {
   const out = [];
   for (const { manifest, originUrl } of loader.listManifests()) {
     if (!manifest.clientMain) continue;
@@ -41,6 +47,7 @@ export function buildAppsCatalog(loader, disabledAppNames = []) {
       clientIntegrity: manifest.clientIntegrity,
       clientSignature: manifest.clientSignature,
       enabled: !disabledAppNames.includes(manifest.name),
+      hiddenFromList: hiddenFromAppListNames.includes(manifest.name),
       pushActions: manifest.pushActions ?? [],
       // See `@qu/foundation/actions.js`'s `actionsForSlot()` - this is the
       // catalog entries it reads `.actions` off of.
