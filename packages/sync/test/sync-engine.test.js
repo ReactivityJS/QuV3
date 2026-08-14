@@ -371,6 +371,85 @@ test('fetchPrefix() excludes LOCAL_ONLY_PREFIX entries even when they fall under
   assert.equal(await clientQu.get('/store/secure/identity/seed'), null);
 });
 
+// ===== reconnect replay of in-flight fetch()/fetchPrefix() requests =======
+
+test('fetch() still in flight during a reconnect is replayed, not left to time out - regression: a relay restart while a request was in the air used to silently degrade to stale local data until a full page reload', async () => {
+  const network = new TestNetwork();
+  const relayQu = freshQu();
+  await relayQu.put('/store/space/docs/d1', { title: 'hello' });
+  new SyncEngine(relayQu, new RelayTransport(network));
+
+  const clientTransport = new ClientTransport('client-a', network);
+  const clientQu = freshQu();
+  const client = new SyncEngine(clientQu, clientTransport);
+
+  // Simulate the request being sent right as the connection drops: swallow
+  // the very first message the client sends (the fetch request never
+  // reaches the relay) - same as a real WebSocket that closes moments after
+  // `send()` queued/flushed it.
+  const realSend = network.fromClientToRelay.bind(network);
+  let swallowedOne = false;
+  network.fromClientToRelay = (peerId, data) => {
+    if (!swallowedOne) { swallowedOne = true; return; }
+    realSend(peerId, data);
+  };
+
+  const fetchPromise = client.fetch('/store/space/docs/d1', null, 2000);
+  await waitUntil(() => swallowedOne);
+
+  network.fromClientToRelay = realSend; // "reconnected" - the network works again
+  clientTransport.simulateReconnect();
+
+  const quBit = await fetchPromise;
+  assert.equal(quBit.val.title, 'hello');
+});
+
+test('fetchPrefix() still in flight during a reconnect is replayed the same way', async () => {
+  const network = new TestNetwork();
+  const relayQu = freshQu();
+  await relayQu.put('/store/space/threads/general/msgs/m1', { body: 'one' });
+  new SyncEngine(relayQu, new RelayTransport(network));
+
+  const clientTransport = new ClientTransport('client-a', network);
+  const clientQu = freshQu();
+  const client = new SyncEngine(clientQu, clientTransport);
+
+  const realSend = network.fromClientToRelay.bind(network);
+  let swallowedOne = false;
+  network.fromClientToRelay = (peerId, data) => {
+    if (!swallowedOne) { swallowedOne = true; return; }
+    realSend(peerId, data);
+  };
+
+  const fetchPromise = client.fetchPrefix('/store/space/threads/general/msgs', null, 2000);
+  await waitUntil(() => swallowedOne);
+
+  network.fromClientToRelay = realSend;
+  clientTransport.simulateReconnect();
+
+  const count = await fetchPromise;
+  assert.equal(count, 1);
+  assert.equal((await clientQu.get('/store/space/threads/general/msgs/m1')).val.body, 'one');
+});
+
+test('a response that arrives for a request no longer pending (already answered, or replayed twice) is ignored, not a double-resolve', async () => {
+  const network = new TestNetwork();
+  const relayQu = freshQu();
+  await relayQu.put('/store/space/docs/d1', { title: 'hello' });
+  new SyncEngine(relayQu, new RelayTransport(network));
+
+  const clientTransport = new ClientTransport('client-a', network);
+  const client = new SyncEngine(freshQu(), clientTransport);
+
+  const quBit = await client.fetch('/store/space/docs/d1');
+  assert.equal(quBit.val.title, 'hello');
+
+  // The request already resolved and was removed from the pending map -
+  // replaying it now (as a reconnect would for a GENUINELY still-pending
+  // request) must not throw or otherwise misbehave.
+  assert.doesNotThrow(() => clientTransport.simulateReconnect());
+});
+
 test('a reconnect resubscribes and fetches whatever was missed while disconnected (reciprocal catch-up)', async () => {
   const network = new TestNetwork();
   const relayQu = freshQu();

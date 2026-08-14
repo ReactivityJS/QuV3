@@ -82,7 +82,18 @@ export function mount(container, { qu, services, syncFetch }) {
       </qu-list>`;
 
     const list = listRoot.querySelector('qu-list');
-    list.onItemStamped = (els, itemId) => {
+    list.onItemStamped = (els, itemId, item) => {
+      // Still fully loaded/enabled/reachable at #/<itemId> - just not worth
+      // discovering by browsing here (an admin-controlled `hiddenFromList`
+      // flag, see relay-settings.js's own doc comment - typically a
+      // widget-only plugin with no standalone page of its own, e.g.
+      // apps/pins, which has no mount() export at all to actually show if
+      // someone did land on its own route). Hidden via CSS, not removed
+      // from the DOM - <qu-list>'s own reconciliation (components.js)
+      // tracks stamped elements by path internally; detaching them itself
+      // would fight that bookkeeping on the next re-render.
+      if (item?.quBit?.val?.hiddenFromList) { els[0].hidden = true; return; }
+
       const link = els[0].querySelector('.qu-app-list-link');
       link.href = `#/${itemId}`;
 

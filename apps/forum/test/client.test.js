@@ -737,6 +737,52 @@ test('a reply quote is a real link to its parent post\'s own permalink, not just
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
   const original = await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'the original post' });
   await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'a reply', replyTo: original.id });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-message-reply') !== null);
+    const quote = container.querySelector('.qu-forum-message-reply');
+    assert.equal(quote.tagName, 'A');
+    assert.equal(quote.getAttribute('href'), `#/forum/t/general/m/${original.id}`);
+    assert.equal(quote.textContent, 'the original post');
+  } finally {
+    stop();
+  }
+});
+
+test('clicking "Reply" in a post\'s context menu shows a "replying to" banner, and posting includes replyTo - native to any post, not just "mine"', async () => {
+  const a = await freshEnv('Ada');
+  const b = await freshEnv('Bob');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  const original = await b.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'from bob' });
+  await mirrorThreadInto(b, a.qu, FORUM_SPACE_ID, 'general');
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-message') !== null);
+    const panel = await openMessageMenu(container);
+    assert.equal(menuItemButton(panel, 'Edit'), undefined); // Bob's post, not Ada's
+    menuItemButton(panel, 'Reply').click();
+
+    await waitFor(() => container.querySelector('.qu-forum-reply-banner')?.hidden === false);
+    assert.match(container.querySelector('.qu-forum-reply-banner').textContent, /Replying to/);
+
+    container.querySelector('.qu-forum-composer textarea').value = 'my reply';
+    const sendBtn = container.querySelector('.qu-forum-composer-action');
+    sendBtn.click();
+
+    await waitForAsync(async () => (await a.services.messages.listMessages(FORUM_SPACE_ID, 'general')).messages.length === 2);
+    const { messages } = await a.services.messages.listMessages(FORUM_SPACE_ID, 'general');
+    const reply = messages.find((m) => m.body === 'my reply');
+    assert.equal(reply.replyTo, original.id);
+    assert.equal(container.querySelector('.qu-forum-reply-banner').hidden, true); // cleared after sending
+  } finally {
+    stop();
+  }
+});
+
 test('landing on a post permalink shows the persistent scroll-to-bottom button (ported from apps/chat/client.js)', async () => {
   const a = await freshEnv('Ada');
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
@@ -785,11 +831,6 @@ test('a new post while NOT at the bottom does not scroll or rebuild the view - m
   const container = makeContainer();
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
   try {
-    await waitFor(() => container.querySelector('.qu-forum-message-reply') !== null);
-    const quote = container.querySelector('.qu-forum-message-reply');
-    assert.equal(quote.tagName, 'A');
-    assert.equal(quote.getAttribute('href'), `#/forum/t/general/m/${original.id}`);
-    assert.equal(quote.textContent, 'the original post');
     await waitFor(() => container.querySelector('.qu-forum-message-text')?.textContent.includes('first'));
     const firstLi = container.querySelector('.qu-forum-message');
     assert.ok(firstLi);
@@ -813,12 +854,6 @@ test('a new post while NOT at the bottom does not scroll or rebuild the view - m
   }
 });
 
-test('clicking "Reply" in a post\'s context menu shows a "replying to" banner, and posting includes replyTo - native to any post, not just "mine"', async () => {
-  const a = await freshEnv('Ada');
-  const b = await freshEnv('Bob');
-  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
-  const original = await b.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'from bob' });
-  await mirrorThreadInto(b, a.qu, FORUM_SPACE_ID, 'general');
 test('a new post while AT the bottom scrolls smoothly to it, via incremental append (not a full rebuild)', async () => {
   const a = await freshEnv('Ada');
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
@@ -827,23 +862,6 @@ test('a new post while AT the bottom scrolls smoothly to it, via incremental app
   const container = makeContainer();
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
   try {
-    await waitFor(() => container.querySelector('.qu-forum-message') !== null);
-    const panel = await openMessageMenu(container);
-    assert.equal(menuItemButton(panel, 'Edit'), undefined); // Bob's post, not Ada's
-    menuItemButton(panel, 'Reply').click();
-
-    await waitFor(() => container.querySelector('.qu-forum-reply-banner')?.hidden === false);
-    assert.match(container.querySelector('.qu-forum-reply-banner').textContent, /Replying to/);
-
-    container.querySelector('.qu-forum-composer textarea').value = 'my reply';
-    const sendBtn = [...container.querySelectorAll('.qu-forum-composer button')].find((btn) => btn.textContent === 'Send');
-    sendBtn.click();
-
-    await waitForAsync(async () => (await a.services.messages.listMessages(FORUM_SPACE_ID, 'general')).messages.length === 2);
-    const { messages } = await a.services.messages.listMessages(FORUM_SPACE_ID, 'general');
-    const reply = messages.find((m) => m.body === 'my reply');
-    assert.equal(reply.replyTo, original.id);
-    assert.equal(container.querySelector('.qu-forum-reply-banner').hidden, true); // cleared after sending
     await waitFor(() => container.querySelector('.qu-forum-message-text')?.textContent.includes('first'));
     const firstLi = container.querySelector('.qu-forum-message');
     const scroll = container.querySelector('.qu-forum-messages-scroll');

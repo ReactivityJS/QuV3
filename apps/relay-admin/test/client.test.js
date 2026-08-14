@@ -28,6 +28,7 @@ const DEFAULT_SETTINGS = {
   defaultLocale: 'en',
   rateLimits: { maxMessagesPerMinute: 0 },
   disabledApps: [],
+  hiddenFromAppList: [],
   flagTypes: [{ id: 'favorite', label: 'Favorite', icon: '⭐', mode: 'private', entityKinds: ['app', 'user'] }],
   channels: { allowMemberCreate: true, allowMemberRestricted: false },
   chat: { allowMemberCreateGroup: true },
@@ -138,6 +139,38 @@ test('saving posts a REAL, independently-verifiable Ed25519 signature over the e
     await waitFor(() => container.querySelector('.qu-relay-admin-status')?.hidden === false);
     assert.match(container.querySelector('.qu-relay-admin-status').textContent, /Saved/);
     assert.equal(container.querySelector('.qu-relay-admin-status').classList.contains('qu-relay-admin-status-error'), false);
+  } finally {
+    stop?.();
+  }
+});
+
+test('checking "Hide from App List" for one app saves it in hiddenFromAppList, independently of the enable/disable checkbox', async (t) => {
+  const env = await freshEnv();
+  let capturedBody = null;
+
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    if (url === '/config.json') return new Response(JSON.stringify({ adminPubs: [env.myPub], settings: DEFAULT_SETTINGS }), { status: 200 });
+    if (url === '/admin/settings') {
+      capturedBody = JSON.parse(init.body);
+      return new Response(JSON.stringify(capturedBody.settings), { status: 200 });
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  });
+
+  const container = makeContainer();
+  const stop = await mount(container, { identity: env.identity, services: env.services, apps: APPS });
+  try {
+    await waitFor(() => container.querySelector('form') !== null);
+    const pinsRow = [...container.querySelectorAll('.qu-relay-admin-apps-row')].find((row) => row.textContent.includes('pins'));
+    const [enableCheckbox, hideCheckbox] = pinsRow.querySelectorAll('input[type="checkbox"]');
+    hideCheckbox.checked = true; // hidden from the App List...
+    // ...but still fully enabled - these are independent settings.
+    assert.equal(enableCheckbox.checked, true);
+    container.querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+
+    await waitFor(() => capturedBody !== null);
+    assert.deepEqual(capturedBody.settings.hiddenFromAppList, ['pins']);
+    assert.deepEqual(capturedBody.settings.disabledApps, []);
   } finally {
     stop?.();
   }

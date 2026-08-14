@@ -167,6 +167,23 @@ test('a disabledApps change re-publishes the app catalog into the store - a disa
   }
 });
 
+test('a hiddenFromAppList change ALSO re-publishes the app catalog into the store, independently of disabledApps', async () => {
+  const env = await freshEnv({
+    manifests: [{ name: 'pins', clientMain: './dist/client.js', label: 'pins' }],
+  });
+  try {
+    assert.equal(await env.qu.get(paths.appCatalogEntryPath('pins')), null);
+
+    await signedPost(env, '/admin/settings', env.adminPub, env.adminKp, 'settings', { hiddenFromAppList: ['pins'] });
+
+    const after = await env.qu.get(paths.appCatalogEntryPath('pins'));
+    assert.equal(after.val.hiddenFromList, true);
+    assert.equal(after.val.enabled, true); // still fully enabled - hiding is a separate concern
+  } finally {
+    await env.teardown();
+  }
+});
+
 test('a settings change with NO disabledApps field does not touch the app catalog at all', async () => {
   const env = await freshEnv({
     manifests: [{ name: 'forum', clientMain: './dist/client.js', label: 'Forum' }],

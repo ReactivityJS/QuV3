@@ -231,8 +231,38 @@ export class SyncEngine {
         // duplicate resend a no-op, not a correctness issue, just a
         // redundant message in that common case.
         this.#replayOutbox();
+        this.#replayPendingRequests();
         for (const cb of this.#reconnectCallbacks) cb();
       });
+    }
+  }
+
+  /**
+   * Re-sends every still-outstanding `fetch()`/`fetchPrefix()` request after
+   * a reconnect - a REAL, previously-silent gap: a fresh reconnection is a
+   * brand new connection as far as the remote side is concerned (same
+   * reasoning `refreshSubscriptions()`/`#replayOutbox()` above already act
+   * on), so a request sent moments before a drop is answered by nobody -
+   * the relay that received it is gone, and the NEW connection has no idea
+   * a request was ever made. Previously this just sat in
+   * `#pendingRequests`/`#pendingPrefixRequests` until its own timeout fired
+   * (10s/15s), degrading silently (every caller's own `.catch(() => {})`
+   * swallows it - see e.g. `@qu/reactive`'s `watch()`/`watchChildren()`) to
+   * whatever was already locally cached, resolved only by a full page
+   * reload (a fresh connection, made before anything tries to fetch).
+   * `#handleResponse()`/`#handlePrefixResponse()` already ignore a late or
+   * duplicate response for a requestId no longer pending, so replaying a
+   * request that's ALSO about to be answered by the original send (a
+   * narrow race, not the common case) is harmless - never a double-resolve.
+   */
+  #replayPendingRequests() {
+    for (const { message, targetPeerId } of this.#pendingRequests.values()) {
+      if (targetPeerId) this.#transport.sendTo(targetPeerId, message);
+      else this.#transport.send(message);
+    }
+    for (const { message, targetPeerId } of this.#pendingPrefixRequests.values()) {
+      if (targetPeerId) this.#transport.sendTo(targetPeerId, message);
+      else this.#transport.send(message);
     }
   }
 
@@ -416,9 +446,14 @@ export class SyncEngine {
         this.#pendingRequests.delete(requestId);
         reject(new Error(`SyncEngine.fetch: timed out waiting for "${path}"`));
       }, timeoutMs);
-      this.#pendingRequests.set(requestId, { resolve, reject, timeout });
-
       const message = { type: 'request', requestId, path, requester: this.#transport.getPeerId() };
+      // `message`/`targetPeerId` kept alongside the resolver so a reconnect
+      // mid-flight (see the constructor's own onReconnect wiring and
+      // #replayPendingRequests()) can re-send this EXACT request instead of
+      // silently losing it to its own timeout - see that method's own doc
+      // comment for why a request sent right before a drop has no other way
+      // to ever get answered.
+      this.#pendingRequests.set(requestId, { resolve, reject, timeout, message, targetPeerId });
       if (targetPeerId) this.#transport.sendTo(targetPeerId, message);
       else this.#transport.send(message);
     });
@@ -507,9 +542,17 @@ export class SyncEngine {
         this.#pendingPrefixRequests.delete(requestId);
         reject(new Error(`SyncEngine.fetchPrefix: timed out waiting for "${prefix}"`));
       }, timeoutMs);
-      this.#pendingPrefixRequests.set(requestId, { resolve, reject, timeout });
-
       const message = { type: 'prefix-request', requestId, prefix, requester: this.#transport.getPeerId() };
+      // See fetch()'s own identical comment - #replayPendingRequests() needs
+      // `message`/`targetPeerId` to re-send this exact request after a
+      // mid-flight reconnect instead of losing it to its own timeout. This
+      // is the SAME method every app's own `ctx.syncFetch` calls through
+      // (`apps/shell/client.js`'s own `syncFetch = (prefix) =>
+      // sync.fetchPrefix(prefix)`) - without this, a request that happened
+      // to be in flight at the exact moment a relay restarted (or any
+      // transient drop) would silently degrade to whatever was already
+      // locally cached until the next full page load, not just re-connect.
+      this.#pendingPrefixRequests.set(requestId, { resolve, reject, timeout, message, targetPeerId });
       if (targetPeerId) this.#transport.sendTo(targetPeerId, message);
       else this.#transport.send(message);
     });

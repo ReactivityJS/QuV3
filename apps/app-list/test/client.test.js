@@ -89,6 +89,24 @@ test('a catalog entry signed by someone OTHER than relayPub is never rendered', 
   assert.equal(container.querySelectorAll('li').length, 0);
 });
 
+test('a catalog entry marked hiddenFromList is still fully enabled (loaded/reachable) but hidden from this browse page - unlike enabled:false, its <li> is stamped, just not visible', async (t) => {
+  const { qu, services, relayKp, relayPub } = await freshEnv();
+  await publishCatalogEntry(qu, relayKp, 'pins', { label: 'Pins', hiddenFromList: true });
+  await publishCatalogEntry(qu, relayKp, 'notes', { label: 'Notes' });
+  t.mock.method(globalThis, 'fetch', mockConfigFetch(relayPub));
+
+  const container = makeContainer();
+  mount(container, { qu, services });
+  await waitFor(() => container.querySelector('.qu-app-list-link') !== null);
+
+  const rows = [...container.querySelectorAll('li')];
+  const pinsRow = rows.find((li) => li.querySelector('.qu-app-list-link')?.textContent.includes('Pins'));
+  const notesRow = rows.find((li) => li.querySelector('.qu-app-list-link')?.textContent.includes('Notes'));
+  assert.ok(pinsRow, 'expected the hidden entry to still be stamped into the DOM');
+  assert.equal(pinsRow.hidden, true);
+  assert.equal(notesRow.hidden, false);
+});
+
 test('a disabled catalog entry (enabled: false) is not rendered', async (t) => {
   const { qu, services, relayKp, relayPub } = await freshEnv();
   await publishCatalogEntry(qu, relayKp, 'off', { label: 'Off', enabled: false });
