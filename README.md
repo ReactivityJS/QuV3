@@ -2155,4 +2155,47 @@ own tests, built bottom-up per the dependency order in
       handlers (this repo has no service-worker test harness at all yet -
       same pre-existing gap the file's own doc comment already
       acknowledged for its other event handlers).
+- [x] **Chat scroll-follow redesign: no more jump-then-back, a real "new
+      message" banner, permalink-to-top, anchor release on return to
+      bottom** - root-caused the reported "scrolling jumps down and then
+      back to the previous post": `renderMessages()` always cleared and
+      fully rebuilt `messagesRoot` on every single new message, which
+      collapses `messagesScroll`'s own `scrollHeight` to ~0 for one frame -
+      the BROWSER itself force-clamps `scrollTop` down to fit that
+      momentarily-empty content, and that clamp does NOT reverse itself
+      once the content regrows a moment later. Two changes close this
+      together: **(1) incremental append** - the common case (a plain new
+      message, nothing else changed, detected by comparing an `{id,
+      editedAt}` snapshot of the previous render against the new one) now
+      only appends the new message(s) to the EXISTING `<ul>`, never
+      touching or rebuilding anything already on screen, so nothing above
+      it can ever collapse or get re-clamped in the first place; **(2)** the
+      remaining, rarer full-rebuild cases (first mount, an edit, a
+      deletion, a fresh permalink target) snapshot `stuckToBottom` and
+      `scrollTop` BEFORE touching the DOM and explicitly restore them
+      afterward when the view must not move - never trusting the LIVE
+      `stuckToBottom` flag (the collapse's own spurious `scroll` event
+      could have just corrupted it) or the browser's own post-collapse
+      resting position.
+      **Per explicit ask**: a new message while NOT at the bottom no longer
+      scrolls (or jumps) AT ALL - a small sticky "↓ New message" banner
+      (`newMessageBanner`, `position: sticky` so it stays pinned near the
+      bottom of the visible scroll area with zero JS position math)
+      appears instead, click-to-catch-up. A permalinked message now scrolls
+      to the TOP of the view (`scrollIntoView({block: 'start'})`, not
+      `'center'`) so it's unambiguous which message a link pointed to.
+      Scrolling back down to the bottom yourself - either manually or via
+      the new banner - strips a lingering `/m/<id>` back out of the URL
+      (`history.replaceState`, no `hashchange`/remount) so a later reload
+      of the same tab lands on the latest message again, not back on the
+      old permalinked one.
+      Verified: full suite green (1180 tests - 6 new
+      `apps/chat/test/client.test.js` cases covering incremental append
+      (both the "not at bottom, banner appears, existing DOM node
+      untouched" and "at bottom, scrolls smoothly, existing DOM node
+      untouched" paths), the banner's click-to-catch-up, permalink
+      block:'start', and anchor release on returning to the bottom - plus a
+      new `simulateScroll()` test helper, since jsdom's own `scrollHeight`/
+      `clientHeight` are fixed getter-only 0s that can't otherwise express
+      "near the bottom" vs "far from it"), `npm run build` bundles cleanly.
 
