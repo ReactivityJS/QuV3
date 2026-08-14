@@ -194,6 +194,7 @@ const DICT = {
     accept: 'Accept',
     decline: 'Decline',
     newMessagesBelow: '↓ New message',
+    scrollToBottomButton: '↓',
   },
   de: {
     title: 'Chats',
@@ -232,6 +233,7 @@ const DICT = {
     accept: 'Annehmen',
     decline: 'Ablehnen',
     newMessagesBelow: '↓ Neue Nachricht',
+    scrollToBottomButton: '↓',
   },
 };
 const { t } = createI18n(DICT);
@@ -309,9 +311,10 @@ const STYLE = `
      while there's unseen content to scroll down to. Hidden (display:none
      via [hidden]) removes it from flow entirely, so it never reserves
      space or affects scrollHeight while not shown. */
-  .qu-chat-new-message-banner { position: sticky; bottom: 1rem; left: 50%; transform: translateX(-50%); display: block; width: fit-content; padding: 0.4rem 0.9rem; border: none; border-radius: 999px; background: var(--qu-color-accent, #5b5bd6); color: white; font: inherit; font-size: 0.85em; cursor: pointer; box-shadow: 0 0.2rem 0.6rem rgba(0,0,0,0.25); }
-  .qu-chat-new-message-banner:hover { filter: brightness(1.08); }
-  .qu-chat-new-message-banner[hidden] { display: none; }
+  .qu-chat-scroll-bottom-btn { position: sticky; bottom: 1rem; left: 50%; transform: translateX(-50%); display: block; width: fit-content; padding: 0.4rem 0.9rem; border: none; border-radius: 999px; background: var(--qu-color-accent, #5b5bd6); color: white; font: inherit; font-size: 0.85em; cursor: pointer; box-shadow: 0 0.2rem 0.6rem rgba(0,0,0,0.25); }
+  .qu-chat-scroll-bottom-btn:hover { filter: brightness(1.08); }
+  .qu-chat-scroll-bottom-btn[hidden] { display: none; }
+  .qu-chat-scroll-bottom-btn-unseen { background: var(--qu-color-danger, #d64545); }
   .qu-chat-messages { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; max-width: 40rem; }
   .qu-chat-bubble-row { display: flex; }
   .qu-chat-bubble-row-mine { justify-content: flex-end; }
@@ -860,16 +863,19 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   messagesScroll.className = 'qu-chat-messages-scroll';
   const messagesRoot = document.createElement('div');
   // A SIBLING of messagesRoot, never touched by renderMessages()'s own
-  // clear-and-rebuild of messagesRoot - see that function's own "NEW
-  // MESSAGE BANNER" doc comment for what shows/hides it. position: sticky
-  // (see STYLE) keeps it pinned near the bottom of the VISIBLE scroll area
-  // regardless of where messagesRoot's own content currently scrolls to.
-  const newMessageBanner = document.createElement('button');
-  newMessageBanner.type = 'button';
-  newMessageBanner.className = 'qu-chat-new-message-banner';
-  newMessageBanner.textContent = t('newMessagesBelow');
-  newMessageBanner.hidden = true;
-  messagesScroll.append(messagesRoot, newMessageBanner);
+  // clear-and-rebuild of messagesRoot - see mountRoomView()'s own
+  // syncScrollToBottomButton() for what shows/hides/labels it. position:
+  // sticky (see STYLE) keeps it pinned near the bottom of the VISIBLE
+  // scroll area regardless of where messagesRoot's own content currently
+  // scrolls to. Shown whenever the user isn't at the bottom (scrolled up,
+  // OR landed on a permalink further up) - not just when a new message
+  // happens to arrive - per explicit ask: a persistent, always-available
+  // way back down, not a one-shot toast.
+  const scrollToBottomBtn = document.createElement('button');
+  scrollToBottomBtn.type = 'button';
+  scrollToBottomBtn.className = 'qu-chat-scroll-bottom-btn';
+  scrollToBottomBtn.hidden = true;
+  messagesScroll.append(messagesRoot, scrollToBottomBtn);
   const composerWrap = document.createElement('div');
   composerWrap.className = 'qu-chat-composer-wrap';
   const replyBanner = document.createElement('div');
@@ -946,6 +952,10 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   // at the bottom to see it, never interrupting whatever they were reading.
   let pendingScrollTarget = target.messageId || null;
   let stuckToBottom = !pendingScrollTarget;
+  // Whether a message arrived while NOT stuck to the bottom - purely
+  // cosmetic (see syncScrollToBottomButton()'s own doc comment for what it
+  // changes about the button), never what decides the button's visibility.
+  let hasUnseenMessage = false;
   // See renderMessages()'s own doc comment at the publishReadReceipt() call
   // site - guards against a self-published read receipt re-triggering the
   // read-receipts watch below, which would re-run renderMessages(), forever.
@@ -961,12 +971,55 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   let lastRenderedSnapshot = [];
   let hasRenderedOnce = false;
   const BOTTOM_FOLLOW_THRESHOLD_PX = 80;
-  function scrollToBottom(smooth) {
+  /**
+   * @param {boolean} smooth
+   * @param {boolean} [correcting] - true for a RESIZE-triggered correction
+   *   (see the ResizeObserver below), never a caller-visible "scroll to
+   *   bottom" action in its own right - skipped entirely once the user has
+   *   since scrolled away again, so a slow-loading image two messages back
+   *   can't yank them back down to "now" after they've already moved on.
+   */
+  function scrollToBottom(smooth, correcting = false) {
+    if (correcting && !stuckToBottom) return;
     if (messagesScroll.scrollTo) messagesScroll.scrollTo({ top: messagesScroll.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
     else messagesScroll.scrollTop = messagesScroll.scrollHeight; // jsdom (this repo's test DOM) has no scrollTo() at all
   }
-  function showNewMessageBanner() { newMessageBanner.hidden = false; }
-  function hideNewMessageBanner() { newMessageBanner.hidden = true; }
+  // TRUE BOTTOM, EVEN WITH LATE-LOADING CONTENT - scrollToBottom() above
+  // reads messagesScroll.scrollHeight AT CALL TIME, which understates the
+  // real total height whenever an attachment (an image, a video's first
+  // frame) is still downloading/decoding at that moment - <qu-asset>
+  // resolves and inserts its actual <img>/<video> asynchronously (see
+  // @qu/ui's own asset-components.js), well after this room's own
+  // renderMessage() already returned and appended the row. Confirmed live
+  // as "scrolling down doesn't reach all the way to the bottom" whenever an
+  // image message was involved. A ResizeObserver on messagesRoot catches
+  // ANY later height change - an image finishing layout, a video's
+  // metadata arriving, anything - without needing to know what caused it,
+  // and re-corrects the scroll position (instantly, not animated a second
+  // time) whenever that happens while still stuck to the bottom. Guarded
+  // for a host with no ResizeObserver at all (jsdom, this repo's test DOM,
+  // included) - the position is still CORRECT for text-only messages
+  // either way, this only ever matters for the async-attachment case.
+  const resizeObserver = typeof ResizeObserver !== 'undefined'
+    ? new ResizeObserver(() => scrollToBottom(false, true))
+    : null;
+  resizeObserver?.observe(messagesRoot);
+  /**
+   * Shows/hides/labels the persistent "scroll to bottom" button - visible
+   * whenever the user ISN'T at the bottom, for ANY reason (scrolled up
+   * themselves, or landed on a permalink further up), not just reactively
+   * when a new message happens to arrive - a persistent, always-available
+   * way back down, matching how every mainstream chat app already does
+   * this, rather than a one-shot "new message" toast that only appears
+   * sometimes. `hasUnseenMessage` only changes its LABEL/styling (a plain
+   * "↓" vs "↓ new message") - never its visibility, which is `stuckToBottom`
+   * alone.
+   */
+  function syncScrollToBottomButton() {
+    scrollToBottomBtn.hidden = stuckToBottom;
+    scrollToBottomBtn.textContent = hasUnseenMessage ? t('newMessagesBelow') : t('scrollToBottomButton');
+    scrollToBottomBtn.classList.toggle('qu-chat-scroll-bottom-btn-unseen', hasUnseenMessage);
+  }
   function roomHash() {
     return target.kind === 'group' ? `#/chat/g/${roomId}` : `#/chat/${target.peerPub}`;
   }
@@ -983,9 +1036,10 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     const plainHash = roomHash();
     if (window.location.hash !== plainHash) window.history.replaceState(null, '', plainHash);
   }
-  newMessageBanner.addEventListener('click', () => {
+  scrollToBottomBtn.addEventListener('click', () => {
     stuckToBottom = true;
-    hideNewMessageBanner();
+    hasUnseenMessage = false;
+    syncScrollToBottomButton();
     scrollToBottom(true);
     releasePermalinkAnchor();
   });
@@ -995,9 +1049,10 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
       // The user just scrolled themselves back down to "now" - see
       // releasePermalinkAnchor()'s own doc comment.
       releasePermalinkAnchor();
-      hideNewMessageBanner();
+      hasUnseenMessage = false;
     }
     stuckToBottom = nowAtBottom;
+    syncScrollToBottomButton();
   });
 
   let pendingAttachment = null;
@@ -1270,10 +1325,12 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
       lastRenderedSnapshot = currentSnapshot;
       hasRenderedOnce = true;
       if (wasStuckToBottom) {
-        hideNewMessageBanner();
+        hasUnseenMessage = false;
+        syncScrollToBottomButton();
         scrollToBottom(true);
       } else {
-        showNewMessageBanner();
+        hasUnseenMessage = true;
+        syncScrollToBottomButton();
       }
       return;
     }
@@ -1302,7 +1359,11 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
       const targetRow = [...messagesRoot.querySelectorAll('.qu-chat-bubble-row')].find((li) => li.dataset.messageId === pendingScrollTarget);
       pendingScrollTarget = null;
       if (targetRow) {
-        hideNewMessageBanner();
+        // A permalink target is, by definition, not the bottom - the button
+        // must show (not hide) here so there's a way back down. See
+        // syncScrollToBottomButton()'s own doc comment: hasUnseenMessage
+        // only controls the label, never the visibility.
+        hasUnseenMessage = false;
         // jsdom (this repo's test DOM) has no layout engine and doesn't
         // implement scrollIntoView() at all - optional-chained so tests
         // exercise every line above/below it without stubbing it out.
@@ -1313,13 +1374,14 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
         targetRow.classList.add('qu-chat-bubble-row-highlight');
         setTimeout(() => targetRow.classList.remove('qu-chat-bubble-row-highlight'), 2000);
         stuckToBottom = false;
+        syncScrollToBottomButton();
         return;
       }
       effectiveStuck = true; // the permalinked message is gone (deleted?) - fall through to "show latest" below
     }
     stuckToBottom = effectiveStuck;
     if (effectiveStuck) {
-      hideNewMessageBanner();
+      hasUnseenMessage = false;
       // A smooth scroll (not an instant scrollTop jump) - most noticeable
       // right after returning from a permalink/highlighted message further
       // up: without this, "catching up" to the latest message read as an
@@ -1330,6 +1392,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     } else {
       messagesScroll.scrollTop = previousScrollTop;
     }
+    syncScrollToBottomButton();
   }
 
   /**
@@ -1666,6 +1729,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     if (presenceTimer) clearInterval(presenceTimer);
     stopComposerMentions();
     stopComposerEmoji();
+    resizeObserver?.disconnect();
   };
 }
 

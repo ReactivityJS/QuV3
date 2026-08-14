@@ -2198,4 +2198,44 @@ own tests, built bottom-up per the dependency order in
       new `simulateScroll()` test helper, since jsdom's own `scrollHeight`/
       `clientHeight` are fixed getter-only 0s that can't otherwise express
       "near the bottom" vs "far from it"), `npm run build` bundles cleanly.
+- [x] **Chat scroll-to-bottom: true-bottom correction for late-loading
+      attachments, persistent scroll-to-bottom button** - the prior round's
+      banner still wasn't landing at the TRUE bottom whenever an image or
+      video attachment was involved: `scrollToBottom()` reads
+      `messagesScroll.scrollHeight` at call time, which understates the
+      real total height while `<qu-asset>` is still asynchronously
+      downloading/decoding the attachment - it resolves and inserts its
+      actual `<img>`/`<video>` well after the row's own render already
+      returned, growing the container's height a moment later with nothing
+      re-correcting the scroll position. Fixed with a `ResizeObserver` on
+      `messagesRoot` that re-corrects (instantly, not a second animated
+      scroll) whenever content resizes while still stuck to the bottom -
+      guarded off the moment the user has scrolled away again, so a
+      slow-loading image two messages back can't yank them back down to
+      "now" after they've already moved on; also guarded for hosts with no
+      `ResizeObserver` at all (jsdom, this repo's test DOM - the position
+      is already correct for text-only messages either way, this only ever
+      mattered for the async-attachment case).
+      **Per explicit ask**: the one-shot "new message" banner is now a
+      persistent "↓ scroll to bottom" button (`scrollToBottomBtn`,
+      `.qu-chat-scroll-bottom-btn`) shown whenever the user isn't at the
+      bottom for ANY reason - manually scrolled up, or landed on an older
+      permalinked message - not just reactively when a new message happens
+      to arrive, matching how Telegram/WhatsApp/Slack already do this
+      rather than a one-shot toast. A separate `hasUnseenMessage` flag only
+      changes the button's label/styling (plain "↓" vs "↓ New message",
+      the latter also getting a `.qu-chat-scroll-bottom-btn-unseen`
+      accent-color modifier) - never its visibility, which is `stuckToBottom`
+      alone. Clicking it (or scrolling down to the bottom manually) still
+      releases a lingering permalink anchor from the URL, same as before.
+      Verified: full suite green (1181 tests - 2 new
+      `apps/chat/test/client.test.js` cases (button visible+unseen-styled
+      on landing on a permalink; button visible-but-not-unseen-styled
+      specifically from manual scroll-up alone, no new message needed) plus
+      renamed selectors/assertions across the existing scroll-follow
+      tests), `npm run build` bundles cleanly. The `ResizeObserver`
+      correction path itself has no jsdom-based test (jsdom implements no
+      `ResizeObserver` at all, same class of gap as `scrollIntoView`/
+      `scrollTo` elsewhere in this file's own tests) - verify visually in a
+      real browser with a slow-loading image attachment.
 

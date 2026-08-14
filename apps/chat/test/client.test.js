@@ -612,6 +612,28 @@ test('landing on a message permalink route (#/chat/<peer>/m/<id>) scrolls to and
   }
 });
 
+test('landing on a message permalink shows the persistent scroll-to-bottom button (not just when a new message arrives)', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  const target = await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'find me' });
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'later one' });
+
+  const container = makeContainer();
+  const stop = mount(container, {
+    qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe,
+    segments: ['chat', bob.myPub, 'm', target.id],
+  });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-bubble-row-highlight') !== null);
+    assert.equal(container.querySelector('.qu-chat-scroll-bottom-btn').hidden, false);
+    assert.equal(container.querySelector('.qu-chat-scroll-bottom-btn').classList.contains('qu-chat-scroll-bottom-btn-unseen'), false);
+  } finally {
+    stop();
+  }
+});
+
 test('landing on a permalink scrolls the target to the TOP of the view (block: "start"), not the center', async () => {
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');
@@ -667,7 +689,7 @@ test('scrolling back down to the bottom after a permalink releases the anchor fr
   }
 });
 
-test('a new message from someone else while NOT at the bottom does not scroll or rebuild the view - shows the "new message" banner instead', async () => {
+test('a new message from someone else while NOT at the bottom does not scroll or rebuild the view - marks the persistent scroll-to-bottom button as unseen instead', async () => {
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');
   await mirrorProfileInto(bob, alice.qu);
@@ -680,10 +702,11 @@ test('a new message from someone else while NOT at the bottom does not scroll or
     await waitFor(() => container.querySelector('.qu-chat-bubble-text')?.textContent.includes('first'));
     const firstRow = container.querySelector('.qu-chat-bubble-row');
     assert.ok(firstRow);
-    assert.equal(container.querySelector('.qu-chat-new-message-banner').hidden, true);
+    assert.equal(container.querySelector('.qu-chat-scroll-bottom-btn').hidden, true);
 
     const scroll = container.querySelector('.qu-chat-messages-scroll');
     simulateScroll(scroll, { scrollTop: 0, scrollHeight: 2000, clientHeight: 500 }); // release stuckToBottom
+    assert.equal(container.querySelector('.qu-chat-scroll-bottom-btn').hidden, false); // persistent button appears just from scrolling up, no new message needed
     const scrollToCalls = [];
     scroll.scrollTo = (opts) => scrollToCalls.push(opts);
 
@@ -695,7 +718,7 @@ test('a new message from someone else while NOT at the bottom does not scroll or
     await bob.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'second, from bob' });
     await mirrorThreadInto(bob, alice.qu, CHAT_SPACE_ID, roomId);
 
-    await waitFor(() => container.querySelector('.qu-chat-new-message-banner')?.hidden === false);
+    await waitFor(() => container.querySelector('.qu-chat-scroll-bottom-btn')?.classList.contains('qu-chat-scroll-bottom-btn-unseen'));
     assert.equal(scrollToCalls.length, 0); // never auto-scrolled away from what the user was reading
     // INCREMENTAL APPEND, not a full rebuild - the FIRST row's own DOM node
     // is the exact same element reference as before, never torn down.
@@ -730,7 +753,7 @@ test('a new message from someone else while AT the bottom scrolls smoothly to it
 
     await waitFor(() => container.querySelectorAll('.qu-chat-bubble-row').length === 2);
     assert.equal(container.querySelector('.qu-chat-bubble-row'), firstRow); // incremental append, first row untouched
-    assert.equal(container.querySelector('.qu-chat-new-message-banner').hidden, true);
+    assert.equal(container.querySelector('.qu-chat-scroll-bottom-btn').hidden, true);
     await waitFor(() => scrollToCalls.length > 0);
     assert.equal(scrollToCalls.at(-1).behavior, 'smooth');
   } finally {
@@ -738,7 +761,7 @@ test('a new message from someone else while AT the bottom scrolls smoothly to it
   }
 });
 
-test('clicking the "new message" banner scrolls to the bottom and hides it', async () => {
+test('clicking the persistent scroll-to-bottom button scrolls to the bottom and hides it', async () => {
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');
   await mirrorProfileInto(bob, alice.qu);
@@ -758,10 +781,10 @@ test('clicking the "new message" banner scrolls to the bottom and hides it', asy
     const bobRoomId = await bob.services.chat.ensureRoom(CHAT_SPACE_ID, alice.myPub);
     await bob.services.messages.postMessage(CHAT_SPACE_ID, bobRoomId, { body: 'second, from bob' });
     await mirrorThreadInto(bob, alice.qu, CHAT_SPACE_ID, roomId);
-    await waitFor(() => container.querySelector('.qu-chat-new-message-banner')?.hidden === false);
+    await waitFor(() => container.querySelector('.qu-chat-scroll-bottom-btn')?.hidden === false);
 
-    container.querySelector('.qu-chat-new-message-banner').click();
-    assert.equal(container.querySelector('.qu-chat-new-message-banner').hidden, true);
+    container.querySelector('.qu-chat-scroll-bottom-btn').click();
+    assert.equal(container.querySelector('.qu-chat-scroll-bottom-btn').hidden, true);
     assert.equal(scrollToCalls.at(-1).behavior, 'smooth');
   } finally {
     stop();
