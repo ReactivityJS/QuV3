@@ -62,6 +62,13 @@ export function createClientServices(qu, identity, { syncFetch = null, getGenera
   new CollectionEngine(qu);
   const messages = new MessageService(qu, identity, list, access, syncFetch, getGeneration);
   return {
+    // The raw, generic Service `contacts`/`favorites`/`bookmarks` below each
+    // narrow to one fixed flagType/entityKind pair - exposed directly too
+    // (first real client caller: apps/calendar's own "My Calendars" private
+    // star list, `flagType: 'calendar'`) for any app that needs a private
+    // flag shape those three named facades don't cover, without inventing a
+    // fourth single-purpose wrapper Service per new use.
+    flags,
     contacts: new ContactsService(flags, identity),
     favorites: new FavoritesService(flags),
     profile: new ProfileService(qu, identity, syncFetch, getGeneration),
