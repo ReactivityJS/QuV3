@@ -108,13 +108,22 @@
  * of plain buttons after it. See `updateActionBtn()`.
  *
  * VOICE MESSAGES: `MediaRecorder` (feature-detected - silently falls back
- * to a `voiceNotSupported` hint on a browser/device without it) records to
- * a `Blob`, uploaded through the EXACT SAME `services.assets.upload()` +
- * `message.extra.attachment` shape a file attachment already uses (see
- * `attachUpload`'s own `qu-asset-uploaded` handler) - so `<qu-asset
- * kind="auto">`'s existing MIME sniff (`@qu/ui`'s `asset-components.js`)
- * picks `audio` and renders a native `<audio controls>` player for it, zero
- * new rendering code needed. `message.extra.voice: true` only suppresses
+ * to a `voiceNotSupported` hint on a browser/device without it), with a real
+ * Start/Pause/Resume/Finish/Preview/Send flow ported from QuV2
+ * (https://github.com/ReactivityJS/QuV2) - tapping the mic starts recording
+ * and swaps the whole composer row for `voiceRecorderEl` (a pause/resume
+ * toggle, a finish button, a live elapsed-time readout, and a discard
+ * escape hatch); Finish does NOT send immediately, it stops into a PREVIEW
+ * state with a real `<audio controls>` player over the recorded `Blob` so
+ * the user can listen back before committing, with Send and Discard as the
+ * only two ways out. See the state machine starting at `recorderState`
+ * (near `startRecording()`). Only on Send is the `Blob` uploaded, through
+ * the EXACT SAME `services.assets.upload()` + `message.extra.attachment`
+ * shape a file attachment already uses (see `attachUpload`'s own
+ * `qu-asset-uploaded` handler) - so `<qu-asset kind="auto">`'s existing MIME
+ * sniff (`@qu/ui`'s `asset-components.js`) picks `audio` and renders a
+ * native `<audio controls>` player for the SENT message too, zero new
+ * rendering code needed there. `message.extra.voice: true` only suppresses
  * the redundant placeholder body text (`t('voiceMessage')`) next to the
  * player - see `renderMessageText()`.
  *
@@ -131,15 +140,21 @@
  * search with link/file/image/date filters, a three-state (sent/relay-
  * confirmed/read) tick - this app renders a simpler two-state (sent/read)
  * tick instead, since no client-side hook into `SyncEngine.waitForAck()` is
- * wired through `services` yet. A recorded voice message has no waveform/
- * duration preview (the native `<audio controls>` element's own scrubber
- * covers playback position) and no press-and-hold-to-record/slide-to-cancel
- * gesture (tap-to-start, tap-to-stop instead) - both real, valid follow-ups,
- * not attempted half-way here. Visual `@mention` highlighting inside a
+ * wired through `services` yet. A recorded voice message has no waveform
+ * scrubber (the native `<audio controls>` element's own scrubber covers
+ * playback position, both live during recording/preview and once sent) and
+ * no press-and-hold-to-record/slide-to-cancel gesture (tap-to-start, plus
+ * explicit Pause/Finish/Discard buttons, instead) - both real, valid
+ * follow-ups, not attempted half-way here. Visual `@mention` highlighting inside a
  * message body is also not rendered (the underlying `mentions` field still
  * drives push notification routing via this app's own `pushActions`, which
- * is the part that actually matters functionally) - only bare `http(s)://`
- * links are auto-linked, via `@qu/services`' shared `detectLinks()`.
+ * is the part that actually matters functionally) - bare `http(s)://` links
+ * are auto-linked via `@qu/services`' shared `detectLinks()`, and the FIRST
+ * link in a message also gets a preview card (`<qu-link-preview>`, `@qu/ui`'s
+ * `link-preview-components.js`) fetched relay-side from `@qu/relay`'s own
+ * `/link-preview` route - see that route's own doc comment
+ * (`packages/relay/src/link-preview.js`) for the SSRF-guarded server-side
+ * Open Graph unfurling this is built on.
  */
 import { watch, watchChildren } from '@qu/reactive';
 import { paths, formatActorLabel, getPrivate, putPrivate, getPrivateChildren, detectLinks, ChatService } from '@qu/services';
@@ -172,7 +187,10 @@ const DICT = {
     attachRemove: 'Remove attachment',
     insertEmoji: 'Insert emoji',
     recordVoice: 'Record a voice message',
-    voiceStop: 'Stop recording and send',
+    voicePause: 'Pause recording',
+    voiceResume: 'Resume recording',
+    voiceFinish: 'Finish recording',
+    voiceDiscard: 'Discard recording',
     voiceNotSupported: 'Voice messages aren\'t supported in this browser.',
     voiceMessage: '🎙️ Voice message',
     shareLocation: 'Share my location',
@@ -194,6 +212,7 @@ const DICT = {
     accept: 'Accept',
     decline: 'Decline',
     newMessagesBelow: '↓ New message',
+    scrollToBottomButton: '↓',
   },
   de: {
     title: 'Chats',
@@ -210,7 +229,10 @@ const DICT = {
     attachRemove: 'Anhang entfernen',
     insertEmoji: 'Emoji einfügen',
     recordVoice: 'Sprachnachricht aufnehmen',
-    voiceStop: 'Aufnahme beenden und senden',
+    voicePause: 'Aufnahme pausieren',
+    voiceResume: 'Aufnahme fortsetzen',
+    voiceFinish: 'Aufnahme abschließen',
+    voiceDiscard: 'Aufnahme verwerfen',
     voiceNotSupported: 'Sprachnachrichten werden in diesem Browser nicht unterstützt.',
     voiceMessage: '🎙️ Sprachnachricht',
     shareLocation: 'Meinen Standort teilen',
@@ -232,6 +254,7 @@ const DICT = {
     accept: 'Annehmen',
     decline: 'Ablehnen',
     newMessagesBelow: '↓ Neue Nachricht',
+    scrollToBottomButton: '↓',
   },
 };
 const { t } = createI18n(DICT);
@@ -309,9 +332,10 @@ const STYLE = `
      while there's unseen content to scroll down to. Hidden (display:none
      via [hidden]) removes it from flow entirely, so it never reserves
      space or affects scrollHeight while not shown. */
-  .qu-chat-new-message-banner { position: sticky; bottom: 1rem; left: 50%; transform: translateX(-50%); display: block; width: fit-content; padding: 0.4rem 0.9rem; border: none; border-radius: 999px; background: var(--qu-color-accent, #5b5bd6); color: white; font: inherit; font-size: 0.85em; cursor: pointer; box-shadow: 0 0.2rem 0.6rem rgba(0,0,0,0.25); }
-  .qu-chat-new-message-banner:hover { filter: brightness(1.08); }
-  .qu-chat-new-message-banner[hidden] { display: none; }
+  .qu-chat-scroll-bottom-btn { position: sticky; bottom: 1rem; left: 50%; transform: translateX(-50%); display: block; width: fit-content; padding: 0.4rem 0.9rem; border: none; border-radius: 999px; background: var(--qu-color-accent, #5b5bd6); color: white; font: inherit; font-size: 0.85em; cursor: pointer; box-shadow: 0 0.2rem 0.6rem rgba(0,0,0,0.25); }
+  .qu-chat-scroll-bottom-btn:hover { filter: brightness(1.08); }
+  .qu-chat-scroll-bottom-btn[hidden] { display: none; }
+  .qu-chat-scroll-bottom-btn-unseen { background: var(--qu-color-danger, #d64545); }
   .qu-chat-messages { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; max-width: 40rem; }
   .qu-chat-bubble-row { display: flex; }
   .qu-chat-bubble-row-mine { justify-content: flex-end; }
@@ -371,10 +395,24 @@ const STYLE = `
   .qu-chat-composer-input-wrap textarea:focus { outline: none; }
   .qu-chat-composer-action { flex-shrink: 0; width: 2.6rem; height: 2.6rem; border-radius: 50%; border: none; background: var(--qu-color-accent, #5b5bd6); color: white; cursor: pointer; font-size: 1.1em; line-height: 1; }
   .qu-chat-composer-action:disabled { opacity: 0.6; cursor: default; }
-  .qu-chat-composer-action-recording { background: var(--qu-color-danger, #d64545); }
   .qu-chat-pending-attachment { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85em; opacity: 0.85; }
   .qu-chat-pending-attachment[hidden] { display: none; }
   .qu-chat-pending-attachment button { background: none; border: none; cursor: pointer; opacity: 0.7; font: inherit; padding: 0; }
+  /* Voice recorder panel - REPLACES .qu-chat-composer (see mountRoomView()'s
+     own syncVoiceRecorderUI()) while recording/paused/previewing, same row
+     height/alignment as the normal composer so nothing jumps when it swaps
+     in and back out. */
+  .qu-chat-voice-recorder { display: flex; align-items: center; gap: 0.6rem; }
+  .qu-chat-voice-recorder[hidden] { display: none; }
+  .qu-chat-voice-recorder-dot { width: 0.6rem; height: 0.6rem; border-radius: 50%; background: var(--qu-color-danger, #d64545); flex-shrink: 0; animation: qu-chat-voice-dot-pulse 1.2s ease-in-out infinite; }
+  .qu-chat-voice-recorder-dot[hidden] { display: none; }
+  @keyframes qu-chat-voice-dot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+  .qu-chat-voice-recorder-time { font-variant-numeric: tabular-nums; opacity: 0.8; min-width: 2.6em; }
+  .qu-chat-voice-recorder-time[hidden] { display: none; }
+  .qu-chat-voice-preview-player { flex: 1; min-width: 0; height: 2.2rem; }
+  .qu-chat-voice-preview-player[hidden] { display: none; }
+  .qu-chat-voice-recorder .qu-chat-tool-btn[hidden] { display: none; }
+  .qu-chat-voice-recorder .qu-chat-composer-action[hidden] { display: none; }
   .qu-chat-new-group-form { display: flex; flex-direction: column; gap: 0.5rem; max-width: 26rem; }
   .qu-chat-new-group-form input[type="text"] { font: inherit; padding: 0.4rem 0.6rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); }
   .qu-chat-member-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; max-height: 16rem; overflow-y: auto; }
@@ -860,16 +898,19 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   messagesScroll.className = 'qu-chat-messages-scroll';
   const messagesRoot = document.createElement('div');
   // A SIBLING of messagesRoot, never touched by renderMessages()'s own
-  // clear-and-rebuild of messagesRoot - see that function's own "NEW
-  // MESSAGE BANNER" doc comment for what shows/hides it. position: sticky
-  // (see STYLE) keeps it pinned near the bottom of the VISIBLE scroll area
-  // regardless of where messagesRoot's own content currently scrolls to.
-  const newMessageBanner = document.createElement('button');
-  newMessageBanner.type = 'button';
-  newMessageBanner.className = 'qu-chat-new-message-banner';
-  newMessageBanner.textContent = t('newMessagesBelow');
-  newMessageBanner.hidden = true;
-  messagesScroll.append(messagesRoot, newMessageBanner);
+  // clear-and-rebuild of messagesRoot - see mountRoomView()'s own
+  // syncScrollToBottomButton() for what shows/hides/labels it. position:
+  // sticky (see STYLE) keeps it pinned near the bottom of the VISIBLE
+  // scroll area regardless of where messagesRoot's own content currently
+  // scrolls to. Shown whenever the user isn't at the bottom (scrolled up,
+  // OR landed on a permalink further up) - not just when a new message
+  // happens to arrive - per explicit ask: a persistent, always-available
+  // way back down, not a one-shot toast.
+  const scrollToBottomBtn = document.createElement('button');
+  scrollToBottomBtn.type = 'button';
+  scrollToBottomBtn.className = 'qu-chat-scroll-bottom-btn';
+  scrollToBottomBtn.hidden = true;
+  messagesScroll.append(messagesRoot, scrollToBottomBtn);
   const composerWrap = document.createElement('div');
   composerWrap.className = 'qu-chat-composer-wrap';
   const replyBanner = document.createElement('div');
@@ -920,7 +961,52 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   // used to (see that element's own doc comment in @qu/ui's
   // asset-components.js for the "text input barely visible" bug this and
   // that fix together close).
-  composerWrap.append(replyBanner, pendingAttachmentEl, composerRow);
+
+  // ---- voice recorder panel: REPLACES composerRow (not layered over it)
+  // while recording/paused/previewing - see the "voice messages" section
+  // below (near startRecording()) for the actual MediaRecorder state
+  // machine this panel is just the view for. Ported UX from QuV2
+  // (https://github.com/ReactivityJS/QuV2): Start (the normal mic
+  // actionBtn), Pause/Resume, Finish (stop into a PREVIEW, not an
+  // immediate send), a real playback preview, and an explicit Discard -
+  // never V3's old tap-to-record/tap-to-stop-and-send-immediately, which
+  // gave no chance to listen back or bail out before something already
+  // went out.
+  const voiceRecorderEl = document.createElement('div');
+  voiceRecorderEl.className = 'qu-chat-voice-recorder';
+  voiceRecorderEl.hidden = true;
+  const voiceDiscardBtn = document.createElement('button');
+  voiceDiscardBtn.type = 'button';
+  voiceDiscardBtn.className = 'qu-chat-tool-btn qu-chat-voice-discard-btn';
+  voiceDiscardBtn.textContent = '🗑️';
+  voiceDiscardBtn.title = t('voiceDiscard');
+  const voiceRecorderDot = document.createElement('span');
+  voiceRecorderDot.className = 'qu-chat-voice-recorder-dot';
+  const voiceRecorderTime = document.createElement('span');
+  voiceRecorderTime.className = 'qu-chat-voice-recorder-time';
+  voiceRecorderTime.textContent = '00:00';
+  const voicePreviewPlayer = document.createElement('audio');
+  voicePreviewPlayer.className = 'qu-chat-voice-preview-player';
+  voicePreviewPlayer.controls = true;
+  const voicePauseBtn = document.createElement('button');
+  voicePauseBtn.type = 'button';
+  voicePauseBtn.className = 'qu-chat-tool-btn qu-chat-voice-pause-btn';
+  const voiceFinishBtn = document.createElement('button');
+  voiceFinishBtn.type = 'button';
+  voiceFinishBtn.className = 'qu-chat-tool-btn qu-chat-voice-finish-btn';
+  voiceFinishBtn.textContent = '⏹';
+  voiceFinishBtn.title = t('voiceFinish');
+  const voiceSendBtn = document.createElement('button');
+  voiceSendBtn.type = 'button';
+  voiceSendBtn.className = 'qu-chat-composer-action qu-chat-voice-send-btn';
+  voiceSendBtn.textContent = '➤';
+  voiceSendBtn.title = t('send');
+  voiceRecorderEl.append(
+    voiceDiscardBtn, voiceRecorderDot, voiceRecorderTime, voicePreviewPlayer,
+    voicePauseBtn, voiceFinishBtn, voiceSendBtn,
+  );
+
+  composerWrap.append(replyBanner, pendingAttachmentEl, composerRow, voiceRecorderEl);
 
   roomView.append(heading, messagesScroll, composerWrap);
   container.appendChild(roomView);
@@ -946,6 +1032,10 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   // at the bottom to see it, never interrupting whatever they were reading.
   let pendingScrollTarget = target.messageId || null;
   let stuckToBottom = !pendingScrollTarget;
+  // Whether a message arrived while NOT stuck to the bottom - purely
+  // cosmetic (see syncScrollToBottomButton()'s own doc comment for what it
+  // changes about the button), never what decides the button's visibility.
+  let hasUnseenMessage = false;
   // See renderMessages()'s own doc comment at the publishReadReceipt() call
   // site - guards against a self-published read receipt re-triggering the
   // read-receipts watch below, which would re-run renderMessages(), forever.
@@ -961,12 +1051,55 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   let lastRenderedSnapshot = [];
   let hasRenderedOnce = false;
   const BOTTOM_FOLLOW_THRESHOLD_PX = 80;
-  function scrollToBottom(smooth) {
+  /**
+   * @param {boolean} smooth
+   * @param {boolean} [correcting] - true for a RESIZE-triggered correction
+   *   (see the ResizeObserver below), never a caller-visible "scroll to
+   *   bottom" action in its own right - skipped entirely once the user has
+   *   since scrolled away again, so a slow-loading image two messages back
+   *   can't yank them back down to "now" after they've already moved on.
+   */
+  function scrollToBottom(smooth, correcting = false) {
+    if (correcting && !stuckToBottom) return;
     if (messagesScroll.scrollTo) messagesScroll.scrollTo({ top: messagesScroll.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
     else messagesScroll.scrollTop = messagesScroll.scrollHeight; // jsdom (this repo's test DOM) has no scrollTo() at all
   }
-  function showNewMessageBanner() { newMessageBanner.hidden = false; }
-  function hideNewMessageBanner() { newMessageBanner.hidden = true; }
+  // TRUE BOTTOM, EVEN WITH LATE-LOADING CONTENT - scrollToBottom() above
+  // reads messagesScroll.scrollHeight AT CALL TIME, which understates the
+  // real total height whenever an attachment (an image, a video's first
+  // frame) is still downloading/decoding at that moment - <qu-asset>
+  // resolves and inserts its actual <img>/<video> asynchronously (see
+  // @qu/ui's own asset-components.js), well after this room's own
+  // renderMessage() already returned and appended the row. Confirmed live
+  // as "scrolling down doesn't reach all the way to the bottom" whenever an
+  // image message was involved. A ResizeObserver on messagesRoot catches
+  // ANY later height change - an image finishing layout, a video's
+  // metadata arriving, anything - without needing to know what caused it,
+  // and re-corrects the scroll position (instantly, not animated a second
+  // time) whenever that happens while still stuck to the bottom. Guarded
+  // for a host with no ResizeObserver at all (jsdom, this repo's test DOM,
+  // included) - the position is still CORRECT for text-only messages
+  // either way, this only ever matters for the async-attachment case.
+  const resizeObserver = typeof ResizeObserver !== 'undefined'
+    ? new ResizeObserver(() => scrollToBottom(false, true))
+    : null;
+  resizeObserver?.observe(messagesRoot);
+  /**
+   * Shows/hides/labels the persistent "scroll to bottom" button - visible
+   * whenever the user ISN'T at the bottom, for ANY reason (scrolled up
+   * themselves, or landed on a permalink further up), not just reactively
+   * when a new message happens to arrive - a persistent, always-available
+   * way back down, matching how every mainstream chat app already does
+   * this, rather than a one-shot "new message" toast that only appears
+   * sometimes. `hasUnseenMessage` only changes its LABEL/styling (a plain
+   * "↓" vs "↓ new message") - never its visibility, which is `stuckToBottom`
+   * alone.
+   */
+  function syncScrollToBottomButton() {
+    scrollToBottomBtn.hidden = stuckToBottom;
+    scrollToBottomBtn.textContent = hasUnseenMessage ? t('newMessagesBelow') : t('scrollToBottomButton');
+    scrollToBottomBtn.classList.toggle('qu-chat-scroll-bottom-btn-unseen', hasUnseenMessage);
+  }
   function roomHash() {
     return target.kind === 'group' ? `#/chat/g/${roomId}` : `#/chat/${target.peerPub}`;
   }
@@ -983,9 +1116,10 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     const plainHash = roomHash();
     if (window.location.hash !== plainHash) window.history.replaceState(null, '', plainHash);
   }
-  newMessageBanner.addEventListener('click', () => {
+  scrollToBottomBtn.addEventListener('click', () => {
     stuckToBottom = true;
-    hideNewMessageBanner();
+    hasUnseenMessage = false;
+    syncScrollToBottomButton();
     scrollToBottom(true);
     releasePermalinkAnchor();
   });
@@ -995,9 +1129,10 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
       // The user just scrolled themselves back down to "now" - see
       // releasePermalinkAnchor()'s own doc comment.
       releasePermalinkAnchor();
-      hideNewMessageBanner();
+      hasUnseenMessage = false;
     }
     stuckToBottom = nowAtBottom;
+    syncScrollToBottomButton();
   });
 
   let pendingAttachment = null;
@@ -1063,17 +1198,95 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   // message.extra.attachment shape a file attachment already uses, so
   // <qu-asset>'s own kind="auto" MIME sniff (AssetService.download()'s
   // meta.mime, see @qu/ui's asset-components.js) picks "audio" and renders
-  // a native <audio controls> player - zero new rendering code needed. ----
-  let isRecording = false;
+  // a native <audio controls> player - zero new rendering code needed.
+  //
+  // STATE MACHINE (ported UX from QuV2 - see voiceRecorderEl's own doc
+  // comment above): 'idle' -> 'recording' -> 'paused' <-> 'recording' ->
+  // (finish) -> 'preview' -> (send, which posts the message, or discard)
+  // -> 'idle'. 'recording'/'paused' can also go straight to 'idle' via
+  // discard, bypassing 'preview' entirely - the whole point of Pause/Stop
+  // being SEPARATE actions is that finishing a recording no longer sends
+  // it immediately; the user always gets a listen-back-or-bail-out step
+  // first. ----
+  let recorderState = 'idle'; // 'idle' | 'recording' | 'paused' | 'preview'
   let mediaRecorder = null;
+  let mediaStream = null;
   let recordedChunks = [];
+  let recordedBlob = null;
+  let recordedObjectUrl = null;
+  // Elapsed recording time is tracked as (accumulated ms from prior
+  // recording spans) + (time since the CURRENT span started), rather than
+  // just "time since start()", so pausing genuinely freezes the displayed
+  // timer instead of it continuing to climb while paused.
+  let recordingElapsedMs = 0;
+  let recordingSpanStartedAt = 0;
+  let recordingTimerHandle = null;
+  // Set right before calling mediaRecorder.stop() to discard the in-progress
+  // take entirely (see discardVoiceRecording()) - distinguishes that from a
+  // normal "finish -> preview" stop() inside the shared onstop handler,
+  // since MediaRecorder only ever exposes the one event either way.
+  let discardingOnStop = false;
+
+  function formatVoiceElapsed(ms) {
+    const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+    const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, '0');
+    const seconds = String(totalSeconds % 60).padStart(2, '0');
+    return `${minutes}:${seconds}`;
+  }
+
+  function currentVoiceElapsedMs() {
+    return recordingElapsedMs + (recorderState === 'recording' ? Date.now() - recordingSpanStartedAt : 0);
+  }
+
+  function startVoiceTimer() {
+    stopVoiceTimer();
+    voiceRecorderTime.textContent = formatVoiceElapsed(currentVoiceElapsedMs());
+    recordingTimerHandle = setInterval(() => {
+      voiceRecorderTime.textContent = formatVoiceElapsed(currentVoiceElapsedMs());
+    }, 250);
+  }
+
+  function stopVoiceTimer() {
+    clearInterval(recordingTimerHandle);
+    recordingTimerHandle = null;
+  }
+
+  function syncVoiceRecorderUI() {
+    const active = recorderState !== 'idle';
+    voiceRecorderEl.hidden = !active;
+    composerRow.hidden = active;
+    const isPreview = recorderState === 'preview';
+    voiceRecorderDot.hidden = recorderState !== 'recording';
+    voiceRecorderTime.hidden = isPreview;
+    voicePreviewPlayer.hidden = !isPreview;
+    voicePauseBtn.hidden = isPreview;
+    voiceFinishBtn.hidden = isPreview;
+    voiceSendBtn.hidden = !isPreview;
+    if (recorderState === 'paused') {
+      voicePauseBtn.textContent = '▶️';
+      voicePauseBtn.title = t('voiceResume');
+    } else {
+      voicePauseBtn.textContent = '⏸️';
+      voicePauseBtn.title = t('voicePause');
+    }
+  }
+
+  function resetVoiceRecorder() {
+    if (recordedObjectUrl) URL.revokeObjectURL(recordedObjectUrl);
+    recordedObjectUrl = null;
+    recordedBlob = null;
+    recordedChunks = [];
+    recordingElapsedMs = 0;
+    mediaRecorder = null;
+    voicePreviewPlayer.removeAttribute('src');
+    voiceRecorderTime.textContent = '00:00';
+    stopVoiceTimer();
+    recorderState = 'idle';
+    syncVoiceRecorderUI();
+  }
 
   function updateActionBtn() {
-    actionBtn.classList.toggle('qu-chat-composer-action-recording', isRecording);
-    if (isRecording) {
-      actionBtn.textContent = '⏹';
-      actionBtn.title = t('voiceStop');
-    } else if (composerInput.value.trim()) {
+    if (composerInput.value.trim()) {
       actionBtn.textContent = '➤';
       actionBtn.title = t('send');
     } else {
@@ -1096,15 +1309,74 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     } catch {
       return; // permission denied / no device - stays idle, nothing to recover
     }
+    mediaStream = stream;
     recordedChunks = [];
+    recordingElapsedMs = 0;
     mediaRecorder = new MediaRecorder(stream);
     mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunks.push(e.data); };
-    mediaRecorder.onstop = async () => {
-      for (const track of stream.getTracks()) track.stop();
-      const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
-      if (blob.size === 0 || !roomReady) return;
+    mediaRecorder.onstop = () => {
+      for (const track of mediaStream.getTracks()) track.stop();
+      mediaStream = null;
+      if (discardingOnStop) {
+        discardingOnStop = false;
+        resetVoiceRecorder();
+        return;
+      }
+      recordedBlob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+      if (recordedBlob.size === 0) {
+        resetVoiceRecorder();
+        return;
+      }
+      recordedObjectUrl = URL.createObjectURL(recordedBlob);
+      voicePreviewPlayer.src = recordedObjectUrl;
+      stopVoiceTimer();
+      recorderState = 'preview';
+      syncVoiceRecorderUI();
+    };
+    mediaRecorder.start();
+    recordingSpanStartedAt = Date.now();
+    recorderState = 'recording';
+    startVoiceTimer();
+    syncVoiceRecorderUI();
+  }
+
+  function togglePauseRecording() {
+    if (recorderState === 'recording') {
+      recordingElapsedMs += Date.now() - recordingSpanStartedAt;
+      mediaRecorder?.pause();
+      stopVoiceTimer();
+      recorderState = 'paused';
+      syncVoiceRecorderUI();
+    } else if (recorderState === 'paused') {
+      recordingSpanStartedAt = Date.now();
+      mediaRecorder?.resume();
+      recorderState = 'recording';
+      startVoiceTimer();
+      syncVoiceRecorderUI();
+    }
+  }
+
+  function finishRecording() {
+    if (recorderState !== 'recording' && recorderState !== 'paused') return;
+    mediaRecorder?.stop(); // onstop above moves recorderState to 'preview'
+  }
+
+  function discardVoiceRecording() {
+    if (recorderState === 'recording' || recorderState === 'paused') {
+      discardingOnStop = true;
+      stopVoiceTimer();
+      mediaRecorder?.stop();
+      return;
+    }
+    if (recorderState === 'preview') resetVoiceRecorder();
+  }
+
+  async function sendVoiceRecording() {
+    if (recorderState !== 'preview' || !recordedBlob || !roomReady) return;
+    voiceSendBtn.disabled = true;
+    try {
       const assetId = globalThis.crypto.randomUUID();
-      const file = new File([blob], `voice-${Date.now()}.webm`, { type: blob.type });
+      const file = new File([recordedBlob], `voice-${Date.now()}.webm`, { type: recordedBlob.type });
       const meta = await services.assets.upload(SPACE_ID, assetId, file, { readerPubs: memberPubs });
       stuckToBottom = true;
       await services.messages.postMessage(SPACE_ID, roomId, {
@@ -1112,21 +1384,18 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
         extra: { attachment: { assetId, ...meta }, voice: true },
       });
       setReplyingTo(null);
-    };
-    mediaRecorder.start();
-    isRecording = true;
-    updateActionBtn();
+      resetVoiceRecorder();
+    } finally {
+      voiceSendBtn.disabled = false;
+    }
   }
 
-  function stopRecording() {
-    isRecording = false;
-    mediaRecorder?.stop();
-    mediaRecorder = null;
-    updateActionBtn();
-  }
+  voicePauseBtn.addEventListener('click', togglePauseRecording);
+  voiceFinishBtn.addEventListener('click', finishRecording);
+  voiceDiscardBtn.addEventListener('click', discardVoiceRecording);
+  voiceSendBtn.addEventListener('click', sendVoiceRecording);
 
   actionBtn.addEventListener('click', () => {
-    if (isRecording) { stopRecording(); return; }
     if (composerInput.value.trim()) { sendTextMessage(); return; }
     startRecording();
   });
@@ -1270,10 +1539,12 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
       lastRenderedSnapshot = currentSnapshot;
       hasRenderedOnce = true;
       if (wasStuckToBottom) {
-        hideNewMessageBanner();
+        hasUnseenMessage = false;
+        syncScrollToBottomButton();
         scrollToBottom(true);
       } else {
-        showNewMessageBanner();
+        hasUnseenMessage = true;
+        syncScrollToBottomButton();
       }
       return;
     }
@@ -1302,7 +1573,11 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
       const targetRow = [...messagesRoot.querySelectorAll('.qu-chat-bubble-row')].find((li) => li.dataset.messageId === pendingScrollTarget);
       pendingScrollTarget = null;
       if (targetRow) {
-        hideNewMessageBanner();
+        // A permalink target is, by definition, not the bottom - the button
+        // must show (not hide) here so there's a way back down. See
+        // syncScrollToBottomButton()'s own doc comment: hasUnseenMessage
+        // only controls the label, never the visibility.
+        hasUnseenMessage = false;
         // jsdom (this repo's test DOM) has no layout engine and doesn't
         // implement scrollIntoView() at all - optional-chained so tests
         // exercise every line above/below it without stubbing it out.
@@ -1313,13 +1588,14 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
         targetRow.classList.add('qu-chat-bubble-row-highlight');
         setTimeout(() => targetRow.classList.remove('qu-chat-bubble-row-highlight'), 2000);
         stuckToBottom = false;
+        syncScrollToBottomButton();
         return;
       }
       effectiveStuck = true; // the permalinked message is gone (deleted?) - fall through to "show latest" below
     }
     stuckToBottom = effectiveStuck;
     if (effectiveStuck) {
-      hideNewMessageBanner();
+      hasUnseenMessage = false;
       // A smooth scroll (not an instant scrollTop jump) - most noticeable
       // right after returning from a permalink/highlighted message further
       // up: without this, "catching up" to the latest message read as an
@@ -1330,6 +1606,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     } else {
       messagesScroll.scrollTop = previousScrollTop;
     }
+    syncScrollToBottomButton();
   }
 
   /**
@@ -1509,7 +1786,8 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     if (!message.voice && !message.location) {
       const p = document.createElement('p');
       p.className = 'qu-chat-bubble-text';
-      for (const segment of detectLinks(message.body)) {
+      const linkSegments = detectLinks(message.body);
+      for (const segment of linkSegments) {
         if (segment.type === 'link') {
           const a = document.createElement('a');
           a.href = segment.value;
@@ -1522,6 +1800,18 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
         }
       }
       root.appendChild(p);
+      // Only the FIRST link in a message gets a preview card - Telegram/
+      // Slack/etc. all do this too, never one card per link (a message with
+      // several links would otherwise turn into a wall of cards). Renders
+      // nothing at all if the relay has nothing preview-worthy for it - see
+      // <qu-link-preview>'s own doc comment (@qu/ui's
+      // link-preview-components.js).
+      const firstLink = linkSegments.find((seg) => seg.type === 'link');
+      if (firstLink) {
+        const preview = document.createElement('qu-link-preview');
+        preview.setAttribute('url', firstLink.value);
+        root.appendChild(preview);
+      }
     }
     if (message.attachment) {
       const assetEl = document.createElement('qu-asset');
@@ -1666,6 +1956,10 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     if (presenceTimer) clearInterval(presenceTimer);
     stopComposerMentions();
     stopComposerEmoji();
+    resizeObserver?.disconnect();
+    stopVoiceTimer();
+    for (const track of mediaStream?.getTracks() ?? []) track.stop();
+    if (recordedObjectUrl) URL.revokeObjectURL(recordedObjectUrl);
   };
 }
 

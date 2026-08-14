@@ -2198,4 +2198,149 @@ own tests, built bottom-up per the dependency order in
       new `simulateScroll()` test helper, since jsdom's own `scrollHeight`/
       `clientHeight` are fixed getter-only 0s that can't otherwise express
       "near the bottom" vs "far from it"), `npm run build` bundles cleanly.
+- [x] **Chat scroll-to-bottom: true-bottom correction for late-loading
+      attachments, persistent scroll-to-bottom button** - the prior round's
+      banner still wasn't landing at the TRUE bottom whenever an image or
+      video attachment was involved: `scrollToBottom()` reads
+      `messagesScroll.scrollHeight` at call time, which understates the
+      real total height while `<qu-asset>` is still asynchronously
+      downloading/decoding the attachment - it resolves and inserts its
+      actual `<img>`/`<video>` well after the row's own render already
+      returned, growing the container's height a moment later with nothing
+      re-correcting the scroll position. Fixed with a `ResizeObserver` on
+      `messagesRoot` that re-corrects (instantly, not a second animated
+      scroll) whenever content resizes while still stuck to the bottom -
+      guarded off the moment the user has scrolled away again, so a
+      slow-loading image two messages back can't yank them back down to
+      "now" after they've already moved on; also guarded for hosts with no
+      `ResizeObserver` at all (jsdom, this repo's test DOM - the position
+      is already correct for text-only messages either way, this only ever
+      mattered for the async-attachment case).
+      **Per explicit ask**: the one-shot "new message" banner is now a
+      persistent "↓ scroll to bottom" button (`scrollToBottomBtn`,
+      `.qu-chat-scroll-bottom-btn`) shown whenever the user isn't at the
+      bottom for ANY reason - manually scrolled up, or landed on an older
+      permalinked message - not just reactively when a new message happens
+      to arrive, matching how Telegram/WhatsApp/Slack already do this
+      rather than a one-shot toast. A separate `hasUnseenMessage` flag only
+      changes the button's label/styling (plain "↓" vs "↓ New message",
+      the latter also getting a `.qu-chat-scroll-bottom-btn-unseen`
+      accent-color modifier) - never its visibility, which is `stuckToBottom`
+      alone. Clicking it (or scrolling down to the bottom manually) still
+      releases a lingering permalink anchor from the URL, same as before.
+      Verified: full suite green (1181 tests - 2 new
+      `apps/chat/test/client.test.js` cases (button visible+unseen-styled
+      on landing on a permalink; button visible-but-not-unseen-styled
+      specifically from manual scroll-up alone, no new message needed) plus
+      renamed selectors/assertions across the existing scroll-follow
+      tests), `npm run build` bundles cleanly. The `ResizeObserver`
+      correction path itself has no jsdom-based test (jsdom implements no
+      `ResizeObserver` at all, same class of gap as `scrollIntoView`/
+      `scrollTo` elsewhere in this file's own tests) - verify visually in a
+      real browser with a slow-loading image attachment.
+- [x] **Chat voice messages: real Start/Pause/Resume/Finish/Preview/Send
+      flow, ported from QuV2** - V3's voice messages were tap-to-record/
+      tap-to-stop-and-send-immediately, with no way to listen back or bail
+      out before something already went out; QuV2
+      (https://github.com/ReactivityJS/QuV2) had a real Start/Pause/Stop/
+      preview-before-send flow and the user asked for it ported over
+      unchanged. Rebuilt as an explicit state machine (`recorderState`:
+      `'idle' -> 'recording' <-> 'paused' -> 'preview' -> 'idle'`, with a
+      discard escape hatch from `'recording'`/`'paused'` straight back to
+      `'idle'`, bypassing preview entirely) driving a new `voiceRecorderEl`
+      panel that REPLACES the normal composer row (not layered over it)
+      while active - a live elapsed-time readout (frozen, not ticking,
+      while paused - tracked as accumulated-ms-from-prior-spans plus
+      time-since-current-span-started, not naively `Date.now() - startedAt`)
+      and Pause/Resume + Finish + Discard buttons during
+      recording/paused; Finish stops the `MediaRecorder` into `'preview'`
+      instead of sending - a real `<audio controls>` player over the
+      recorded `Blob` appears, with Send (uploads + posts the message, the
+      exact same `services.assets.upload()` + `message.extra.attachment`
+      path as before) and Discard as the only two ways out. Discarding
+      mid-recording needed a `discardingOnStop` flag to tell the shared
+      `MediaRecorder.onstop` handler "throw this take away" apart from a
+      normal finish-into-preview stop, since `MediaRecorder` only exposes
+      the one event either way. Teardown now also stops any still-open
+      `getUserMedia()` stream and revokes the preview's object URL if the
+      room view unmounts mid-recording/preview, closing a media-stream/
+      URL leak the old tap-to-stop flow didn't have room for.
+      Verified: full suite green (1183 tests - replaced the single old
+      immediate-send voice message test in
+      `apps/chat/test/client.test.js` with three covering the full
+      start/pause/resume/finish/preview/send path, mid-recording discard,
+      and preview-stage discard; extended the file's own `FakeMediaRecorder`
+      test double with `pause()`/`resume()`), `npm run build` bundles
+      cleanly. NOT built this round (still scoped as explicit follow-ups,
+      unchanged from this app's own top doc comment "SCOPE" section): a
+      waveform scrubber (the native `<audio controls>` element's own
+      scrubber already covers playback position, both live and once sent)
+      and a press-and-hold-to-record/slide-to-cancel gesture.
+- [x] **Link preview cards (title/description/image) for URLs in chat/forum
+      messages** - new `@qu/relay` module `link-preview.js`: server-side
+      Open Graph unfurling (`og:title`/`og:description`/`og:image`,
+      falling back to `<title>`/plain `<meta name="description">`),
+      exposed at `GET /link-preview?url=...` (`http-router.js`). Relay-side,
+      not a direct client fetch of the target site, for the two reasons
+      that rule that out: it would leak the VIEWER's own IP to every site
+      anyone ever pasted a link to, and it would hit CORS on most sites
+      that don't send permissive headers.
+      **SSRF was the actual hard part**: `url` is caller-supplied (a viewer
+      typed it into their own message), so fetching it server-side without
+      validation would let anyone probe this relay's OWN internal network
+      through it as an open proxy (a cloud metadata endpoint, `localhost`,
+      a private subnet's admin panels, ...). `assertSafeUrl()` rejects
+      non-http(s) schemes, embedded credentials, non-default ports, and -
+      the part a naive hostname-string check would miss - resolves the
+      hostname and rejects any IP in a private/loopback/link-local/
+      reserved range (checked against ALL resolved addresses, not just the
+      first, closing a DNS-rebinding-style multi-answer gap), re-validated
+      on every redirect hop with `redirect: 'manual'` so a public hostname
+      redirecting to a private address is still caught. Response reads are
+      capped at 512KB (a page's `<head>` never needs more) and a 5s
+      timeout. Results (and failures, at a shorter TTL) are cached
+      in-memory so the SAME url is fetched from the target site at most
+      once per TTL window, not once per viewer per render.
+      New `<qu-link-preview url="...">` custom element (`@qu/ui`'s new
+      `link-preview-components.js`, same `_mount()`/mount-token/
+      `injectStyle()` skeleton `<qu-asset>` already established) fetches
+      `/link-preview` (same-origin, no base-URL config needed - same
+      precedent as `apps/profile/client.js`'s own `/push/vapid-public-key`
+      call) with its own client-side cache layer on top of the relay's,
+      and renders NOTHING (never an empty card) when there's nothing
+      preview-worthy - a dead link, the feature disabled, or a page with
+      no title/description/image. Wired into both `apps/chat`'s and
+      `apps/forum`'s message rendering: only the FIRST link in a message
+      gets a card (Telegram/Slack precedent - a multi-link message
+      otherwise turns into a wall of cards). An admin kill switch
+      (`settings.linkPreviews.enabled`, default on) is exposed in
+      `apps/relay-admin` - deliberately NOT an allowlist/blocklist editor,
+      since the actual SSRF defense is a hard-coded safety floor, never
+      something an admin should be able to loosen through that UI.
+      **Incidental fix while touching `apps/forum/client.js`'s message
+      render path**: `renderMessages()` fired `MessageService.markRead()`
+      without awaiting it - a caller (or a test) that unmounted the view
+      right after seeing an unread badge render had no guarantee the read
+      marker had actually landed yet. Found because it made one of this
+      round's own new tests flaky; now awaited (still swallowing its own
+      errors exactly as before), closing a real, if narrow, race for any
+      caller relying on "this view saw it, so it's marked read by now".
+      Verified: full suite green (1228 tests - new
+      `packages/relay/test/link-preview.test.js` (27 cases: OG/title/
+      description parsing, HTML entity decoding, attribute-order
+      tolerance, the "nothing preview-worthy -> null" rule, every SSRF
+      guard listed above individually, redirect-chain following +
+      re-validation + the cap, content-type/status rejection, the body-size
+      cap, and both the positive and negative cache paths), extended
+      `packages/relay/test/http-router.test.js` (`/link-preview` route:
+      success shape, disabled-via-settings 404, missing-param 400) and
+      `packages/relay/test/relay-settings.test.js`, new
+      `packages/ui/test/link-preview-components.test.js` (8 cases: render,
+      hidden-on-nothing-worthy, hidden-on-fetch-failure, hidden-on-non-ok,
+      no-image variant, cross-element caching, no-url-attribute, and
+      attribute-change remount), extended `apps/chat/test/client.test.js`/
+      `apps/forum/test/client.test.js` (card presence + "only the first
+      link" + "no link, no card") and `apps/relay-admin/test/client.test.js`
+      (pre-population, save payload, the new section's own toggle-and-save
+      round trip), `npm run build` bundles cleanly.
 

@@ -10,3 +10,4 @@ export { HttpRouter } from './http-router.js';
 export { buildAppsCatalog } from './apps-catalog.js';
 export { publishAppsCatalog } from './apps-catalog-store.js';
 export { serveApps } from './static-apps.js';
+export { fetchLinkPreview, getLinkPreview } from './link-preview.js';

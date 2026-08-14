@@ -203,6 +203,38 @@ test('renders a posted message with the author\'s alias, body, and a data-messag
   }
 });
 
+test('a post body URL gets a <qu-link-preview url="..."> right after the text - only the FIRST of several links', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'see https://example.com/a and also https://example.com/b' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-message-text') !== null);
+    const previews = container.querySelectorAll('qu-link-preview');
+    assert.equal(previews.length, 1); // only the first link, not one per link
+    assert.equal(previews[0].getAttribute('url'), 'https://example.com/a');
+  } finally {
+    stop();
+  }
+});
+
+test('a post body with no URL gets no <qu-link-preview> at all', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'no links here' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-message-text')?.textContent.includes('no links here'));
+    assert.equal(container.querySelector('qu-link-preview'), null);
+  } finally {
+    stop();
+  }
+});
+
 test('the composer posts a message and clears the input afterward', async () => {
   const a = await freshEnv('Ada');
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());

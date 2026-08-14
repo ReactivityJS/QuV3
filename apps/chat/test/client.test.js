@@ -13,13 +13,17 @@ import { installDom, waitFor } from '@qu/ui/testing';
 installDom();
 const { mount, renderChatSettings, searchChat, resolveChatReference } = await import('../client.js');
 
-/** A minimal MediaRecorder test double - start()/stop() only, stop() synchronously fires ondataavailable then onstop, matching real MediaRecorder's own event order closely enough for startRecording()'s own handler. */
+/** A minimal MediaRecorder test double - start()/pause()/resume()/stop(), stop() synchronously fires ondataavailable then onstop, matching real MediaRecorder's own event order closely enough for startRecording()'s own handler. pause()/resume() just track state (this file's own tests only assert on the DOM state the client itself derives, not on MediaRecorder.state). */
 class FakeMediaRecorder {
   constructor() {
     this.mimeType = 'audio/webm';
+    this.state = 'inactive';
   }
-  start() {}
+  start() { this.state = 'recording'; }
+  pause() { this.state = 'paused'; }
+  resume() { this.state = 'recording'; }
   stop() {
+    this.state = 'inactive';
     this.ondataavailable?.({ data: new Blob(['fake voice bytes'], { type: 'audio/webm' }) });
     this.onstop?.();
   }
@@ -500,7 +504,7 @@ test('the composer action button morphs between mic (empty) and send (has text)'
   }
 });
 
-test('recording a voice message (mocked MediaRecorder) uploads it as an attachment and posts extra.voice: true, rendered as a native <qu-asset>', async () => {
+test('recording a voice message goes through start -> pause -> resume -> finish -> PREVIEW -> send (ported QuV2 flow), uploading it as an attachment and posting extra.voice: true, rendered as a native <qu-asset>', async () => {
   installVoiceMocks();
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');
@@ -512,19 +516,92 @@ test('recording a voice message (mocked MediaRecorder) uploads it as an attachme
     await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
     const actionBtn = container.querySelector('.qu-chat-composer-action');
     assert.equal(actionBtn.textContent, '🎙️');
+    assert.equal(container.querySelector('.qu-chat-voice-recorder').hidden, true);
 
     actionBtn.click(); // start recording
-    await waitFor(() => actionBtn.textContent === '⏹');
-    actionBtn.click(); // stop -> FakeMediaRecorder.stop() synchronously fires ondataavailable+onstop
+    await waitFor(() => container.querySelector('.qu-chat-voice-recorder').hidden === false);
+    // the normal composer (text input, mic/send button) is fully swapped
+    // out while recording - not layered underneath/alongside it.
+    assert.equal(container.querySelector('.qu-chat-composer').hidden, true);
+    assert.equal(container.querySelector('.qu-chat-voice-recorder-dot').hidden, false);
+
+    const pauseBtn = container.querySelector('.qu-chat-voice-pause-btn');
+    pauseBtn.click(); // pause
+    assert.equal(container.querySelector('.qu-chat-voice-recorder-dot').hidden, true); // no longer "live recording"
+    pauseBtn.click(); // resume
+    assert.equal(container.querySelector('.qu-chat-voice-recorder-dot').hidden, false);
+
+    container.querySelector('.qu-chat-voice-finish-btn').click(); // finish -> FakeMediaRecorder.stop() synchronously fires ondataavailable+onstop
+
+    // Finishing lands in PREVIEW, not an immediate send - a real playback
+    // player appears, nothing has been posted yet.
+    await waitFor(() => container.querySelector('.qu-chat-voice-preview-player').hidden === false);
+    assert.equal(container.querySelector('.qu-chat-voice-recorder-time').hidden, true);
+    const roomId = await ChatService.roomId([alice.myPub, bob.myPub]);
+    assert.equal((await alice.services.messages.listMessages(CHAT_SPACE_ID, roomId)).messages.length, 0);
+
+    container.querySelector('.qu-chat-voice-send-btn').click();
 
     await waitFor(() => container.querySelector('.qu-chat-bubble-attachment') !== null);
-    const roomId = await ChatService.roomId([alice.myPub, bob.myPub]);
     const { messages } = await alice.services.messages.listMessages(CHAT_SPACE_ID, roomId);
     assert.equal(messages.length, 1);
     assert.equal(messages[0].voice, true);
     assert.ok(messages[0].attachment?.assetId);
     // no redundant placeholder text line next to the player - see renderMessageText()'s own doc comment
     assert.equal(container.querySelector('.qu-chat-bubble-text'), null);
+    // back to the normal composer, ready for the next message
+    assert.equal(container.querySelector('.qu-chat-voice-recorder').hidden, true);
+    assert.equal(container.querySelector('.qu-chat-composer').hidden, false);
+  } finally {
+    stop();
+  }
+});
+
+test('discarding a voice recording mid-recording cancels it - no message posted, back to the normal composer', async () => {
+  installVoiceMocks();
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
+    container.querySelector('.qu-chat-composer-action').click(); // start recording
+    await waitFor(() => container.querySelector('.qu-chat-voice-recorder').hidden === false);
+
+    container.querySelector('.qu-chat-voice-discard-btn').click();
+
+    assert.equal(container.querySelector('.qu-chat-voice-recorder').hidden, true);
+    assert.equal(container.querySelector('.qu-chat-composer').hidden, false);
+    const roomId = await ChatService.roomId([alice.myPub, bob.myPub]);
+    assert.equal((await alice.services.messages.listMessages(CHAT_SPACE_ID, roomId)).messages.length, 0);
+  } finally {
+    stop();
+  }
+});
+
+test('discarding a voice recording during PREVIEW (after finishing) also cancels it - no message posted', async () => {
+  installVoiceMocks();
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
+    container.querySelector('.qu-chat-composer-action').click(); // start recording
+    await waitFor(() => container.querySelector('.qu-chat-voice-recorder').hidden === false);
+    container.querySelector('.qu-chat-voice-finish-btn').click();
+    await waitFor(() => container.querySelector('.qu-chat-voice-preview-player').hidden === false);
+
+    container.querySelector('.qu-chat-voice-discard-btn').click();
+
+    assert.equal(container.querySelector('.qu-chat-voice-recorder').hidden, true);
+    assert.equal(container.querySelector('.qu-chat-composer').hidden, false);
+    const roomId = await ChatService.roomId([alice.myPub, bob.myPub]);
+    assert.equal((await alice.services.messages.listMessages(CHAT_SPACE_ID, roomId)).messages.length, 0);
   } finally {
     stop();
   }
@@ -550,6 +627,48 @@ test('sharing location posts a message with extra.location, rendered as an OpenS
     const roomId = await ChatService.roomId([alice.myPub, bob.myPub]);
     const { messages } = await alice.services.messages.listMessages(CHAT_SPACE_ID, roomId);
     assert.deepEqual(messages[0].location, { lat: 52.52, lng: 13.405 });
+  } finally {
+    stop();
+  }
+});
+
+test('a message body URL is auto-linked AND gets a <qu-link-preview url="..."> right after the text - only the FIRST of several links', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'see https://example.com/a and also https://example.com/b' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-bubble-text a') !== null);
+    const links = [...container.querySelectorAll('.qu-chat-bubble-text a')];
+    assert.equal(links.length, 2);
+    assert.equal(links[0].href, 'https://example.com/a');
+    assert.equal(links[0].target, '_blank');
+    assert.equal(links[0].rel, 'noopener noreferrer');
+
+    const previews = container.querySelectorAll('qu-link-preview');
+    assert.equal(previews.length, 1); // only the first link, not one per link
+    assert.equal(previews[0].getAttribute('url'), 'https://example.com/a');
+  } finally {
+    stop();
+  }
+});
+
+test('a message body with no URL gets no <qu-link-preview> at all', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'no links here' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-bubble-text')?.textContent.includes('no links here'));
+    assert.equal(container.querySelector('qu-link-preview'), null);
   } finally {
     stop();
   }
@@ -612,6 +731,28 @@ test('landing on a message permalink route (#/chat/<peer>/m/<id>) scrolls to and
   }
 });
 
+test('landing on a message permalink shows the persistent scroll-to-bottom button (not just when a new message arrives)', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  const target = await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'find me' });
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'later one' });
+
+  const container = makeContainer();
+  const stop = mount(container, {
+    qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe,
+    segments: ['chat', bob.myPub, 'm', target.id],
+  });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-bubble-row-highlight') !== null);
+    assert.equal(container.querySelector('.qu-chat-scroll-bottom-btn').hidden, false);
+    assert.equal(container.querySelector('.qu-chat-scroll-bottom-btn').classList.contains('qu-chat-scroll-bottom-btn-unseen'), false);
+  } finally {
+    stop();
+  }
+});
+
 test('landing on a permalink scrolls the target to the TOP of the view (block: "start"), not the center', async () => {
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');
@@ -667,7 +808,7 @@ test('scrolling back down to the bottom after a permalink releases the anchor fr
   }
 });
 
-test('a new message from someone else while NOT at the bottom does not scroll or rebuild the view - shows the "new message" banner instead', async () => {
+test('a new message from someone else while NOT at the bottom does not scroll or rebuild the view - marks the persistent scroll-to-bottom button as unseen instead', async () => {
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');
   await mirrorProfileInto(bob, alice.qu);
@@ -680,10 +821,11 @@ test('a new message from someone else while NOT at the bottom does not scroll or
     await waitFor(() => container.querySelector('.qu-chat-bubble-text')?.textContent.includes('first'));
     const firstRow = container.querySelector('.qu-chat-bubble-row');
     assert.ok(firstRow);
-    assert.equal(container.querySelector('.qu-chat-new-message-banner').hidden, true);
+    assert.equal(container.querySelector('.qu-chat-scroll-bottom-btn').hidden, true);
 
     const scroll = container.querySelector('.qu-chat-messages-scroll');
     simulateScroll(scroll, { scrollTop: 0, scrollHeight: 2000, clientHeight: 500 }); // release stuckToBottom
+    assert.equal(container.querySelector('.qu-chat-scroll-bottom-btn').hidden, false); // persistent button appears just from scrolling up, no new message needed
     const scrollToCalls = [];
     scroll.scrollTo = (opts) => scrollToCalls.push(opts);
 
@@ -695,7 +837,7 @@ test('a new message from someone else while NOT at the bottom does not scroll or
     await bob.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'second, from bob' });
     await mirrorThreadInto(bob, alice.qu, CHAT_SPACE_ID, roomId);
 
-    await waitFor(() => container.querySelector('.qu-chat-new-message-banner')?.hidden === false);
+    await waitFor(() => container.querySelector('.qu-chat-scroll-bottom-btn')?.classList.contains('qu-chat-scroll-bottom-btn-unseen'));
     assert.equal(scrollToCalls.length, 0); // never auto-scrolled away from what the user was reading
     // INCREMENTAL APPEND, not a full rebuild - the FIRST row's own DOM node
     // is the exact same element reference as before, never torn down.
@@ -730,7 +872,7 @@ test('a new message from someone else while AT the bottom scrolls smoothly to it
 
     await waitFor(() => container.querySelectorAll('.qu-chat-bubble-row').length === 2);
     assert.equal(container.querySelector('.qu-chat-bubble-row'), firstRow); // incremental append, first row untouched
-    assert.equal(container.querySelector('.qu-chat-new-message-banner').hidden, true);
+    assert.equal(container.querySelector('.qu-chat-scroll-bottom-btn').hidden, true);
     await waitFor(() => scrollToCalls.length > 0);
     assert.equal(scrollToCalls.at(-1).behavior, 'smooth');
   } finally {
@@ -738,7 +880,7 @@ test('a new message from someone else while AT the bottom scrolls smoothly to it
   }
 });
 
-test('clicking the "new message" banner scrolls to the bottom and hides it', async () => {
+test('clicking the persistent scroll-to-bottom button scrolls to the bottom and hides it', async () => {
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');
   await mirrorProfileInto(bob, alice.qu);
@@ -758,10 +900,10 @@ test('clicking the "new message" banner scrolls to the bottom and hides it', asy
     const bobRoomId = await bob.services.chat.ensureRoom(CHAT_SPACE_ID, alice.myPub);
     await bob.services.messages.postMessage(CHAT_SPACE_ID, bobRoomId, { body: 'second, from bob' });
     await mirrorThreadInto(bob, alice.qu, CHAT_SPACE_ID, roomId);
-    await waitFor(() => container.querySelector('.qu-chat-new-message-banner')?.hidden === false);
+    await waitFor(() => container.querySelector('.qu-chat-scroll-bottom-btn')?.hidden === false);
 
-    container.querySelector('.qu-chat-new-message-banner').click();
-    assert.equal(container.querySelector('.qu-chat-new-message-banner').hidden, true);
+    container.querySelector('.qu-chat-scroll-bottom-btn').click();
+    assert.equal(container.querySelector('.qu-chat-scroll-bottom-btn').hidden, true);
     assert.equal(scrollToCalls.at(-1).behavior, 'smooth');
   } finally {
     stop();

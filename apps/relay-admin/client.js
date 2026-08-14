@@ -62,6 +62,15 @@
  * - a deliberate simplicity choice (no drag-and-drop library, no custom
  * HTML5 drag-event wiring to maintain) that's exactly as capable for a
  * short, few-item list like either point has today.
+ *
+ * LINK PREVIEWS SECTION: `settings.linkPreviews.enabled` is a plain on/off
+ * kill switch for `@qu/relay`'s `link-preview.js`/its `/link-preview` route
+ * - see that module's own doc comment for what it fetches and why (server-
+ * side Open Graph unfurling, so a viewer's own browser never fetches an
+ * arbitrary third-party URL directly). Deliberately no allowlist/blocklist
+ * editor here - the actual SSRF defense (refusing private/internal address
+ * ranges) is a hard-coded safety floor in that module, never something an
+ * admin should be able to loosen through this UI.
  */
 import { QuCrypto } from '@qu/core';
 import { createI18n } from '@qu/i18n';
@@ -113,6 +122,9 @@ const DICT = {
     chat: 'Chat',
     allowMemberCreateGroup: 'Members may create chat groups',
     chatHint: 'This relay\'s own admins can always create a chat group, regardless of this setting. 1:1 chats between contacts are never gated.',
+    linkPreviews: 'Link previews',
+    linkPreviewsEnabled: 'Fetch link preview cards (title/description/image) for URLs in messages',
+    linkPreviewsHint: 'This relay fetches each URL server-side (never the viewer\'s own browser) to build the preview, with built-in protection against being used to probe this relay\'s own internal network - that protection is not configurable here, only whether the feature runs at all.',
     flagTypes: 'Flag types',
     flagTypesHint: 'Read-only for now - edit via a future round.',
     orderMessageFooter: 'Message row order',
@@ -145,6 +157,9 @@ const DICT = {
     chat: 'Chat',
     allowMemberCreateGroup: 'Mitglieder dürfen Chat-Gruppen anlegen',
     chatHint: 'Admins dieses Relays dürfen unabhängig von dieser Einstellung immer eine Chat-Gruppe anlegen. 1:1-Chats zwischen Kontakten sind nie eingeschränkt.',
+    linkPreviews: 'Link-Vorschauen',
+    linkPreviewsEnabled: 'Vorschaukarten (Titel/Beschreibung/Bild) für Links in Nachrichten abrufen',
+    linkPreviewsHint: 'Dieses Relay ruft jede URL serverseitig ab (nie der Browser des Betrachters), mit eingebautem Schutz davor, damit das interne Netzwerk dieses Relays ausgekundschaftet zu werden - dieser Schutz ist hier nicht konfigurierbar, nur ob das Feature überhaupt aktiv ist.',
     flagTypes: 'Flag-Typen',
     flagTypesHint: 'Aktuell nur lesbar - Bearbeitung folgt in einer späteren Runde.',
     orderMessageFooter: 'Reihenfolge der Nachrichtenzeile',
@@ -382,6 +397,20 @@ export async function mount(container, { identity, services, apps }) {
   chatHint.textContent = t('chatHint');
   chatSection.append(chatTitle, allowCreateGroupLabel, chatHint);
 
+  // ---- Link previews ----
+  const linkPreviewsSection = document.createElement('section');
+  const linkPreviewsTitle = document.createElement('h2');
+  linkPreviewsTitle.textContent = t('linkPreviews');
+  const linkPreviewsEnabledLabel = document.createElement('label');
+  const linkPreviewsEnabledInput = document.createElement('input');
+  linkPreviewsEnabledInput.type = 'checkbox';
+  linkPreviewsEnabledInput.checked = settings.linkPreviews?.enabled ?? true;
+  linkPreviewsEnabledLabel.append(linkPreviewsEnabledInput, document.createTextNode(t('linkPreviewsEnabled')));
+  const linkPreviewsHint = document.createElement('p');
+  linkPreviewsHint.className = 'qu-relay-admin-hint';
+  linkPreviewsHint.textContent = t('linkPreviewsHint');
+  linkPreviewsSection.append(linkPreviewsTitle, linkPreviewsEnabledLabel, linkPreviewsHint);
+
   // ---- Message row / menu order ----
   const orderSections = KNOWN_ORDER_POINTS.map(({ point, titleKey, defaultOrder, nativeItems }) => {
     const resolvedNativeItems = nativeItems.map((n) => ({ id: n.id, label: t(n.labelKey) }));
@@ -414,7 +443,7 @@ export async function mount(container, { identity, services, apps }) {
   status.className = 'qu-relay-admin-status';
   status.hidden = true;
 
-  form.append(generalSection, appsSection, channelsSection, chatSection, ...orderSections.map((o) => o.section), flagTypesSection, saveBtn, status);
+  form.append(generalSection, appsSection, channelsSection, chatSection, linkPreviewsSection, ...orderSections.map((o) => o.section), flagTypesSection, saveBtn, status);
   bodyRoot.appendChild(form);
 
   form.addEventListener('submit', async (e) => {
@@ -429,6 +458,7 @@ export async function mount(container, { identity, services, apps }) {
         disabledApps: newDisabledApps,
         channels: { allowMemberCreate: allowCreateInput.checked, allowMemberRestricted: allowRestrictedInput.checked },
         chat: { allowMemberCreateGroup: allowCreateGroupInput.checked },
+        linkPreviews: { enabled: linkPreviewsEnabledInput.checked },
         // extensionOrder replaces the WHOLE map on save (see relay-settings.js's
         // own doc comment on that field) - every known point from
         // KNOWN_ORDER_POINTS is always included here, so a point this form

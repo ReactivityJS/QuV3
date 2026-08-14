@@ -1048,7 +1048,13 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     if (stopped || token !== renderToken) return;
     const { messages } = await services.messages.listMessages(SPACE_ID, topicId);
     if (stopped || token !== renderToken) return;
-    if (messages.length) services.messages.markRead(SPACE_ID, topicId).catch(() => {});
+    // Awaited (not fire-and-forget) - a caller/test that unmounts this view
+    // right after seeing the unread badge render must be able to rely on
+    // the read marker having actually landed by then (see this file's own
+    // "UNREAD-BY-ME" tests, apps/forum/test/client.test.js), not on
+    // whatever happened to still be in flight when this view tore down.
+    if (messages.length) await services.messages.markRead(SPACE_ID, topicId).catch(() => {});
+    if (stopped || token !== renderToken) return;
 
     clearMessageWatchers();
     messagesRoot.textContent = '';
@@ -1224,6 +1230,20 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
       p.textContent = message.body;
     }
     root.appendChild(p);
+    // Only the FIRST link in a post gets a preview card - see
+    // <qu-link-preview>'s own doc comment (@qu/ui's
+    // link-preview-components.js) for why (relay-proxied, IP/CORS-safe) and
+    // why just the first (never a wall of cards for a multi-link post).
+    // `message.body` (the plain, pre-formatting text), not `formattedHtml` -
+    // `detectLinks()` needs the raw URL text, and this is the exact same
+    // source `classifyMessageContentType()` below already reads for its own
+    // 'link' classification.
+    const firstLink = detectLinks(message.body ?? '').find((seg) => seg.type === 'link');
+    if (firstLink) {
+      const preview = document.createElement('qu-link-preview');
+      preview.setAttribute('url', firstLink.value);
+      root.appendChild(preview);
+    }
     if (message.attachment) {
       const assetEl = document.createElement('qu-asset');
       assetEl.className = 'qu-forum-message-attachment';

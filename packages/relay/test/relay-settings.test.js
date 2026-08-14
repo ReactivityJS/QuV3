@@ -36,6 +36,13 @@ test('saveSettings() with a rateLimits patch merges it into the default rateLimi
   assert.deepEqual(result.rateLimits, { maxMessagesPerMinute: 30 });
 });
 
+test('saveSettings() can turn link previews off - an admin kill switch for link-preview.js\'s outbound fetches', async () => {
+  const qu = freshQu();
+  await saveSettings(qu, { linkPreviews: { enabled: false } });
+  const result = await getSettings(qu);
+  assert.deepEqual(result.linkPreviews, { enabled: false });
+});
+
 test('a second saveSettings() call merges onto the FIRST persisted state, not the hardcoded defaults', async () => {
   const qu = freshQu();
   await saveSettings(qu, { defaultLocale: 'de' });

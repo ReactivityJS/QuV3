@@ -12,7 +12,7 @@ function fakeLoader(manifests = []) {
   return { listManifests: () => manifests.map((manifest) => ({ manifest, originUrl: null })) };
 }
 
-async function freshEnv({ manifests = [], serveShell = false, shellDir = null } = {}) {
+async function freshEnv({ manifests = [], serveShell = false, shellDir = null, getLinkPreviewImpl } = {}) {
   const appsDir = await mkdtemp(join(tmpdir(), 'qu-http-router-apps-'));
   const qu = new QuStore();
   qu.mount('store', new MemoryStoreAdapter());
@@ -26,7 +26,7 @@ async function freshEnv({ manifests = [], serveShell = false, shellDir = null } 
     handleDataImport(req, res) { this.dataImportCalls++; res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}'); },
   };
   const loader = fakeLoader(manifests);
-  const router = new HttpRouter(qu, adminHttp, loader, { adminPubs: ['admin-pub-1'], appsDir, serveShell, shellDir, state });
+  const router = new HttpRouter(qu, adminHttp, loader, { adminPubs: ['admin-pub-1'], appsDir, serveShell, shellDir, state, getLinkPreviewImpl });
 
   const httpServer = createServer((req, res) => router.handle(req, res));
   await new Promise((resolve) => httpServer.listen(0, resolve));
@@ -125,6 +125,55 @@ test('GET /push/vapid-public-key returns the public key once state.vapidKeys is 
     env.state.vapidKeys = { publicKey: 'the-public-key' };
     const res = await fetch(`http://localhost:${env.port}/push/vapid-public-key`);
     assert.deepEqual(await res.json(), { publicKey: 'the-public-key' });
+  } finally {
+    await env.teardown();
+  }
+});
+
+test('GET /link-preview?url=... returns the injected getLinkPreview() result, with CORS + a cache-control header', async () => {
+  const calls = [];
+  const env = await freshEnv({
+    getLinkPreviewImpl: async (url) => { calls.push(url); return { url, title: 'A Title', description: 'A description', image: 'https://example.com/img.png', siteName: 'example.com' }; },
+  });
+  try {
+    const res = await fetch(`http://localhost:${env.port}/link-preview?url=${encodeURIComponent('https://example.com/article')}`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('access-control-allow-origin'), '*');
+    assert.ok(res.headers.get('cache-control')?.includes('max-age'));
+    assert.deepEqual(await res.json(), { url: 'https://example.com/article', title: 'A Title', description: 'A description', image: 'https://example.com/img.png', siteName: 'example.com' });
+    assert.deepEqual(calls, ['https://example.com/article']);
+  } finally {
+    await env.teardown();
+  }
+});
+
+test('GET /link-preview?url=... returns an all-null shape (not an error) when getLinkPreview() resolves null', async () => {
+  const env = await freshEnv({ getLinkPreviewImpl: async () => null });
+  try {
+    const res = await fetch(`http://localhost:${env.port}/link-preview?url=${encodeURIComponent('https://example.com/dead')}`);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { url: 'https://example.com/dead', title: null, description: null, image: null, siteName: null });
+  } finally {
+    await env.teardown();
+  }
+});
+
+test('GET /link-preview with no url query parameter is a 400', async () => {
+  const env = await freshEnv({ getLinkPreviewImpl: async () => { throw new Error('must not be called'); } });
+  try {
+    const res = await fetch(`http://localhost:${env.port}/link-preview`);
+    assert.equal(res.status, 400);
+  } finally {
+    await env.teardown();
+  }
+});
+
+test('GET /link-preview is a 404 once an admin has turned linkPreviews.enabled off, and never calls getLinkPreview()', async () => {
+  const env = await freshEnv({ getLinkPreviewImpl: async () => { throw new Error('must not be called'); } });
+  try {
+    await saveSettings(env.qu, { linkPreviews: { enabled: false } });
+    const res = await fetch(`http://localhost:${env.port}/link-preview?url=${encodeURIComponent('https://example.com/x')}`);
+    assert.equal(res.status, 404);
   } finally {
     await env.teardown();
   }
