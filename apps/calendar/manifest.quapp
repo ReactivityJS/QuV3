@@ -1,0 +1,20 @@
+{
+  "name": "calendar",
+  "version": "1.0.0",
+  "kind": "app",
+  "main": "./index.js",
+  "clientMain": "./dist/client.js",
+  "label": "Calendar",
+  "icon": "📅",
+  "navOrder": 14,
+  "spaceId": "ff73365b-144a-4285-8e98-ac7f9928a95f",
+  "requires": [],
+  "pushActions": [
+    { "id": "invite", "label": "Calendar invitations", "type": "create" },
+    { "id": "eventChange", "label": "Shared calendar changes", "type": "update" },
+    { "id": "guestInvite", "label": "Event invitations", "type": "create" }
+  ],
+  "contributes": [
+    { "point": "content.messageMenu", "export": "createEventMenuItem", "kind": "menu", "order": 40 }
+  ]
+}
