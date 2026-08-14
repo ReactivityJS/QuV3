@@ -1507,21 +1507,28 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
       replyEl.textContent = parent?.body ?? t('originalMessageUnavailable');
       root.appendChild(replyEl);
     }
-    const p = document.createElement('p');
-    p.className = 'qu-forum-message-text';
-    if (message.formattedHtml) {
-      p.innerHTML = message.formattedHtml; // see this file's own doc comment - escaped/whitelisted server-side, safe to insert
-    } else {
-      // Defensive: `formattedHtml` is only ever set when the topic's own
-      // thread config includes 'markdown' formatting (see `applyFormatting()`,
-      // `@qu/services`) - every topic THIS app creates always does (see
-      // `ChannelService.createTopic()`'s own doc comment on why a restricted
-      // topic still gets 'markdown', not just 'mentions'), but this falls
-      // back to plain (still-safe, `textContent`-set) text rather than
-      // silently rendering an empty body if that ever stops being true.
-      p.textContent = message.body;
+    // Skipped entirely for a caption-less attachment post (an empty body is
+    // only possible today via an attachment - see actionBtn's own click
+    // handler) - same reasoning apps/chat/client.js's own renderMessageText()
+    // already applies for voice/location messages: an empty paragraph adds
+    // nothing, the attachment below is the actual content.
+    if (message.body) {
+      const p = document.createElement('p');
+      p.className = 'qu-forum-message-text';
+      if (message.formattedHtml) {
+        p.innerHTML = message.formattedHtml; // see this file's own doc comment - escaped/whitelisted server-side, safe to insert
+      } else {
+        // Defensive: `formattedHtml` is only ever set when the topic's own
+        // thread config includes 'markdown' formatting (see `applyFormatting()`,
+        // `@qu/services`) - every topic THIS app creates always does (see
+        // `ChannelService.createTopic()`'s own doc comment on why a restricted
+        // topic still gets 'markdown', not just 'mentions'), but this falls
+        // back to plain (still-safe, `textContent`-set) text rather than
+        // silently rendering an empty body if that ever stops being true.
+        p.textContent = message.body;
+      }
+      root.appendChild(p);
     }
-    root.appendChild(p);
     // Only the FIRST link in a post gets a preview card - see
     // <qu-link-preview>'s own doc comment (@qu/ui's
     // link-preview-components.js) for why (relay-proxied, IP/CORS-safe) and
@@ -1599,16 +1606,24 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
 
   actionBtn.addEventListener('click', async () => {
     const body = composerInput.value.trim();
-    if (!body) return;
+    // A caption is optional whenever there's an attachment to post instead
+    // - same "content doesn't have to be text" rule apps/chat/client.js's
+    // own sendTextMessage() already applies for its voice messages; only a
+    // genuinely empty post (no text AND no attachment) is refused.
+    if (!body && !pendingAttachment) return;
     actionBtn.disabled = true;
     try {
-      const extra = pendingAttachment ? { attachment: pendingAttachment } : {};
-      //await services.messages.postMessage(SPACE_ID, topicId, { body, extra });
+      const attachment = pendingAttachment;
+      const extra = attachment ? { attachment } : {};
       await services.messages.postMessage(SPACE_ID, topicId, { body, replyTo: replyingTo?.id ?? null, extra });
       stuckToBottom = true; // sending a post always means "show me what I just sent" - see apps/chat/client.js's own identical rule
       composerInput.value = '';
       clearPendingAttachment();
       setReplyingTo(null);
+      // Only now, once the attachment is genuinely part of a sent post,
+      // does the (deferred) sync-out verification phase start - see
+      // <qu-asset-upload>'s own doc comment on confirmSent() for why.
+      if (attachment) attachUpload.confirmSent(attachment.assetId);
     } finally {
       actionBtn.disabled = false;
     }

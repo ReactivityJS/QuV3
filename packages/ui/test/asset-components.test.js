@@ -80,19 +80,65 @@ test('<qu-asset-upload>: picking a file uploads it and fires qu-asset-uploaded w
   assert.equal(service.uploadCalls[0].file, file);
 });
 
-test('<qu-asset-upload>: fires qu-asset-synced once sync verification completes', async () => {
+test('<qu-asset-upload>: sync-out verification is deferred - picking a file alone never fires qu-asset-synced', async () => {
   const service = fakeAssetService();
   const container = makeContainer(service);
   const el = document.createElement('qu-asset-upload');
   el.setAttribute('space-id', 'gallery');
   container.appendChild(el);
 
+  let uploaded = null;
   let syncDetail = null;
+  el.addEventListener('qu-asset-uploaded', (e) => { uploaded = e.detail; });
   el.addEventListener('qu-asset-synced', (e) => { syncDetail = e.detail; });
   pickFile(el, new File(['hello'], 'x.txt', { type: 'text/plain' }));
 
+  await waitFor(() => uploaded !== null);
+  const status = el.querySelector('.qu-asset-upload-progress');
+  await waitFor(() => status.hidden === true);
+  assert.equal(service.uploadCalls.length, 1);
+  // no verifySyncOut() call yet, and the local-save box is hidden again -
+  // the confusing "stuck at 0%" bar this used to leave floating over the
+  // composer right after picking a file (before the message is even sent).
+  assert.equal(syncDetail, null);
+});
+
+test('<qu-asset-upload>.confirmSent(assetId) starts the deferred sync-out phase and fires qu-asset-synced once it completes', async () => {
+  const service = fakeAssetService();
+  const container = makeContainer(service);
+  const el = document.createElement('qu-asset-upload');
+  el.setAttribute('space-id', 'gallery');
+  container.appendChild(el);
+
+  let uploaded = null;
+  let syncDetail = null;
+  el.addEventListener('qu-asset-uploaded', (e) => { uploaded = e.detail; });
+  el.addEventListener('qu-asset-synced', (e) => { syncDetail = e.detail; });
+  pickFile(el, new File(['hello'], 'x.txt', { type: 'text/plain' }));
+  await waitFor(() => uploaded !== null);
+
+  await el.confirmSent(uploaded.assetId);
   await waitFor(() => syncDetail !== null);
   assert.equal(syncDetail.synced, true);
+  assert.equal(syncDetail.assetId, uploaded.assetId);
+});
+
+test('<qu-asset-upload>.confirmSent(assetId) is a no-op when the assetId doesn\'t match the pending upload (a stale confirm racing a newer pick)', async () => {
+  const service = fakeAssetService();
+  const container = makeContainer(service);
+  const el = document.createElement('qu-asset-upload');
+  el.setAttribute('space-id', 'gallery');
+  container.appendChild(el);
+
+  let uploaded = null;
+  let syncDetail = null;
+  el.addEventListener('qu-asset-uploaded', (e) => { uploaded = e.detail; });
+  el.addEventListener('qu-asset-synced', (e) => { syncDetail = e.detail; });
+  pickFile(el, new File(['hello'], 'x.txt', { type: 'text/plain' }));
+  await waitFor(() => uploaded !== null);
+
+  await el.confirmSent('some-other-assetId-entirely');
+  assert.equal(syncDetail, null); // ignored - not the asset that was actually confirmed sent
 });
 
 test('<qu-asset-upload>: without a configured syncFetch, no sync phase runs (progress hides right after the local save)', async () => {

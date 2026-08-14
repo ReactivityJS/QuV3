@@ -175,6 +175,49 @@ test('a 1:1 room derives the SAME roomId for both members, and messages round-tr
   }
 });
 
+test('attaching a file via the composer\'s <qu-asset-upload> morphs the action button to Send and posts with no caption required', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    // Waits for the room itself to be ready (not just the composer DOM to
+    // exist) - same convention the "derives the SAME roomId" test above
+    // uses, needed here because attaching a file does real, sometimes-slow
+    // crypto work that can otherwise race ahead of roomReady under a loaded
+    // full-suite run, leaving the click a silent no-op (sendTextMessage()
+    // bails out early while !roomReady).
+    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
+    const actionBtn = container.querySelector('.qu-chat-composer-action');
+    assert.equal(actionBtn.textContent, '🎙️'); // no text, no attachment yet - mic
+
+    const fileInput = container.querySelector('qu-asset-upload input[type=file]');
+    const file = new File(['fake image bytes'], 'photo.png', { type: 'image/png' });
+    Object.defineProperty(fileInput, 'files', { value: [file], configurable: true });
+    fileInput.dispatchEvent(new window.Event('change'));
+    // Real Ed25519/SHA-256 work under it - see apps/forum/test/client.test.js's
+    // own identical timeout note on its attachment test.
+    await waitFor(() => container.querySelector('.qu-chat-pending-attachment')?.hidden === false, { timeout: 5000 });
+    assert.equal(actionBtn.textContent, '➤'); // an attachment alone is enough to morph to Send
+
+    actionBtn.click(); // no caption typed at all
+    await waitFor(() => container.querySelector('.qu-chat-bubble-attachment') !== null, { timeout: 5000 });
+
+    const roomId = await ChatService.roomId([alice.myPub, bob.myPub]);
+    const { messages } = await alice.services.messages.listMessages(CHAT_SPACE_ID, roomId);
+    assert.equal(messages[0].body, '');
+    assert.equal(messages[0].attachment.name, 'photo.png');
+    assert.equal(container.querySelector('.qu-chat-pending-attachment').hidden, true);
+    // No stray empty bubble-text paragraph for the caption-less body.
+    assert.equal(container.querySelector('.qu-chat-bubble-text'), null);
+    assert.equal(actionBtn.textContent, '🎙️'); // back to mic once the attachment was sent and cleared
+  } finally {
+    stop();
+  }
+});
+
 test('editing OWN message updates its bubble text', async () => {
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');

@@ -63,8 +63,9 @@
  * (a plain object mutation and a DOM attribute write, no re-import, no DOM
  * churn) and avoids a second, ad hoc "watch the route" mechanism.
  */
-import { watchChildren } from '@qu/reactive';
+import { watch, watchChildren } from '@qu/reactive';
 import { paths, formatActorLabel } from '@qu/services';
+import { actorPath } from '@qu/identity';
 import { createI18n } from '@qu/i18n';
 import { injectStyle, ensureTheme, renderAvatarOrAsset } from '@qu/ui';
 import { ExtensionPointHost } from '@qu/foundation';
@@ -326,6 +327,7 @@ export function mountHeader(container, { qu, services, adminPubs = [], subscribe
   window.addEventListener('qu:flag-changed', onFlagChanged);
 
   let off = null;
+  let offBadge = null;
   let badgeToken = 0;
   async function updateBadge(spaceId) {
     const token = ++badgeToken;
@@ -339,22 +341,48 @@ export function mountHeader(container, { qu, services, adminPubs = [], subscribe
     badge.textContent = unread > 9 ? '9+' : String(unread);
   }
 
+  // Kept as a mutable reference, not the original `avatarSlot` constant:
+  // every re-render below REPLACES the mounted avatar element wholesale
+  // (renderAvatarOrAsset() returns a fresh node each time), so the node to
+  // replace next has to track whatever is actually in the DOM right now.
+  let mountedAvatarEl = avatarSlot;
+  function applyOwnProfile(profile) {
+    if (stopped) return;
+    const label = formatActorLabel(myPub, profile ?? {});
+    nameSlot.textContent = label;
+    userBtn.title = `${label} — ${t('menu')}`;
+    const nextAvatarEl = renderAvatarOrAsset(myPub, label, profile?.avatar, { size: '1.7rem' });
+    mountedAvatarEl.replaceWith(nextAvatarEl);
+    mountedAvatarEl = nextAvatarEl;
+  }
+
   (async () => {
     myPub = await myPubPromise;
     if (stopped) return;
 
-    const profile = (await services.profile.getOwnProfile()) ?? {};
+    applyOwnProfile(await services.profile.getOwnProfile());
     if (stopped) return;
-    const label = formatActorLabel(myPub, profile);
-    nameSlot.textContent = label;
-    userBtn.title = `${label} — ${t('menu')}`;
-    avatarSlot.replaceWith(renderAvatarOrAsset(myPub, label, profile.avatar, { size: '1.7rem' }));
+
+    // Live-updates the name/avatar shown here the moment this identity's
+    // own alias/avatar changes (e.g. edited in apps/profile's Settings, on
+    // THIS device or synced in from another one) - watch() re-delivers on
+    // every write to the public profile document, no reload needed. Goes
+    // back through getOwnProfile() rather than reading the watched value
+    // directly: the stored document is a signed `{profile, signature}`
+    // envelope (see @qu/identity's `publishMainProfile()`/`getProfile()`),
+    // and getOwnProfile() is where that verification + private-field merge
+    // already lives - watch() here is only the "something changed, go
+    // re-resolve" trigger, same division of labor as `updateBadge()` below.
+    off = watch(qu, actorPath(myPub, 'profile'), () => {
+      if (stopped) return;
+      services.profile.getOwnProfile().then(applyOwnProfile);
+    }, { initial: false, syncFetch });
 
     const spaceId = paths.notificationsSpaceId(myPub);
     // Defense in depth, same reasoning apps/notifications/client.js's own
     // subscribe?.() call already documents.
     subscribe?.(paths.spacePath(spaceId));
-    off = watchChildren(qu, paths.threadMessagesParentPath(spaceId, paths.NOTIFICATIONS_THREAD_ID), () => updateBadge(spaceId), { syncFetch });
+    offBadge = watchChildren(qu, paths.threadMessagesParentPath(spaceId, paths.NOTIFICATIONS_THREAD_ID), () => updateBadge(spaceId), { syncFetch });
   })();
 
   return () => {
@@ -364,5 +392,6 @@ export function mountHeader(container, { qu, services, adminPubs = [], subscribe
     window.removeEventListener('qu:flag-changed', onFlagChanged);
     window.removeEventListener('hashchange', updateRouteContext);
     off?.();
+    offBadge?.();
   };
 }

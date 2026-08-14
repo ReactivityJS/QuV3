@@ -1166,6 +1166,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     pendingAttachment = null;
     pendingAttachmentEl.hidden = true;
     pendingAttachmentEl.textContent = '';
+    updateActionBtn();
   }
   attachUpload.addEventListener('qu-asset-uploaded', (e) => {
     pendingAttachment = { assetId: e.detail.assetId, ...e.detail.meta };
@@ -1179,6 +1180,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     removeBtn.title = t('attachRemove');
     removeBtn.addEventListener('click', clearPendingAttachment);
     pendingAttachmentEl.append(label, removeBtn);
+    updateActionBtn(); // an attachment alone is now enough to make the action button "Send", not just typed text
   });
 
   let replyingTo = null; // {id, author, body} or null
@@ -1205,16 +1207,25 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   async function sendTextMessage() {
     if (!roomReady) return;
     const body = composerInput.value.trim();
-    if (!body) return;
+    // A caption is optional whenever there's an attachment to send instead
+    // - the same "content doesn't have to be text" rule voice messages
+    // already get (see sendVoiceRecording()); only a genuinely empty
+    // send (no text AND no attachment) is refused.
+    if (!body && !pendingAttachment) return;
     actionBtn.disabled = true;
     try {
-      const extra = pendingAttachment ? { attachment: pendingAttachment } : {};
+      const attachment = pendingAttachment;
+      const extra = attachment ? { attachment } : {};
       stuckToBottom = true; // sending a message always means "show me what I just sent" - see the scroll-follow doc comment above
       await services.messages.postMessage(SPACE_ID, roomId, { body, replyTo: replyingTo?.id ?? null, extra });
       composerInput.value = '';
       clearPendingAttachment();
       setReplyingTo(null);
       updateActionBtn();
+      // Only now, once the attachment is genuinely part of a sent message,
+      // does the (deferred) sync-out verification phase start - see
+      // <qu-asset-upload>'s own doc comment on confirmSent() for why.
+      if (attachment) attachUpload.confirmSent(attachment.assetId);
     } finally {
       actionBtn.disabled = false;
     }
@@ -1312,7 +1323,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   }
 
   function updateActionBtn() {
-    if (composerInput.value.trim()) {
+    if (composerInput.value.trim() || pendingAttachment) {
       actionBtn.textContent = '➤';
       actionBtn.title = t('send');
     } else {
@@ -1422,7 +1433,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   voiceSendBtn.addEventListener('click', sendVoiceRecording);
 
   actionBtn.addEventListener('click', () => {
-    if (composerInput.value.trim()) { sendTextMessage(); return; }
+    if (composerInput.value.trim() || pendingAttachment) { sendTextMessage(); return; }
     startRecording();
   });
 
@@ -1820,7 +1831,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     // player below is the actual content, so the redundant text line is
     // skipped entirely, same reasoning a location message's own coordinate
     // block below replaces its placeholder body text rather than showing both.
-    if (!message.voice && !message.location) {
+    if (!message.voice && !message.location && message.body) {
       const p = document.createElement('p');
       p.className = 'qu-chat-bubble-text';
       const linkSegments = detectLinks(message.body);

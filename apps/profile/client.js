@@ -531,7 +531,9 @@ function renderOwnProfile(root, own, listed, services, myPub, saveState, justSav
   // this fires before sync-out verification even starts) updates the SAME
   // `avatar` text field an upload is meant to replace, not a separate
   // hidden field - Save still just reads `avatarRow.input.value`, unchanged.
+  let lastUploadedAvatarAssetId = null;
   avatarUpload.addEventListener('qu-asset-uploaded', (e) => {
+    lastUploadedAvatarAssetId = e.detail.assetId;
     avatarRow.input.value = `${ASSET_AVATAR_PREFIX}${e.detail.assetId}`;
     updatePreview();
   });
@@ -576,6 +578,16 @@ function renderOwnProfile(root, own, listed, services, myPub, saveState, justSav
       preferredLocale: own.preferredLocale,
       preferredTheme: own.preferredTheme,
     });
+    // Only now, once the freshly uploaded avatar is genuinely part of a
+    // saved profile, does its (deferred) sync-out verification phase start
+    // - see <qu-asset-upload>'s own doc comment on confirmSent() for why.
+    // Guarded against the field having been hand-edited/cleared after the
+    // upload but before Save - confirmSent()'s own assetId match already
+    // covers a NEWER upload replacing this one, this covers the field
+    // simply no longer pointing at it at all.
+    if (lastUploadedAvatarAssetId && avatarRow.input.value === `${ASSET_AVATAR_PREFIX}${lastUploadedAvatarAssetId}`) {
+      avatarUpload.confirmSent(lastUploadedAvatarAssetId);
+    }
   });
 
   const listedLabel = document.createElement('label');
