@@ -182,7 +182,7 @@ import { renderEmojiPicker, renderContextMenu, mountMentionAutocomplete, mountEm
 // default ordering without either importing the other (an admin can still
 // reorder either point via Relay Admin - see that app's own doc comment).
 const FOOTER_ORDER_DEFAULT = { reactions: 0, 'core.menu': 10, 'core.timestamp': 20 };
-const MENU_ORDER_DEFAULT = { edit: 0, pin: 10, bookmark: 20 };
+const MENU_ORDER_DEFAULT = { edit: 0, reply: 5, pin: 10, bookmark: 20 };
 
 const DICT = {
   en: {
@@ -191,6 +191,8 @@ const DICT = {
     composerPlaceholder: 'Write a message…',
     send: 'Send',
     edit: 'Edit', save: 'Save', cancel: 'Cancel',
+    reply: 'Reply', replyingTo: 'Replying to {name}',
+    originalMessageUnavailable: 'Original message',
     moreActions: 'More actions',
     attachRemove: 'Remove attachment',
     insertEmoji: 'Insert emoji',
@@ -222,6 +224,8 @@ const DICT = {
     composerPlaceholder: 'Nachricht schreiben…',
     send: 'Senden',
     edit: 'Bearbeiten', save: 'Speichern', cancel: 'Abbrechen',
+    reply: 'Antworten', replyingTo: 'Antwort an {name}',
+    originalMessageUnavailable: 'Ursprünglicher Beitrag',
     moreActions: 'Weitere Aktionen',
     attachRemove: 'Anhang entfernen',
     insertEmoji: 'Emoji einfügen',
@@ -278,6 +282,13 @@ const STYLE = `
   .qu-forum-message-body { flex: 1; min-width: 0; }
   .qu-forum-message-head { display: flex; align-items: baseline; gap: 0.5rem; }
   .qu-forum-message-author { font-weight: 600; }
+  /* The "replying to" quote - a real link to the parent post's own
+     permalink (see mountTopicView()'s own "PERMALINKS" doc comment), not
+     just a text snippet - clicking it scrolls to and highlights the
+     original post, the exact same mechanism the timestamp link already
+     uses. */
+  .qu-forum-message-reply { display: block; border-left: 2px solid var(--qu-color-accent, #5b5bd6); padding-left: 0.5rem; margin-bottom: 0.3rem; font-size: 0.85em; opacity: 0.75; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; text-decoration: none; cursor: pointer; }
+  .qu-forum-message-reply:hover { opacity: 1; text-decoration: underline; }
   .qu-forum-message-text { overflow-wrap: anywhere; }
   .qu-forum-message-text code { font-family: var(--qu-font-mono, ui-monospace, monospace); background: var(--qu-color-surface, #8882); padding: 0.05rem 0.3rem; border-radius: var(--qu-radius-sm, 0.3rem); }
   /* The per-message footer ROW (content.messageFooter) - menu trigger,
@@ -303,6 +314,9 @@ const STYLE = `
   .qu-forum-composer button:disabled { opacity: 0.6; cursor: default; }
   .qu-forum-empty { padding: 1.5rem; text-align: center; opacity: 0.7; }
   .qu-forum-composer-wrap { display: flex; flex-direction: column; gap: 0.4rem; }
+  .qu-forum-reply-banner { display: flex; justify-content: space-between; align-items: center; padding: 0.3rem 0.6rem; border-left: 3px solid var(--qu-color-accent, #5b5bd6); background: var(--qu-color-surface, #8882); border-radius: var(--qu-radius-sm, 0.3rem); font-size: 0.85em; }
+  .qu-forum-reply-banner button { background: none; border: none; cursor: pointer; opacity: 0.7; font: inherit; }
+  .qu-forum-reply-banner[hidden] { display: none; }
   .qu-forum-pending-attachment { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85em; opacity: 0.85; }
   /* Without this, pendingAttachmentEl.hidden = true (its default, and how
      it resets after posting/removing) would have no visual effect - a plain
@@ -922,11 +936,21 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
   // itself - see that file's own doc comment), so there's no per-topic
   // watchChildren() left in THIS file for pins at all.
   if (extensionPoints) {
-    extensionPoints.renderSlot('forum.topicToolbar', pinnedRoot, { services, qu, syncFetch, spaceId: SPACE_ID, threadId: topicId });
+    extensionPoints.renderSlot('forum.topicToolbar', pinnedRoot, {
+      services, qu, syncFetch, spaceId: SPACE_ID, threadId: topicId,
+      // Lets a contributor (Pins' own "📌 Pinned" bar) link a message back
+      // to its real permalink without hardcoding/duplicating forum's own
+      // route shape (`#/forum/t/<topicId>/m/<id>`) inside its own,
+      // host-agnostic code - see apps/pins/client.js's own doc comment.
+      messagePermalink: (messageId) => `#/forum/t/${topicId}/m/${messageId}`,
+    });
   }
   const messagesRoot = document.createElement('div');
   const composerWrap = document.createElement('div');
   composerWrap.className = 'qu-forum-composer-wrap';
+  const replyBanner = document.createElement('div');
+  replyBanner.className = 'qu-forum-reply-banner';
+  replyBanner.hidden = true;
   const composerRow = document.createElement('div');
   composerRow.className = 'qu-forum-composer';
   const composerInput = document.createElement('textarea');
@@ -957,7 +981,7 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
   // ABOVE the input row, not below it - see apps/chat/client.js's own
   // identical composer-ordering fix for why (a pending attachment is
   // context for what's about to be sent, not a footnote after the fact).
-  composerWrap.append(pendingAttachmentEl, composerRow);
+  composerWrap.append(replyBanner, pendingAttachmentEl, composerRow);
 
   renderSubpage(mainRoot, {
     showBackLink: false, // the shell header's own Back/Forward already covers this - see this app's own top doc comment
@@ -1002,6 +1026,24 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
       profileCache.set(pub, services.profile.getPublicProfile(pub).catch(() => null));
     }
     return profileCache.get(pub);
+  }
+
+  // Reply-to state, mirroring apps/chat/client.js's own setReplyingTo() -
+  // bound via the native "Reply" content.messageMenu item below (any post,
+  // not just `mine` - Edit is the "mine only" one).
+  let replyingTo = null; // {id, body} or null
+  function setReplyingTo(message, authorLabel) {
+    replyingTo = message ? { id: message.id, body: message.body } : null;
+    replyBanner.textContent = '';
+    if (!message) { replyBanner.hidden = true; return; }
+    replyBanner.hidden = false;
+    const label = document.createElement('span');
+    label.textContent = t('replyingTo', { name: authorLabel });
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.textContent = '✕';
+    cancelBtn.addEventListener('click', () => setReplyingTo(null));
+    replyBanner.append(label, cancelBtn);
   }
 
   // messageId -> in-progress, NOT-YET-SAVED edit text. renderMessages()
@@ -1066,10 +1108,11 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
       return;
     }
 
+    const byId = new Map(messages.map((m) => [m.id, m])); // see renderMessageText()'s own reply-quote lookup
     const ul = document.createElement('ul');
     ul.className = 'qu-forum-messages';
     for (const message of messages) {
-      const li = await renderMessage(message, myPub, lastReadAt);
+      const li = await renderMessage(message, myPub, lastReadAt, byId);
       // A newer renderMessages() call may have started (and already called
       // clearMessageWatchers()) while `renderMessage()`'s own awaits
       // (attachment/profile/extension-slot lookups) were in flight - bail
@@ -1096,7 +1139,7 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     }
   }
 
-  async function renderMessage(message, myPub, lastReadAt) {
+  async function renderMessage(message, myPub, lastReadAt, byId) {
     const li = document.createElement('li');
     const unread = message.author !== myPub && message.ts > lastReadAt;
     li.className = 'qu-forum-message' + (unread ? ' qu-forum-message-unread' : '');
@@ -1135,7 +1178,7 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
 
     const textWrap = document.createElement('div');
     if (editingDrafts.has(message.id)) renderMessageEdit(textWrap, message);
-    else renderMessageText(textWrap, message);
+    else renderMessageText(textWrap, message, byId);
 
     const footer = await buildMessageFooter(message, myPub, textWrap);
 
@@ -1171,7 +1214,16 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
             trigger: '⋮',
             triggerTitle: t('moreActions'),
             getItems: async () => {
-              const nativeItems = mine ? [{ id: 'edit', label: t('edit'), icon: '✏️', onClick: () => renderMessageEdit(textWrap, message) }] : [];
+              const nativeItems = [];
+              if (mine) nativeItems.push({ id: 'edit', label: t('edit'), icon: '✏️', onClick: () => renderMessageEdit(textWrap, message) });
+              nativeItems.push({
+                id: 'reply', label: t('reply'), icon: '↩️',
+                onClick: async () => {
+                  const authorLabel = formatActorLabel(message.author, await resolveAuthor(message.author));
+                  setReplyingTo(message, authorLabel);
+                  composerInput.focus();
+                },
+              });
               const pluginItems = extensionPoints ? await extensionPoints.collect('content.messageMenu', menuPayload) : [];
               return [...nativeItems, ...pluginItems].sort(
                 (a, b) => rankFor(extensionPoints?.order, 'content.messageMenu', a.id, MENU_ORDER_DEFAULT[a.id] ?? 50)
@@ -1213,8 +1265,24 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     return footer;
   }
 
-  function renderMessageText(root, message) {
+  function renderMessageText(root, message, byId) {
     root.textContent = '';
+    if (message.replyTo) {
+      // A real link to the parent post's own permalink (see
+      // mountTopicView()'s own "PERMALINKS" doc comment), not just a text
+      // snippet - clicking it scrolls to and highlights the original post,
+      // the exact same mechanism the timestamp link already uses. `byId`
+      // may not have the parent (paginated out) - still links to
+      // `message.replyTo`'s own id either way; renderMessages() itself
+      // already falls back to doing nothing further if the target isn't
+      // locally rendered.
+      const parent = byId?.get(message.replyTo);
+      const replyEl = document.createElement('a');
+      replyEl.className = 'qu-forum-message-reply';
+      replyEl.href = `#/forum/t/${topicId}/m/${message.replyTo}`;
+      replyEl.textContent = parent?.body ?? t('originalMessageUnavailable');
+      root.appendChild(replyEl);
+    }
     const p = document.createElement('p');
     p.className = 'qu-forum-message-text';
     if (message.formattedHtml) {
@@ -1311,9 +1379,10 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     sendBtn.disabled = true;
     try {
       const extra = pendingAttachment ? { attachment: pendingAttachment } : {};
-      await services.messages.postMessage(SPACE_ID, topicId, { body, extra });
+      await services.messages.postMessage(SPACE_ID, topicId, { body, replyTo: replyingTo?.id ?? null, extra });
       composerInput.value = '';
       clearPendingAttachment();
+      setReplyingTo(null);
     } finally {
       sendBtn.disabled = false;
     }

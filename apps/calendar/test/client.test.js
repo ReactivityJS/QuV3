@@ -12,6 +12,17 @@ import { installDom, waitFor } from '@qu/ui/testing';
 installDom();
 const { mount, createEventMenuItem } = await import('../client.js');
 
+const CAL_SPACE_ID = 'ff73365b-144a-4285-8e98-ac7f9928a95f'; // real UUID from apps/calendar/manifest.quapp
+
+/** Writes an event directly into a calendar's events document - faster/more reliable than driving the New Event form when a test just needs some events to exist, with no dependency on "today"'s date. */
+async function upsertEventDirectly(qu, services, calId, { title, start = Date.now(), end = Date.now() + 30 * 60 * 1000 }) {
+  const resourceId = `cal-${calId}-events`;
+  const doc = (await qu.get(paths.documentPath(CAL_SPACE_ID, resourceId)))?.val ?? { events: [] };
+  const events = [...doc.events, { id: crypto.randomUUID(), title, description: '', start, end, allDay: false, guests: [] }];
+  const writeOptions = await services.access.writeOptionsFor(CAL_SPACE_ID, 'docs', resourceId);
+  await qu.put(paths.documentPath(CAL_SPACE_ID, resourceId), { events }, writeOptions);
+}
+
 async function freshEnv() {
   const qu = new QuStore();
   qu.mount('store', new MemoryStoreAdapter());
@@ -47,6 +58,52 @@ async function publishOtherUser(qu, { alias } = {}) {
   const actorPub = await otherIdentity.publishMainProfile({ alias });
   await qu.putSealed(actorPath(actorPub, 'profile'), await otherQu.get(actorPath(actorPub, 'profile')));
   return actorPub;
+}
+
+/**
+ * A full second, INDEPENDENT identity (own QuStore - `QuIdentityEngine`
+ * refuses a second seed on a store that already holds one, same as two real
+ * browsers) + services bundle - a peer who can be mounted as "the app,
+ * running as them" to check what THEY actually see, not just inspect the
+ * owner's own writes. Mirrors this peer's own profile onto `ownerQu` (same
+ * as `publishOtherUser()`) so the owner's side can resolve their X25519 key
+ * to invite them.
+ */
+async function createPeer(ownerQu, { alias } = {}) {
+  const peerQu = new QuStore();
+  peerQu.mount('store', new MemoryStoreAdapter());
+  new AccessEngine(peerQu);
+  new ThreadEngine(peerQu);
+  const identity = new QuIdentityEngine(peerQu);
+  await identity.importMnemonic(identity.generateMnemonic());
+  await identity.publishMainProfile({ alias });
+  const list = new ListService(peerQu);
+  const access = new AccessService(peerQu, identity);
+  const messages = new MessageService(peerQu, identity, list, access);
+  const flags = new FlagService(peerQu, identity, list);
+  const services = {
+    actors: new ActorService(identity), access, messages, flags,
+    contacts: new ContactsService(flags, identity),
+    directory: new DirectoryService(peerQu, identity, list),
+    profile: new ProfileService(peerQu, identity),
+  };
+  const myPub = await services.actors.whoAmI();
+  await ownerQu.putSealed(actorPath(myPub, 'profile'), await peerQu.get(actorPath(myPub, 'profile')));
+  return { qu: peerQu, identity, services, myPub };
+}
+
+/** Copies whichever of `paths_` actually exist from one QuStore to another - simulates "this peer's client has synced these specific paths in", the same shape every real-sync test in this codebase uses (see e.g. apps/forum/test/client.test.js's own mirrorThreadInto()). */
+async function mirrorPaths(fromQu, toQu, paths_) {
+  for (const p of paths_) {
+    const bit = await fromQu.get(p);
+    if (bit) await toQu.putSealed(p, bit);
+  }
+}
+
+/** Same idea as mirrorPaths(), for a DERIVED list's children (unknown/random ids, e.g. thread messages) - enumerates via ListService.listDerived() instead of a fixed path list. */
+async function mirrorChildren(fromQu, toQu, parentPath) {
+  const entries = await new ListService(fromQu).listDerived(parentPath);
+  for (const { path, quBit } of entries) await toQu.putSealed(path, quBit);
 }
 
 function noopSubscribe() {}
@@ -227,6 +284,83 @@ test('inviteMember flow: inviting a known contact grants them a role, grows the 
   assert.equal(inviteEntries.length, 1);
 });
 
+test('an invited member sees the shared calendar (correctly labeled "Shared with me") and its existing events the next time they open #/calendar - regression for the "notification arrives but nothing shows up" bug', async () => {
+  const CAL_SPACE = 'ff73365b-144a-4285-8e98-ac7f9928a95f';
+  const { qu: ownerQu, services: ownerServices } = await freshEnv();
+  const { qu: guestQu, services: guestServices, myPub: guestPub } = await createPeer(ownerQu, { alias: 'Ada' });
+  await ownerServices.contacts.addContact(guestPub, {});
+
+  // Owner creates a calendar, adds an event, then shares it.
+  const ownerContainer = makeContainer();
+  let stop = mount(ownerContainer, { qu: ownerQu, services: ownerServices, segments: ['calendar'], subscribe: noopSubscribe });
+  await createCalendarViaForm(ownerContainer);
+  const [{ id: calId }] = await ownerServices.flags.listPrivate('calendar', 'calendar');
+  stop();
+
+  stop = mount(ownerContainer, { qu: ownerQu, services: ownerServices, segments: segmentsFor(`#/calendar/${calId}/new`), subscribe: noopSubscribe });
+  await waitFor(() => ownerContainer.querySelector('.qu-cal-form') !== null);
+  ownerContainer.querySelector('.qu-cal-form input[placeholder]').value = 'Kickoff';
+  // Leaves the start datetime at its own default (now) - the guest's Month
+  // view below defaults its cursor to today too, so the event lands in the
+  // same visible month without hardcoding (and potentially drifting out of
+  // "the current month") a fixed date.
+  ownerContainer.querySelector('.qu-cal-form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+  await waitFor(() => window.location.hash === '#/calendar');
+  stop();
+
+  stop = mount(ownerContainer, { qu: ownerQu, services: ownerServices, segments: segmentsFor(`#/calendar/${calId}/share`), subscribe: noopSubscribe });
+  await waitFor(() => ownerContainer.querySelector('.qu-cal-picker input') !== null);
+  const picker = ownerContainer.querySelector('.qu-cal-picker input');
+  picker.value = 'Ada';
+  picker.dispatchEvent(new window.Event('input', { bubbles: true }));
+  await waitFor(() => ownerContainer.querySelector('.qu-cal-picker-option') !== null);
+  ownerContainer.querySelector('.qu-cal-picker-option').click();
+  await waitForAsync(async () => (await ownerServices.access.getAcl(CAL_SPACE, 'docs', `cal-${calId}-events`)).writers.length === 2);
+  stop();
+
+  // Simulates the guest's OWN client having synced in exactly what a real
+  // relay connection would deliver: the calendar's meta/events documents,
+  // their own private invite-mailbox thread (config + the one message in
+  // it), and the OWNER's own profile - decrypting that invite message needs
+  // the SENDER's published X25519 key too (ECDH), same reasoning
+  // MessageService's own `#getProfile()`/`resolveReaderXKeys()` already
+  // document - see mirrorPaths()/mirrorChildren()'s own doc comments.
+  const ownerPub = await ownerServices.actors.whoAmI();
+  await mirrorPaths(ownerQu, guestQu, [
+    actorPath(ownerPub, 'profile'),
+    paths.documentPath(CAL_SPACE, `cal-${calId}-meta`),
+    paths.documentPath(CAL_SPACE, `cal-${calId}-events`),
+    paths.threadMetaPath(CAL_SPACE, `invite-${guestPub}`),
+  ]);
+  await mirrorChildren(ownerQu, guestQu, paths.threadMessagesParentPath(CAL_SPACE, `invite-${guestPub}`));
+
+  // Before the fix, NOTHING besides directly visiting `#/calendar/<calId>`
+  // (a link the invitee is never actually given - notification URLs are
+  // always the generic `#/calendar`) starred this calendar for the guest -
+  // simply opening `#/calendar` is exactly what a real invitee does after
+  // seeing a notification arrive.
+  const guestContainer = makeContainer();
+  stop = mount(guestContainer, { qu: guestQu, services: guestServices, segments: ['calendar'], subscribe: noopSubscribe });
+  await waitFor(() => guestContainer.querySelector('.qu-cal-section-heading') !== null);
+
+  const mine = await guestServices.flags.listPrivate('calendar', 'calendar');
+  assert.deepEqual(mine.map((c) => c.id), [calId]);
+
+  // "My calendars" always renders (even empty, so a pure guest can still
+  // create their own) - "Shared with me" only appears once there's
+  // something in it, and must be the one actually containing the invite.
+  const headings = [...guestContainer.querySelectorAll('.qu-cal-section-heading')].map((el) => el.textContent);
+  assert.deepEqual(headings, ['My calendars', 'Shared with me']);
+  const sharedSection = headings.indexOf('Shared with me');
+  const sharedRow = guestContainer.querySelectorAll('.qu-cal-section-heading')[sharedSection].nextElementSibling;
+  assert.equal(sharedRow.querySelector('.qu-cal-row-title').textContent, 'Team calendar');
+
+  await waitFor(() => guestContainer.querySelector('.qu-cal-month-grid') !== null);
+  await waitFor(() => guestContainer.querySelector('.qu-cal-chip') !== null);
+  assert.equal(guestContainer.querySelector('.qu-cal-chip').textContent, 'Kickoff');
+  stop();
+});
+
 // ===== content.messageMenu contributor - chat/forum -> calendar bridge ====
 
 test('createEventMenuItem(): resolves a menu entry that prefills sessionStorage from the message body and navigates to the New Event page', async () => {
@@ -272,6 +406,37 @@ test('#/calendar/from-message consumes the sessionStorage prefill exactly once',
   assert.equal(container.querySelector('.qu-cal-notice') !== null, true);
   assert.equal(window.sessionStorage.getItem('qu-calendar-prefill'), null);
   stop();
+});
+
+test('typing into the Agenda filter never recreates the input element (focus/cursor survive every keystroke) - regression: it used to call the full renderMain() rebuild on every "input" event', async () => {
+  const { qu, services } = await freshEnv();
+  const container = makeContainer();
+  const stop = mount(container, { qu, services, segments: ['calendar'], subscribe: noopSubscribe });
+  try {
+    await createCalendarViaForm(container);
+    const [{ id: calId }] = await services.flags.listPrivate('calendar', 'calendar');
+    await upsertEventDirectly(qu, services, calId, { title: 'Standup' });
+    await upsertEventDirectly(qu, services, calId, { title: 'Retro' });
+    await waitFor(() => container.querySelector('.qu-cal-viewswitch button')?.textContent === 'Day');
+
+    const agendaBtn = [...container.querySelectorAll('.qu-cal-viewswitch button')].find((b) => b.textContent === 'Agenda');
+    agendaBtn.click();
+    await waitFor(() => container.querySelector('.qu-cal-filter') !== null);
+
+    const filterInput = container.querySelector('.qu-cal-filter');
+    for (const ch of 'Standup') {
+      filterInput.value += ch;
+      filterInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+      // Still the EXACT same DOM node after every single keystroke - a
+      // recreated <input> (the old, full-rebuild bug) would fail this on
+      // the very first character.
+      assert.equal(container.querySelector('.qu-cal-filter'), filterInput);
+    }
+    await waitFor(() => container.querySelectorAll('.qu-cal-event-row, .qu-cal-chip').length === 1);
+    assert.match(container.querySelector('.qu-cal-event-row, .qu-cal-chip').textContent, /Standup/);
+  } finally {
+    stop();
+  }
 });
 
 test('the returned stop function tears down cleanly - no error thrown', async () => {

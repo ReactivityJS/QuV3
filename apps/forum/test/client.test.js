@@ -163,6 +163,15 @@ function menuItemButton(panel, label) {
 
 function noopSubscribe() {}
 
+/** `@qu/ui/testing`'s waitFor() never awaits an async predicate (documented gotcha, docs/building-an-app.md §9) - a real poll loop for conditions that themselves need an `await`. */
+async function waitForAsync(check, { timeout = 1000, interval = 5 } = {}) {
+  const start = Date.now();
+  while (!(await check())) {
+    if (Date.now() - start > timeout) throw new Error(`waitForAsync: condition never became true within ${timeout}ms`);
+    await new Promise((resolve) => setTimeout(resolve, interval));
+  }
+}
+
 /** Must be attached to document.body - reactive rendering only matters once actually part of the document. */
 function makeContainer() {
   const el = document.createElement('div');
@@ -524,7 +533,7 @@ test('content.messageMenu (bookmarks): the REAL apps/bookmarks app (not a fake) 
   }
 });
 
-test('content.messageMenu: without extensionPoints/a contributing app, the menu still opens with just this app\'s OWN native items ("Edit" for an own message) - no crash', async () => {
+test('content.messageMenu: without extensionPoints/a contributing app, the menu still opens with just this app\'s OWN native items ("Edit"+"Reply" for an own message) - no crash', async () => {
   const a = await freshEnv('Ada');
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
   await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'no plugins loaded' });
@@ -534,7 +543,8 @@ test('content.messageMenu: without extensionPoints/a contributing app, the menu 
   try {
     const panel = await openMessageMenu(container);
     assert.ok(menuItemButton(panel, 'Edit')); // this app's own native item, unaffected by the missing extensionPoints
-    assert.equal(panel.querySelectorAll('.qu-thread-ui-context-menu-item').length, 1); // nothing else - no plugin contributed
+    assert.ok(menuItemButton(panel, 'Reply')); // native too - any message, not just mine
+    assert.equal(panel.querySelectorAll('.qu-thread-ui-context-menu-item').length, 2); // Edit + Reply - no plugin contributed
   } finally {
     stop();
   }
@@ -556,8 +566,10 @@ test('content.messageMenu (bookmarks): a bookmark is private - a SECOND identity
   try {
     const panel = await openMessageMenu(container);
     // Bob's own, independent, still-inactive state - and no "Edit" item at
-    // all (Ada's message, not his).
+    // all (Ada's message, not his) - "Reply" is still there either way,
+    // native to any message.
     assert.ok(menuItemButton(panel, 'Bookmark this message'));
+    assert.ok(menuItemButton(panel, 'Reply'));
     assert.equal(menuItemButton(panel, 'Edit'), undefined);
   } finally {
     stop();
@@ -582,7 +594,14 @@ test('content.messageMenu (pins) / forum.topicToolbar: the REAL apps/pins app pi
     pinBtn.click();
 
     await waitFor(() => containerB.querySelector('.qu-pins-bar') !== null);
-    assert.match(containerB.querySelector('.qu-pins-bar-row span').textContent, /Pin this one/);
+    const pinnedRowText = containerB.querySelector('.qu-pins-bar-row-text');
+    assert.match(pinnedRowText.textContent, /Pin this one/);
+    // Forum supplies a real messagePermalink() to the toolbar slot (see
+    // mountTopicView()'s own renderSlot() call) - the pinned row is a real
+    // link back to the original post, not just a text snippet.
+    const { messages } = await a.services.messages.listMessages(FORUM_SPACE_ID, 'general');
+    assert.equal(pinnedRowText.tagName, 'A');
+    assert.equal(pinnedRowText.getAttribute('href'), `#/forum/t/general/m/${messages[0].id}`);
 
     panelA = await openMessageMenu(containerA); // reopen - menu closed itself on the click above
     assert.ok(menuItemButton(panelA, 'Unpin'));
@@ -702,6 +721,57 @@ test('a post\'s timestamp is its permalink (#/forum/t/<topicId>/m/<id>); landing
     assert.equal(highlighted[0].id, `m-${target.id}`);
   } finally {
     stopPermalink();
+  }
+});
+
+test('a reply quote is a real link to its parent post\'s own permalink, not just a text snippet', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  const original = await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'the original post' });
+  await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'a reply', replyTo: original.id });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-message-reply') !== null);
+    const quote = container.querySelector('.qu-forum-message-reply');
+    assert.equal(quote.tagName, 'A');
+    assert.equal(quote.getAttribute('href'), `#/forum/t/general/m/${original.id}`);
+    assert.equal(quote.textContent, 'the original post');
+  } finally {
+    stop();
+  }
+});
+
+test('clicking "Reply" in a post\'s context menu shows a "replying to" banner, and posting includes replyTo - native to any post, not just "mine"', async () => {
+  const a = await freshEnv('Ada');
+  const b = await freshEnv('Bob');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  const original = await b.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'from bob' });
+  await mirrorThreadInto(b, a.qu, FORUM_SPACE_ID, 'general');
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-message') !== null);
+    const panel = await openMessageMenu(container);
+    assert.equal(menuItemButton(panel, 'Edit'), undefined); // Bob's post, not Ada's
+    menuItemButton(panel, 'Reply').click();
+
+    await waitFor(() => container.querySelector('.qu-forum-reply-banner')?.hidden === false);
+    assert.match(container.querySelector('.qu-forum-reply-banner').textContent, /Replying to/);
+
+    container.querySelector('.qu-forum-composer textarea').value = 'my reply';
+    const sendBtn = [...container.querySelectorAll('.qu-forum-composer button')].find((btn) => btn.textContent === 'Send');
+    sendBtn.click();
+
+    await waitForAsync(async () => (await a.services.messages.listMessages(FORUM_SPACE_ID, 'general')).messages.length === 2);
+    const { messages } = await a.services.messages.listMessages(FORUM_SPACE_ID, 'general');
+    const reply = messages.find((m) => m.body === 'my reply');
+    assert.equal(reply.replyTo, original.id);
+    assert.equal(container.querySelector('.qu-forum-reply-banner').hidden, true); // cleared after sending
+  } finally {
+    stop();
   }
 });
 

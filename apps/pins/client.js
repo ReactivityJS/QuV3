@@ -26,14 +26,21 @@
  *    `payload` is `{services, qu, syncFetch, spaceId, threadId, messageId,
  *    myPub, mine}` - see either host's own doc comment for the full shape.
  *  - `forum.topicToolbar`: `(container, {services, qu, syncFetch, spaceId,
- *    threadId})` - rendered once when a topic view mounts (no `messageId` -
- *    this is topic-scoped, not per-message), shows every currently pinned
- *    message with an inline "unpin" - empty (renders nothing) when the
- *    topic has no pins, same as the original inline `renderPinned()`'s own
- *    "nothing to show" behavior. Still a live Custom Element (`watchChildren()`
- *    self-managed via `connectedCallback()`/`disconnectedCallback()`, same
- *    reasoning `apps/reactions/client.js`'s own doc comment has) - this bar
- *    IS continuously on-screen, unlike a menu item.
+ *    threadId, messagePermalink?})` - rendered once when a topic view mounts
+ *    (no `messageId` - this is topic-scoped, not per-message), shows every
+ *    currently pinned message with an inline "unpin" - empty (renders
+ *    nothing) when the topic has no pins, same as the original inline
+ *    `renderPinned()`'s own "nothing to show" behavior. Still a live Custom
+ *    Element (`watchChildren()` self-managed via `connectedCallback()`/
+ *    `disconnectedCallback()`, same reasoning `apps/reactions/client.js`'s
+ *    own doc comment has) - this bar IS continuously on-screen, unlike a
+ *    menu item. `messagePermalink` (optional - a host may not provide one)
+ *    is a `(messageId) => string` href builder, supplied by the HOST app
+ *    (its own route shape, e.g. `#/forum/t/<topicId>/m/<id>`) rather than
+ *    hardcoded here - this file stays host-agnostic (per its own top doc
+ *    comment, meant to work for a future chat toolbar too, whose permalink
+ *    shape is entirely different). Falls back to a plain, unclickable
+ *    snippet when omitted.
  */
 import { watchChildren } from '@qu/reactive';
 import { paths } from '@qu/services';
@@ -53,6 +60,9 @@ const STYLE = `
   .qu-pins-bar-row { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; padding: 0.15rem 0; }
   .qu-pins-bar-row button { background: none; border: none; cursor: pointer; opacity: 0.6; font: inherit; padding: 0; }
   .qu-pins-bar-row button:hover { opacity: 1; }
+  .qu-pins-bar-row-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  a.qu-pins-bar-row-text { color: inherit; text-decoration: none; cursor: pointer; }
+  a.qu-pins-bar-row-text:hover { text-decoration: underline; }
 `;
 
 class QuPinnedBarElement extends HTMLElement {
@@ -75,7 +85,7 @@ class QuPinnedBarElement extends HTMLElement {
 
   async _render() {
     const token = ++this._token;
-    const { services, qu, spaceId, threadId } = this._opts;
+    const { services, qu, spaceId, threadId, messagePermalink } = this._opts;
     const pinnedIds = await services.pins.listPinned(spaceId, threadId);
     if (token !== this._token) return;
     this.textContent = '';
@@ -93,14 +103,20 @@ class QuPinnedBarElement extends HTMLElement {
       if (token !== this._token) return;
       const row = document.createElement('div');
       row.className = 'qu-pins-bar-row';
-      const span = document.createElement('span');
-      span.textContent = quBit?.val?.body ?? messageId;
+      // A real link to the pinned message's own permalink when the host
+      // supplies one (clicking it scrolls to/highlights the original post -
+      // see this file's own top doc comment) - a plain, unclickable span
+      // otherwise (no host-specific route to build one from).
+      const textEl = document.createElement(messagePermalink ? 'a' : 'span');
+      textEl.className = 'qu-pins-bar-row-text';
+      if (messagePermalink) textEl.href = messagePermalink(messageId);
+      textEl.textContent = quBit?.val?.body ?? messageId;
       const unpinBtn = document.createElement('button');
       unpinBtn.type = 'button';
       unpinBtn.textContent = '✕';
       unpinBtn.title = t('unpin');
       unpinBtn.addEventListener('click', () => services.pins.setPinned(spaceId, threadId, messageId, false));
-      row.append(span, unpinBtn);
+      row.append(textEl, unpinBtn);
       box.appendChild(row);
     }
     this.appendChild(box);
