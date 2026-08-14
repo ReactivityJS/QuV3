@@ -2238,4 +2238,42 @@ own tests, built bottom-up per the dependency order in
       `ResizeObserver` at all, same class of gap as `scrollIntoView`/
       `scrollTo` elsewhere in this file's own tests) - verify visually in a
       real browser with a slow-loading image attachment.
+- [x] **Chat voice messages: real Start/Pause/Resume/Finish/Preview/Send
+      flow, ported from QuV2** - V3's voice messages were tap-to-record/
+      tap-to-stop-and-send-immediately, with no way to listen back or bail
+      out before something already went out; QuV2
+      (https://github.com/ReactivityJS/QuV2) had a real Start/Pause/Stop/
+      preview-before-send flow and the user asked for it ported over
+      unchanged. Rebuilt as an explicit state machine (`recorderState`:
+      `'idle' -> 'recording' <-> 'paused' -> 'preview' -> 'idle'`, with a
+      discard escape hatch from `'recording'`/`'paused'` straight back to
+      `'idle'`, bypassing preview entirely) driving a new `voiceRecorderEl`
+      panel that REPLACES the normal composer row (not layered over it)
+      while active - a live elapsed-time readout (frozen, not ticking,
+      while paused - tracked as accumulated-ms-from-prior-spans plus
+      time-since-current-span-started, not naively `Date.now() - startedAt`)
+      and Pause/Resume + Finish + Discard buttons during
+      recording/paused; Finish stops the `MediaRecorder` into `'preview'`
+      instead of sending - a real `<audio controls>` player over the
+      recorded `Blob` appears, with Send (uploads + posts the message, the
+      exact same `services.assets.upload()` + `message.extra.attachment`
+      path as before) and Discard as the only two ways out. Discarding
+      mid-recording needed a `discardingOnStop` flag to tell the shared
+      `MediaRecorder.onstop` handler "throw this take away" apart from a
+      normal finish-into-preview stop, since `MediaRecorder` only exposes
+      the one event either way. Teardown now also stops any still-open
+      `getUserMedia()` stream and revokes the preview's object URL if the
+      room view unmounts mid-recording/preview, closing a media-stream/
+      URL leak the old tap-to-stop flow didn't have room for.
+      Verified: full suite green (1183 tests - replaced the single old
+      immediate-send voice message test in
+      `apps/chat/test/client.test.js` with three covering the full
+      start/pause/resume/finish/preview/send path, mid-recording discard,
+      and preview-stage discard; extended the file's own `FakeMediaRecorder`
+      test double with `pause()`/`resume()`), `npm run build` bundles
+      cleanly. NOT built this round (still scoped as explicit follow-ups,
+      unchanged from this app's own top doc comment "SCOPE" section): a
+      waveform scrubber (the native `<audio controls>` element's own
+      scrubber already covers playback position, both live and once sent)
+      and a press-and-hold-to-record/slide-to-cancel gesture.
 

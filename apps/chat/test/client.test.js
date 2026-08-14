@@ -13,13 +13,17 @@ import { installDom, waitFor } from '@qu/ui/testing';
 installDom();
 const { mount, renderChatSettings, searchChat, resolveChatReference } = await import('../client.js');
 
-/** A minimal MediaRecorder test double - start()/stop() only, stop() synchronously fires ondataavailable then onstop, matching real MediaRecorder's own event order closely enough for startRecording()'s own handler. */
+/** A minimal MediaRecorder test double - start()/pause()/resume()/stop(), stop() synchronously fires ondataavailable then onstop, matching real MediaRecorder's own event order closely enough for startRecording()'s own handler. pause()/resume() just track state (this file's own tests only assert on the DOM state the client itself derives, not on MediaRecorder.state). */
 class FakeMediaRecorder {
   constructor() {
     this.mimeType = 'audio/webm';
+    this.state = 'inactive';
   }
-  start() {}
+  start() { this.state = 'recording'; }
+  pause() { this.state = 'paused'; }
+  resume() { this.state = 'recording'; }
   stop() {
+    this.state = 'inactive';
     this.ondataavailable?.({ data: new Blob(['fake voice bytes'], { type: 'audio/webm' }) });
     this.onstop?.();
   }
@@ -500,7 +504,7 @@ test('the composer action button morphs between mic (empty) and send (has text)'
   }
 });
 
-test('recording a voice message (mocked MediaRecorder) uploads it as an attachment and posts extra.voice: true, rendered as a native <qu-asset>', async () => {
+test('recording a voice message goes through start -> pause -> resume -> finish -> PREVIEW -> send (ported QuV2 flow), uploading it as an attachment and posting extra.voice: true, rendered as a native <qu-asset>', async () => {
   installVoiceMocks();
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');
@@ -512,19 +516,92 @@ test('recording a voice message (mocked MediaRecorder) uploads it as an attachme
     await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
     const actionBtn = container.querySelector('.qu-chat-composer-action');
     assert.equal(actionBtn.textContent, '🎙️');
+    assert.equal(container.querySelector('.qu-chat-voice-recorder').hidden, true);
 
     actionBtn.click(); // start recording
-    await waitFor(() => actionBtn.textContent === '⏹');
-    actionBtn.click(); // stop -> FakeMediaRecorder.stop() synchronously fires ondataavailable+onstop
+    await waitFor(() => container.querySelector('.qu-chat-voice-recorder').hidden === false);
+    // the normal composer (text input, mic/send button) is fully swapped
+    // out while recording - not layered underneath/alongside it.
+    assert.equal(container.querySelector('.qu-chat-composer').hidden, true);
+    assert.equal(container.querySelector('.qu-chat-voice-recorder-dot').hidden, false);
+
+    const pauseBtn = container.querySelector('.qu-chat-voice-pause-btn');
+    pauseBtn.click(); // pause
+    assert.equal(container.querySelector('.qu-chat-voice-recorder-dot').hidden, true); // no longer "live recording"
+    pauseBtn.click(); // resume
+    assert.equal(container.querySelector('.qu-chat-voice-recorder-dot').hidden, false);
+
+    container.querySelector('.qu-chat-voice-finish-btn').click(); // finish -> FakeMediaRecorder.stop() synchronously fires ondataavailable+onstop
+
+    // Finishing lands in PREVIEW, not an immediate send - a real playback
+    // player appears, nothing has been posted yet.
+    await waitFor(() => container.querySelector('.qu-chat-voice-preview-player').hidden === false);
+    assert.equal(container.querySelector('.qu-chat-voice-recorder-time').hidden, true);
+    const roomId = await ChatService.roomId([alice.myPub, bob.myPub]);
+    assert.equal((await alice.services.messages.listMessages(CHAT_SPACE_ID, roomId)).messages.length, 0);
+
+    container.querySelector('.qu-chat-voice-send-btn').click();
 
     await waitFor(() => container.querySelector('.qu-chat-bubble-attachment') !== null);
-    const roomId = await ChatService.roomId([alice.myPub, bob.myPub]);
     const { messages } = await alice.services.messages.listMessages(CHAT_SPACE_ID, roomId);
     assert.equal(messages.length, 1);
     assert.equal(messages[0].voice, true);
     assert.ok(messages[0].attachment?.assetId);
     // no redundant placeholder text line next to the player - see renderMessageText()'s own doc comment
     assert.equal(container.querySelector('.qu-chat-bubble-text'), null);
+    // back to the normal composer, ready for the next message
+    assert.equal(container.querySelector('.qu-chat-voice-recorder').hidden, true);
+    assert.equal(container.querySelector('.qu-chat-composer').hidden, false);
+  } finally {
+    stop();
+  }
+});
+
+test('discarding a voice recording mid-recording cancels it - no message posted, back to the normal composer', async () => {
+  installVoiceMocks();
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
+    container.querySelector('.qu-chat-composer-action').click(); // start recording
+    await waitFor(() => container.querySelector('.qu-chat-voice-recorder').hidden === false);
+
+    container.querySelector('.qu-chat-voice-discard-btn').click();
+
+    assert.equal(container.querySelector('.qu-chat-voice-recorder').hidden, true);
+    assert.equal(container.querySelector('.qu-chat-composer').hidden, false);
+    const roomId = await ChatService.roomId([alice.myPub, bob.myPub]);
+    assert.equal((await alice.services.messages.listMessages(CHAT_SPACE_ID, roomId)).messages.length, 0);
+  } finally {
+    stop();
+  }
+});
+
+test('discarding a voice recording during PREVIEW (after finishing) also cancels it - no message posted', async () => {
+  installVoiceMocks();
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
+    container.querySelector('.qu-chat-composer-action').click(); // start recording
+    await waitFor(() => container.querySelector('.qu-chat-voice-recorder').hidden === false);
+    container.querySelector('.qu-chat-voice-finish-btn').click();
+    await waitFor(() => container.querySelector('.qu-chat-voice-preview-player').hidden === false);
+
+    container.querySelector('.qu-chat-voice-discard-btn').click();
+
+    assert.equal(container.querySelector('.qu-chat-voice-recorder').hidden, true);
+    assert.equal(container.querySelector('.qu-chat-composer').hidden, false);
+    const roomId = await ChatService.roomId([alice.myPub, bob.myPub]);
+    assert.equal((await alice.services.messages.listMessages(CHAT_SPACE_ID, roomId)).messages.length, 0);
   } finally {
     stop();
   }
