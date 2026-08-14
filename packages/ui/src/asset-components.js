@@ -9,19 +9,26 @@
  * `watch()`, they just call it and render.
  *
  * Two elements:
- *   <qu-asset-upload>  a file picker that uploads, shows LOCAL-write
- *                       progress, then SEPARATELY tracks sync-out
- *                       verification/retry progress (two distinguishable
- *                       phases - see `AssetEngine`'s own doc comment for
- *                       why "saved locally" and "confirmed synced" are
- *                       deliberately not the same moment). Fires
- *                       `qu-asset-uploaded` (detail: `{assetId, meta}`) the
- *                       moment the local write is durable, then
+ *   <qu-asset-upload>  a file picker that uploads and shows LOCAL-write
+ *                       progress, then fires `qu-asset-uploaded` (detail:
+ *                       `{assetId, meta}`) the moment that write is durable
+ *                       - a host reacts to this to remember the new
+ *                       `assetId` (e.g. as a composer's pending attachment).
+ *                       Sync-out verification/retry progress is a SEPARATE,
+ *                       DEFERRED phase (see `AssetEngine`'s own doc comment
+ *                       for why "saved locally" and "confirmed synced" are
+ *                       deliberately not the same moment): it does NOT
+ *                       start automatically after the local save - a host
+ *                       calls `.confirmSent(assetId)` once whatever it
+ *                       attached this asset to (a chat/forum message, ...)
+ *                       has actually been sent, which is what starts the
+ *                       progress bar again and eventually fires
  *                       `qu-asset-synced` (detail: `{assetId, synced,
- *                       missing}`) once sync verification finishes (success
- *                       or exhausted retries) - a host app reacts to the
- *                       first to remember the new `assetId`, and MAY listen
- *                       to the second for a "confirmed synced" indicator.
+ *                       missing}`). Never starting sync verification for an
+ *                       asset the user picked but never actually sent (or
+ *                       showing its progress before there's a "send" to
+ *                       attach it to) is the whole point of the split - see
+ *                       `confirmSent()`'s own doc comment.
  *   <qu-asset>          a read-only viewer: downloads once (an uploaded
  *                       asset's bytes never change - matches the
  *                       established "render* is imperative/call-once"
@@ -218,14 +225,41 @@ export class QuAssetUploadElement extends HTMLElement {
     // established convention (see AssetEngine's doc comment), the host
     // already has everything it needs via this event.
     this.dispatchEvent(new CustomEvent('qu-asset-uploaded', { detail: { assetId, meta }, bubbles: true }));
+    status.hidden = true;
 
-    if (!assetService.syncFetch) {
-      status.hidden = true; // no sync configured at all - nothing further to show
-      return;
-    }
+    // Sync-out verification is DEFERRED until the host calls confirmSent()
+    // below, rather than starting automatically right here - starting it
+    // immediately meant a file the user had just picked (but not yet sent
+    // - still typing a caption, or never sends it at all) already showed a
+    // "Syncing... 0%" bar with no send action behind it yet, confirmed
+    // confusing live: the percentage sat at 0% until the FIRST verification
+    // attempt actually completed, reading exactly like a stuck upload even
+    // though the local save (the part that actually blocks sending) was
+    // already long done. Stashing what verifySyncOut() needs here and
+    // waiting for an explicit "this was actually sent" signal fixes both
+    // the mystery 0% and its premature timing in one change.
+    if (assetService.syncFetch) this._pendingSync = { assetService, spaceId, assetId, readerPubs, asSpaceId, file, status, renderPhase };
+  }
 
+  /**
+   * Call once a message carrying this element's most recently uploaded
+   * asset has actually been sent - starts the deferred sync-out
+   * verification phase (see `_upload()`'s own doc comment on why it isn't
+   * automatic). A no-op if nothing's pending: no syncFetch configured, the
+   * pending upload was already confirmed, or `assetId` is given and
+   * doesn't match (guards against a stale confirm racing a newer pick -
+   * e.g. attachment A confirmed sent after attachment B already replaced it).
+   * @param {string} [assetId]
+   */
+  async confirmSent(assetId) {
+    const pending = this._pendingSync;
+    if (!pending || (assetId && pending.assetId !== assetId)) return;
+    this._pendingSync = null;
+    const { assetService, spaceId, assetId: pendingAssetId, readerPubs, asSpaceId, status, renderPhase } = pending;
+
+    status.hidden = false;
     renderPhase('Syncing', 0, 'qu-asset-upload-fill-sync');
-    const syncStatus = await assetService.verifySyncOut(spaceId, assetId, {
+    const syncStatus = await assetService.verifySyncOut(spaceId, pendingAssetId, {
       readerPubs,
       asSpaceId,
       onSyncProgress: (fraction) => renderPhase('Syncing', fraction, 'qu-asset-upload-fill-sync'),
@@ -239,7 +273,7 @@ export class QuAssetUploadElement extends HTMLElement {
       errEl.textContent = `Sync incomplete after retries (${syncStatus.missing.length} piece(s) unconfirmed)`;
       status.appendChild(errEl);
     }
-    this.dispatchEvent(new CustomEvent('qu-asset-synced', { detail: { assetId, ...syncStatus }, bubbles: true }));
+    this.dispatchEvent(new CustomEvent('qu-asset-synced', { detail: { assetId: pendingAssetId, ...syncStatus }, bubbles: true }));
   }
 }
 

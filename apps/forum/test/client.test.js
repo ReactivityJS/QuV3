@@ -310,6 +310,36 @@ test('attaching a file via the composer\'s <qu-asset-upload> sends it along with
   }
 });
 
+test('an attachment can be sent with no caption at all - the same rule voice messages already get in apps/chat', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => container.querySelector('qu-asset-upload') !== null);
+    const fileInput = container.querySelector('qu-asset-upload input[type=file]');
+    const file = new File(['fake image bytes'], 'photo.png', { type: 'image/png' });
+    Object.defineProperty(fileInput, 'files', { value: [file], configurable: true });
+    fileInput.dispatchEvent(new window.Event('change'));
+    await waitFor(() => container.querySelector('.qu-forum-pending-attachment')?.hidden === false, { timeout: 5000 });
+
+    // No text typed at all - previously actionBtn's click handler bailed
+    // out on an empty body regardless of a pending attachment.
+    const sendBtn = container.querySelector('.qu-forum-composer-action');
+    sendBtn.click();
+
+    await waitFor(() => container.querySelector('.qu-forum-message-attachment') !== null, { timeout: 5000 });
+    const { messages } = await a.services.messages.listMessages(FORUM_SPACE_ID, 'general');
+    assert.equal(messages[0].body, '');
+    assert.equal(messages[0].attachment.name, 'photo.png');
+    // No stray empty <p> for the caption-less body - see renderMessageText()'s own doc comment.
+    assert.equal(container.querySelector('.qu-forum-message-text'), null);
+  } finally {
+    stop();
+  }
+});
+
 test('the composer\'s emoji picker inserts the picked emoji at the caret', async () => {
   const a = await freshEnv('Ada');
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
