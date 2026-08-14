@@ -86,16 +86,20 @@
  * PERMALINKS + SCROLL-FOLLOW: a message's timestamp (see
  * `buildMessageFooter()`) IS its permalink - clicking it (or landing on one
  * from Search/a notification, see `searchChat()`/`resolveChatReference()`)
- * scrolls that message into view and briefly highlights it
+ * scrolls that message to the TOP of the view and briefly highlights it
  * (`.qu-chat-bubble-row-highlight`). `mountRoomView()` also tracks whether
  * the user is currently scrolled to the bottom (`stuckToBottom`): true by
  * default, false when landing on an older permalink so the jump-to isn't
- * immediately overridden. Scrolling back down to the bottom re-engages it;
- * scrolling away releases it. `renderMessages()` (re-run on every new
- * message via `watchChildren()`) only force-scrolls to the bottom when
- * `stuckToBottom` is still true - so a new message auto-scrolls the view
- * exactly when the user was already looking at the latest one, and never
- * yanks them away from something they scrolled up to read.
+ * immediately overridden. Scrolling back down to the bottom re-engages it
+ * (AND strips a lingering `/m/<id>` back out of the URL, see
+ * `releasePermalinkAnchor()`); scrolling away releases it. A new message
+ * (re-run on every write via `watchChildren()`) only force-scrolls the view
+ * when `stuckToBottom` is still true - otherwise a small "↓ New message"
+ * banner appears instead (`newMessageBanner`, click-to-catch-up), never an
+ * automatic jump away from whatever the user was reading. See
+ * `renderMessages()`'s own doc comment for HOW a new message is applied
+ * without disturbing the current scroll position (incremental append, not
+ * a full rebuild, for the common case).
  *
  * COMPOSER: a rounded "pill" (textarea + emoji trigger) plus a tool
  * cluster (attach/location) and ONE circular action button that MORPHS
@@ -189,6 +193,7 @@ const DICT = {
     messageRequests: 'Message requests',
     accept: 'Accept',
     decline: 'Decline',
+    newMessagesBelow: '↓ New message',
   },
   de: {
     title: 'Chats',
@@ -226,6 +231,7 @@ const DICT = {
     messageRequests: 'Nachrichtenanfragen',
     accept: 'Annehmen',
     decline: 'Ablehnen',
+    newMessagesBelow: '↓ Neue Nachricht',
   },
 };
 const { t } = createI18n(DICT);
@@ -293,6 +299,19 @@ const STYLE = `
   .qu-chat-header-name { font-weight: 700; font-size: 1.1em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .qu-chat-header-status { font-size: 0.8em; opacity: 0.65; }
   .qu-chat-messages-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 1rem; }
+  /* NEW MESSAGE BANNER - see mountRoomView()'s own creation site and
+     renderMessages()'s "NO SPURIOUS JUMPS" doc comment. position: sticky
+     (not absolute/fixed) pins it near the bottom of the CURRENTLY VISIBLE
+     scroll area with zero JS position math - its natural in-flow position
+     is right after every message (the very end of messagesScroll's
+     content), so "stuck" at bottom: 1rem only ever actually applies while
+     that natural position is below the visible viewport, i.e. exactly
+     while there's unseen content to scroll down to. Hidden (display:none
+     via [hidden]) removes it from flow entirely, so it never reserves
+     space or affects scrollHeight while not shown. */
+  .qu-chat-new-message-banner { position: sticky; bottom: 1rem; left: 50%; transform: translateX(-50%); display: block; width: fit-content; padding: 0.4rem 0.9rem; border: none; border-radius: 999px; background: var(--qu-color-accent, #5b5bd6); color: white; font: inherit; font-size: 0.85em; cursor: pointer; box-shadow: 0 0.2rem 0.6rem rgba(0,0,0,0.25); }
+  .qu-chat-new-message-banner:hover { filter: brightness(1.08); }
+  .qu-chat-new-message-banner[hidden] { display: none; }
   .qu-chat-messages { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; max-width: 40rem; }
   .qu-chat-bubble-row { display: flex; }
   .qu-chat-bubble-row-mine { justify-content: flex-end; }
@@ -840,7 +859,17 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   const messagesScroll = document.createElement('div');
   messagesScroll.className = 'qu-chat-messages-scroll';
   const messagesRoot = document.createElement('div');
-  messagesScroll.appendChild(messagesRoot);
+  // A SIBLING of messagesRoot, never touched by renderMessages()'s own
+  // clear-and-rebuild of messagesRoot - see that function's own "NEW
+  // MESSAGE BANNER" doc comment for what shows/hides it. position: sticky
+  // (see STYLE) keeps it pinned near the bottom of the VISIBLE scroll area
+  // regardless of where messagesRoot's own content currently scrolls to.
+  const newMessageBanner = document.createElement('button');
+  newMessageBanner.type = 'button';
+  newMessageBanner.className = 'qu-chat-new-message-banner';
+  newMessageBanner.textContent = t('newMessagesBelow');
+  newMessageBanner.hidden = true;
+  messagesScroll.append(messagesRoot, newMessageBanner);
   const composerWrap = document.createElement('div');
   composerWrap.className = 'qu-chat-composer-wrap';
   const replyBanner = document.createElement('div');
@@ -926,16 +955,50 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   // an ALREADY-rendered row's tick in place without needing its own copy of
   // the message list.
   let renderedMessagesById = new Map();
+  // {id, editedAt}[] snapshot of the last successfully rendered message
+  // list, oldest-first - see renderMessages()'s own "INCREMENTAL APPEND"
+  // doc comment for what this drives. Empty until the first render.
+  let lastRenderedSnapshot = [];
+  let hasRenderedOnce = false;
   const BOTTOM_FOLLOW_THRESHOLD_PX = 80;
-  messagesScroll.addEventListener('scroll', () => {
-    stuckToBottom = messagesScroll.scrollHeight - messagesScroll.scrollTop - messagesScroll.clientHeight < BOTTOM_FOLLOW_THRESHOLD_PX;
-  });
+  function scrollToBottom(smooth) {
+    if (messagesScroll.scrollTo) messagesScroll.scrollTo({ top: messagesScroll.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
+    else messagesScroll.scrollTop = messagesScroll.scrollHeight; // jsdom (this repo's test DOM) has no scrollTo() at all
+  }
+  function showNewMessageBanner() { newMessageBanner.hidden = false; }
+  function hideNewMessageBanner() { newMessageBanner.hidden = true; }
   function roomHash() {
     return target.kind === 'group' ? `#/chat/g/${roomId}` : `#/chat/${target.peerPub}`;
   }
   function messagePermalink(message) {
     return `${roomHash()}/m/${message.id}`;
   }
+  // Landing back at the very bottom RELEASES a permalink anchor still
+  // sitting in the URL, the same way stuckToBottom itself already releases
+  // the IN-MEMORY "don't auto-scroll away from this" behavior - without
+  // this, reloading this same tab later would jump back to the old
+  // permalinked message instead of showing the latest one, even though
+  // the user had already scrolled past it and moved on.
+  function releasePermalinkAnchor() {
+    const plainHash = roomHash();
+    if (window.location.hash !== plainHash) window.history.replaceState(null, '', plainHash);
+  }
+  newMessageBanner.addEventListener('click', () => {
+    stuckToBottom = true;
+    hideNewMessageBanner();
+    scrollToBottom(true);
+    releasePermalinkAnchor();
+  });
+  messagesScroll.addEventListener('scroll', () => {
+    const nowAtBottom = messagesScroll.scrollHeight - messagesScroll.scrollTop - messagesScroll.clientHeight < BOTTOM_FOLLOW_THRESHOLD_PX;
+    if (nowAtBottom && !stuckToBottom) {
+      // The user just scrolled themselves back down to "now" - see
+      // releasePermalinkAnchor()'s own doc comment.
+      releasePermalinkAnchor();
+      hideNewMessageBanner();
+    }
+    stuckToBottom = nowAtBottom;
+  });
 
   let pendingAttachment = null;
   function clearPendingAttachment() {
@@ -1105,6 +1168,57 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   let myPub = null;
   let chatSettings = DEFAULT_CHAT_SETTINGS;
 
+  /** @param {object[]} messages @returns {{id: string, editedAt: number|null}[]} */
+  function snapshotOf(messages) {
+    return messages.map((m) => ({ id: m.id, editedAt: m.editedAt ?? null }));
+  }
+  /**
+   * True when `current` is `previous` with ONLY new messages appended after
+   * it - same ids, same `editedAt`, in the same order, for the whole
+   * `previous` prefix. False for a first render (`previous` empty), an
+   * edit/deletion anywhere in the existing range, or a reordering - any of
+   * which needs the full rebuild path below to render correctly.
+   */
+  function isSimpleAppend(previous, current) {
+    if (previous.length === 0 || current.length <= previous.length) return false;
+    for (let i = 0; i < previous.length; i++) {
+      if (previous[i].id !== current[i].id || previous[i].editedAt !== current[i].editedAt) return false;
+    }
+    return true;
+  }
+
+  /**
+   * NO SPURIOUS JUMPS: `messagesRoot.textContent = ''` (the full-rebuild
+   * path below) collapses `messagesScroll`'s own `scrollHeight` to ~0 for
+   * one frame - if the user was scrolled anywhere below that, the BROWSER
+   * itself force-clamps `scrollTop` down to fit the (momentarily empty)
+   * content, and that clamp does NOT reverse itself once the content
+   * regrows a moment later - confirmed live as "scrolling jumps down, then
+   * back to the previous post" (down to wherever the clamp landed, then
+   * back up/down again once something - a stray `stuckToBottom` read
+   * during that same collapsed frame - kicks off a second, corrective
+   * scroll). Two changes fix this together, not just one:
+   *   1. INCREMENTAL APPEND (`isSimpleAppend()` above) - the overwhelmingly
+   *      common case (a plain new message, nothing else changed) never
+   *      touches `messagesRoot` at all; only the new tail messages are
+   *      appended to the EXISTING <ul>, so nothing above them ever moves,
+   *      collapses, or gets re-clamped in the first place.
+   *   2. For the remaining, rarer full-rebuild cases (first mount, an edit,
+   *      a deletion, a fresh permalink target to locate), `stuckToBottom`
+   *      is snapshotted into `wasStuckToBottom` BEFORE touching the DOM at
+   *      all, and `messagesScroll.scrollTop` is captured/explicitly
+   *      restored afterward whenever this render must NOT move the view -
+   *      never trusting the LIVE `stuckToBottom` (which the collapse's own
+   *      spurious 'scroll' event could have just corrupted) or the
+   *      browser's own post-collapse resting scrollTop (which is simply
+   *      wrong, not "close enough").
+   *
+   * NEW MESSAGE BANNER: when NOT stuck to the bottom, a newly arrived
+   * message never auto-scrolls the view at all (per explicit ask - jumping
+   * away from whatever the user is reading is worse than not scrolling)
+   * - `newMessageBanner` (a sticky-positioned pill, see its own creation
+   * site) appears instead, click-to-catch-up.
+   */
   async function renderMessages() {
     const token = ++renderToken;
     if (stopped || !roomReady) return;
@@ -1140,9 +1254,37 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
       }
     }
 
+    // See this function's own "NO SPURIOUS JUMPS" doc comment.
+    const wasStuckToBottom = stuckToBottom;
+    const currentSnapshot = snapshotOf(messages);
+
+    if (!pendingScrollTarget && isSimpleAppend(lastRenderedSnapshot, currentSnapshot)) {
+      const appended = messages.slice(lastRenderedSnapshot.length);
+      const ul = messagesRoot.querySelector('.qu-chat-messages');
+      for (const message of appended) {
+        renderedMessagesById.set(message.id, message);
+        const li = await renderMessage(message, renderedMessagesById, readReceipts);
+        if (stopped || token !== renderToken) return;
+        ul.appendChild(li);
+      }
+      lastRenderedSnapshot = currentSnapshot;
+      hasRenderedOnce = true;
+      if (wasStuckToBottom) {
+        hideNewMessageBanner();
+        scrollToBottom(true);
+      } else {
+        showNewMessageBanner();
+      }
+      return;
+    }
+
+    const previousScrollTop = messagesScroll.scrollTop; // see "NO SPURIOUS JUMPS" - restored below when this render must not move the view
+    const isFirstRender = !hasRenderedOnce;
     clearMessageWatchers();
     messagesRoot.textContent = '';
     renderedMessagesById = new Map(messages.map((m) => [m.id, m])); // see refreshReadTicks()'s own doc comment
+    lastRenderedSnapshot = currentSnapshot;
+    hasRenderedOnce = true;
     if (messages.length > 0) {
       const ul = document.createElement('ul');
       ul.className = 'qu-chat-messages';
@@ -1155,30 +1297,38 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     }
 
     // See mountRoomView()'s own doc comment on "PERMALINKS + scroll-follow".
+    let effectiveStuck = wasStuckToBottom;
     if (pendingScrollTarget) {
       const targetRow = [...messagesRoot.querySelectorAll('.qu-chat-bubble-row')].find((li) => li.dataset.messageId === pendingScrollTarget);
       pendingScrollTarget = null;
       if (targetRow) {
+        hideNewMessageBanner();
         // jsdom (this repo's test DOM) has no layout engine and doesn't
         // implement scrollIntoView() at all - optional-chained so tests
         // exercise every line above/below it without stubbing it out.
-        targetRow.scrollIntoView?.({ block: 'center' });
+        // block: 'start' (not 'center') - the message someone followed a
+        // link to should land clearly at the TOP of the visible area, not
+        // buried in the middle where it's easy to miss which one it was.
+        targetRow.scrollIntoView?.({ block: 'start' });
         targetRow.classList.add('qu-chat-bubble-row-highlight');
         setTimeout(() => targetRow.classList.remove('qu-chat-bubble-row-highlight'), 2000);
+        stuckToBottom = false;
         return;
       }
-      stuckToBottom = true; // the permalinked message is gone (deleted?) - fall through to "show latest" below
+      effectiveStuck = true; // the permalinked message is gone (deleted?) - fall through to "show latest" below
     }
-    if (stuckToBottom) {
+    stuckToBottom = effectiveStuck;
+    if (effectiveStuck) {
+      hideNewMessageBanner();
       // A smooth scroll (not an instant scrollTop jump) - most noticeable
       // right after returning from a permalink/highlighted message further
       // up: without this, "catching up" to the latest message read as an
-      // abrupt jump rather than a natural scroll. jsdom (this repo's test
-      // DOM) has no layout engine and doesn't implement scrollTo() at all -
-      // scrollTop assignment is the fallback there (and for any other host
-      // missing it), functionally equivalent minus the animation.
-      if (messagesScroll.scrollTo) messagesScroll.scrollTo({ top: messagesScroll.scrollHeight, behavior: 'smooth' });
-      else messagesScroll.scrollTop = messagesScroll.scrollHeight;
+      // abrupt jump rather than a natural scroll. Instant on the very
+      // first render of this mount instead - opening a room should show it
+      // already resting at the bottom, not visibly scroll there.
+      scrollToBottom(!isFirstRender);
+    } else {
+      messagesScroll.scrollTop = previousScrollTop;
     }
   }
 

@@ -98,6 +98,22 @@ function makeContainer() {
   return el;
 }
 
+/**
+ * Simulates the user's scroll position for mountRoomView()'s own
+ * stuckToBottom listener. jsdom (this repo's test DOM) has no layout
+ * engine - `scrollHeight`/`clientHeight` are fixed, getter-only 0s, so
+ * `scrollTop` alone can never actually express "near the bottom" vs "far
+ * from it" the way the real geometry check needs; both getters are
+ * overridden here (configurable, so a later call can re-override them
+ * again) to give the listener real numbers to compare.
+ */
+function simulateScroll(scrollEl, { scrollTop = 0, scrollHeight = 0, clientHeight = 0 } = {}) {
+  Object.defineProperty(scrollEl, 'scrollHeight', { value: scrollHeight, configurable: true });
+  Object.defineProperty(scrollEl, 'clientHeight', { value: clientHeight, configurable: true });
+  scrollEl.scrollTop = scrollTop;
+  scrollEl.dispatchEvent(new window.Event('scroll'));
+}
+
 /** Opens a message's "⋮" context menu (content.messageFooter's core.menu segment) and returns its panel - see apps/forum/test/client.test.js's own identical helper. */
 async function openMessageMenu(root) {
   await waitFor(() => root.querySelector('.qu-thread-ui-context-menu-trigger') !== null);
@@ -591,6 +607,162 @@ test('landing on a message permalink route (#/chat/<peer>/m/<id>) scrolls to and
     const highlighted = rows.filter((row) => row.classList.contains('qu-chat-bubble-row-highlight'));
     assert.equal(highlighted.length, 1);
     assert.equal(highlighted[0].id, `m-${target.id}`);
+  } finally {
+    stop();
+  }
+});
+
+test('landing on a permalink scrolls the target to the TOP of the view (block: "start"), not the center', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  const target = await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'find me' });
+
+  // scrollIntoView() is called DURING renderMessages(), on a row that
+  // doesn't exist until mount-time render - spied at the shared prototype
+  // level (keyed by class), same technique @qu/thread-ui's own popup tests
+  // already use for the identical "element doesn't exist until a click/
+  // render happens inside the code under test" situation.
+  const original = window.HTMLElement.prototype.scrollIntoView;
+  const calls = [];
+  window.HTMLElement.prototype.scrollIntoView = function (opts) {
+    if (this.classList.contains('qu-chat-bubble-row')) calls.push(opts);
+  };
+  const container = makeContainer();
+  const stop = mount(container, {
+    qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe,
+    segments: ['chat', bob.myPub, 'm', target.id],
+  });
+  try {
+    await waitFor(() => calls.length > 0);
+    assert.equal(calls[0].block, 'start');
+  } finally {
+    window.HTMLElement.prototype.scrollIntoView = original;
+    stop();
+  }
+});
+
+test('scrolling back down to the bottom after a permalink releases the anchor from the URL (a later reload lands on the latest message, not the old one)', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  const target = await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'old one' });
+
+  const container = makeContainer();
+  const stop = mount(container, {
+    qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe,
+    segments: ['chat', bob.myPub, 'm', target.id],
+  });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-bubble-row-highlight') !== null);
+
+    const scroll = container.querySelector('.qu-chat-messages-scroll');
+    simulateScroll(scroll, { scrollTop: 1500, scrollHeight: 2000, clientHeight: 500 }); // "at the bottom"
+
+    assert.equal(window.location.hash, `#/chat/${bob.myPub}`);
+  } finally {
+    stop();
+  }
+});
+
+test('a new message from someone else while NOT at the bottom does not scroll or rebuild the view - shows the "new message" banner instead', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'first' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-bubble-text')?.textContent.includes('first'));
+    const firstRow = container.querySelector('.qu-chat-bubble-row');
+    assert.ok(firstRow);
+    assert.equal(container.querySelector('.qu-chat-new-message-banner').hidden, true);
+
+    const scroll = container.querySelector('.qu-chat-messages-scroll');
+    simulateScroll(scroll, { scrollTop: 0, scrollHeight: 2000, clientHeight: 500 }); // release stuckToBottom
+    const scrollToCalls = [];
+    scroll.scrollTo = (opts) => scrollToCalls.push(opts);
+
+    // Bob posts on HIS OWN store, then "syncs" into Alice's - the standard
+    // cross-identity technique this file's own tests already use.
+    await mirrorProfileInto(alice, bob.qu);
+    const bobRoomId = await bob.services.chat.ensureRoom(CHAT_SPACE_ID, alice.myPub);
+    assert.equal(bobRoomId, roomId);
+    await bob.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'second, from bob' });
+    await mirrorThreadInto(bob, alice.qu, CHAT_SPACE_ID, roomId);
+
+    await waitFor(() => container.querySelector('.qu-chat-new-message-banner')?.hidden === false);
+    assert.equal(scrollToCalls.length, 0); // never auto-scrolled away from what the user was reading
+    // INCREMENTAL APPEND, not a full rebuild - the FIRST row's own DOM node
+    // is the exact same element reference as before, never torn down.
+    assert.equal(container.querySelector('.qu-chat-bubble-row'), firstRow);
+    assert.equal(container.querySelectorAll('.qu-chat-bubble-row').length, 2);
+  } finally {
+    stop();
+  }
+});
+
+test('a new message from someone else while AT the bottom scrolls smoothly to it, via incremental append (not a full rebuild)', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'first' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-bubble-text')?.textContent.includes('first'));
+    const firstRow = container.querySelector('.qu-chat-bubble-row');
+
+    const scroll = container.querySelector('.qu-chat-messages-scroll');
+    const scrollToCalls = [];
+    scroll.scrollTo = (opts) => scrollToCalls.push(opts);
+
+    await mirrorProfileInto(alice, bob.qu);
+    const bobRoomId = await bob.services.chat.ensureRoom(CHAT_SPACE_ID, alice.myPub);
+    await bob.services.messages.postMessage(CHAT_SPACE_ID, bobRoomId, { body: 'second, from bob' });
+    await mirrorThreadInto(bob, alice.qu, CHAT_SPACE_ID, roomId);
+
+    await waitFor(() => container.querySelectorAll('.qu-chat-bubble-row').length === 2);
+    assert.equal(container.querySelector('.qu-chat-bubble-row'), firstRow); // incremental append, first row untouched
+    assert.equal(container.querySelector('.qu-chat-new-message-banner').hidden, true);
+    await waitFor(() => scrollToCalls.length > 0);
+    assert.equal(scrollToCalls.at(-1).behavior, 'smooth');
+  } finally {
+    stop();
+  }
+});
+
+test('clicking the "new message" banner scrolls to the bottom and hides it', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'first' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-bubble-text')?.textContent.includes('first'));
+    const scroll = container.querySelector('.qu-chat-messages-scroll');
+    simulateScroll(scroll, { scrollTop: 0, scrollHeight: 2000, clientHeight: 500 });
+    const scrollToCalls = [];
+    scroll.scrollTo = (opts) => scrollToCalls.push(opts);
+
+    await mirrorProfileInto(alice, bob.qu);
+    const bobRoomId = await bob.services.chat.ensureRoom(CHAT_SPACE_ID, alice.myPub);
+    await bob.services.messages.postMessage(CHAT_SPACE_ID, bobRoomId, { body: 'second, from bob' });
+    await mirrorThreadInto(bob, alice.qu, CHAT_SPACE_ID, roomId);
+    await waitFor(() => container.querySelector('.qu-chat-new-message-banner')?.hidden === false);
+
+    container.querySelector('.qu-chat-new-message-banner').click();
+    assert.equal(container.querySelector('.qu-chat-new-message-banner').hidden, true);
+    assert.equal(scrollToCalls.at(-1).behavior, 'smooth');
   } finally {
     stop();
   }
