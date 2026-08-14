@@ -75,11 +75,19 @@ export const DEFAULT_RELAY_SETTINGS = Object.freeze({
   // default order, appended after every explicitly configured id - see
   // `rankFor()`'s own doc comment for the exact precedence.
   extensionOrder: Object.freeze({}),
+  // Server-side Open Graph unfurling for URLs typed into chat/forum
+  // messages (see `link-preview.js`'s own doc comment for why this is
+  // relay-side rather than a direct client fetch: IP-leak + CORS). An
+  // admin-visible kill switch, not a per-domain allowlist/blocklist - the
+  // SSRF defense itself (private/internal address ranges) is a hard-coded
+  // safety floor in `link-preview.js`, never something a relay operator
+  // should be able to loosen via this setting.
+  linkPreviews: Object.freeze({ enabled: true }),
 });
 
 /**
  * @param {import('@qu/core').QuStore} qu
- * @returns {Promise<{defaultLocale: string, rateLimits: {maxMessagesPerMinute: number}, disabledApps: string[], flagTypes: Array<{id: string, label: string, icon: string, mode: string, entityKinds: string[]}>, channels: {allowMemberCreate: boolean, allowMemberRestricted: boolean}, chat: {allowMemberCreateGroup: boolean}, extensionOrder: Record<string, string[]>}>}
+ * @returns {Promise<{defaultLocale: string, rateLimits: {maxMessagesPerMinute: number}, disabledApps: string[], flagTypes: Array<{id: string, label: string, icon: string, mode: string, entityKinds: string[]}>, channels: {allowMemberCreate: boolean, allowMemberRestricted: boolean}, chat: {allowMemberCreateGroup: boolean}, extensionOrder: Record<string, string[]>, linkPreviews: {enabled: boolean}}>}
  *   Always fully populated - missing fields fall back to `DEFAULT_RELAY_SETTINGS`.
  */
 export async function getSettings(qu) {
@@ -92,6 +100,7 @@ export async function getSettings(qu) {
     channels: { ...DEFAULT_RELAY_SETTINGS.channels, ...val.channels },
     chat: { ...DEFAULT_RELAY_SETTINGS.chat, ...val.chat },
     extensionOrder: { ...DEFAULT_RELAY_SETTINGS.extensionOrder, ...val.extensionOrder },
+    linkPreviews: { ...DEFAULT_RELAY_SETTINGS.linkPreviews, ...val.linkPreviews },
   };
 }
 

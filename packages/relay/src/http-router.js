@@ -4,6 +4,7 @@ import { getSettings } from './relay-settings.js';
 import { buildAppsCatalog } from './apps-catalog.js';
 import { serveApps } from './static-apps.js';
 import { serveShell } from './static-shell.js';
+import { getLinkPreview } from './link-preview.js';
 
 const log = createLogger('HttpRouter');
 
@@ -24,7 +25,7 @@ export class HttpRouter {
    *   fresh on every request via `loader.listManifests()`, so apps loaded
    *   partway through `boot()` (see `relay.js`) show up the moment they're
    *   actually loaded, not just after `boot()` fully completes.
-   * @param {{adminPubs: string[], appsDir: string, serveShell: boolean, shellDir: string, state: {transport: object|null, vapidKeys: {publicKey: string}|null}}} options -
+   * @param {{adminPubs: string[], appsDir: string, serveShell: boolean, shellDir: string, state: {transport: object|null, vapidKeys: {publicKey: string}|null}, getLinkPreviewImpl?: typeof getLinkPreview}} options -
    *   `state` is a mutable, shared reference the caller keeps populating as
    *   the relay boots (`transport`/`vapidKeys` aren't known until partway
    *   through `boot()` - see `relay.js`) - read fresh on every request
@@ -33,7 +34,7 @@ export class HttpRouter {
    *   (`/healthz`'s own `peerId` field, `/push/vapid-public-key`'s
    *   `publicKey` field) instead of a stale/undefined value.
    */
-  constructor(qu, adminHttp, loader, { adminPubs, appsDir, serveShell: serveShellOption, shellDir, state }) {
+  constructor(qu, adminHttp, loader, { adminPubs, appsDir, serveShell: serveShellOption, shellDir, state, getLinkPreviewImpl = getLinkPreview }) {
     this.qu = qu;
     this.adminHttp = adminHttp;
     this.loader = loader;
@@ -42,6 +43,10 @@ export class HttpRouter {
     this.serveShellOption = serveShellOption;
     this.shellDir = shellDir;
     this.state = state;
+    // Injectable (see link-preview.test.js style DI) so this route's own
+    // tests don't have to make REAL outbound network requests - defaults to
+    // the real, caching, SSRF-guarded implementation in link-preview.js.
+    this.getLinkPreview = getLinkPreviewImpl;
   }
 
   /** @param {import('node:http').IncomingMessage} req @param {import('node:http').ServerResponse} res */
@@ -110,6 +115,39 @@ export class HttpRouter {
       // as a TLS cert - never a secret).
       if (req.url === '/push/vapid-public-key') {
         res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }).end(JSON.stringify({ publicKey: this.state.vapidKeys?.publicKey ?? null }));
+        return;
+      }
+
+      // Server-side Open Graph unfurling (title/description/image) for a
+      // URL a chat/forum message links to - see `link-preview.js`'s own top
+      // doc comment for why this is a relay route rather than a direct
+      // client-side fetch of the target site (IP-leak to arbitrary third
+      // parties + CORS), and for the SSRF guard every fetch this route
+      // triggers goes through. `enabled: false` (an admin's own kill
+      // switch, see `relay-settings.js`) answers 404 rather than a "success
+      // with everything null" 200, so a client can tell "this relay has the
+      // feature off" apart from "fetched fine, page just had no OG tags".
+      if (req.url?.startsWith('/link-preview')) {
+        const settings = await getSettings(this.qu);
+        if (!settings.linkPreviews.enabled) {
+          res.writeHead(404, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }).end(JSON.stringify({ error: 'link previews are disabled on this relay' }));
+          return;
+        }
+        const target = new URL(req.url, 'http://internal').searchParams.get('url');
+        if (!target) {
+          res.writeHead(400, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }).end(JSON.stringify({ error: 'missing url query parameter' }));
+          return;
+        }
+        // getLinkPreview() never throws (see its own doc comment) - a dead/
+        // blocked/non-HTML target just resolves to `null` here, same as any
+        // other "nothing to preview" outcome, cached at its own (shorter)
+        // negative TTL so this relay doesn't hammer it on every render.
+        const preview = await this.getLinkPreview(target);
+        res.writeHead(200, {
+          'content-type': 'application/json',
+          'access-control-allow-origin': '*',
+          'cache-control': 'public, max-age=300', // a client-side re-fetch (e.g. a fresh page load) can reuse a recent response too - this relay's own cache already governs true freshness
+        }).end(JSON.stringify(preview ?? { url: target, title: null, description: null, image: null, siteName: null }));
         return;
       }
 

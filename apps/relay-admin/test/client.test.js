@@ -31,6 +31,7 @@ const DEFAULT_SETTINGS = {
   flagTypes: [{ id: 'favorite', label: 'Favorite', icon: '⭐', mode: 'private', entityKinds: ['app', 'user'] }],
   channels: { allowMemberCreate: true, allowMemberRestricted: false },
   chat: { allowMemberCreateGroup: true },
+  linkPreviews: { enabled: true },
 };
 
 const APPS = [
@@ -39,9 +40,9 @@ const APPS = [
   { name: 'pins', label: 'pins', icon: '📌', contributes: [{ point: 'content.messageMenu', export: 'pinMenuItem' }] },
 ];
 
-/** section:nth-of-type - order-section index depends on how many sections come before it (see mount()'s own form.append() order). */
-const FOOTER_ORDER_SECTION = 'form > section:nth-of-type(5)';
-const MENU_ORDER_SECTION = 'form > section:nth-of-type(6)';
+/** section:nth-of-type - order-section index depends on how many sections come before it (see mount()'s own form.append() order: general, apps, channels, chat, linkPreviews, then the order sections). */
+const FOOTER_ORDER_SECTION = 'form > section:nth-of-type(6)';
+const MENU_ORDER_SECTION = 'form > section:nth-of-type(7)';
 
 function orderRowLabels(section) {
   return [...section.querySelectorAll('.qu-relay-admin-order-row')].map((row) => row.querySelector('span').textContent);
@@ -65,7 +66,7 @@ test('an admin identity sees the settings form, pre-populated from /config.json'
   const env = await freshEnv();
   t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({
     adminPubs: [env.myPub],
-    settings: { ...DEFAULT_SETTINGS, defaultLocale: 'de', rateLimits: { maxMessagesPerMinute: 30 }, disabledApps: ['reactions'], channels: { allowMemberCreate: false, allowMemberRestricted: true }, chat: { allowMemberCreateGroup: false } },
+    settings: { ...DEFAULT_SETTINGS, defaultLocale: 'de', rateLimits: { maxMessagesPerMinute: 30 }, disabledApps: ['reactions'], channels: { allowMemberCreate: false, allowMemberRestricted: true }, chat: { allowMemberCreateGroup: false }, linkPreviews: { enabled: false } },
   }), { status: 200 }));
 
   const container = makeContainer();
@@ -87,6 +88,9 @@ test('an admin identity sees the settings form, pre-populated from /config.json'
 
     const chatCheckboxes = [...container.querySelectorAll('form > section:nth-of-type(4) input[type="checkbox"]')];
     assert.equal(chatCheckboxes[0].checked, false); // allowMemberCreateGroup
+
+    const linkPreviewsCheckboxes = [...container.querySelectorAll('form > section:nth-of-type(5) input[type="checkbox"]')];
+    assert.equal(linkPreviewsCheckboxes[0].checked, false); // linkPreviews.enabled
 
     assert.match(container.querySelector('.qu-relay-admin-flagtypes').textContent, /Favorite/);
   } finally {
@@ -129,10 +133,40 @@ test('saving posts a REAL, independently-verifiable Ed25519 signature over the e
     assert.equal(capturedBody.settings.defaultLocale, 'de');
     assert.deepEqual(capturedBody.settings.disabledApps, ['reactions']);
     assert.deepEqual(capturedBody.settings.chat, { allowMemberCreateGroup: true }); // untouched - the form's own default
+    assert.deepEqual(capturedBody.settings.linkPreviews, { enabled: true }); // untouched - the form's own default
 
     await waitFor(() => container.querySelector('.qu-relay-admin-status')?.hidden === false);
     assert.match(container.querySelector('.qu-relay-admin-status').textContent, /Saved/);
     assert.equal(container.querySelector('.qu-relay-admin-status').classList.contains('qu-relay-admin-status-error'), false);
+  } finally {
+    stop?.();
+  }
+});
+
+test('toggling link previews off includes { enabled: false } in the saved settings patch', async (t) => {
+  const env = await freshEnv();
+  let capturedBody = null;
+
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    if (url === '/config.json') return new Response(JSON.stringify({ adminPubs: [env.myPub], settings: DEFAULT_SETTINGS }), { status: 200 });
+    if (url === '/admin/settings') {
+      capturedBody = JSON.parse(init.body);
+      return new Response(JSON.stringify(capturedBody.settings), { status: 200 });
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  });
+
+  const container = makeContainer();
+  const stop = await mount(container, { identity: env.identity, services: env.services, apps: APPS });
+  try {
+    await waitFor(() => container.querySelector('form') !== null);
+    assert.match(container.textContent, /internal network/); // the SSRF-safety hint text renders
+    const linkPreviewsCheckbox = container.querySelector('form > section:nth-of-type(5) input[type="checkbox"]');
+    linkPreviewsCheckbox.checked = false;
+    container.querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+
+    await waitFor(() => capturedBody !== null);
+    assert.deepEqual(capturedBody.settings.linkPreviews, { enabled: false });
   } finally {
     stop?.();
   }

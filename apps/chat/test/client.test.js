@@ -632,6 +632,48 @@ test('sharing location posts a message with extra.location, rendered as an OpenS
   }
 });
 
+test('a message body URL is auto-linked AND gets a <qu-link-preview url="..."> right after the text - only the FIRST of several links', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'see https://example.com/a and also https://example.com/b' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-bubble-text a') !== null);
+    const links = [...container.querySelectorAll('.qu-chat-bubble-text a')];
+    assert.equal(links.length, 2);
+    assert.equal(links[0].href, 'https://example.com/a');
+    assert.equal(links[0].target, '_blank');
+    assert.equal(links[0].rel, 'noopener noreferrer');
+
+    const previews = container.querySelectorAll('qu-link-preview');
+    assert.equal(previews.length, 1); // only the first link, not one per link
+    assert.equal(previews[0].getAttribute('url'), 'https://example.com/a');
+  } finally {
+    stop();
+  }
+});
+
+test('a message body with no URL gets no <qu-link-preview> at all', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'no links here' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-bubble-text')?.textContent.includes('no links here'));
+    assert.equal(container.querySelector('qu-link-preview'), null);
+  } finally {
+    stop();
+  }
+});
+
 test('a message\'s timestamp IS its permalink - #/chat/<peer>/m/<id> for a 1:1 room, #/chat/g/<groupId>/m/<id> for a group', async () => {
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');

@@ -148,8 +148,13 @@
  * follow-ups, not attempted half-way here. Visual `@mention` highlighting inside a
  * message body is also not rendered (the underlying `mentions` field still
  * drives push notification routing via this app's own `pushActions`, which
- * is the part that actually matters functionally) - only bare `http(s)://`
- * links are auto-linked, via `@qu/services`' shared `detectLinks()`.
+ * is the part that actually matters functionally) - bare `http(s)://` links
+ * are auto-linked via `@qu/services`' shared `detectLinks()`, and the FIRST
+ * link in a message also gets a preview card (`<qu-link-preview>`, `@qu/ui`'s
+ * `link-preview-components.js`) fetched relay-side from `@qu/relay`'s own
+ * `/link-preview` route - see that route's own doc comment
+ * (`packages/relay/src/link-preview.js`) for the SSRF-guarded server-side
+ * Open Graph unfurling this is built on.
  */
 import { watch, watchChildren } from '@qu/reactive';
 import { paths, formatActorLabel, getPrivate, putPrivate, getPrivateChildren, detectLinks, ChatService } from '@qu/services';
@@ -1781,7 +1786,8 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     if (!message.voice && !message.location) {
       const p = document.createElement('p');
       p.className = 'qu-chat-bubble-text';
-      for (const segment of detectLinks(message.body)) {
+      const linkSegments = detectLinks(message.body);
+      for (const segment of linkSegments) {
         if (segment.type === 'link') {
           const a = document.createElement('a');
           a.href = segment.value;
@@ -1794,6 +1800,18 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
         }
       }
       root.appendChild(p);
+      // Only the FIRST link in a message gets a preview card - Telegram/
+      // Slack/etc. all do this too, never one card per link (a message with
+      // several links would otherwise turn into a wall of cards). Renders
+      // nothing at all if the relay has nothing preview-worthy for it - see
+      // <qu-link-preview>'s own doc comment (@qu/ui's
+      // link-preview-components.js).
+      const firstLink = linkSegments.find((seg) => seg.type === 'link');
+      if (firstLink) {
+        const preview = document.createElement('qu-link-preview');
+        preview.setAttribute('url', firstLink.value);
+        root.appendChild(preview);
+      }
     }
     if (message.attachment) {
       const assetEl = document.createElement('qu-asset');
