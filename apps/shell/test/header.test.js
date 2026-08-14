@@ -182,6 +182,25 @@ test('subscribe() is called with the notifications space prefix', async (t) => {
   }
 });
 
+test('the own alias/avatar shown in the header updates live when the profile changes, no reload needed', async (t) => {
+  const { qu, services } = await freshEnv();
+  t.mock.method(globalThis, 'fetch', mockAppsFetch());
+  const container = makeContainer();
+  const stop = mountHeader(container, { qu, services, subscribe: noopSubscribe });
+  try {
+    await waitForOwnName(container);
+    const nameSlot = container.querySelector('.qu-shell-user-name');
+    assert.notEqual(nameSlot.textContent, 'Ada');
+
+    await services.profile.saveProfile({ alias: 'Ada' });
+
+    await waitFor(() => nameSlot.textContent === 'Ada');
+    assert.match(container.querySelector('.qu-shell-user-btn').title, /^Ada — /);
+  } finally {
+    stop();
+  }
+});
+
 test('the returned stop function tears down cleanly - no error thrown', async (t) => {
   const { qu, services } = await freshEnv();
   t.mock.method(globalThis, 'fetch', mockAppsFetch());
