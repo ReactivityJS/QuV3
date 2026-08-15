@@ -15,6 +15,7 @@
     { "id": "guestInvite", "label": "Event invitations", "type": "create" }
   ],
   "contributes": [
-    { "point": "content.messageMenu", "export": "createEventMenuItem", "kind": "menu", "order": 40 }
+    { "point": "content.messageMenu", "export": "createEventMenuItem", "kind": "menu", "order": 40 },
+    { "point": "shell.headerAction", "export": "renderHeaderAction", "kind": "ui", "order": 10 }
   ]
 }

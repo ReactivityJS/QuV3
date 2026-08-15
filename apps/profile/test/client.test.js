@@ -523,8 +523,10 @@ test('#/~<pub>/settings renders the userSettings.contributions extension point i
     // Rendered inside profile's own `.qu-profile-ext-settings` mount point, after every one of its own settings sections.
     const extRoot = container.querySelector('.qu-profile-ext-settings');
     assert.ok(extRoot.contains(container.querySelector('.contributed-marker')));
-    const backLink = [...container.querySelectorAll('a')].find((a) => a.textContent === 'Back to profile');
-    assert.ok(extRoot.compareDocumentPosition(backLink) & Node.DOCUMENT_POSITION_FOLLOWING, 'the extension slot renders before the back link');
+    // No bespoke "back to profile" link - the shell header's own Back/
+    // Forward already covers it (docs/app-navigation-standard.md Rule 1).
+    assert.equal(container.querySelector('a.qu-subpage-back'), null);
+    assert.equal([...container.querySelectorAll('a')].some((a) => a.textContent === 'Back to profile'), false);
   } finally {
     stop();
   }

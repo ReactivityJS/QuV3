@@ -544,12 +544,16 @@ and the shell's own nav (`apps/shell/src/nav.js`) both read.
 ## 6. `@qu/ui`
 
 `packages/ui/src/index.js` exports: `QuViewElement, QuBindElement, QuListElement,
-QuKeyElement, QuIfElement, findQu, renderSubpage, renderAvatar,
+QuKeyElement, QuIfElement, findQu, renderSubpage, mountAppHeaderAction,
+mountContextSwitcher, renderContextListPage, renderAvatar,
 renderAvatarOrAsset, ASSET_AVATAR_PREFIX, injectStyle, renderFlagToggle,
 ensureTheme, DEFAULT_THEME, THEME_PRESETS, getStoredTheme, setStoredTheme,
 QuAssetUploadElement, QuAssetElement, findAssetService`. (`@qu/ui/testing.js`
 is a separate entry point — `installDom()`, `waitFor()` — for tests only, see
-`docs/building-an-app.md` §9.)
+`docs/building-an-app.md` §9.) `renderSubpage`, `mountAppHeaderAction`, and
+`mountContextSwitcher`/`renderContextListPage` are the three building blocks
+behind [`docs/app-navigation-standard.md`](./app-navigation-standard.md) —
+see that doc for the full navigation spec, not just their signatures.
 
 ### Custom Elements (`components.js`)
 
@@ -576,11 +580,37 @@ itself or an ancestor, **before** the element connects (`findQu(el)`/
 - **`<qu-if path="..." field="..." equals="..." negate>`** — toggles
   `.hidden` on itself based on a field comparison.
 
-### `renderSubpage(...)` (`subpage.js`)
+### `renderSubpage(container, { backHref, backLabel, showBackLink = true, render })` (`subpage.js`)
 
-The shared "← back to X" building block every subpage in this repo uses —
-see `docs/building-an-app.md` §4.2 for how a subpage fits into `segments`-based
-routing.
+The shared content-area wrapper every subpage in this repo uses — see
+`docs/building-an-app.md` §4.2 for how a subpage fits into `segments`-based
+routing. Pass `showBackLink: false` (per
+[`docs/app-navigation-standard.md`](./app-navigation-standard.md) Rule 1) — the
+shell header's own Back/Forward already covers "return to where you came
+from", so a subpage should not also render its own "← back to X" link.
+`backHref`/`backLabel` are only used when `showBackLink` is left `true`.
+
+### `mountAppHeaderAction(container, { appId, getContext, onContextChange, render })` (`app-header-action.js`)
+
+The App Action Slot helper (`docs/app-navigation-standard.md` Rule 2) — shows
+`render(wrap)`'s output only while `getContext().appId === appId`, and runs
+its returned cleanup (if any) on leaving that app. Used from a `shell.headerAction`
+contributor (see `apps/calendar/client.js`'s/`apps/chat/client.js`'s own
+`renderHeaderAction()` exports) to make a header icon conditional on which
+app is currently active, instead of always-visible like `apps/search`'s own
+contributor. Also injects the shared `.qu-app-action-btn` icon style every
+contributor's own icon should use.
+
+### `mountContextSwitcher(container, options)` / `renderContextListPage(container, options)` (`context-switcher.js`)
+
+The Context Switcher (`docs/app-navigation-standard.md` Rule 3) — a
+responsive sidebar/tab-strip (`variant: 'tabs'`) or sidebar/real-sub-page
+(`variant: 'page'`) shell for any app with more than one sibling "place" to
+be. `items` (a plain link list) or `renderSidebar` (a custom builder, for a
+list with its own per-item UI) supplies the sidebar content;
+`render(content)` supplies the app's own main view. `renderContextListPage()`
+renders the same sidebar content full-page, for `variant: 'page'`'s
+`switchHref` route. See that doc's own usage examples for both variants.
 
 ### `renderAvatar(seed, label, avatarValue, { size = '2rem' } = {})` (`avatar.js`)
 

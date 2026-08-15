@@ -1432,20 +1432,31 @@ test('none of the forum subpages (channel view, topic view, new-channel view) re
   const a = await freshEnv('Ada');
   const channel = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Announcements' });
 
-  // Channel view and the new-channel form still go through renderSubpage()
-  // (`.qu-subpage-content`) - the topic view no longer does, since it's
-  // its own fixed "room" layout now (see mountTopicView()'s own top doc
-  // comment) with no page-level back-link concept to begin with, so it's
-  // checked separately below via its own always-present marker instead.
-  for (const segments of [['forum', 'c', channel._id], ['forum', 'new']]) {
-    const container = makeContainer();
-    const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments });
-    try {
-      await waitFor(() => container.querySelector('.qu-subpage-content') !== null);
-      assert.equal(container.querySelector('.qu-subpage-back'), null, `expected no back link for segments ${segments.join('/')}`);
-    } finally {
-      stop();
-    }
+  // The new-channel form still goes through renderSubpage() directly
+  // (`.qu-subpage-content`). The channel view no longer does - it's
+  // @qu/ui's mountContextSwitcher() now (see mountChannelView()'s own doc
+  // comment / docs/app-navigation-standard.md Rule 3), which owns its own
+  // "no back link" guarantee without needing a nested renderSubpage() -
+  // waited for via its own `.qu-ctxswitch-content` marker instead. The
+  // topic view is its own fixed "room" layout with no page-level back-link
+  // concept to begin with, checked separately below via its own
+  // always-present marker.
+  const channelContainer = makeContainer();
+  const stopChannel = mount(channelContainer, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', channel._id] });
+  try {
+    await waitFor(() => channelContainer.querySelector('.qu-ctxswitch-content') !== null);
+    assert.equal(channelContainer.querySelector('.qu-subpage-back'), null);
+  } finally {
+    stopChannel();
+  }
+
+  const newChannelContainer = makeContainer();
+  const stopNewChannel = mount(newChannelContainer, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'new'] });
+  try {
+    await waitFor(() => newChannelContainer.querySelector('.qu-subpage-content') !== null);
+    assert.equal(newChannelContainer.querySelector('.qu-subpage-back'), null);
+  } finally {
+    stopNewChannel();
   }
 
   const topicContainer = makeContainer();

@@ -1,0 +1,13 @@
+{
+  "name": "template",
+  "version": "1.0.0",
+  "kind": "app",
+  "main": "./index.js",
+  "label": "Template",
+  "icon": "🧩",
+  "navOrder": 0,
+  "requires": [],
+  "contributes": [
+    { "point": "shell.headerAction", "export": "renderHeaderAction", "kind": "ui", "order": 10 }
+  ]
+}

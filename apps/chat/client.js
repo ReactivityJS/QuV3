@@ -167,7 +167,7 @@ import { watch, watchChildren } from '@qu/reactive';
 import { paths, formatActorLabel, getPrivate, putPrivate, getPrivateChildren, detectLinks, ChatService } from '@qu/services';
 import { rankFor } from '@qu/foundation';
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage } from '@qu/ui';
+import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage, mountAppHeaderAction } from '@qu/ui';
 import {
   renderEmojiPicker, renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, insertAtCursor, copyToClipboard,
   mountComposerAutogrow, COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS,
@@ -190,7 +190,6 @@ const DICT = {
   en: {
     title: 'Chats',
     empty: 'No chats yet - add a contact from the User List, or start a group.',
-    backToChats: '← Chats',
     online: 'online',
     lastSeen: 'last seen {time}',
     membersOnline: '{count} members, {online} online',
@@ -214,7 +213,7 @@ const DICT = {
     voiceMessage: '🎙️ Voice message',
     shareLocation: 'Share my location',
     locationMessage: 'Location',
-    newGroup: '+ New group',
+    newGroup: 'New group',
     createGroup: 'Create group',
     groupName: 'Group name',
     selectMembers: 'Add members',
@@ -237,7 +236,6 @@ const DICT = {
   de: {
     title: 'Chats',
     empty: 'Noch keine Chats - Kontakt aus der Nutzerliste hinzufügen oder eine Gruppe starten.',
-    backToChats: '← Chats',
     online: 'online',
     lastSeen: 'zuletzt online {time}',
     membersOnline: '{count} Mitglieder, {online} online',
@@ -261,7 +259,7 @@ const DICT = {
     voiceMessage: '🎙️ Sprachnachricht',
     shareLocation: 'Meinen Standort teilen',
     locationMessage: 'Standort',
-    newGroup: '+ Neue Gruppe',
+    newGroup: 'Neue Gruppe',
     createGroup: 'Gruppe erstellen',
     groupName: 'Gruppenname',
     selectMembers: 'Mitglieder hinzufügen',
@@ -310,8 +308,6 @@ const STYLE = `
   .qu-chat-request-actions button { padding: 0.3rem 0.7rem; border-radius: var(--qu-radius-sm, 0.3rem); border: 1px solid var(--qu-color-border, #8884); background: transparent; cursor: pointer; font: inherit; }
   .qu-chat-request-actions button:first-child { background: var(--qu-color-accent, #5b5bd6); color: white; border-color: transparent; }
   .qu-chat-empty { padding: 1.5rem; text-align: center; opacity: 0.7; }
-  .qu-chat-new-group { display: block; margin-top: 0.4rem; opacity: 0.85; }
-  .qu-chat-new-group:hover { opacity: 1; }
   /* ROOM VIEW FIXED LAYOUT - see this file's own top doc comment. Genuine
      position: fixed (viewport-relative), NOT a calc(100vh - ...) height
      against .qu-shell-screen's own padding/box model - a PRIOR version of
@@ -341,8 +337,6 @@ const STYLE = `
      box, so they're simply never part of the scrolling region. */
   .qu-chat-room-view { position: fixed; top: 3.25rem; right: 0; bottom: 0; left: 0; display: flex; flex-direction: column; background: var(--qu-color-surface, #ffffff); z-index: 10; }
   .qu-chat-header { flex-shrink: 0; display: flex; align-items: center; gap: 0.6rem; padding: 0.6rem 1rem; border-bottom: 1px solid var(--qu-color-border, #8884); background: var(--qu-color-surface, #ffffff); }
-  .qu-chat-header-back { flex-shrink: 0; text-decoration: none; color: inherit; font-size: 1.2em; padding: 0.2rem 0.5rem; border-radius: var(--qu-radius-sm, 0.3rem); }
-  .qu-chat-header-back:hover { background: var(--qu-color-border, #8884); }
   .qu-chat-header-namewrap { min-width: 0; overflow: hidden; }
   .qu-chat-header-name { font-weight: 700; font-size: 1.1em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .qu-chat-header-status { font-size: 0.8em; opacity: 0.65; }
@@ -561,6 +555,40 @@ export async function renderChatSettings(container, { myPub, services }) {
 }
 
 // ===================================================================
+// HEADER ACTION - "+ New group" (see docs/app-navigation-standard.md Rule 2)
+// ===================================================================
+
+/**
+ * The `shell.headerAction` contributor (see `apps/chat/manifest.quapp`'s
+ * `contributes`) - shows a single "+" icon in the GLOBAL header, only while
+ * Chat is the active app, linking to the New Group form - gated by the SAME
+ * `fetchChatPolicy()` check the old inline "+ New group" room-list link used
+ * (below, moved here). Replaces that inline link entirely.
+ * @param {HTMLElement} container
+ * @param {{getContext: Function, onContextChange: Function, services: object}} payload
+ */
+export function renderHeaderAction(container, { getContext, onContextChange, services }) {
+  mountAppHeaderAction(container, {
+    appId: 'chat', getContext, onContextChange,
+    render: (wrap) => {
+      let stopped = false;
+      (async () => {
+        const { allowMemberCreateGroup, isAdmin } = await fetchChatPolicy(services);
+        if (stopped || !(isAdmin || allowMemberCreateGroup)) return;
+        const link = document.createElement('a');
+        link.className = 'qu-app-action-btn';
+        link.textContent = '+';
+        link.title = t('newGroup');
+        link.setAttribute('aria-label', t('newGroup'));
+        link.href = '#/chat/new-group';
+        wrap.appendChild(link);
+      })();
+      return () => { stopped = true; };
+    },
+  });
+}
+
+// ===================================================================
 // ROUTER
 // ===================================================================
 
@@ -712,16 +740,9 @@ function mountRoomListView(container, { qu, services, subscribe, syncFetch, SPAC
       for (const room of rooms) ul.appendChild(roomRow(room));
       listRoot.appendChild(ul);
     }
-
-    const { allowMemberCreateGroup, isAdmin } = await fetchChatPolicy(services);
-    if (stopped || token !== renderToken) return;
-    if (isAdmin || allowMemberCreateGroup) {
-      const newGroupLink = document.createElement('a');
-      newGroupLink.href = '#/chat/new-group';
-      newGroupLink.className = 'qu-chat-new-group';
-      newGroupLink.textContent = t('newGroup');
-      listRoot.appendChild(newGroupLink);
-    }
+    // No inline "+ New group" link here anymore - it's the global header's
+    // App Action Slot now (see renderHeaderAction() below and
+    // docs/app-navigation-standard.md Rule 2), same policy check.
   }
 
   function roomRow(room) {
@@ -847,8 +868,10 @@ function mountNewGroupView(container, { services, SPACE_ID }) {
   heading.textContent = t('createGroup');
 
   renderSubpage(container, {
-    backHref: '#/chat',
-    backLabel: t('backToChats'),
+    // The shell header's own Back/Forward already covers this - see
+    // docs/app-navigation-standard.md Rule 1 (same reasoning apps/forum's
+    // own renderSubpage() calls already document).
+    showBackLink: false,
     render: (content) => content.append(heading, formRoot),
   });
 
@@ -922,21 +945,16 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   // A flex COLUMN filling the viewport height below the shell's own fixed
   // top header (see this file's own top doc comment's "FIXED LAYOUT"
   // section) - `heading`/`composerWrap` are flex-shrink:0 (pinned), only
-  // `.qu-chat-messages-scroll` (wrapping `messagesRoot`) scrolls. Replaces
-  // the earlier `renderSubpage()` usage - the back arrow now lives INSIDE
-  // this one fixed header row instead of a separate line above it, so
-  // there's exactly one fixed top bar to account for, not two stacked ones.
+  // `.qu-chat-messages-scroll` (wrapping `messagesRoot`) scrolls. Doesn't use
+  // `renderSubpage()` for the same reason it never did - no bespoke back
+  // link either (see docs/app-navigation-standard.md Rule 1): the shell
+  // header's own Back/Forward already covers "return to the room list",
+  // so this row is just avatar + name/status, one fixed top bar total.
   const roomView = document.createElement('div');
   roomView.className = 'qu-chat-room-view';
 
   const heading = document.createElement('div');
   heading.className = 'qu-chat-header';
-  const backLink = document.createElement('a');
-  backLink.className = 'qu-chat-header-back';
-  backLink.href = '#/chat';
-  backLink.textContent = '←';
-  backLink.title = t('backToChats');
-  backLink.setAttribute('aria-label', t('backToChats'));
   const headerAvatarSlot = document.createElement('div');
   const headerName = document.createElement('div');
   headerName.className = 'qu-chat-header-namewrap';
@@ -945,7 +963,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   const headerStatusEl = document.createElement('div');
   headerStatusEl.className = 'qu-chat-header-status';
   headerName.append(headerNameEl, headerStatusEl);
-  heading.append(backLink, headerAvatarSlot, headerName);
+  heading.append(headerAvatarSlot, headerName);
 
   const messagesScroll = document.createElement('div');
   messagesScroll.className = 'qu-chat-messages-scroll';
