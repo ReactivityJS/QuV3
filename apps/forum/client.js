@@ -179,7 +179,7 @@ import { watchChildren, watch } from '@qu/reactive';
 import { rankFor } from '@qu/foundation';
 import { paths, formatActorLabel, detectLinks } from '@qu/services';
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage } from '@qu/ui';
+import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage, mountContextSwitcher } from '@qu/ui';
 import {
   renderEmojiPicker, renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, insertAtCursor, copyToClipboard,
   mountComposerAutogrow, COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS,
@@ -753,45 +753,9 @@ function mountNewChannelView(container, { services, SPACE_ID }) {
 
 function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
   let stopped = false;
-  container.textContent = '';
-
-  const layout = document.createElement('div');
-  layout.className = 'qu-forum-layout';
-  const sidebarRoot = document.createElement('aside');
-  const mainRoot = document.createElement('div');
-  layout.append(sidebarRoot, mainRoot);
-  container.appendChild(layout);
-  // 'all' - the board view IS the "All channels" entry, see
-  // mountMiniChannelSidebar()'s own doc comment on that sentinel.
-  const stopSidebar = mountMiniChannelSidebar(sidebarRoot, { qu, services, syncFetch, SPACE_ID }, 'all');
-
-  const heading = document.createElement('h1');
-  heading.textContent = t('title');
-  const activityRoot = document.createElement('div');
-  mainRoot.append(heading, activityRoot);
-
-  // Keeps reply/unread counts current as messages land in any topic
-  // already on screen, not just when a channel/topic is added - see
-  // watchTopicsActivity()'s own doc comment for the confirmed bug this fixes.
-  const topicsActivity = watchTopicsActivity(qu, syncFetch, SPACE_ID, services, () => render());
-
-  let renderToken = 0;
-  async function render() {
-    const token = ++renderToken;
-    if (stopped) return;
-    const channels = await services.channels.listChannels(SPACE_ID);
-    if (stopped || token !== renderToken) return;
-    const topicsPerChannel = await Promise.all(channels.map((c) => services.channels.listTopics(SPACE_ID, c._id)));
-    if (stopped || token !== renderToken) return;
-
-    const merged = [];
-    channels.forEach((channel, i) => {
-      for (const topic of topicsPerChannel[i]) merged.push({ ...topic, channelTitle: channel.title });
-    });
-    merged.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
-    topicsActivity.sync(merged.map((topic) => topic._id));
-    renderActivityFeed(activityRoot, merged);
-  }
+  let stopSidebar = () => {};
+  let topicsActivity;
+  let off;
 
   function renderActivityFeed(root, topics) {
     root.textContent = '';
@@ -812,12 +776,54 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
     root.appendChild(ul);
   }
 
-  const off = watch(qu, paths.listPath(SPACE_ID, 'channels'), () => render(), { syncFetch });
+  // See docs/app-navigation-standard.md Rule 3 - the shared responsive
+  // sidebar/tab-strip shell (@qu/ui's mountContextSwitcher(), variant:
+  // 'tabs'), with `renderSidebar` handing off to mountMiniChannelSidebar()
+  // UNCHANGED (it self-manages its own channel-list fetch + live watch,
+  // same as before - only the surrounding layout/CSS is now shared with
+  // every other app instead of this app's own bespoke `.qu-forum-layout`).
+  mountContextSwitcher(container, {
+    // 'all' - the board view IS the "All channels" entry, see
+    // mountMiniChannelSidebar()'s own doc comment on that sentinel.
+    renderSidebar: (host) => { stopSidebar = mountMiniChannelSidebar(host, { qu, services, syncFetch, SPACE_ID }, 'all'); },
+    variant: 'tabs',
+    render: (content) => {
+      const heading = document.createElement('h1');
+      heading.textContent = t('title');
+      const activityRoot = document.createElement('div');
+      content.append(heading, activityRoot);
+
+      // Keeps reply/unread counts current as messages land in any topic
+      // already on screen, not just when a channel/topic is added - see
+      // watchTopicsActivity()'s own doc comment for the confirmed bug this fixes.
+      topicsActivity = watchTopicsActivity(qu, syncFetch, SPACE_ID, services, () => render());
+
+      let renderToken = 0;
+      async function render() {
+        const token = ++renderToken;
+        if (stopped) return;
+        const channels = await services.channels.listChannels(SPACE_ID);
+        if (stopped || token !== renderToken) return;
+        const topicsPerChannel = await Promise.all(channels.map((c) => services.channels.listTopics(SPACE_ID, c._id)));
+        if (stopped || token !== renderToken) return;
+
+        const merged = [];
+        channels.forEach((channel, i) => {
+          for (const topic of topicsPerChannel[i]) merged.push({ ...topic, channelTitle: channel.title });
+        });
+        merged.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+        topicsActivity.sync(merged.map((topic) => topic._id));
+        renderActivityFeed(activityRoot, merged);
+      }
+
+      off = watch(qu, paths.listPath(SPACE_ID, 'channels'), () => render(), { syncFetch }); // initial: true (default) - fires render() immediately, not just on later changes
+    },
+  });
 
   return () => {
     stopped = true;
-    off();
-    topicsActivity.stop();
+    off?.();
+    topicsActivity?.stop();
     stopSidebar();
   };
 }
@@ -923,14 +929,7 @@ function mountMiniChannelSidebar(root, { qu, services, syncFetch, SPACE_ID }, ac
 
 function mountChannelView(container, { qu, services, syncFetch, SPACE_ID, channelId }) {
   let stopped = false;
-  container.textContent = '';
-  const layout = document.createElement('div');
-  layout.className = 'qu-forum-layout';
-  const sidebarRoot = document.createElement('aside');
-  const mainRoot = document.createElement('div');
-  layout.append(sidebarRoot, mainRoot);
-  container.appendChild(layout);
-  const stopSidebar = mountMiniChannelSidebar(sidebarRoot, { qu, services, syncFetch, SPACE_ID }, channelId);
+  let stopSidebar = () => {};
 
   const heading = document.createElement('div');
   heading.className = 'qu-forum-channel-heading';
@@ -941,8 +940,14 @@ function mountChannelView(container, { qu, services, syncFetch, SPACE_ID, channe
   const topicsRoot = document.createElement('div');
   const inviteRoot = document.createElement('div');
 
-  renderSubpage(mainRoot, {
-    showBackLink: false, // the shell header's own Back/Forward already covers this, and the persistent sidebar's own "All channels" entry covers the rest - see this app's own top doc comment
+  // See docs/app-navigation-standard.md Rule 1 (no bespoke back link - the
+  // shell header's own Back/Forward already covers this, and the sidebar's
+  // own "All channels" entry covers the rest) and Rule 3 (the shared
+  // responsive sidebar/tab-strip shell) - same shape as mountBoardView()'s
+  // own mountContextSwitcher() call just above.
+  mountContextSwitcher(container, {
+    renderSidebar: (host) => { stopSidebar = mountMiniChannelSidebar(host, { qu, services, syncFetch, SPACE_ID }, channelId); },
+    variant: 'tabs',
     render: (content) => content.append(heading, topicsRoot, inviteRoot),
   });
 

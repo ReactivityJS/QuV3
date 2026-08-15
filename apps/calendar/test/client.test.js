@@ -10,7 +10,7 @@ import {
 import { installDom, waitFor } from '@qu/ui/testing';
 
 installDom();
-const { mount, createEventMenuItem } = await import('../client.js');
+const { mount, createEventMenuItem, renderHeaderAction } = await import('../client.js');
 
 const CAL_SPACE_ID = 'ff73365b-144a-4285-8e98-ac7f9928a95f'; // real UUID from apps/calendar/manifest.quapp
 
@@ -150,7 +150,7 @@ test('renders the empty state when there are no calendars yet', async () => {
   }
 });
 
-test('creating a calendar via the sidebar form shows it under "My calendars" and switches to month view with a FAB', async () => {
+test('creating a calendar via the sidebar form shows it under "My calendars" and switches to month view', async () => {
   const { qu, services } = await freshEnv();
   const container = makeContainer();
   const stop = mount(container, { qu, services, segments: ['calendar'], subscribe: noopSubscribe });
@@ -158,10 +158,95 @@ test('creating a calendar via the sidebar form shows it under "My calendars" and
     await createCalendarViaForm(container);
     assert.equal(container.querySelector('.qu-cal-row-title').textContent, 'Team calendar');
     assert.equal(container.querySelector('.qu-cal-month-grid') !== null, true);
-    assert.equal(container.querySelector('.qu-cal-fab') !== null, true);
+    // No FAB/inline "+ New event" link anymore - that's the global header's
+    // App Action Slot now (renderHeaderAction, tested in isolation below),
+    // reachable at every width instead of only on mobile.
+    assert.equal(container.querySelector('.qu-cal-fab'), null);
+    assert.equal(container.querySelector('.qu-cal-new-event-inline'), null);
   } finally {
     stop();
   }
+});
+
+test('the main view has exactly one back/switch affordance (mountContextSwitcher\'s titlebar link) - no bespoke hamburger/off-canvas drawer', async () => {
+  const { qu, services } = await freshEnv();
+  const container = makeContainer();
+  const stop = mount(container, { qu, services, segments: ['calendar'], subscribe: noopSubscribe });
+  try {
+    await waitFor(() => container.querySelector('.qu-ctxswitch-root') !== null);
+    assert.equal(container.querySelector('.qu-cal-menu-btn'), null);
+    assert.equal(container.querySelector('.qu-cal-scrim'), null);
+    const titleLink = container.querySelector('.qu-ctxswitch-title-link');
+    assert.ok(titleLink);
+    assert.equal(titleLink.getAttribute('href'), '#/calendar/manage');
+  } finally {
+    stop();
+  }
+});
+
+test('#/calendar/manage renders the same calendars list full-page, with no back link of its own (the shell header\'s Back already covers it)', async () => {
+  const { qu, services } = await freshEnv();
+  const container = makeContainer();
+  const stop = mount(container, { qu, services, segments: ['calendar'], subscribe: noopSubscribe });
+  await createCalendarViaForm(container);
+  stop();
+
+  const container2 = makeContainer();
+  const stop2 = mount(container2, { qu, services, segments: ['calendar', 'manage'], subscribe: noopSubscribe });
+  try {
+    await waitFor(() => container2.querySelector('.qu-cal-row-title') !== null);
+    assert.equal(container2.querySelector('.qu-cal-row-title').textContent, 'Team calendar');
+    assert.equal(container2.querySelector('a.qu-subpage-back'), null);
+  } finally {
+    stop2();
+  }
+});
+
+test('every subpage (new event, event detail, share) has no bespoke back link - only the shell header\'s Back/Forward', async () => {
+  const { qu, services } = await freshEnv();
+  const container = makeContainer();
+  const stop = mount(container, { qu, services, segments: ['calendar'], subscribe: noopSubscribe });
+  await createCalendarViaForm(container);
+  const [{ id: calId }] = await services.flags.listPrivate('calendar', 'calendar');
+  stop();
+
+  for (const segments of [['calendar', calId, 'new'], ['calendar', calId, 'share']]) {
+    const c = makeContainer();
+    const s = mount(c, { qu, services, segments, subscribe: noopSubscribe });
+    try {
+      await waitFor(() => c.querySelector('.qu-cal-page') !== null || c.querySelector('.qu-cal-form') !== null);
+      assert.equal(c.querySelector('a.qu-subpage-back'), null, `no back link for segments ${segments.join('/')}`);
+      assert.equal(c.querySelector('.qu-cal-back-link'), null);
+    } finally {
+      s();
+    }
+  }
+});
+
+// ===== renderHeaderAction() - the shell.headerAction contributor (see docs/app-navigation-standard.md Rule 2) =====
+
+test('renderHeaderAction(): hidden while another app is active, shown with a "+" link once Calendar becomes active and an editable calendar resolves', async () => {
+  const { qu, services } = await freshEnv();
+  const container = makeContainer();
+  const stop = mount(makeContainer(), { qu, services, segments: ['calendar'], subscribe: noopSubscribe });
+  await createCalendarViaForm(document.body.lastElementChild);
+  const [{ id: calId }] = await services.flags.listPrivate('calendar', 'calendar');
+  stop();
+
+  let appId = 'chat';
+  const listeners = [];
+  renderHeaderAction(container, {
+    getContext: () => ({ appId, segments: [appId] }),
+    onContextChange: (cb) => listeners.push(cb),
+    services, qu,
+  });
+  const wrap = container.querySelector('.qu-app-header-action');
+  assert.equal(wrap.hidden, true);
+
+  appId = 'calendar';
+  listeners.forEach((cb) => cb());
+  assert.equal(wrap.hidden, false);
+  await waitFor(() => wrap.querySelector('a')?.getAttribute('href') === `#/calendar/${calId}/new`);
 });
 
 test('a newly created calendar is real, ACL-protected storage: owner-only writer, real member list', async () => {

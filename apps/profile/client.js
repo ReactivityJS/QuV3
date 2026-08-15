@@ -109,7 +109,7 @@
 import { watch } from '@qu/reactive';
 import { actorPath } from '@qu/identity';
 import { createI18n, AVAILABLE_LOCALES, setLocale } from '@qu/i18n';
-import { injectStyle, ensureTheme, renderAvatarOrAsset, ASSET_AVATAR_PREFIX, renderFlagToggle, THEME_PRESETS, setStoredTheme } from '@qu/ui';
+import { injectStyle, ensureTheme, renderAvatarOrAsset, ASSET_AVATAR_PREFIX, renderFlagToggle, THEME_PRESETS, setStoredTheme, renderSubpage } from '@qu/ui';
 import { formatActorLabel } from '@qu/services';
 
 const DICT = {
@@ -126,7 +126,6 @@ const DICT = {
     addField: 'Add field', removeField: 'Remove',
     listedInDirectory: 'Listed in directory (visible to the User List)',
     settingsLink: 'Language & theme settings',
-    backToProfile: 'Back to profile',
     language: 'Language', theme: 'Theme', useDefault: '(use default)',
     yourKeys: 'Your keys', pub: 'Signing key (pub)', epub: 'Encryption key (epub)',
     contactAdd: 'Add contact', contactRemove: 'Remove contact',
@@ -161,7 +160,6 @@ const DICT = {
     addField: 'Feld hinzufügen', removeField: 'Entfernen',
     listedInDirectory: 'Im Verzeichnis gelistet (sichtbar in der Nutzerliste)',
     settingsLink: 'Sprache & Theme',
-    backToProfile: 'Zurück zum Profil',
     language: 'Sprache', theme: 'Theme', useDefault: '(Standard verwenden)',
     yourKeys: 'Deine Schlüssel', pub: 'Signatur-Schlüssel (pub)', epub: 'Verschlüsselungs-Schlüssel (epub)',
     contactAdd: 'Kontakt hinzufügen', contactRemove: 'Kontakt entfernen',
@@ -379,7 +377,7 @@ export function mount(container, { qu, identity, services, segments = [], extens
         const justSaved = saveState.justSaved;
         saveState.justSaved = false;
         root.textContent = '';
-        const extRoot = renderSettings(root, own, services, myPub, saveState, justSaved, notifPrefs, installedApps);
+        const extRoot = renderSettings(root, own, services, saveState, justSaved, notifPrefs, installedApps);
         // The `userSettings.contributions` extension point (see this file's
         // own top doc comment) - any OTHER app (or a future relay-level
         // settings section) may render its own per-user preferences here,
@@ -628,7 +626,7 @@ function labeledInput(label, value, placeholder = '') {
   return { row, input };
 }
 
-function renderSettings(root, own, services, myPub, saveState, justSaved, notifPrefs, installedApps) {
+function renderSettings(root, own, services, saveState, justSaved, notifPrefs, installedApps) {
   const view = document.createElement('div');
   view.className = 'qu-profile qu-profile-settings';
 
@@ -729,12 +727,11 @@ function renderSettings(root, own, services, myPub, saveState, justSaved, notifP
   const extRoot = document.createElement('div');
   extRoot.className = 'qu-profile-ext-settings';
 
-  const backLink = document.createElement('a');
-  backLink.href = `#/~${myPub}`;
-  backLink.textContent = t('backToProfile');
-
-  view.append(heading, localeRow, themeRow, saveBtn, reloadRow, notifSection, extRoot, backLink);
-  root.appendChild(view);
+  view.append(heading, localeRow, themeRow, saveBtn, reloadRow, notifSection, extRoot);
+  // The shell header's own Back/Forward already covers "return to my
+  // profile" - see docs/app-navigation-standard.md Rule 1 (same reasoning
+  // apps/forum's/apps/chat's own renderSubpage() calls already document).
+  renderSubpage(root, { showBackLink: false, render: (content) => content.appendChild(view) });
   return extRoot;
 }
 

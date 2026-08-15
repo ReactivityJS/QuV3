@@ -6,7 +6,10 @@ either quoted directly from real source in this repo, or is a real, working
 example you can find under `apps/*`. For the full method-by-method reference
 (every Service, every `@qu/ui` element, theming/styling/templating), see
 [`docs/api-reference.md`](./api-reference.md); this guide is about *shape and
-wiring*, that one is about *what's callable*.
+wiring*. For how navigation specifically should look and behave (back
+buttons, "create new X" actions, switching between channels/calendars/
+conversations), see [`docs/app-navigation-standard.md`](./app-navigation-standard.md)
+and copy [`apps/_template/`](../apps/_template/) as your starting point.
 
 ## 1. The two-file shape
 
@@ -220,8 +223,11 @@ export function mount(container, { services, segments = [] }) {
 Build a link to a subpage the same way any other link works — a plain `<a
 href="#/notes/inbox/42">` — real browser history, working back/forward, no
 special JS needed (see `@qu/ui`'s `renderSubpage()` helper in
-`docs/api-reference.md` for the shared "← back to X" building block every
-subpage in this repo uses).
+`docs/api-reference.md` for the shared content-area wrapper every subpage in
+this repo uses — call it with `showBackLink: false`, per
+[`docs/app-navigation-standard.md`](./app-navigation-standard.md)'s Rule 1:
+the shell header's own Back/Forward already covers "return to where you
+came from", so a subpage should not also render its own back link).
 
 ## 5. Appearing in the nav — nothing to register
 

@@ -46,22 +46,30 @@
  *      same graceful "app not found" placeholder every other not-yet-loaded
  *      catalog entry already does.
  *
- * SEARCH SLOT (`shell.headerAction`): the header itself defines this one
- * extension point (`@qu/foundation`'s `ExtensionPointHost.renderSlot()`,
+ * APP ACTION SLOT (`shell.headerAction`, see `docs/app-navigation-standard.md`
+ * for the full standard this is Rule 2 of): the header itself defines this
+ * one extension point (`@qu/foundation`'s `ExtensionPointHost.renderSlot()`,
  * same mechanism `apps/forum`'s `content.messageActions`/etc. already use,
  * just with the HOST being this file instead of an app) and renders it
  * ONCE, unlike the per-route `extensionPoints` `apps/shell/client.js`
  * rebuilds on every navigation - this header is mounted exactly once for
  * the whole session, so its OWN `ExtensionPointHost` lives for that long
- * too. `apps/search` is the one contributor today (its `renderHeaderSearch`
- * mounts a single 🔍 icon), but nothing here is search-specific - any app
- * could contribute a second header icon the same way. Since the contributed
- * widget is mounted once but the ROUTE changes on every navigation, the
- * payload carries a live `getContext()`/`onContextChange()` pair (a plain
- * mutable `{appId, segments}` object plus a listener list this file updates
- * on every `hashchange`) instead of a fresh payload per render - cheap
- * (a plain object mutation and a DOM attribute write, no re-import, no DOM
- * churn) and avoids a second, ad hoc "watch the route" mechanism.
+ * too. `apps/search` is the one ALWAYS-VISIBLE contributor (its
+ * `renderHeaderSearch` mounts a single 🔍 icon); `apps/calendar`/`apps/chat`
+ * are CONDITIONAL contributors (a "+ New event"/"+ New group" icon, shown
+ * only while that app is the active one) via `@qu/ui`'s
+ * `mountAppHeaderAction()` helper - nothing here is app-specific, any app
+ * can contribute a header icon either way. Since the contributed widget is
+ * mounted once but the ROUTE changes on every navigation, the payload
+ * carries a live `getContext()`/`onContextChange()` pair (a plain mutable
+ * `{appId, segments}` object plus a listener list this file updates on
+ * every `hashchange`) instead of a fresh payload per render - cheap (a
+ * plain object mutation and a DOM attribute write, no re-import, no DOM
+ * churn) and avoids a second, ad hoc "watch the route" mechanism. The
+ * payload also carries `services`/`qu`/`subscribe`/`syncFetch` (the same
+ * ones this header itself was built with) so a CONDITIONAL contributor can
+ * resolve its own data once active, without a second trust surface - see
+ * the `renderSlot()` call site below.
  */
 import { watch, watchChildren } from '@qu/reactive';
 import { paths, formatActorLabel } from '@qu/services';
@@ -120,8 +128,8 @@ const STYLE = `
  * @param {HTMLElement} container
  * @param {{qu: import('@qu/core').QuStore, services: object, adminPubs?: string[], subscribe?: (prefix: string) => void, syncFetch?: (prefix: string) => Promise<*>, apps?: object[]}} deps -
  *   `apps` is the SAME manifest catalog every routed app already receives as
- *   `ctx.apps` (see this file's own "SEARCH SLOT" doc comment) - defaults to
- *   `[]` so an existing caller that doesn't pass it yet just renders no
+ *   `ctx.apps` (see this file's own "APP ACTION SLOT" doc comment) - defaults
+ *   to `[]` so an existing caller that doesn't pass it yet just renders no
  *   `shell.headerAction` contributors, never throws.
  * @returns {() => void} A stop function.
  */
@@ -223,7 +231,13 @@ export function mountHeader(container, { qu, services, adminPubs = [], subscribe
   }
   updateRouteContext();
   window.addEventListener('hashchange', updateRouteContext);
-  extensionPoints.renderSlot('shell.headerAction', headerSlot, { getContext, onContextChange });
+  // `services`/`qu`/`subscribe`/`syncFetch` ride along so a CONDITIONAL
+  // contributor (see @qu/ui's `mountAppHeaderAction()`) can resolve its own
+  // data once it becomes the active app - e.g. Calendar's "+ New event"
+  // needs `services.flags` to find an editable calendar, Chat's "+ New
+  // group" needs `services` for its own policy check. `apps/search`'s
+  // existing contributor ignores the extra fields, so this is non-breaking.
+  extensionPoints.renderSlot('shell.headerAction', headerSlot, { getContext, onContextChange, services, qu, subscribe, syncFetch });
 
   function closeMenu() {
     menu.hidden = true;

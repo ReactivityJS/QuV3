@@ -11,7 +11,7 @@ import { ExtensionPointHost } from '@qu/foundation';
 import { installDom, waitFor } from '@qu/ui/testing';
 
 installDom();
-const { mount, renderChatSettings, searchChat, resolveChatReference, renderSearchResult } = await import('../client.js');
+const { mount, renderChatSettings, renderHeaderAction, searchChat, resolveChatReference, renderSearchResult } = await import('../client.js');
 
 /** A minimal MediaRecorder test double - start()/pause()/resume()/stop(), stop() synchronously fires ondataavailable then onstop, matching real MediaRecorder's own event order closely enough for startRecording()'s own handler. pause()/resume() just track state (this file's own tests only assert on the DOM state the client itself derives, not on MediaRecorder.state). */
 class FakeMediaRecorder {
@@ -1291,7 +1291,7 @@ test('renderSearchResult(): an image/video/audio/file result renders a real <qu-
   assert.equal(link.contains(assetEl), false);
 });
 
-test('the room view uses the fixed-layout structure: a back link in the header, and the message list wrapped in a scrollable container', async () => {
+test('the room view uses the fixed-layout structure: no bespoke back link (the shell header\'s Back/Forward already covers it), and the message list wrapped in a scrollable container', async () => {
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');
   await mirrorProfileInto(bob, alice.qu);
@@ -1301,12 +1301,47 @@ test('the room view uses the fixed-layout structure: a back link in the header, 
   try {
     await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
     assert.ok(container.querySelector('.qu-chat-room-view'));
-    const backLink = container.querySelector('.qu-chat-header-back');
-    assert.equal(backLink.getAttribute('href'), '#/chat');
+    assert.equal(container.querySelector('.qu-chat-header-back'), null);
     // the message list lives INSIDE the scrollable wrapper, not directly under roomView
     assert.ok(container.querySelector('.qu-chat-messages-scroll'));
     assert.ok(container.querySelector('.qu-chat-messages-scroll .qu-chat-header') === null); // header is a SIBLING, not inside the scroll area
   } finally {
     stop();
   }
+});
+
+test('the new-group form has no bespoke back link either - just the shell header\'s Back/Forward', async () => {
+  const { qu, services } = await freshEnv('Alice');
+  const container = makeContainer();
+  const stop = mount(container, { qu, services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', 'new-group'] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-new-group-form') !== null);
+    assert.equal(container.querySelector('a.qu-subpage-back'), null);
+  } finally {
+    stop();
+  }
+});
+
+// ===== renderHeaderAction() - the shell.headerAction contributor (see docs/app-navigation-standard.md Rule 2) =====
+
+test('renderHeaderAction(): hidden while another app is active, shows a "+ New group" link once Chat becomes active', async () => {
+  const { services } = await freshEnv('Alice');
+  const container = makeContainer();
+
+  let appId = 'calendar';
+  const listeners = [];
+  renderHeaderAction(container, {
+    getContext: () => ({ appId, segments: [appId] }),
+    onContextChange: (cb) => listeners.push(cb),
+    services,
+  });
+  const wrap = container.querySelector('.qu-app-header-action');
+  assert.equal(wrap.hidden, true);
+  assert.equal(wrap.querySelector('a'), null);
+
+  appId = 'chat';
+  listeners.forEach((cb) => cb());
+  assert.equal(wrap.hidden, false);
+  await waitFor(() => wrap.querySelector('a') !== null);
+  assert.equal(wrap.querySelector('a').getAttribute('href'), '#/chat/new-group');
 });

@@ -66,7 +66,7 @@
 import { watch } from '@qu/reactive';
 import { paths, THREAD_PRESETS, formatActorLabel, matchesActorQuery } from '@qu/services';
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme } from '@qu/ui';
+import { injectStyle, ensureTheme, renderSubpage, mountContextSwitcher, renderContextListPage, mountAppHeaderAction } from '@qu/ui';
 
 const SPACE_ID = 'ff73365b-144a-4285-8e98-ac7f9928a95f'; // this app's own manifest.spaceId - see index.js's own copy of this constant
 const PALETTE = ['#e0483e', '#3e7fe0', '#3ea05e', '#d0a02a', '#9a4fe0', '#e0648a', '#2ab3a6', '#c47a2a'];
@@ -82,7 +82,7 @@ const DICT = {
     title: 'Calendar', myCalendars: 'My calendars', sharedWithMe: 'Shared with me', untitled: 'Untitled calendar',
     newCalendar: 'New calendar name…', create: 'Create',
     day: 'Day', week: 'Week', month: 'Month', list: 'Agenda',
-    today: 'Today', prev: 'Previous', next: 'Next', backToCalendar: '← Calendar',
+    today: 'Today', prev: 'Previous', next: 'Next',
     filterPlaceholder: 'Filter by title or description…',
     newEvent: 'New event', eventTitle: 'Title', eventDescription: 'Description (optional)',
     start: 'Start', end: 'End', allDay: 'All day', calendarLabel: 'Calendar', add: 'Add event', save: 'Save', cancel: 'Cancel',
@@ -111,7 +111,7 @@ const DICT = {
     title: 'Kalender', myCalendars: 'Meine Kalender', sharedWithMe: 'Für mich freigegeben', untitled: 'Unbenannter Kalender',
     newCalendar: 'Name des neuen Kalenders…', create: 'Erstellen',
     day: 'Tag', week: 'Woche', month: 'Monat', list: 'Liste',
-    today: 'Heute', prev: 'Zurück', next: 'Weiter', backToCalendar: '← Kalender',
+    today: 'Heute', prev: 'Zurück', next: 'Weiter',
     filterPlaceholder: 'Nach Titel oder Beschreibung filtern…',
     newEvent: 'Neuer Termin', eventTitle: 'Titel', eventDescription: 'Beschreibung (optional)',
     start: 'Start', end: 'Ende', allDay: 'Ganztägig', calendarLabel: 'Kalender', add: 'Termin hinzufügen', save: 'Speichern', cancel: 'Abbrechen',
@@ -142,22 +142,12 @@ const { t } = createI18n(DICT);
 const STYLE_ID = 'qu-calendar-style';
 const STYLE = `
   .qu-cal-root { position: relative; }
-  .qu-cal-topbar { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.6rem; }
-  .qu-cal-menu-btn { flex-shrink: 0; border: 1px solid var(--qu-color-border, #8884); background: none; border-radius: var(--qu-radius-md, 0.4rem); padding: 0.45rem 0.6rem; cursor: pointer; font-size: 1.1em; line-height: 1; }
-  .qu-cal-title-h1 { margin: 0; font-size: 1.3em; flex: 1; }
 
-  .qu-cal-layout { display: flex; align-items: flex-start; }
-  .qu-cal-main { flex: 1; min-width: 0; }
-
-  /* ---- Off-canvas sidebar (mobile default) / persistent sidebar (wide) ---- */
-  .qu-cal-scrim { position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 20; opacity: 0; pointer-events: none; transition: opacity 0.15s; }
-  .qu-cal-scrim[data-open="true"] { opacity: 1; pointer-events: auto; }
-  .qu-cal-sidebar { position: fixed; top: 0; bottom: 0; left: 0; width: 17rem; max-width: 84vw; background: var(--qu-color-surface, Canvas); z-index: 21; transform: translateX(-100%); transition: transform 0.18s ease-out; display: flex; flex-direction: column; gap: 0.9rem; padding: 1rem; box-sizing: border-box; overflow-y: auto; box-shadow: 0.4rem 0 1rem rgba(0,0,0,0.15); }
-  .qu-cal-sidebar[data-open="true"] { transform: translateX(0); }
-  .qu-cal-sidebar-head { display: flex; align-items: center; justify-content: space-between; }
-  .qu-cal-sidebar-head h2 { margin: 0; font-size: 1em; }
-  .qu-cal-sidebar-close { border: none; background: none; font-size: 1.3em; line-height: 1; cursor: pointer; padding: 0.2rem 0.4rem; }
-
+  /* The calendar-list "manage" sidebar is now @qu/ui's shared
+     mountContextSwitcher()/renderContextListPage() (variant: 'page') - see
+     docs/app-navigation-standard.md Rule 3. It supplies its own layout/
+     sidebar/titlebar styling; only the content BELOW/INSIDE it stays this
+     app's own. */
   .qu-cal-section-heading { font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.6; margin: 0.6rem 0 0.3rem; }
   .qu-cal-calendars { display: flex; flex-direction: column; gap: 0.2rem; }
   .qu-cal-row { display: flex; align-items: center; gap: 0.3rem; }
@@ -188,16 +178,12 @@ const STYLE = `
   .qu-cal-nav button { border: 1px solid var(--qu-color-border, #8884); background: none; border-radius: var(--qu-radius-md, 0.4rem); padding: 0.4rem 0.65rem; cursor: pointer; min-width: 2.2rem; }
   .qu-cal-heading { font-weight: 600; margin: 0 0.2rem; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.95em; }
   .qu-cal-primary { border: none; border-radius: var(--qu-radius-md, 0.4rem); padding: 0.5rem 1rem; background: var(--qu-color-accent, #5b5bd6); color: #fff; cursor: pointer; font-weight: 600; text-decoration: none; display: inline-block; }
-  .qu-cal-new-event-inline { display: none; }
   .qu-cal-filter { padding: 0.5rem; width: 100%; box-sizing: border-box; font-size: 1em; }
 
   /* Segmented view switcher - full-width, thumb-friendly on mobile */
   .qu-cal-viewswitch { display: flex; border: 1px solid var(--qu-color-border, #8884); border-radius: 999px; overflow: hidden; width: 100%; }
   .qu-cal-viewswitch button { flex: 1; border: none; background: none; padding: 0.5rem 0.4rem; cursor: pointer; font-size: 0.85em; }
   .qu-cal-viewswitch button[data-active="true"] { background: var(--qu-color-accent, #5b5bd6); color: #fff; font-weight: 600; }
-
-  /* Floating action button - mobile primary "New event" affordance */
-  .qu-cal-fab { position: fixed; right: 1.1rem; bottom: calc(1.1rem + env(safe-area-inset-bottom, 0px)); width: 3.4rem; height: 3.4rem; border-radius: 50%; background: var(--qu-color-accent, #5b5bd6); color: #fff; border: none; font-size: 1.6em; line-height: 1; cursor: pointer; box-shadow: 0 0.3rem 0.9rem rgba(0,0,0,0.3); z-index: 15; display: flex; align-items: center; justify-content: center; text-decoration: none; }
 
   .qu-cal-month-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 0.2rem; }
   .qu-cal-month-cell { min-width: 0; border: 1px solid var(--qu-color-border, #8884); border-radius: 0.25rem; padding: 0.25rem; min-height: 3.6rem; font-size: 0.82em; cursor: pointer; transition: background-color 0.1s; }
@@ -233,8 +219,6 @@ const STYLE = `
   .qu-cal-now-line::before { content: ''; position: absolute; left: -4px; top: -3px; width: 8px; height: 8px; border-radius: 50%; background: var(--qu-color-danger, #c00); }
 
   .qu-cal-page { max-width: 34rem; padding-bottom: 5rem; }
-  .qu-cal-back-link { display: inline-block; margin-bottom: 0.6rem; text-decoration: none; opacity: 0.8; }
-  .qu-cal-back-link:hover { opacity: 1; }
   .qu-cal-notice { font-size: 0.85em; opacity: 0.75; border: 1px dashed var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); padding: 0.5rem 0.7rem; margin-bottom: 0.6rem; }
   .qu-cal-form { display: flex; flex-direction: column; gap: 0.7rem; }
   .qu-cal-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.9em; }
@@ -261,20 +245,13 @@ const STYLE = `
   .qu-cal-picker-option:hover, .qu-cal-picker-option[data-active="true"] { background: #8882; }
   .qu-cal-picker-empty { padding: 0.55rem 0.7rem; font-size: 0.85em; opacity: 0.65; }
 
-  /* ---- ≥720px: persistent sidebar, back to a desktop-style layout ---- */
+  /* ---- ≥720px: back to a desktop-style toolbar layout ---- */
   @media (min-width: 720px) {
-    .qu-cal-menu-btn { display: none; }
-    .qu-cal-scrim { display: none; }
-    .qu-cal-layout { gap: 1.3rem; align-items: flex-start; }
-    .qu-cal-sidebar { position: static; transform: none; width: 16rem; max-width: none; flex-shrink: 0; box-shadow: none; padding: 0; overflow-y: visible; }
-    .qu-cal-sidebar-head { display: none; }
     .qu-cal-toolbar { flex-wrap: nowrap; }
     .qu-cal-toolbar-navrow { width: auto; flex: 1; min-width: 0; }
     .qu-cal-viewswitch { width: auto; flex-shrink: 0; }
     .qu-cal-viewswitch button { flex: initial; padding: 0.35rem 0.8rem; }
     .qu-cal-filter { width: 14rem; }
-    .qu-cal-fab { display: none; }
-    .qu-cal-new-event-inline { display: inline-block; }
     .qu-cal-month-cell { min-height: 5.2rem; padding: 0.35rem; font-size: 0.85em; }
   }
 `;
@@ -524,6 +501,51 @@ function mountActorPicker(container, { services, subscribe, excludePubs = new Se
 }
 
 // ===========================================================================
+// Header action - "+ New event" (see docs/app-navigation-standard.md Rule 2)
+// ===========================================================================
+
+/**
+ * The `shell.headerAction` contributor (see `apps/calendar/manifest.quapp`'s
+ * `contributes`) - shows a single "+" icon in the GLOBAL header, only while
+ * Calendar is the active app, linking straight to the New Event page for the
+ * first calendar this identity can actually edit. Replaces the old floating
+ * action button (mobile) + inline toolbar link (desktop) - this ONE
+ * affordance is reachable at every width, since the global header is always
+ * visible, so nothing mobile-specific is lost.
+ * @param {HTMLElement} container
+ * @param {{getContext: Function, onContextChange: Function, services: object, qu: import('@qu/core').QuStore}} payload
+ */
+export function renderHeaderAction(container, { getContext, onContextChange, services, qu }) {
+  mountAppHeaderAction(container, {
+    appId: 'calendar', getContext, onContextChange,
+    render: (wrap) => {
+      const link = document.createElement('a');
+      link.className = 'qu-app-action-btn';
+      link.textContent = '+';
+      link.title = t('newEvent');
+      link.setAttribute('aria-label', t('newEvent'));
+      wrap.appendChild(link);
+
+      let stopped = false;
+      (async () => {
+        const myPub = await services.actors.whoAmI();
+        const mine = await services.flags.listPrivate('calendar', 'calendar');
+        for (const cal of mine) {
+          if (stopped) return;
+          const quBit = await qu.get(paths.documentPath(SPACE_ID, metaResourceId(cal.id)));
+          const role = quBit?.val?.members?.find((m) => m.actorPub === myPub)?.role;
+          if (role === 'owner' || role === 'editor') {
+            link.href = newEventHash(cal.id);
+            return;
+          }
+        }
+      })();
+      return () => { stopped = true; };
+    },
+  });
+}
+
+// ===========================================================================
 // mount()
 // ===========================================================================
 export function mount(container, { qu, services, segments, subscribe, syncFetch }) {
@@ -537,7 +559,6 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
   let cursor = startOfDay(new Date());
   let filterText = '';
   let myActorPub = null;
-  let sidebarOpen = false;
   let pickerCleanups = [];
   let pendingInvitesChecked = false; // discoverPendingInvites() - see its own doc comment; runs once per mount
 
@@ -549,6 +570,11 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     myActorPub = await services.actors.whoAmI();
     if (stopped) return;
     if (calId === 'from-message') { await renderNewEventPage(null, null, readAndClearPrefill()); return; }
+    // `#/calendar/manage` - the real, dedicated sub-page mountContextSwitcher()'s
+    // 'page' variant links to below its breakpoint (see renderMain()'s own
+    // context-switcher call and docs/app-navigation-standard.md Rule 3) -
+    // never an off-canvas drawer.
+    if (calId === 'manage') { await renderManagePage(); return; }
     if (!calId) { await renderMain(); return; }
     if (!sub) { await handleInviteLink(calId); return; }
     if (sub === 'share') { await renderSharePage(calId); return; }
@@ -638,14 +664,6 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     }
   }
 
-  function backLink() {
-    const a = document.createElement('a');
-    a.className = 'qu-cal-back-link';
-    a.href = '#/calendar';
-    a.textContent = t('backToCalendar');
-    return a;
-  }
-
   // ---------------------------------------------------------------------
   // Invite-link handling - `#/calendar/<id>` checks real membership before
   // starring, instead of unconditionally joining on sight.
@@ -678,30 +696,62 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
   // ---------------------------------------------------------------------
   // Main view
   // ---------------------------------------------------------------------
-  async function renderMain() {
-    if (stopped) return;
+  /**
+   * Loads this identity's calendars once, wiring live-update watches that
+   * re-invoke `onChange` (the caller's own re-render) - shared by
+   * `renderMain()` and `renderManagePage()`, since both need the exact same
+   * data (see docs/app-navigation-standard.md Rule 3: they render the SAME
+   * calendars-sidebar content, just at different breakpoints/routes).
+   * @returns {Promise<Array<object>|null>} `null` if stopped mid-flight.
+   */
+  async function loadCalendarInfos(onChange) {
     subscribe?.(paths.spacePath(SPACE_ID)); // every calendar's docs/threads live under this ONE app space
     if (!pendingInvitesChecked) {
       pendingInvitesChecked = true;
       await discoverPendingInvites();
-      if (stopped) return;
+      if (stopped) return null;
     }
     const mine = await listMine();
-    if (stopped) return;
+    if (stopped) return null;
 
     if (checked === null) checked = new Set(mine.map((c) => c.id));
 
     clearWatches();
     const infos = [];
     for (const cal of mine) {
-      unwatches.push(watch(qu, paths.documentPath(SPACE_ID, eventsResourceId(cal.id)), () => renderMain(), { initial: false, syncFetch }));
-      unwatches.push(watch(qu, paths.documentPath(SPACE_ID, metaResourceId(cal.id)), () => renderMain(), { initial: false, syncFetch }));
+      unwatches.push(watch(qu, paths.documentPath(SPACE_ID, eventsResourceId(cal.id)), () => onChange(), { initial: false, syncFetch }));
+      unwatches.push(watch(qu, paths.documentPath(SPACE_ID, metaResourceId(cal.id)), () => onChange(), { initial: false, syncFetch }));
 
       const meta = await fetchMeta(cal.id);
       const eventsDoc = await fetchEvents(cal.id);
       infos.push({ id: cal.id, meta: meta ?? { title: t('untitled'), members: [], ownerPub: null, color: null }, events: eventsDoc.events ?? [], role: roleOf(meta, myActorPub), color: meta?.color || colorFor(cal.id) });
     }
+    if (stopped) return null;
+    return infos;
+  }
+
+  /**
+   * The calendars list content (multi-select show/hide + share/delete/leave
+   * + "new calendar" form) - not a simple "pick one, navigate there" list,
+   * so it's `@qu/ui`'s `mountContextSwitcher()`/`renderContextListPage()`'s
+   * `renderSidebar` override, not their default `items` shape (see
+   * docs/app-navigation-standard.md Rule 3). `onChange` re-renders whichever
+   * VIEW is currently showing this content - `renderMain()` (desktop
+   * sidebar, or after any mutation there) or `renderManagePage()` (the
+   * mobile `#/calendar/manage` page) - so a toggle/create/delete/leave never
+   * jumps the user to the OTHER one.
+   */
+  function buildCalendarsSidebar(host, infos, onChange) {
+    host.appendChild(calendarsSection(infos.filter((i) => i.role === 'owner'), t('myCalendars'), onChange));
+    const shared = infos.filter((i) => i.role && i.role !== 'owner');
+    if (shared.length) host.appendChild(calendarsSection(shared, t('sharedWithMe'), onChange));
+    host.appendChild(newCalendarForm(onChange));
+  }
+
+  async function renderMain() {
     if (stopped) return;
+    const infos = await loadCalendarInfos(renderMain);
+    if (!infos) return;
 
     const events = [];
     for (const info of infos) {
@@ -719,107 +769,68 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     const root = document.createElement('div');
     root.className = 'qu-cal-root';
 
-    const topbar = document.createElement('div');
-    topbar.className = 'qu-cal-topbar';
-    const menuBtn = document.createElement('button');
-    menuBtn.type = 'button';
-    menuBtn.className = 'qu-cal-menu-btn';
-    menuBtn.textContent = '☰';
-    menuBtn.title = t('calendarsMenu');
-    menuBtn.addEventListener('click', () => setSidebarOpen(true));
-    const h1 = document.createElement('h1');
-    h1.className = 'qu-cal-title-h1';
-    h1.textContent = t('title');
-    topbar.append(menuBtn, h1);
-    root.appendChild(topbar);
-
-    const layout = document.createElement('div');
-    layout.className = 'qu-cal-layout';
-
-    const scrim = document.createElement('div');
-    scrim.className = 'qu-cal-scrim';
-    scrim.addEventListener('click', () => setSidebarOpen(false));
-
-    const sidebar = document.createElement('div');
-    sidebar.className = 'qu-cal-sidebar';
-    const sideHead = document.createElement('div');
-    sideHead.className = 'qu-cal-sidebar-head';
-    const sideH2 = document.createElement('h2');
-    sideH2.textContent = t('calendarsMenu');
-    const closeBtn = document.createElement('button');
-    closeBtn.type = 'button';
-    closeBtn.className = 'qu-cal-sidebar-close';
-    closeBtn.textContent = '✕';
-    closeBtn.title = t('close');
-    closeBtn.addEventListener('click', () => setSidebarOpen(false));
-    sideHead.append(sideH2, closeBtn);
-    sidebar.appendChild(sideHead);
-    sidebar.appendChild(calendarsSection(infos.filter((i) => i.role === 'owner'), t('myCalendars')));
-    const shared = infos.filter((i) => i.role && i.role !== 'owner');
-    if (shared.length) sidebar.appendChild(calendarsSection(shared, t('sharedWithMe')));
-    sidebar.appendChild(newCalendarForm());
-
-    function setSidebarOpen(open) {
-      sidebarOpen = open;
-      sidebar.dataset.open = String(open);
-      scrim.dataset.open = String(open);
-    }
-    sidebar.dataset.open = String(sidebarOpen);
-    scrim.dataset.open = String(sidebarOpen);
-
-    layout.append(scrim, sidebar);
-
-    const main = document.createElement('div');
-    main.className = 'qu-cal-main';
-    if (infos.length === 0) {
-      const empty = document.createElement('p');
-      empty.className = 'qu-cal-empty';
-      empty.textContent = t('noCalendars');
-      main.appendChild(empty);
-    } else if (checked.size === 0) {
-      // Nothing to filter with every calendar hidden - just keep the typed
-      // text (no re-render needed, the empty message doesn't depend on it),
-      // so the filter input stays usable instead of throwing on the
-      // otherwise-required onFilterChange callback.
-      main.appendChild(toolbar(infos, (value) => { filterText = value; }));
-      const empty = document.createElement('p');
-      empty.className = 'qu-cal-empty';
-      empty.textContent = t('allHidden');
-      main.appendChild(empty);
-    } else {
-      // The filter input lives inside toolbar(infos), rendered ONCE per
-      // renderMain() call - typing into it must NOT trigger a full
-      // renderMain() rebuild (that recreates the <input> element itself
-      // from scratch on every keystroke, dropping focus/cursor position
-      // after every single character, confirmed live). Only the view
-      // portion below the toolbar is swapped on a filter change instead,
-      // via this closure's own onFilterChange callback - the toolbar
-      // (and its input) is never touched again until the next REAL
-      // renderMain() (a view/nav/calendar-visibility change).
-      const viewContainer = document.createElement('div');
-      main.appendChild(toolbar(infos, (value) => {
-        filterText = value;
-        viewContainer.textContent = '';
-        viewContainer.appendChild(viewEl(events, infos));
-      }));
-      viewContainer.appendChild(viewEl(events, infos));
-      main.appendChild(viewContainer);
-    }
-    layout.appendChild(main);
-
-    root.appendChild(layout);
-
-    const editableCals = infos.filter((i) => canEdit(i.role));
-    if (editableCals.length) {
-      const fab = document.createElement('a');
-      fab.className = 'qu-cal-fab';
-      fab.href = newEventHash(editableCals[0].id);
-      fab.textContent = '+';
-      fab.title = t('newEvent');
-      root.appendChild(fab);
-    }
+    mountContextSwitcher(root, {
+      renderSidebar: (host) => buildCalendarsSidebar(host, infos, renderMain),
+      variant: 'page',
+      switchHref: '#/calendar/manage',
+      activeLabel: t('title'),
+      heading: t('calendarsMenu'),
+      render: (content) => {
+        if (infos.length === 0) {
+          const empty = document.createElement('p');
+          empty.className = 'qu-cal-empty';
+          empty.textContent = t('noCalendars');
+          content.appendChild(empty);
+        } else if (checked.size === 0) {
+          // Nothing to filter with every calendar hidden - just keep the
+          // typed text (no re-render needed, the empty message doesn't
+          // depend on it), so the filter input stays usable instead of
+          // throwing on the otherwise-required onFilterChange callback.
+          content.appendChild(toolbar(infos, (value) => { filterText = value; }));
+          const empty = document.createElement('p');
+          empty.className = 'qu-cal-empty';
+          empty.textContent = t('allHidden');
+          content.appendChild(empty);
+        } else {
+          // The filter input lives inside toolbar(infos), rendered ONCE per
+          // renderMain() call - typing into it must NOT trigger a full
+          // renderMain() rebuild (that recreates the <input> element itself
+          // from scratch on every keystroke, dropping focus/cursor position
+          // after every single character, confirmed live). Only the view
+          // portion below the toolbar is swapped on a filter change instead,
+          // via this closure's own onFilterChange callback - the toolbar
+          // (and its input) is never touched again until the next REAL
+          // renderMain() (a view/nav/calendar-visibility change).
+          const viewContainer = document.createElement('div');
+          content.appendChild(toolbar(infos, (value) => {
+            filterText = value;
+            viewContainer.textContent = '';
+            viewContainer.appendChild(viewEl(events, infos));
+          }));
+          viewContainer.appendChild(viewEl(events, infos));
+          content.appendChild(viewContainer);
+        }
+      },
+    });
 
     container.appendChild(root);
+  }
+
+  /**
+   * `#/calendar/manage` - the real, dedicated sub-page `mountContextSwitcher()`'s
+   * 'page' variant links to below its breakpoint (replaces the old off-canvas
+   * drawer - a genuine, bookmarkable, Back/Forward-friendly route instead,
+   * see docs/app-navigation-standard.md Rule 3). Same calendars-list content
+   * `renderMain()`'s own desktop sidebar shows, just full-page.
+   */
+  async function renderManagePage() {
+    if (stopped) return;
+    const infos = await loadCalendarInfos(renderManagePage);
+    if (!infos) return;
+    renderContextListPage(container, {
+      renderSidebar: (host) => buildCalendarsSidebar(host, infos, renderManagePage),
+      heading: t('calendarsMenu'),
+    });
   }
 
   /**
@@ -839,7 +850,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
    * deletable/editable here; this only changes what's SHOWN, never a
    * permission decision.
    */
-  function calendarsSection(infos, heading) {
+  function calendarsSection(infos, heading, onChange) {
     const wrap = document.createElement('div');
     const h = document.createElement('div');
     h.className = 'qu-cal-section-heading';
@@ -860,7 +871,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
       checkbox.addEventListener('change', () => {
         if (checkbox.checked) checked.add(info.id);
         else checked.delete(info.id);
-        renderMain();
+        onChange();
       });
       const swatch = document.createElement('span');
       swatch.className = 'qu-cal-swatch';
@@ -917,7 +928,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
         deleteBtn.addEventListener('click', async () => {
           if (!window.confirm(t('deleteCalendarConfirm', { title: info.meta.title || t('untitled') }))) return;
           await deleteCalendar(info.id);
-          await renderMain();
+          await onChange();
         });
         row.appendChild(deleteBtn);
       } else {
@@ -938,7 +949,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
           // already uses - see notifyActivity()'s own doc comment.
           await services.flags.setPrivate('calendar', 'calendar', info.id, false);
           await notifyActivity(info.id, 'left');
-          await renderMain();
+          await onChange();
         });
         row.appendChild(leaveBtn);
       }
@@ -949,7 +960,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     return wrap;
   }
 
-  function newCalendarForm() {
+  function newCalendarForm(onChange) {
     const wrap = document.createElement('div');
     const form = document.createElement('form');
     form.className = 'qu-cal-new';
@@ -968,7 +979,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
       try {
         const newId = await createCalendar(title);
         checked?.add(newId);
-        await renderMain();
+        await onChange();
       } finally {
         submit.disabled = false;
       }
@@ -1026,17 +1037,10 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     heading.textContent = headingLabel();
     navRow.appendChild(heading);
 
-    const editableCals = infos.filter((i) => canEdit(i.role));
-    if (editableCals.length) {
-      // Hidden below 720px (`.qu-cal-new-event-inline` - see STYLE): the FAB
-      // is the mobile "new event" affordance instead, so this inline button
-      // only reappears once the sidebar itself goes persistent.
-      const newLink = document.createElement('a');
-      newLink.className = 'qu-cal-primary qu-cal-new-event-inline';
-      newLink.href = newEventHash(editableCals[0].id);
-      newLink.textContent = `+ ${t('newEvent')}`;
-      navRow.appendChild(newLink);
-    }
+    // No in-toolbar "+ New event" link here anymore - it's the global
+    // header's App Action Slot now (see renderHeaderAction() below and
+    // docs/app-navigation-standard.md Rule 2), reachable at every width
+    // instead of only ≥720px.
     bar.appendChild(navRow);
 
     const switcher = document.createElement('div');
@@ -1435,38 +1439,42 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     const editableCals = await editableCalendars();
     if (stopped) return;
 
-    container.textContent = '';
-    container.appendChild(backLink());
+    renderSubpage(container, {
+      // The shell header's own Back/Forward already covers this - see this
+      // app's own top doc comment / docs/app-navigation-standard.md Rule 1.
+      showBackLink: false,
+      render: (content) => {
+        if (editableCals.length === 0) {
+          const p = document.createElement('p');
+          p.textContent = t('noEditableCalendars');
+          content.appendChild(p);
+          return;
+        }
 
-    if (editableCals.length === 0) {
-      const p = document.createElement('p');
-      p.textContent = t('noEditableCalendars');
-      container.appendChild(p);
-      return;
-    }
+        const page = document.createElement('div');
+        page.className = 'qu-cal-page';
+        const h = document.createElement('h1');
+        h.textContent = t('newEvent');
+        page.appendChild(h);
 
-    const page = document.createElement('div');
-    page.className = 'qu-cal-page';
-    const h = document.createElement('h1');
-    h.textContent = t('newEvent');
-    page.appendChild(h);
-
-    const targetCalId = editableCals.some((c) => c.id === landingCalId) ? landingCalId : editableCals[0].id;
-    const form = buildEventForm({
-      mode: 'create',
-      editableCals,
-      startMs,
-      existing: null,
-      prefill,
-      onCancel: () => { window.location.hash = '#/calendar'; },
-      onSubmit: async (payload, calSelectedId) => {
-        await upsertEvent(calSelectedId, payload, { isNew: true });
-        window.location.hash = '#/calendar';
+        const targetCalId = editableCals.some((c) => c.id === landingCalId) ? landingCalId : editableCals[0].id;
+        const form = buildEventForm({
+          mode: 'create',
+          editableCals,
+          startMs,
+          existing: null,
+          prefill,
+          onCancel: () => { window.location.hash = '#/calendar'; },
+          onSubmit: async (payload, calSelectedId) => {
+            await upsertEvent(calSelectedId, payload, { isNew: true });
+            window.location.hash = '#/calendar';
+          },
+        });
+        form.querySelector('select').value = targetCalId;
+        page.appendChild(form);
+        content.appendChild(page);
       },
     });
-    form.querySelector('select').value = targetCalId;
-    page.appendChild(form);
-    container.appendChild(page);
   }
 
   // ---------------------------------------------------------------------
@@ -1484,30 +1492,32 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     const ev = (eventsDoc.events ?? []).find((e) => e.id === eventId);
     if (stopped) return;
 
-    container.textContent = '';
-    container.appendChild(backLink());
+    renderSubpage(container, {
+      showBackLink: false,
+      render: (content) => {
+        if (!meta || !ev) {
+          const p = document.createElement('p');
+          p.textContent = t('eventNotFound');
+          content.appendChild(p);
+          return;
+        }
+        const role = roleOf(meta, myActorPub);
+        if (!role) {
+          const p = document.createElement('p');
+          p.textContent = t('eventNoAccess');
+          content.appendChild(p);
+          return;
+        }
 
-    if (!meta || !ev) {
-      const p = document.createElement('p');
-      p.textContent = t('eventNotFound');
-      container.appendChild(p);
-      return;
-    }
-    const role = roleOf(meta, myActorPub);
-    if (!role) {
-      const p = document.createElement('p');
-      p.textContent = t('eventNoAccess');
-      container.appendChild(p);
-      return;
-    }
+        const calendarTitle = meta.title || t('untitled');
+        const withContext = { ...ev, calendarId: id, calendarTitle, color: meta.color || colorFor(id) };
 
-    const calendarTitle = meta.title || t('untitled');
-    const withContext = { ...ev, calendarId: id, calendarTitle, color: meta.color || colorFor(id) };
-
-    const page = document.createElement('div');
-    page.className = 'qu-cal-page';
-    renderEventView(page, withContext, meta, role, id);
-    container.appendChild(page);
+        const page = document.createElement('div');
+        page.className = 'qu-cal-page';
+        renderEventView(page, withContext, meta, role, id);
+        content.appendChild(page);
+      },
+    });
   }
 
   function renderEventView(page, ev, meta, role, id) {
@@ -1699,96 +1709,98 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     const meta = await fetchMeta(id);
     if (stopped) return;
 
-    container.textContent = '';
-    container.appendChild(backLink());
-
     if (!meta || !canManage(roleOf(meta, myActorPub))) {
       window.location.hash = '#/calendar';
       return;
     }
     const color = meta.color || colorFor(id);
 
-    const page = document.createElement('div');
-    page.className = 'qu-cal-page';
-    const h = document.createElement('h1');
-    h.textContent = t('shareTitle', { title: meta.title || t('untitled') });
-    page.appendChild(h);
+    renderSubpage(container, {
+      showBackLink: false,
+      render: (content) => {
+        const page = document.createElement('div');
+        page.className = 'qu-cal-page';
+        const h = document.createElement('h1');
+        h.textContent = t('shareTitle', { title: meta.title || t('untitled') });
+        page.appendChild(h);
 
-    const renameForm = document.createElement('form');
-    renameForm.className = 'qu-cal-form';
-    const nameInput = document.createElement('input');
-    nameInput.value = meta.title || '';
-    const nameLabel = document.createElement('label');
-    nameLabel.append(t('renameLabel'), nameInput);
+        const renameForm = document.createElement('form');
+        renameForm.className = 'qu-cal-form';
+        const nameInput = document.createElement('input');
+        nameInput.value = meta.title || '';
+        const nameLabel = document.createElement('label');
+        nameLabel.append(t('renameLabel'), nameInput);
 
-    const colorInput = document.createElement('input');
-    colorInput.type = 'color';
-    colorInput.value = color;
-    const colorLabel = document.createElement('label');
-    colorLabel.append(t('colorLabel'), colorInput);
+        const colorInput = document.createElement('input');
+        colorInput.type = 'color';
+        colorInput.value = color;
+        const colorLabel = document.createElement('label');
+        colorLabel.append(t('colorLabel'), colorInput);
 
-    const renameRow = document.createElement('div');
-    renameRow.className = 'qu-cal-form-row';
-    renameRow.append(nameLabel, colorLabel);
-    const saveBtn = document.createElement('button');
-    saveBtn.type = 'submit';
-    saveBtn.className = 'qu-cal-primary';
-    saveBtn.textContent = t('save');
-    renameForm.append(renameRow, saveBtn);
-    renameForm.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const writeOptions = await services.access.writeOptionsFor(SPACE_ID, 'docs', metaResourceId(id));
-      await qu.put(paths.documentPath(SPACE_ID, metaResourceId(id)), { ...meta, title: nameInput.value.trim() || t('untitled'), color: colorInput.value }, writeOptions);
-    });
-    page.appendChild(renameForm);
+        const renameRow = document.createElement('div');
+        renameRow.className = 'qu-cal-form-row';
+        renameRow.append(nameLabel, colorLabel);
+        const saveBtn = document.createElement('button');
+        saveBtn.type = 'submit';
+        saveBtn.className = 'qu-cal-primary';
+        saveBtn.textContent = t('save');
+        renameForm.append(renameRow, saveBtn);
+        renameForm.addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const writeOptions = await services.access.writeOptionsFor(SPACE_ID, 'docs', metaResourceId(id));
+          await qu.put(paths.documentPath(SPACE_ID, metaResourceId(id)), { ...meta, title: nameInput.value.trim() || t('untitled'), color: colorInput.value }, writeOptions);
+        });
+        page.appendChild(renameForm);
 
-    const peopleHeading = document.createElement('h3');
-    peopleHeading.textContent = t('people');
-    page.appendChild(peopleHeading);
+        const peopleHeading = document.createElement('h3');
+        peopleHeading.textContent = t('people');
+        page.appendChild(peopleHeading);
 
-    const memberList = document.createElement('div');
-    page.appendChild(memberList);
-    const info = { id, meta, color };
-    renderMembers(memberList, info);
+        const memberList = document.createElement('div');
+        page.appendChild(memberList);
+        const info = { id, meta, color };
+        renderMembers(memberList, info);
 
-    const roleSelect = document.createElement('select');
-    for (const [val, label] of [['editor', t('role_editor')], ['viewer', t('role_viewer')]]) {
-      const opt = document.createElement('option');
-      opt.value = val;
-      opt.textContent = label;
-      roleSelect.appendChild(opt);
-    }
-    const pickerRow = document.createElement('div');
-    pickerRow.className = 'qu-cal-form-row';
-    const roleLabel = document.createElement('label');
-    roleLabel.append(t('invite'), roleSelect);
-    pickerRow.appendChild(roleLabel);
-    page.appendChild(pickerRow);
-
-    const pickerHost = document.createElement('div');
-    page.appendChild(pickerHost);
-    const status = document.createElement('p');
-    status.className = 'qu-cal-status';
-    page.appendChild(status);
-
-    const cleanup = mountActorPicker(pickerHost, {
-      services,
-      subscribe,
-      excludePubs: new Set(meta.members.map((m) => m.actorPub)),
-      onPick: async (actorPub, label) => {
-        status.textContent = '';
-        try {
-          await inviteMember(id, actorPub, roleSelect.value);
-          const refreshedMeta = await fetchMeta(id);
-          renderMembers(memberList, { ...info, meta: refreshedMeta });
-        } catch (err) {
-          status.textContent = t('inviteFailed', { name: label, message: err.message });
+        const roleSelect = document.createElement('select');
+        for (const [val, label] of [['editor', t('role_editor')], ['viewer', t('role_viewer')]]) {
+          const opt = document.createElement('option');
+          opt.value = val;
+          opt.textContent = label;
+          roleSelect.appendChild(opt);
         }
+        const pickerRow = document.createElement('div');
+        pickerRow.className = 'qu-cal-form-row';
+        const roleLabel = document.createElement('label');
+        roleLabel.append(t('invite'), roleSelect);
+        pickerRow.appendChild(roleLabel);
+        page.appendChild(pickerRow);
+
+        const pickerHost = document.createElement('div');
+        page.appendChild(pickerHost);
+        const status = document.createElement('p');
+        status.className = 'qu-cal-status';
+        page.appendChild(status);
+
+        const cleanup = mountActorPicker(pickerHost, {
+          services,
+          subscribe,
+          excludePubs: new Set(meta.members.map((m) => m.actorPub)),
+          onPick: async (actorPub, label) => {
+            status.textContent = '';
+            try {
+              await inviteMember(id, actorPub, roleSelect.value);
+              const refreshedMeta = await fetchMeta(id);
+              renderMembers(memberList, { ...info, meta: refreshedMeta });
+            } catch (err) {
+              status.textContent = t('inviteFailed', { name: label, message: err.message });
+            }
+          },
+        });
+        pickerCleanups.push(cleanup);
+
+        content.appendChild(page);
       },
     });
-    pickerCleanups.push(cleanup);
-
-    container.appendChild(page);
   }
 
   function renderMembers(listEl, info) {
