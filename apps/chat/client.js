@@ -956,7 +956,6 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     onPick: (emoji) => insertAtCursor(composerInput, emoji),
     trigger: '😀',
     triggerTitle: t('insertEmoji'),
-    inputEl: composerInput,
   });
   inputWrap.append(composerInput, emojiPicker);
 

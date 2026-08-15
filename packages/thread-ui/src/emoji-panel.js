@@ -1,26 +1,31 @@
 /**
- * EMOJI PANEL — the desktop-only extended emoji grid: bigger buttons, a
- * name/glyph search filter, and pagination instead of one tall scrolling
- * grid of tiny buttons. Lives in its own module SPECIFICALLY so
- * `emoji.js`'s `renderEmojiPicker()` can reach it via a dynamic
- * `import('./emoji-panel.js')` gated behind `platform.js`'s
- * `prefersNativeEmojiKeyboard()` - a coarse-pointer (touch) session takes
- * the OS's own native emoji keyboard instead (see emoji.js's own doc
- * comment) and never even requests this module's code.
+ * EMOJI PANEL — the extended emoji grid: bigger buttons, a name/glyph
+ * search filter, and pagination instead of one tall scrolling grid of
+ * tiny buttons. Used on EVERY platform, touch included - see emoji.js's
+ * own doc comment for why this package doesn't try to hand off to the
+ * OS's native emoji keyboard instead (Telegram/Signal/WhatsApp don't
+ * either, for the same reasons). Lives in its own module purely so
+ * `emoji.js`'s `renderEmojiPicker()` can lazy-`import('./emoji-panel.js')`
+ * it on first open rather than paying for it up front.
+ *
+ * Sized for a fingertip, not just a mouse cursor: `PAGE_SIZE`/the grid's
+ * `minmax()` column width both assume >=2.75rem (~44px) touch targets,
+ * the commonly cited minimum (Apple HIG/Material Design) for a reliably
+ * tappable button.
  */
 import { EMOJI_SHORTCODE_LIST } from './emoji-shortcodes.js';
 
 const STYLE_ID = 'qu-thread-ui-emoji-panel-style';
 
-/** 8 columns x 4 rows - big enough to feel like a real picker, small enough to fit without scrolling. */
+/** Big enough to feel like a real picker, small enough that one page never needs its own scrollbar. */
 const PAGE_SIZE = 32;
 
 const STYLE = `
   .qu-thread-ui-emoji-panel { position: absolute; z-index: 20; top: 100%; left: 0; margin-top: 0.2rem; display: flex; flex-direction: column; gap: 0.4rem; width: 21rem; max-width: calc(100vw - 1rem); padding: 0.5rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); background: var(--qu-color-surface, #ffffff); box-shadow: 0 0.3rem 0.8rem rgba(0,0,0,0.2); }
   .qu-thread-ui-emoji-panel-flip-up { top: auto; bottom: 100%; margin-top: 0; margin-bottom: 0.2rem; }
-  .qu-thread-ui-emoji-panel-search { font: inherit; font-size: 0.9rem; padding: 0.35rem 0.6rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-sm, 0.3rem); background: transparent; color: inherit; }
-  .qu-thread-ui-emoji-panel-grid { display: grid; grid-template-columns: repeat(8, 2.4rem); gap: 0.2rem; }
-  .qu-thread-ui-emoji-panel-grid button { border: none; background: transparent; cursor: pointer; font-size: 1.6rem; line-height: 2.4rem; border-radius: var(--qu-radius-sm, 0.3rem); }
+  .qu-thread-ui-emoji-panel-search { font: inherit; font-size: 1rem; padding: 0.5rem 0.6rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-sm, 0.3rem); background: transparent; color: inherit; }
+  .qu-thread-ui-emoji-panel-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(2.75rem, 1fr)); gap: 0.2rem; }
+  .qu-thread-ui-emoji-panel-grid button { border: none; background: transparent; cursor: pointer; font-size: 1.6rem; line-height: 2.75rem; min-height: 2.75rem; border-radius: var(--qu-radius-sm, 0.3rem); }
   .qu-thread-ui-emoji-panel-grid button:hover { background: var(--qu-color-border, #8884); }
   .qu-thread-ui-emoji-panel-empty { grid-column: 1 / -1; padding: 1.4rem 0; text-align: center; opacity: 0.6; font-size: 0.85rem; }
   .qu-thread-ui-emoji-panel-pager { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; font-size: 0.8rem; opacity: 0.8; }
