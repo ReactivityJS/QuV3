@@ -101,11 +101,18 @@
  * without disturbing the current scroll position (incremental append, not
  * a full rebuild, for the common case).
  *
- * COMPOSER: a rounded "pill" (textarea + emoji trigger) plus a tool
- * cluster (attach/location) and ONE circular action button that MORPHS
- * between 🎙️ (composer empty) and ➤ send (composer has text) - Telegram/
- * WhatsApp's own composer language, not a flat text-input row with a line
- * of plain buttons after it. See `updateActionBtn()`.
+ * COMPOSER: a rounded "pill" (textarea + emoji trigger) plus a "+" action-
+ * menu trigger (`content.composerActions` - Attach/Share location, plus
+ * whatever plugin apps contribute, e.g. a Calendar/Gallery app's own entry
+ * or a game's own "share a challenge" - see that menu's own doc comment in
+ * `mountRoomView()`) and ONE circular action button that MORPHS between
+ * 🎙️ (composer empty) and ➤ send (composer has text) - Telegram/WhatsApp's
+ * own composer language, not a flat text-input row with a line of plain
+ * buttons after it. See `updateActionBtn()`. The textarea itself starts at
+ * ONE visual line and grows up to `COMPOSER_MAX_ROWS` before scrolling
+ * internally (`@qu/thread-ui`'s `mountComposerAutogrow()`), rather than
+ * opening two lines tall by default the way an un-sized `<textarea>`'s own
+ * UA-default `rows="2"` otherwise would.
  *
  * VOICE MESSAGES: `MediaRecorder` (feature-detected - silently falls back
  * to a `voiceNotSupported` hint on a browser/device without it), with a real
@@ -161,7 +168,10 @@ import { paths, formatActorLabel, getPrivate, putPrivate, getPrivateChildren, de
 import { rankFor } from '@qu/foundation';
 import { createI18n } from '@qu/i18n';
 import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage } from '@qu/ui';
-import { renderEmojiPicker, renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, insertAtCursor, copyToClipboard } from '@qu/thread-ui';
+import {
+  renderEmojiPicker, renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, insertAtCursor, copyToClipboard,
+  mountComposerAutogrow, COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS,
+} from '@qu/thread-ui';
 
 // See this file's own top doc comment's "MESSAGE CHROME" section - the
 // SAME two default-order maps `apps/forum/client.js` uses (keep both files'
@@ -170,6 +180,11 @@ import { renderEmojiPicker, renderContextMenu, mountMentionAutocomplete, mountEm
 // before an admin configures relay-settings' own `extensionOrder`.
 const FOOTER_ORDER_DEFAULT = { reactions: 0, 'core.menu': 10, 'core.timestamp': 20, 'core.readReceipt': 30 };
 const MENU_ORDER_DEFAULT = { edit: 0, reply: 5, pin: 10, bookmark: 20, copyText: 30, copyLink: 40 };
+// The composer's own "+" action menu (content.composerActions - see this
+// file's own top doc comment) - SAME default-order convention as the two
+// maps above, kept identical to apps/forum/client.js's own copy (minus
+// 'location', which forum's composer has no equivalent of).
+const COMPOSER_ACTIONS_ORDER_DEFAULT = { attach: 0, location: 10 };
 
 const DICT = {
   en: {
@@ -187,6 +202,8 @@ const DICT = {
     copyText: 'Copy text',
     copyLink: 'Copy link',
     attachRemove: 'Remove attachment',
+    addAttachment: 'Add',
+    attachFile: 'Attach file',
     insertEmoji: 'Insert emoji',
     recordVoice: 'Record a voice message',
     voicePause: 'Pause recording',
@@ -232,6 +249,8 @@ const DICT = {
     copyText: 'Text kopieren',
     copyLink: 'Link kopieren',
     attachRemove: 'Anhang entfernen',
+    addAttachment: 'Hinzufügen',
+    attachFile: 'Datei anhängen',
     insertEmoji: 'Emoji einfügen',
     recordVoice: 'Sprachnachricht aufnehmen',
     voicePause: 'Aufnahme pausieren',
@@ -386,17 +405,38 @@ const STYLE = `
   .qu-chat-edit-row-buttons { display: flex; gap: 0.4rem; }
   .qu-chat-reply-banner { display: flex; justify-content: space-between; align-items: center; padding: 0.3rem 0.6rem; border-left: 3px solid var(--qu-color-accent, #5b5bd6); background: var(--qu-color-surface, #8882); border-radius: var(--qu-radius-sm, 0.3rem); font-size: 0.85em; margin-bottom: 0.3rem; }
   .qu-chat-reply-banner button { background: none; border: none; cursor: pointer; opacity: 0.7; font: inherit; }
+  /* Without this, replyBanner.hidden = true (its initial/cleared state) never
+     actually hides anything - the class rule above is an author-stylesheet
+     rule, which always beats the UA's own [hidden] rule regardless of
+     specificity, so the empty banner stayed rendered as a bare rounded
+     left-accent stripe above the composer (looked like a stray "(" sitting
+     on its own line) whenever no reply was active. Same fix, same root
+     cause, as .qu-asset-upload-progress[hidden] in @qu/ui's
+     asset-components.js and apps/forum/client.js's own
+     .qu-forum-reply-banner[hidden] (forum never had this bug - chat did). */
+  .qu-chat-reply-banner[hidden] { display: none; }
   .qu-chat-composer-wrap { flex-shrink: 0; display: flex; flex-direction: column; gap: 0.4rem; padding: 0.6rem 1rem; border-top: 1px solid var(--qu-color-border, #8884); background: var(--qu-color-surface, #ffffff); }
-  /* The composer: a tool cluster (attach/location), a rounded PILL holding
-     the textarea + emoji trigger, and one circular action button that
-     morphs mic <-> send (see updateActionBtn() in mountRoomView()) -
-     Telegram/WhatsApp's own composer language, not a single flat text-input
-     row with a row of plain buttons after it. */
+  /* The composer: a "+" action-menu trigger (Attach/Share location/plugin
+     items - content.composerActions, see mountRoomView()'s own doc comment -
+     rather than always-visible icons per action), a rounded PILL holding the
+     textarea + emoji trigger, and one circular action button that morphs
+     mic <-> send (see updateActionBtn() in mountRoomView()) - Telegram/
+     WhatsApp's own composer language, not a single flat text-input row with
+     a row of plain buttons after it. */
   .qu-chat-composer { display: flex; align-items: flex-end; gap: 0.4rem; position: relative; }
   .qu-chat-composer-tools { display: flex; align-items: center; gap: 0.2rem; padding-bottom: 0.35rem; }
   .qu-chat-tool-btn { background: none; border: none; cursor: pointer; font-size: 1.1em; padding: 0.3rem; border-radius: 999px; opacity: 0.75; }
   .qu-chat-tool-btn:hover { opacity: 1; background: var(--qu-color-border, #8884); }
   .qu-chat-tool-btn:disabled { opacity: 0.35; cursor: default; }
+  /* Sized to match .qu-chat-tool-btn (the button it replaced) - @qu/thread-ui's
+     own .qu-thread-ui-context-menu-trigger default is tuned for the smaller
+     per-message "⋮" menu, not a composer-height tool cluster. */
+  .qu-chat-composer-plus .qu-thread-ui-context-menu-trigger { font-size: 1.1em; padding: 0.3rem; border-radius: 999px; opacity: 0.75; }
+  .qu-chat-composer-plus .qu-thread-ui-context-menu-trigger:hover { opacity: 1; background: var(--qu-color-border, #8884); }
+  /* min-height/max-height are a defensive fallback only (e.g. before
+     mountComposerAutogrow()'s first synchronous resize() call) - the actual
+     1-to-COMPOSER_MAX_ROWS growth is driven by @qu/thread-ui's
+     mountComposerAutogrow(), not this CSS. */
   .qu-chat-composer-input-wrap { flex: 1; min-width: 0; display: flex; align-items: flex-end; gap: 0.3rem; background: var(--qu-color-surface, #8882); border: 1px solid var(--qu-color-border, #8884); border-radius: 1.3rem; padding: 0.4rem 0.6rem; }
   .qu-chat-composer-input-wrap textarea { flex: 1; min-width: 0; font: inherit; border: none; background: transparent; resize: none; min-height: 1.4rem; max-height: 8rem; padding: 0.15rem 0; }
   .qu-chat-composer-input-wrap textarea:focus { outline: none; }
@@ -940,18 +980,43 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   composerTools.className = 'qu-chat-composer-tools';
   const attachUpload = document.createElement('qu-asset-upload');
   attachUpload.setAttribute('space-id', SPACE_ID);
-  attachUpload.setAttribute('label', '📎');
-  const locationBtn = document.createElement('button');
-  locationBtn.type = 'button';
-  locationBtn.className = 'qu-chat-tool-btn';
-  locationBtn.textContent = '📍';
-  locationBtn.title = t('shareLocation');
-  composerTools.append(attachUpload, locationBtn);
+  attachUpload.setAttribute('hide-picker', ''); // its own picker button is replaced by the "+" action menu below
+  // The composer's "+" action menu (content.composerActions) - Attach/
+  // Share location plus whatever plugin apps contribute (a Calendar/
+  // Gallery app's own entry, a game's own "share a challenge", ...),
+  // behind ONE trigger instead of always-visible icons - same trigger/
+  // panel/outside-click-close shape as the message "⋮" menu
+  // (buildMessageFooter()'s own `content.messageMenu`), just for the
+  // composer instead of a message.
+  const composerActionsBtn = renderContextMenu({
+    trigger: '+',
+    triggerTitle: t('addAttachment'),
+    getItems: async () => {
+      const nativeItems = [
+        { id: 'attach', label: t('attachFile'), icon: '📎', onClick: () => attachUpload.openPicker() },
+        { id: 'location', label: t('shareLocation'), icon: '📍', onClick: shareLocation },
+      ];
+      // Built fresh on each open (not hoisted to a captured const) - roomId
+      // isn't resolved yet at composer-build time (see mountRoomView()'s own
+      // async room-resolution below), same "getItems is a function, not a
+      // plain array, so it's built lazily every open" reasoning
+      // context-menu.js's own doc comment already gives for messageMenu.
+      const payload = { services, qu, syncFetch, spaceId: SPACE_ID, threadId: roomId };
+      const pluginItems = extensionPoints ? await extensionPoints.collect('content.composerActions', payload) : [];
+      return [...nativeItems, ...pluginItems].sort(
+        (a, b) => rankFor(extensionPoints?.order, 'content.composerActions', a.id, COMPOSER_ACTIONS_ORDER_DEFAULT[a.id] ?? 50)
+          - rankFor(extensionPoints?.order, 'content.composerActions', b.id, COMPOSER_ACTIONS_ORDER_DEFAULT[b.id] ?? 50)
+      );
+    },
+  });
+  composerActionsBtn.classList.add('qu-chat-composer-plus');
+  composerTools.append(composerActionsBtn, attachUpload);
 
   const inputWrap = document.createElement('div');
   inputWrap.className = 'qu-chat-composer-input-wrap';
   const composerInput = document.createElement('textarea');
   composerInput.placeholder = t('composerPlaceholder');
+  const stopComposerAutogrow = mountComposerAutogrow(composerInput, { minRows: COMPOSER_MIN_ROWS, maxRows: COMPOSER_MAX_ROWS });
   const emojiPicker = renderEmojiPicker({
     onPick: (emoji) => insertAtCursor(composerInput, emoji),
     trigger: '😀',
@@ -1520,10 +1585,16 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   // field - deliberately no embedded map-tile PREVIEW image (that would mean
   // fetching from a third-party tile server on every render, leaking this
   // room's location data to a party beyond the relay/its members) - just a
-  // link out to OpenStreetMap plus the raw coordinates, see renderMessageText(). ----
-  locationBtn.addEventListener('click', () => {
-    if (!roomReady || !navigator.geolocation) return;
-    locationBtn.disabled = true;
+  // link out to OpenStreetMap plus the raw coordinates, see
+  // renderMessageText(). Invoked from the composer's "+" action menu (see
+  // that menu's own doc comment) rather than its own always-visible button -
+  // `shareLocationBusy` replaces the old per-button `.disabled` toggle as the
+  // re-entrancy guard against a second click firing while a position request
+  // is already in flight, since a closed menu has no button left to disable. ----
+  let shareLocationBusy = false;
+  function shareLocation() {
+    if (!roomReady || !navigator.geolocation || shareLocationBusy) return;
+    shareLocationBusy = true;
     navigator.geolocation.getCurrentPosition(
       async (position) => {
         try {
@@ -1535,12 +1606,12 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
           });
           setReplyingTo(null);
         } finally {
-          locationBtn.disabled = false;
+          shareLocationBusy = false;
         }
       },
-      () => { locationBtn.disabled = false; }
+      () => { shareLocationBusy = false; }
     );
-  });
+  }
 
   const editingDrafts = new Map();
   let messageWatchers = [];
@@ -2090,6 +2161,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     if (presenceTimer) clearInterval(presenceTimer);
     stopComposerMentions();
     stopComposerEmoji();
+    stopComposerAutogrow();
     resizeObserver?.disconnect();
     viewportResizeTarget.removeEventListener('resize', onViewportResize);
     stopVoiceTimer();

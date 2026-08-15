@@ -118,10 +118,21 @@ function simulateScroll(scrollEl, { scrollTop = 0, scrollHeight = 0, clientHeigh
   scrollEl.dispatchEvent(new window.Event('scroll'));
 }
 
-/** Opens a message's "⋮" context menu (content.messageFooter's core.menu segment) and returns its panel - see apps/forum/test/client.test.js's own identical helper. */
+/**
+ * Opens a message's "⋮" context menu (content.messageFooter's core.menu
+ * segment) and returns its panel - see apps/forum/test/client.test.js's own
+ * identical helper. Scoped to `.qu-chat-bubble-footer` (not a bare
+ * `.qu-thread-ui-context-menu-trigger` query) because the composer's own
+ * "+" action menu (content.composerActions) is built from the SAME
+ * `@qu/thread-ui` `renderContextMenu()` and carries the identical trigger
+ * class - an unscoped query can resolve to whichever one happens to exist
+ * in the DOM first (the composer mounts synchronously, a message's footer
+ * only after its own async render), not necessarily a message's.
+ */
 async function openMessageMenu(root) {
-  await waitFor(() => root.querySelector('.qu-thread-ui-context-menu-trigger') !== null);
-  root.querySelector('.qu-thread-ui-context-menu-trigger').click();
+  const selector = '.qu-chat-bubble-footer .qu-thread-ui-context-menu-trigger';
+  await waitFor(() => root.querySelector(selector) !== null);
+  root.querySelector(selector).click();
   await waitFor(() => root.querySelector('.qu-thread-ui-context-menu-panel') !== null);
   return root.querySelector('.qu-thread-ui-context-menu-panel');
 }
@@ -418,7 +429,14 @@ test('the "Reply" menu item (native, any message) opens the reply banner and tag
     const reply = messages.find((m) => m.body === 'my reply');
     assert.equal(reply.replyTo, original.id);
     // the reply banner cleared itself after sending
-    assert.equal(container.querySelector('.qu-chat-reply-banner').hidden, true);
+    const banner = container.querySelector('.qu-chat-reply-banner');
+    assert.equal(banner.hidden, true);
+    // Regression: .qu-chat-reply-banner's own `display: flex` rule used to
+    // have no `[hidden]` override, so the empty banner stayed VISUALLY
+    // rendered (a bare rounded left-accent stripe, looking like a stray "("
+    // sitting on its own line above the composer) even with `hidden` set -
+    // see this rule's own doc comment in the STYLE block above.
+    assert.equal(window.getComputedStyle(banner).display, 'none');
   } finally {
     stop();
   }
@@ -660,7 +678,11 @@ test('sharing location posts a message with extra.location, rendered as an OpenS
   const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
   try {
     await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
-    container.querySelector('.qu-chat-tool-btn').click(); // the ONLY .qu-chat-tool-btn is the location button - attachUpload is a <qu-asset-upload>, not this class
+    // Location sharing now lives behind the composer's own "+" action menu
+    // (content.composerActions) instead of its own always-visible button.
+    container.querySelector('.qu-chat-composer-plus .qu-thread-ui-context-menu-trigger').click();
+    await waitFor(() => container.querySelector('.qu-thread-ui-context-menu-panel') !== null);
+    menuItemButton(container.querySelector('.qu-thread-ui-context-menu-panel'), 'Share my location').click();
 
     await waitFor(() => container.querySelector('.qu-chat-bubble-location') !== null);
     const link = container.querySelector('.qu-chat-bubble-location a');
@@ -670,6 +692,58 @@ test('sharing location posts a message with extra.location, rendered as an OpenS
     const roomId = await ChatService.roomId([alice.myPub, bob.myPub]);
     const { messages } = await alice.services.messages.listMessages(CHAT_SPACE_ID, roomId);
     assert.deepEqual(messages[0].location, { lat: 52.52, lng: 13.405 });
+  } finally {
+    stop();
+  }
+});
+
+test('the composer textarea starts at ONE visual line (rows=1) - regression: an un-sized <textarea> defaults to the UA\'s own rows=2', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
+    assert.equal(container.querySelector('.qu-chat-composer-input-wrap textarea').rows, 1);
+  } finally {
+    stop();
+  }
+});
+
+test('the composer\'s "+" action menu (content.composerActions) lists Attach/Share location natively, plus any plugin-contributed item, in rank order', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+
+  const container = makeContainer();
+  // A duck-typed stub (not a real ExtensionPointHost) - this point has no
+  // real contributing app yet, this only proves the HOOK itself works, the
+  // same way this file's own "content.messageMenu: without extensionPoints"
+  // sibling test proves the native-only path.
+  const seen = [];
+  const extensionPoints = {
+    order: null,
+    collect: async (point, payload) => {
+      seen.push({ point, payload });
+      return [{ id: 'gallery.pick', label: 'Pick from Gallery', icon: '🖼️', onClick: () => {} }];
+    },
+  };
+  const stop = mount(container, {
+    qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe,
+    segments: ['chat', bob.myPub], extensionPoints,
+  });
+  try {
+    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
+    container.querySelector('.qu-chat-composer-plus .qu-thread-ui-context-menu-trigger').click();
+    await waitFor(() => container.querySelector('.qu-thread-ui-context-menu-panel') !== null);
+    const panel = container.querySelector('.qu-thread-ui-context-menu-panel');
+    const items = [...panel.querySelectorAll('.qu-thread-ui-context-menu-item')].map((btn) => btn.textContent);
+    assert.deepEqual(items, ['📎Attach file', '📍Share my location', '🖼️Pick from Gallery']);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].point, 'content.composerActions');
+    assert.equal(seen[0].payload.spaceId, CHAT_SPACE_ID);
   } finally {
     stop();
   }
