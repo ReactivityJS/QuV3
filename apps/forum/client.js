@@ -158,6 +158,14 @@
  *   - `forum.topicToolbar` (`kind: 'ui'`) - rendered ONCE per topic view,
  *     above the message list. Payload: `{services, qu, syncFetch, spaceId,
  *     threadId}` (Pins' own "Pinned" bar).
+ *   - `content.composerActions` (`kind: 'menu'`, `ExtensionPointHost.
+ *     collect()`) - the composer's own "+" action menu (Attach, plus
+ *     whatever a plugin app contributes - e.g. a Calendar/Gallery app's own
+ *     entry), gathered fresh every time it opens, same shape/mechanism as
+ *     `content.messageMenu` above. Same payload shape as `forum.
+ *     topicToolbar`. `apps/chat/client.js` shares this SAME point (plus its
+ *     own native "Share location" item, which forum's composer has no
+ *     equivalent of) - see that file's own doc comment.
  *
  * KNOWN GAPS, left for later: no delete (`MessageService` has none, author-
  * only `editMessage()` is the whole story), no channel-metadata editing UI
@@ -172,7 +180,10 @@ import { rankFor } from '@qu/foundation';
 import { paths, formatActorLabel, detectLinks } from '@qu/services';
 import { createI18n } from '@qu/i18n';
 import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage } from '@qu/ui';
-import { renderEmojiPicker, renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, insertAtCursor, copyToClipboard } from '@qu/thread-ui';
+import {
+  renderEmojiPicker, renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, insertAtCursor, copyToClipboard,
+  mountComposerAutogrow, COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS,
+} from '@qu/thread-ui';
 
 // Default fallback order for `content.messageFooter`/`content.messageMenu`
 // items when an admin hasn't configured `relay-settings`' `extensionOrder`
@@ -183,6 +194,11 @@ import { renderEmojiPicker, renderContextMenu, mountMentionAutocomplete, mountEm
 // reorder either point via Relay Admin - see that app's own doc comment).
 const FOOTER_ORDER_DEFAULT = { reactions: 0, 'core.menu': 10, 'core.timestamp': 20 };
 const MENU_ORDER_DEFAULT = { edit: 0, reply: 5, pin: 10, bookmark: 20, copyText: 30, copyLink: 40 };
+// The composer's own "+" action menu (content.composerActions - see this
+// file's own top doc comment) - same convention, kept identical to
+// apps/chat/client.js's own copy (minus 'location', which forum's composer
+// has no equivalent of).
+const COMPOSER_ACTIONS_ORDER_DEFAULT = { attach: 0 };
 
 const DICT = {
   en: {
@@ -197,6 +213,8 @@ const DICT = {
     copyText: 'Copy text',
     copyLink: 'Copy link',
     attachRemove: 'Remove attachment',
+    addAttachment: 'Add',
+    attachFile: 'Attach file',
     insertEmoji: 'Insert emoji',
     channels: 'Channels',
     allChannels: 'All channels',
@@ -235,6 +253,8 @@ const DICT = {
     copyText: 'Text kopieren',
     copyLink: 'Link kopieren',
     attachRemove: 'Anhang entfernen',
+    addAttachment: 'Hinzufügen',
+    attachFile: 'Datei anhängen',
     insertEmoji: 'Emoji einfügen',
     channels: 'Kanäle',
     allChannels: 'Alle Kanäle',
@@ -311,19 +331,28 @@ const STYLE = `
   .qu-forum-edit-row { display: flex; flex-direction: column; gap: 0.4rem; position: relative; }
   .qu-forum-edit-row textarea { font: inherit; padding: 0.4rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); resize: vertical; }
   .qu-forum-edit-row-buttons { display: flex; gap: 0.4rem; }
-  /* The composer: a tool cluster (attach), a rounded PILL holding the
-     textarea + emoji trigger, and one circular send button - the SAME
-     visual language apps/chat/client.js's own composer uses (see that
-     file's own STYLE comment), minus the mic morph (Forum has no voice
-     messages - see mountTopicView()'s own top doc comment). position:
-     relative on .qu-forum-composer itself (NOT .qu-forum-composer-input-wrap,
-     the textarea's own direct parent) - @qu/thread-ui's
-     mountMentionAutocomplete() appends its dropdown into the textarea's
-     parentNode as position: absolute, which anchors to the nearest
-     POSITIONED ancestor, not necessarily the direct parent - exactly
+  /* The composer: a "+" action-menu trigger (content.composerActions - see
+     this file's own top doc comment's "EXTENSION POINTS" section), a
+     rounded PILL holding the textarea + emoji trigger, and one circular
+     send button - the SAME visual language apps/chat/client.js's own
+     composer uses (see that file's own STYLE comment), minus the mic morph
+     (Forum has no voice messages - see mountTopicView()'s own top doc
+     comment). position: relative on .qu-forum-composer itself (NOT
+     .qu-forum-composer-input-wrap, the textarea's own direct parent) -
+     @qu/thread-ui's mountMentionAutocomplete() appends its dropdown into the
+     textarea's parentNode as position: absolute, which anchors to the
+     nearest POSITIONED ancestor, not necessarily the direct parent - exactly
      apps/chat/client.js's own identical setup, already proven to work. */
   .qu-forum-composer { display: flex; align-items: flex-end; gap: 0.4rem; position: relative; }
   .qu-forum-composer-tools { display: flex; align-items: center; gap: 0.2rem; padding-bottom: 0.35rem; }
+  /* Same sizing as apps/chat/client.js's own .qu-chat-composer-plus override -
+     @qu/thread-ui's own .qu-thread-ui-context-menu-trigger default is tuned
+     for the smaller per-message "⋮" menu, not a composer-height tool cluster. */
+  .qu-forum-composer-plus .qu-thread-ui-context-menu-trigger { font-size: 1.1em; padding: 0.3rem; border-radius: 999px; opacity: 0.75; }
+  .qu-forum-composer-plus .qu-thread-ui-context-menu-trigger:hover { opacity: 1; background: var(--qu-color-border, #8884); }
+  /* min-height/max-height are a defensive fallback only - the actual
+     1-to-COMPOSER_MAX_ROWS growth is driven by @qu/thread-ui's
+     mountComposerAutogrow(), not this CSS. */
   .qu-forum-composer-input-wrap { flex: 1; min-width: 0; display: flex; align-items: flex-end; gap: 0.3rem; background: var(--qu-color-surface, #8882); border: 1px solid var(--qu-color-border, #8884); border-radius: 1.3rem; padding: 0.4rem 0.6rem; }
   .qu-forum-composer-input-wrap textarea { flex: 1; min-width: 0; font: inherit; border: none; background: transparent; resize: none; min-height: 1.4rem; max-height: 8rem; padding: 0.15rem 0; }
   .qu-forum-composer-input-wrap textarea:focus { outline: none; }
@@ -1132,25 +1161,44 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
   replyBanner.className = 'qu-forum-reply-banner';
   replyBanner.hidden = true;
 
-  // The composer is a rounded "pill" (textarea + emoji trigger) plus a tool
-  // cluster (attach) and one circular send button - the SAME visual
-  // language `apps/chat/client.js`'s own composer uses (see that file's own
-  // top doc comment's "COMPOSER" section), minus the mic/morph-to-mic
-  // behavior entirely: Forum has no voice messages (see this function's own
-  // top doc comment), so this action button is ALWAYS "send".
+  // The composer is a rounded "pill" (textarea + emoji trigger) plus a "+"
+  // action-menu trigger (`content.composerActions` - see this file's own top
+  // doc comment's "EXTENSION POINTS" section) and one circular send button -
+  // the SAME visual language `apps/chat/client.js`'s own composer uses (see
+  // that file's own top doc comment's "COMPOSER" section), minus the
+  // mic/morph-to-mic behavior entirely: Forum has no voice messages (see
+  // this function's own top doc comment), so this action button is ALWAYS
+  // "send".
   const composerRow = document.createElement('div');
   composerRow.className = 'qu-forum-composer';
   const composerTools = document.createElement('div');
   composerTools.className = 'qu-forum-composer-tools';
   const attachUpload = document.createElement('qu-asset-upload');
   attachUpload.setAttribute('space-id', SPACE_ID);
-  attachUpload.setAttribute('label', '📎');
-  composerTools.appendChild(attachUpload);
+  attachUpload.setAttribute('hide-picker', ''); // its own picker button is replaced by the "+" action menu below
+  const composerActionsBtn = renderContextMenu({
+    trigger: '+',
+    triggerTitle: t('addAttachment'),
+    getItems: async () => {
+      const nativeItems = [
+        { id: 'attach', label: t('attachFile'), icon: '📎', onClick: () => attachUpload.openPicker() },
+      ];
+      const payload = { services, qu, syncFetch, spaceId: SPACE_ID, threadId: topicId };
+      const pluginItems = extensionPoints ? await extensionPoints.collect('content.composerActions', payload) : [];
+      return [...nativeItems, ...pluginItems].sort(
+        (a, b) => rankFor(extensionPoints?.order, 'content.composerActions', a.id, COMPOSER_ACTIONS_ORDER_DEFAULT[a.id] ?? 50)
+          - rankFor(extensionPoints?.order, 'content.composerActions', b.id, COMPOSER_ACTIONS_ORDER_DEFAULT[b.id] ?? 50)
+      );
+    },
+  });
+  composerActionsBtn.classList.add('qu-forum-composer-plus');
+  composerTools.append(composerActionsBtn, attachUpload);
 
   const inputWrap = document.createElement('div');
   inputWrap.className = 'qu-forum-composer-input-wrap';
   const composerInput = document.createElement('textarea');
   composerInput.placeholder = t('composerPlaceholder');
+  const stopComposerAutogrow = mountComposerAutogrow(composerInput, { minRows: COMPOSER_MIN_ROWS, maxRows: COMPOSER_MAX_ROWS });
   const emojiPicker = renderEmojiPicker({
     onPick: (emoji) => insertAtCursor(composerInput, emoji),
     trigger: '😀',
@@ -1879,6 +1927,7 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     offMessages();
     stopComposerMentions();
     stopComposerEmoji();
+    stopComposerAutogrow();
     stopSidebar();
   };
 }

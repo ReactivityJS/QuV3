@@ -83,6 +83,12 @@ const STYLE = `
      picker button's own (small, fixed) width is all the row ever sees. */
   qu-asset-upload { position: relative; display: inline-flex; }
   .qu-asset-upload-picker { display: inline-flex; align-items: center; gap: 0.5rem; }
+  /* A host that folds "Attach" into its own action menu (e.g. a composer's
+     "+" - see apps/chat's/apps/forum's own composer) sets this attribute to
+     hide the OWN small picker button while keeping the element mounted (its
+     hidden <input type=file> and the progress panel below both still need
+     to exist/position correctly) - triggers the SAME dialog via .openPicker(). */
+  qu-asset-upload[hide-picker] .qu-asset-upload-picker { display: none; }
   .qu-asset-upload-progress { position: absolute; z-index: 20; bottom: 100%; left: 0; margin-bottom: 0.3rem; display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.85em; min-width: 12rem; padding: 0.4rem 0.6rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); background: var(--qu-color-surface, #ffffff); box-shadow: 0 0.3rem 0.8rem rgba(0,0,0,0.2); }
   /* Without this, the [hidden] attribute this file sets via \`status.hidden = true\`
      (a plain author-stylesheet class selector beats the UA's own [hidden]
@@ -161,12 +167,25 @@ export class QuAssetUploadElement extends HTMLElement {
     status.hidden = true;
 
     this.append(picker, status);
+    this._fileInput = fileInput;
 
     fileInput.addEventListener('change', () => {
       const file = fileInput.files[0];
       fileInput.value = '';
       if (file) this._upload(file, status);
     });
+  }
+
+  /**
+   * Opens the native file-picker dialog without needing `pickBtn` itself
+   * clicked/visible - lets a host that hides this element's own OWN button
+   * (via the `hide-picker` attribute below, e.g. a composer that folds
+   * "Attach" into its own "+" action menu instead) still trigger the SAME
+   * upload flow from its own UI. Safe to call outside a real user gesture
+   * handler too (a no-op if `disconnectedCallback()` already ran).
+   */
+  openPicker() {
+    this._fileInput?.click();
   }
 
   disconnectedCallback() {

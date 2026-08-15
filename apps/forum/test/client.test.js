@@ -148,10 +148,18 @@ const FORUM_APPS_WITH_PINS = [
  * Opens a message's "⋮" context menu (content.messageFooter's core.menu
  * segment) and returns its panel - `root` scopes to one specific message's
  * own `<li>` when a view has more than one (defaults to the whole container).
+ * Scoped to `.qu-forum-message-footer` (not a bare
+ * `.qu-thread-ui-context-menu-trigger` query) because the composer's own
+ * "+" action menu (content.composerActions) is built from the SAME
+ * `@qu/thread-ui` `renderContextMenu()` and carries the identical trigger
+ * class - an unscoped query can resolve to whichever one happens to exist
+ * in the DOM first (the composer mounts synchronously, a message's footer
+ * only after its own async render), not necessarily a message's.
  */
 async function openMessageMenu(root) {
-  await waitFor(() => root.querySelector('.qu-thread-ui-context-menu-trigger') !== null);
-  root.querySelector('.qu-thread-ui-context-menu-trigger').click();
+  const selector = '.qu-forum-message-footer .qu-thread-ui-context-menu-trigger';
+  await waitFor(() => root.querySelector(selector) !== null);
+  root.querySelector(selector).click();
   await waitFor(() => root.querySelector('.qu-thread-ui-context-menu-panel') !== null);
   return root.querySelector('.qu-thread-ui-context-menu-panel');
 }
@@ -269,6 +277,55 @@ test('the composer posts a message and clears the input afterward', async () => 
     assert.equal(textarea.value, '');
     const { messages } = await a.services.messages.listMessages(FORUM_SPACE_ID, 'general');
     assert.equal(messages.length, 1);
+  } finally {
+    stop();
+  }
+});
+
+test('the composer textarea starts at ONE visual line (rows=1) - regression: an un-sized <textarea> defaults to the UA\'s own rows=2', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => container.querySelector('textarea') !== null);
+    assert.equal(container.querySelector('.qu-forum-composer-input-wrap textarea').rows, 1);
+  } finally {
+    stop();
+  }
+});
+
+test('the composer\'s "+" action menu (content.composerActions) lists Attach natively, plus any plugin-contributed item', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+
+  const container = makeContainer();
+  // A duck-typed stub (not a real ExtensionPointHost) - this point has no
+  // real contributing app yet, this only proves the HOOK itself works, the
+  // same way this file's own "content.messageMenu: without extensionPoints"
+  // sibling test proves the native-only path.
+  const seen = [];
+  const extensionPoints = {
+    order: null,
+    collect: async (point, payload) => {
+      seen.push({ point, payload });
+      return [{ id: 'calendar.newEvent', label: 'New calendar event', icon: '📅', onClick: () => {} }];
+    },
+    renderSlot: async () => {}, // forum.topicToolbar - unrelated to this test, just needs to exist
+  };
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS, extensionPoints });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-composer-plus .qu-thread-ui-context-menu-trigger') !== null);
+    container.querySelector('.qu-forum-composer-plus .qu-thread-ui-context-menu-trigger').click();
+    await waitFor(() => container.querySelector('.qu-thread-ui-context-menu-panel') !== null);
+    const panel = container.querySelector('.qu-thread-ui-context-menu-panel');
+    const items = [...panel.querySelectorAll('.qu-thread-ui-context-menu-item')].map((btn) => btn.textContent);
+    assert.deepEqual(items, ['📎Attach file', '📅New calendar event']);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].point, 'content.composerActions');
+    assert.equal(seen[0].payload.spaceId, FORUM_SPACE_ID);
+    assert.equal(seen[0].payload.threadId, 'general');
   } finally {
     stop();
   }
