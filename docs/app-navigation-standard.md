@@ -271,30 +271,57 @@ Room view:
 ### Forum
 
 ```
-BEFORE (mobile, already close to the standard):
+BEFORE (mobile, v1 of the migration - a real regression, since fixed):
 ┌──────────────────────────────┐
-│ [General] [Team] [Support] +  │  <- own tab-strip CSS, own sidebar CSS
+│ [General][Team][Support][Ops] │  <- horizontal scroll, forced sideways
+│ [Random][Off-topic][Archive]…│     scrolling once there were more than
+├──────────────────────────────┤     a handful of channels
+│  Announcements                │
+│  [topics...]                  │
+└──────────────────────────────┘
+
+AFTER (mobile) - the shared sidebar list (mountContextSwitcher, variant:
+'tabs') collapses to a native <select> below 720px instead of a
+horizontally-scrolling strip - shows the active channel/"All channels" as
+its current value, no width problem at any channel count, no custom
+open/close/positioning code:
+Global header:  ←  →  🏠 …  [+]  🔔  👤   <- "+" now lives here, only while Forum is active
+┌──────────────────────────────┐
+│  ▾ All channels                │
 ├──────────────────────────────┤
 │  Announcements                │
 │  [topics...]                  │
 └──────────────────────────────┘
 
-AFTER (mobile) - same look, now the SHARED component (mountContextSwitcher,
-variant: 'tabs') instead of Forum's own bespoke sidebar/media-query CSS -
-the exact same component Calendar's desktop sidebar shell is built from:
-┌──────────────────────────────┐
-│ [General] [Team] [Support] +  │
-├──────────────────────────────┤
-│  Announcements                │
-│  [topics...]                  │
-└──────────────────────────────┘
+AFTER (desktop, ≥720px) - unchanged, a persistent vertical sidebar:
+┌────────────┬───────────────────┐
+│ Channels   │  Announcements    │
+│  All chan. │  [topics...]      │
+│  General   │                   │
+│  Team      │                   │
+└────────────┴───────────────────┘
 ```
 
 Forum was already compliant on Rule 1 (its subpages already used
-`renderSubpage({ showBackLink: false })`) — the only change was moving its
-channel list onto the shared `mountContextSwitcher()` shell and its "+ New
-channel" link into that component's `newItem` slot, so it shares real CSS
-with Calendar's sidebar instead of a parallel, hand-maintained copy.
+`renderSubpage({ showBackLink: false })`). The migration moved its channel
+list onto the shared `mountContextSwitcher()` shell (`variant: 'tabs'`, via
+a `renderSidebar` override — its channel-list data fetch/live-watch logic is
+non-trivial enough, like Calendar's calendars, to keep self-managed rather
+than flattened into a plain `items` array) so it shares real CSS/layout with
+Calendar's sidebar instead of a parallel, hand-maintained copy — and moved
+"+ New channel" into the global header's App Action Slot (Rule 2), matching
+Calendar's/Chat's own shape exactly, rather than leaving it as the sidebar
+list's own trailing entry.
+
+**A real bug shipped in the first version of this migration**, since fixed:
+the reused `mountMiniChannelSidebar()` did `root.className = '...'` — a
+blind assignment that silently wiped the `.qu-ctxswitch-sidebar` class
+`mountContextSwitcher()` had already put on that same element, breaking its
+own responsive CSS and producing exactly the "too wide, forces horizontal
+scrolling" symptom shown above. **Lesson for any future `renderSidebar`
+override**: only ever `classList.add()` your own class onto the `host`
+element you're handed — never reassign `className` wholesale, since the
+host is already carrying the shared component's own class.
 
 ## What's explicitly out of scope (for now)
 

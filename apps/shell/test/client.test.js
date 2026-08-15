@@ -276,6 +276,81 @@ test('navigating away from a mounted app calls its own returned stop function', 
   }
 });
 
+test('a re-navigation while a prior app\'s own mount() is still in flight stops that stale app the instant it does resolve, instead of leaking it as the tracked mounted app', async (t) => {
+  const qu = freshQu();
+  const identity = new QuIdentityEngine(qu);
+  await identity.importMnemonic(identity.generateMnemonic());
+
+  let releaseSlowMount;
+  window.__slowGate = new Promise((resolve) => { releaseSlowMount = resolve; });
+  window.__slowMountStarted = false;
+  window.__slowStopped = false;
+  window.__fastStopped = false;
+  // `mount()` itself signals it actually STARTED (not just that the
+  // navigation was dispatched) before awaiting the controllable gate - the
+  // second navigation below waits for exactly that, to land deterministically
+  // in the race window renderRoute()'s FINAL check (right after `await
+  // mod.mount(...)` resolves) exists to close, rather than an earlier one.
+  // NOTE: this stale app's own mount() still briefly overwrites the shared
+  // `screen` node's content once its gate releases - the navToken guard's
+  // real, load-bearing guarantee is that its returned stop() gets called
+  // (no leaked watches/subscriptions) and `stopMountedApp` never ends up
+  // tracking it, NOT that the DOM can never show a one-frame flash of its
+  // content - closing that fully would need each mount() to render into an
+  // offscreen node first, a bigger change than this fix's scope.
+  const slowUrl = dataUrlModule(`
+    export async function mount(container) {
+      window.__slowMountStarted = true;
+      await window.__slowGate;
+      container.textContent = 'SLOW MOUNTED';
+      return () => { window.__slowStopped = true; };
+    }
+  `);
+  const fastUrl = dataUrlModule(`
+    export function mount(container) {
+      container.textContent = 'FAST MOUNTED';
+      return () => { window.__fastStopped = true; };
+    }
+  `);
+  t.mock.method(globalThis, 'fetch', mockFetch({ apps: [
+    { name: 'slowapp', clientMainUrl: slowUrl },
+    { name: 'fastapp', clientMainUrl: fastUrl },
+  ] }));
+
+  const container = makeContainer();
+  const stop = await mount(container, { qu, identity });
+  try {
+    window.location.hash = '#/slowapp';
+    window.dispatchEvent(new window.Event('hashchange'));
+    await waitFor(() => window.__slowMountStarted === true);
+
+    // Re-navigate while slowapp's own mount() call is still pending on its
+    // gate - the exact race renderRoute()'s navToken guard exists to close.
+    window.location.hash = '#/fastapp';
+    window.dispatchEvent(new window.Event('hashchange'));
+    await waitFor(() => container.querySelector('.qu-shell-screen')?.textContent === 'FAST MOUNTED');
+
+    // Now let the stale slowapp's mount() finally resolve - its own stop()
+    // must be called immediately (no leaked watches/subscriptions), instead
+    // of being left running forever or overwriting `stopMountedApp`.
+    releaseSlowMount();
+    await waitFor(() => window.__slowStopped === true);
+
+    // `stopMountedApp` must still correctly be fastapp's own stop function,
+    // not corrupted/overwritten by the stale slowapp resolving after it -
+    // navigating away now must call fastapp's stop exactly once.
+    window.location.hash = '';
+    window.dispatchEvent(new window.Event('hashchange'));
+    await waitFor(() => window.__fastStopped === true);
+  } finally {
+    stop();
+    delete window.__slowGate;
+    delete window.__slowMountStarted;
+    delete window.__slowStopped;
+    delete window.__fastStopped;
+  }
+});
+
 test('an unknown appId renders a graceful "not found" placeholder, not a crash', async (t) => {
   const qu = freshQu();
   const identity = new QuIdentityEngine(qu);
