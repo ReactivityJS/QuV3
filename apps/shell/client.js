@@ -130,6 +130,12 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
   injectStyle(STYLE_ID, STYLE);
   let stopped = false;
   let stopMountedApp = null;
+  // See renderRoute()'s own doc comment - a monotonic epoch, bumped at the
+  // start of every call, so a STALE call (superseded by a newer navigation
+  // while it was still awaiting fetch()/import()/mount()) can tell it's
+  // stale and bail out instead of racing the newer one for control of
+  // `screen`/`stopMountedApp`.
+  let navToken = 0;
 
   if (!(await identity.hasIdentity())) {
     const onboardRoot = document.createElement('div');
@@ -267,7 +273,28 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
     screen.appendChild(p);
   }
 
+  /**
+   * The `hashchange` handler - has TWO `await` points (the `/apps.json`
+   * fetch, then the dynamic `import()`) before it ever touches `screen` or
+   * calls `mod.mount()`. Nothing stops a SECOND `hashchange` firing while a
+   * first call is still in either await (a fast double-navigation - e.g.
+   * clicking a link twice, or one nav triggering another) - without a guard,
+   * two concurrent calls race to build into the SAME `screen` node with no
+   * ordering guarantee between them, and whichever's async chain resolves
+   * LAST silently "wins" regardless of which one is actually current,
+   * potentially leaving the other's in-flight `mod.mount()` call's own
+   * returned stop function never captured/called. `navToken` (declared
+   * alongside `stopped`/`stopMountedApp` above) closes that: each call
+   * captures its own token at the very start, and bails out - without
+   * touching `screen`, calling `renderPlaceholder()`, or assigning
+   * `stopMountedApp` - the moment a NEWER call has since started. Same
+   * `token`/`stopped` guard idiom already used throughout this codebase
+   * (e.g. every app's own `renderToken` pattern, see
+   * `docs/building-an-app.md` §9) - applied here to the one place it was
+   * missing.
+   */
   async function renderRoute() {
+    const token = ++navToken;
     stopMountedApp?.();
     stopMountedApp = null;
     screen.textContent = '';
@@ -288,6 +315,7 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
       const res = await fetch('/apps.json');
       apps = res.ok ? await res.json() : [];
     } catch { /* transient fetch failure - treated the same as "app not found" below */ }
+    if (stopped || token !== navToken) return; // a newer navigation started while this fetch was in flight
     const app = apps.find((a) => a.name === catalogName);
     // `enabled === false` (an admin's `disabledApps`, see relay-settings.js)
     // is treated exactly like "not found" - the real enforced gate is still
@@ -298,7 +326,7 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
 
     log.debug(`mounting app "${catalogName}"`);
     const mod = await import(/* @vite-ignore */ app.clientMainUrl);
-    if (stopped) return;
+    if (stopped || token !== navToken) return;
     // A contribute-only app (e.g. `apps/reactions`/`apps/pins` - live plugin
     // code for another app's extension point, no page of its own) ships a
     // clientMain with no `mount` export - still reachable in the App List
@@ -307,7 +335,15 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
     // placeholder rather than throwing on `mod.mount is not a function`.
     if (typeof mod.mount !== 'function') { renderPlaceholder(t('appNotFound')); return; }
     const extensionPoints = new ExtensionPointHost(apps, { extensionOrder });
-    stopMountedApp = (await mod.mount(screen, { qu, identity, services, apps, segments, subscribe, syncFetch, extensionPoints })) ?? null;
+    const stopFn = (await mod.mount(screen, { qu, identity, services, apps, segments, subscribe, syncFetch, extensionPoints })) ?? null;
+    if (stopped || token !== navToken) {
+      // A newer navigation already won control of `screen` while this
+      // mount() call was itself in flight - never leave this one mounted
+      // (and its watches/subscriptions live) in the background.
+      stopFn?.();
+      return;
+    }
+    stopMountedApp = stopFn;
   }
 
   window.addEventListener('hashchange', renderRoute);

@@ -179,7 +179,7 @@ import { watchChildren, watch } from '@qu/reactive';
 import { rankFor } from '@qu/foundation';
 import { paths, formatActorLabel, detectLinks } from '@qu/services';
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage, mountContextSwitcher } from '@qu/ui';
+import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage, mountContextSwitcher, mountAppHeaderAction } from '@qu/ui';
 import {
   renderEmojiPicker, renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, insertAtCursor, copyToClipboard,
   mountComposerAutogrow, COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS,
@@ -220,7 +220,7 @@ const DICT = {
     allChannels: 'All channels',
     newChannelPlaceholder: 'New channel name…',
     createChannel: 'Create channel',
-    newChannelLink: '+ New channel',
+    newChannelLink: 'New channel',
     notAllowedToCreateChannel: 'This relay does not allow you to create a channel right now - ask an admin.',
     restrictedChannel: 'Restricted (only invited members)',
     membersPlaceholder: 'Member pubkeys, comma-separated',
@@ -260,7 +260,7 @@ const DICT = {
     allChannels: 'Alle Kanäle',
     newChannelPlaceholder: 'Name des neuen Kanals…',
     createChannel: 'Kanal erstellen',
-    newChannelLink: '+ Neuer Kanal',
+    newChannelLink: 'Neuer Kanal',
     notAllowedToCreateChannel: 'Auf diesem Relay darfst du aktuell keinen Kanal anlegen - wende dich an einen Admin.',
     restrictedChannel: 'Geschützt (nur eingeladene Mitglieder)',
     membersPlaceholder: 'Mitglieder-Pubkeys, kommagetrennt',
@@ -411,22 +411,27 @@ const STYLE = `
   .qu-forum-mini-channels a { display: flex; align-items: center; gap: 0.3rem; padding: 0.3rem 0.5rem; border-radius: var(--qu-radius-md, 0.4rem); text-decoration: none; color: inherit; font-size: 0.9em; }
   .qu-forum-mini-channels a:hover { background: var(--qu-color-border, #8884); }
   .qu-forum-mini-channel-active { background: color-mix(in srgb, var(--qu-color-accent, #5b5bd6) 15%, transparent); font-weight: 600; }
-  .qu-forum-mini-new-channel { opacity: 0.8; }
-  .qu-forum-mini-new-channel:hover { opacity: 1; }
+  /* Native <select> - the mobile (<720px) presentation of the same channel
+     list (see mountMiniChannelSidebar()'s own doc comment for why: a
+     horizontally-scrolling row of pills forced sideways scrolling once
+     there were more than a handful of channels; a native dropdown has no
+     width problem at any count and shows the active channel/"All channels"
+     as its current value for free). Hidden by default (desktop shows the
+     vertical list instead) - see the media query below. */
+  .qu-forum-mini-select { display: none; width: 100%; padding: 0.5rem 0.6rem; font: inherit; font-size: 0.9em; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); background: var(--qu-color-surface, Canvas); color: inherit; }
   /* Below this width there's no room for a side-by-side sidebar column -
-     esoTalk's own mobile pattern (tabs, not a tree) rather than a tall list
-     pushing the actual content below the fold: the sidebar collapses into a
-     single-row, horizontally scrollable tab bar ABOVE the content instead
-     of stacking a full-height list on top of it. Same DOM either way -
-     mountMiniChannelSidebar() has no separate "mobile" code path, this is
-     CSS-only. */
-  @media (max-width: 40rem) {
+     the sidebar collapses to a single-row native <select> ABOVE the content
+     instead of stacking a full-height list on top of it. Same breakpoint
+     @qu/ui's mountContextSwitcher() itself defaults to, so the shared
+     component (board/channel views) and this app's own topic ("room") view
+     - which still builds its .qu-forum-layout wrapper directly - agree on
+     where "mobile" starts. */
+  @media (max-width: 720px) {
     .qu-forum-layout { flex-direction: column; gap: 0.6rem; }
     .qu-forum-layout > aside { flex-basis: auto; width: 100%; }
     .qu-forum-mini-sidebar h2 { display: none; }
-    .qu-forum-mini-channels { flex-direction: row; flex-wrap: nowrap; overflow-x: auto; gap: 0.4rem; padding-bottom: 0.2rem; -webkit-overflow-scrolling: touch; }
-    .qu-forum-mini-channels li { flex: 0 0 auto; }
-    .qu-forum-mini-channels a { white-space: nowrap; border: 1px solid var(--qu-color-border, #8884); border-radius: 999px; padding: 0.3rem 0.7rem; }
+    .qu-forum-mini-channels { display: none; }
+    .qu-forum-mini-select { display: block; }
   }
   .qu-forum-new-channel-form, .qu-forum-new-topic-form, .qu-forum-invite-form { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.6rem; max-width: 26rem; }
   .qu-forum-invite-error { color: var(--qu-color-danger, #c00); font-size: 0.85em; margin: 0; }
@@ -756,6 +761,7 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
   let stopSidebar = () => {};
   let topicsActivity;
   let off;
+  const topicsListWatchers = new Map(); // channelId -> stop function
 
   function renderActivityFeed(root, topics) {
     root.textContent = '';
@@ -804,6 +810,28 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
         if (stopped) return;
         const channels = await services.channels.listChannels(SPACE_ID);
         if (stopped || token !== renderToken) return;
+
+        // A per-channel topics-list watch, added once per channel (never
+        // re-added on a later render() re-run) - `ChannelService`'s own
+        // internal backfill-on-miss (packages/services/src/list-service.js's
+        // listCuratedRawPaths()) only retries a local miss ONCE PER SYNC
+        // "GENERATION" (see packages/services/src/sync-freshness.js's own
+        // doc comment on createMissGate()), which can race the sync
+        // connection still coming up on a cold client and then not retry
+        // until the next reconnect - a page reload is what actually forces
+        // that retry today, which is the exact "board view loads empty,
+        // needs a reload" symptom this closes. `watch()`'s own `syncFetch`
+        // option (below) is called UNCONDITIONALLY every time, no gating -
+        // same shape mountChannelView()'s own dedicated topics-list watch
+        // already uses for its one channel - and its callback re-runs THIS
+        // render() the moment fresh data actually lands, or a new topic is
+        // added later (watchTopicsActivity() above only covers ALREADY-
+        // LISTED topics' own messages, not a channel gaining a new topic).
+        for (const channel of channels) {
+          if (topicsListWatchers.has(channel._id)) continue;
+          topicsListWatchers.set(channel._id, watch(qu, paths.listPath(SPACE_ID, `topics-${channel._id}`), () => render(), { syncFetch, initial: false }));
+        }
+
         const topicsPerChannel = await Promise.all(channels.map((c) => services.channels.listTopics(SPACE_ID, c._id)));
         if (stopped || token !== renderToken) return;
 
@@ -824,6 +852,7 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
     stopped = true;
     off?.();
     topicsActivity?.stop();
+    for (const stopWatch of topicsListWatchers.values()) stopWatch();
     stopSidebar();
   };
 }
@@ -831,19 +860,27 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
 /**
  * THE one persistent channel list, shared by all three views (board,
  * channel, topic) - esoTalk's own "channel tabs stay visible no matter how
- * deep you've drilled in" idiom. The board view used to render its OWN,
- * separate copy of this list (with the create-channel form built directly
- * into it); now every view mounts this exact same function, and channel
- * creation lives on its own subpage (`mountNewChannelView()`, `#/forum/new`)
- * linked from the "+ New channel" affordance at the end of this list -
- * policy-gated the identical way that subpage itself is (`fetchChannelPolicy()`),
- * so a relay where members can't create channels simply never shows the
- * link, rather than showing it and then rejecting the click.
+ * deep you've drilled in" idiom. Channel creation lives on its own subpage
+ * (`mountNewChannelView()`, `#/forum/new`), reachable via the global
+ * header's App Action Slot (`renderHeaderAction()` below, see
+ * docs/app-navigation-standard.md Rule 2) - not from this list itself.
  *
- * RESPONSIVE: this same DOM (an `<h2>` + `<ul>` of links) is what collapses
- * from a vertical sidebar into a horizontal, scrollable tab bar on a narrow
- * viewport - see this file's own `@media` rules under `.qu-forum-mini-*`.
- * No separate "mobile" markup/JS path - the CSS alone reflows it.
+ * RESPONSIVE: two presentations of the SAME data, built every render -
+ * a vertical `<ul>` (desktop, >=720px) and a native `<select>` (mobile,
+ * <720px, see this file's own `@media` rules under `.qu-forum-mini-*`) -
+ * CSS alone decides which one is visible, no separate "mobile" JS path. The
+ * `<select>` exists because a horizontally-scrolling row of channel pills
+ * forced sideways scrolling once there were more than a handful of channels
+ * - a native dropdown has no width problem at any channel count, shows the
+ * active channel (or "All channels") as its current value for free, and
+ * needs no custom open/close/positioning code.
+ *
+ * NOTE: reused directly (unchanged) via `@qu/ui`'s `mountContextSwitcher()`
+ * `renderSidebar` option for the board/channel views - `root` there is
+ * ALREADY a styled `<aside class="qu-ctxswitch-sidebar">` when this runs, so
+ * this function only ever ADDS its own class (`classList.add`), never
+ * overwrites `className` wholesale - overwriting it once silently broke
+ * `mountContextSwitcher`'s own responsive sidebar CSS for both views.
  * @param {HTMLElement} root
  * @param {{qu: object, services: object, syncFetch?: Function, SPACE_ID: string}} deps
  * @param {string|null} [activeChannelId] - Highlighted in the list, when
@@ -854,17 +891,8 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
  * @returns {() => void} stop function
  */
 function mountMiniChannelSidebar(root, { qu, services, syncFetch, SPACE_ID }, activeChannelId = null) {
-  root.className = 'qu-forum-mini-sidebar';
+  root.classList.add('qu-forum-mini-sidebar');
   let stopped = false;
-
-  // Resolved once per mount, independent of the (possibly repeated)
-  // channel-list render() below - same reasoning as mountNewChannelView()'s
-  // own fetch: a relay's policy doesn't change mid-session.
-  let policy = null;
-  (async () => {
-    policy = await fetchChannelPolicy(services);
-    if (!stopped) render();
-  })();
 
   async function render() {
     if (stopped) return;
@@ -874,28 +902,21 @@ function mountMiniChannelSidebar(root, { qu, services, syncFetch, SPACE_ID }, ac
     const title = document.createElement('h2');
     title.textContent = t('channels');
     root.appendChild(title);
+
+    const entries = [{ id: 'all', label: t('allChannels'), href: '#/forum', restricted: false }, ...channels.map((c) => ({
+      id: c._id, label: c.title, href: `#/forum/c/${c._id}`, restricted: c.restricted,
+    }))];
+
     const ul = document.createElement('ul');
     ul.className = 'qu-forum-mini-channels';
-
-    // esoTalk's own "All Channels" entry - the merged recent-activity board
-    // view (#/forum), listed alongside the individual channels rather than
-    // reached only via the shell header's Back button.
-    const allLi = document.createElement('li');
-    const allLink = document.createElement('a');
-    allLink.href = '#/forum';
-    allLink.textContent = t('allChannels');
-    allLink.className = 'qu-forum-mini-all-channels';
-    if (activeChannelId === 'all') allLink.classList.add('qu-forum-mini-channel-active');
-    allLi.appendChild(allLink);
-    ul.appendChild(allLi);
-
-    for (const channel of channels) {
+    for (const entry of entries) {
       const li = document.createElement('li');
       const a = document.createElement('a');
-      a.href = `#/forum/c/${channel._id}`;
-      a.textContent = channel.title;
-      if (channel._id === activeChannelId) a.classList.add('qu-forum-mini-channel-active');
-      if (channel.restricted) {
+      a.href = entry.href;
+      a.textContent = entry.label;
+      a.className = entry.id === 'all' ? 'qu-forum-mini-all-channels' : '';
+      if (entry.id === activeChannelId) a.classList.add('qu-forum-mini-channel-active');
+      if (entry.restricted) {
         const badge = document.createElement('span');
         badge.className = 'qu-forum-restricted-badge';
         badge.textContent = '🔒';
@@ -904,16 +925,19 @@ function mountMiniChannelSidebar(root, { qu, services, syncFetch, SPACE_ID }, ac
       li.appendChild(a);
       ul.appendChild(li);
     }
-    if (policy && (policy.isAdmin || policy.channelPolicy.allowMemberCreate)) {
-      const newLi = document.createElement('li');
-      const newLink = document.createElement('a');
-      newLink.href = '#/forum/new';
-      newLink.className = 'qu-forum-mini-new-channel';
-      newLink.textContent = t('newChannelLink');
-      newLi.appendChild(newLink);
-      ul.appendChild(newLi);
-    }
     root.appendChild(ul);
+
+    const select = document.createElement('select');
+    select.className = 'qu-forum-mini-select';
+    for (const entry of entries) {
+      const opt = document.createElement('option');
+      opt.value = entry.href;
+      opt.textContent = entry.restricted ? `${entry.label} 🔒` : entry.label;
+      opt.selected = entry.id === activeChannelId;
+      select.appendChild(opt);
+    }
+    select.addEventListener('change', () => { window.location.hash = select.value; });
+    root.appendChild(select);
   }
 
   const off = watch(qu, paths.listPath(SPACE_ID, 'channels'), () => render(), { syncFetch });
@@ -921,6 +945,40 @@ function mountMiniChannelSidebar(root, { qu, services, syncFetch, SPACE_ID }, ac
     stopped = true;
     off();
   };
+}
+
+// ===================================================================
+// HEADER ACTION - "+ New channel" (see docs/app-navigation-standard.md Rule 2)
+// ===================================================================
+
+/**
+ * The `shell.headerAction` contributor (see `apps/forum/manifest.quapp`'s
+ * `contributes`) - a single "+" icon in the GLOBAL header, shown only while
+ * Forum is active, linking to the New Channel form - gated by the SAME
+ * `fetchChannelPolicy()` check the old inline "+ New channel" list entry
+ * used (moved here from `mountMiniChannelSidebar()` above).
+ * @param {HTMLElement} container
+ * @param {{getContext: Function, onContextChange: Function, services: object}} payload
+ */
+export function renderHeaderAction(container, { getContext, onContextChange, services }) {
+  mountAppHeaderAction(container, {
+    appId: 'forum', getContext, onContextChange,
+    render: (wrap) => {
+      let stopped = false;
+      (async () => {
+        const policy = await fetchChannelPolicy(services);
+        if (stopped || !(policy.isAdmin || policy.channelPolicy.allowMemberCreate)) return;
+        const link = document.createElement('a');
+        link.className = 'qu-app-action-btn';
+        link.textContent = '+';
+        link.title = t('newChannelLink');
+        link.setAttribute('aria-label', t('newChannelLink'));
+        link.href = '#/forum/new';
+        wrap.appendChild(link);
+      })();
+      return () => { stopped = true; };
+    },
+  });
 }
 
 // ===================================================================
