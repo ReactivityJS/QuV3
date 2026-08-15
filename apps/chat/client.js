@@ -1060,6 +1060,19 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   // guard flag.
   let stuckToMessageId = null;
   let lastKnownAnchorScrollTop = null;
+  // The scrollTop a RESIZE- or VIEWPORT-triggered bottom correction
+  // (`scrollToBottom(_, true)` below) last set - ALSO ported from
+  // apps/forum/client.js's own identical fix (see that file's own doc
+  // comment on `lastKnownBottomScrollTop` for the full "why": a
+  // late-loading attachment growing `messagesRoot` across MULTIPLE steps
+  // can race the native 'scroll' event for our OWN correction, reading a
+  // stale-but-still-ours scrollTop against the NOW-larger scrollHeight as
+  // "the user scrolled away" - permanently disabling further corrections
+  // and stranding the newest message off-screen). Narrower in scope than
+  // `lastKnownAnchorScrollTop` on purpose - only tracked for a `correcting:
+  // true` call, never the plain first-render jump or an explicit smooth
+  // catch-up.
+  let lastKnownBottomScrollTop = null;
   // Whether a message arrived while NOT stuck to the bottom - purely
   // cosmetic (see syncScrollToBottomButton()'s own doc comment for what it
   // changes about the button), never what decides the button's visibility.
@@ -1091,6 +1104,9 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     if (correcting && !stuckToBottom) return;
     if (messagesScroll.scrollTo) messagesScroll.scrollTo({ top: messagesScroll.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
     else messagesScroll.scrollTop = messagesScroll.scrollHeight; // jsdom (this repo's test DOM) has no scrollTo() at all
+    // Only a RESIZE/VIEWPORT-triggered correction is tracked - see
+    // `lastKnownBottomScrollTop`'s own doc comment for exactly why.
+    if (correcting) lastKnownBottomScrollTop = messagesScroll.scrollTop;
   }
   /**
    * Re-aligns the viewport back on `stuckToMessageId`'s own row (if still
@@ -1192,12 +1208,19 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     stuckToBottom = true;
     stuckToMessageId = null;
     lastKnownAnchorScrollTop = null;
+    lastKnownBottomScrollTop = null; // scrollToBottom(true) below is smooth - never tracked, see that function's own doc comment
     hasUnseenMessage = false;
     syncScrollToBottomButton();
     scrollToBottom(true);
     releasePermalinkAnchor();
   });
   messagesScroll.addEventListener('scroll', () => {
+    // A resize/viewport-correction echo (see `lastKnownBottomScrollTop`'s
+    // own doc comment) - skip recomputing ANYTHING here, unlike the
+    // anchor-echo check below (which only decides whether to release the
+    // anchor; `stuckToBottom` still recomputes normally either way).
+    if (lastKnownBottomScrollTop !== null && Math.abs(messagesScroll.scrollTop - lastKnownBottomScrollTop) <= 1) return;
+    lastKnownBottomScrollTop = null;
     // Releases `stuckToMessageId` only when THIS scroll moved the viewport
     // away from where our own last correction put it - see that variable's
     // own doc comment for why a geometry comparison, not an event-timing

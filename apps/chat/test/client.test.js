@@ -1050,6 +1050,62 @@ test('clicking the persistent scroll-to-bottom button scrolls to the bottom and 
   }
 });
 
+test('a resize-triggered "stay at bottom" correction is never falsely undone by its own scroll event catching up mid-content-growth (regression: an attachment growing messagesRoot across MULTIPLE steps - e.g. a large image resolving its real size well after an initial placeholder - could race the native \'scroll\' event for our OWN correction, read as "the user scrolled away", and permanently strand the newest message off-screen with no further correction ever attempted) - ported from apps/forum/client.js\'s own identical fix/test', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'first' });
+
+  // jsdom (this repo's test DOM) has no ResizeObserver at all - a minimal
+  // fake, installed just for this test, lets it manually drive the exact
+  // callback a real browser would invoke on each layout step.
+  let roInstance = null;
+  class FakeResizeObserver {
+    constructor(cb) { this.cb = cb; roInstance = this; }
+    observe() {}
+    disconnect() {}
+  }
+  const originalRO = globalThis.ResizeObserver;
+  globalThis.ResizeObserver = FakeResizeObserver;
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-bubble-text')?.textContent.includes('first'));
+    assert.ok(roInstance, 'expected the client to have constructed a ResizeObserver');
+    const scroll = container.querySelector('.qu-chat-messages-scroll');
+    // Emulates a real browser's own clamping - jsdom's plain scrollTop
+    // property doesn't clamp on its own.
+    scroll.scrollTo = (opts) => { scroll.scrollTop = Math.max(0, Math.min(opts.top, scroll.scrollHeight - scroll.clientHeight)); };
+    Object.defineProperty(scroll, 'clientHeight', { value: 519, configurable: true });
+
+    // STEP 1: an attachment is still mid-decode - content is 548px tall.
+    Object.defineProperty(scroll, 'scrollHeight', { value: 548, configurable: true });
+    roInstance.cb();
+    assert.equal(scroll.scrollTop, 29); // clamped: 548 - 519
+
+    // STEP 2: content grows FURTHER (868px) before the native 'scroll'
+    // event for step 1's own correction ever gets a chance to fire.
+    // scrollTop is untouched (still 29, a stale echo of step 1).
+    Object.defineProperty(scroll, 'scrollHeight', { value: 868, configurable: true });
+    scroll.dispatchEvent(new window.Event('scroll'));
+
+    assert.equal(
+      container.querySelector('.qu-chat-scroll-bottom-btn').hidden, true,
+      'must still be considered "at the bottom" - the button must not appear just because content grew underneath a not-yet-corrected view'
+    );
+
+    // STEP 3: the NEXT ResizeObserver firing picks up exactly where step 1 left off.
+    roInstance.cb();
+    assert.equal(scroll.scrollTop, 349); // clamped: 868 - 519
+    assert.equal(container.querySelector('.qu-chat-scroll-bottom-btn').hidden, true);
+  } finally {
+    stop();
+    globalThis.ResizeObserver = originalRO;
+  }
+});
+
 test('sending a message always scrolls the view to the bottom, even if the user had scrolled away from it (stuckToBottom released)', async () => {
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');
