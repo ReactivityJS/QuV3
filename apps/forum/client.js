@@ -1155,6 +1155,7 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     onPick: (emoji) => insertAtCursor(composerInput, emoji),
     trigger: '😀',
     triggerTitle: t('insertEmoji'),
+    inputEl: composerInput,
   });
   inputWrap.append(composerInput, emojiPicker);
 

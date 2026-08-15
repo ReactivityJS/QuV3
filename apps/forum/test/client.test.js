@@ -355,6 +355,7 @@ test('the composer\'s emoji picker inserts the picked emoji at the caret', async
     const emojiTrigger = container.querySelector('.qu-thread-ui-emoji-picker button');
     assert.ok(emojiTrigger, 'expected a thread-ui emoji picker in the composer row');
     emojiTrigger.click();
+    await waitFor(() => container.querySelector('.qu-thread-ui-emoji-panel') !== null);
     const panelButton = container.querySelector('.qu-thread-ui-emoji-panel button');
     assert.ok(panelButton);
     const picked = panelButton.textContent;
@@ -530,7 +531,13 @@ test('content.messageFooter (reactions): the REAL apps/reactions app is dynamica
 
     containerA.querySelector('qu-reactions-row .qu-thread-ui-emoji-trigger').click();
     await waitFor(() => containerA.querySelector('qu-reactions-row .qu-thread-ui-emoji-panel') !== null);
-    [...containerA.querySelectorAll('qu-reactions-row .qu-thread-ui-emoji-panel button')].find((btn) => btn.textContent === '👍').click();
+    // 👍 isn't necessarily on the panel's first (paginated) page - see
+    // emoji-panel.js's own doc comment - so search for it by name rather
+    // than assuming it's already in the DOM.
+    const reactionSearch = containerA.querySelector('qu-reactions-row .qu-thread-ui-emoji-panel-search');
+    reactionSearch.value = 'thumbsup';
+    reactionSearch.dispatchEvent(new window.Event('input'));
+    [...containerA.querySelectorAll('qu-reactions-row .qu-thread-ui-emoji-panel-grid button')].find((btn) => btn.textContent === '👍').click();
 
     await waitFor(() => [...containerB.querySelectorAll('.qu-reactions-pill')].some((btn) => btn.textContent === '👍 1'));
     assert.ok(containerA.querySelector('.qu-reactions-pill').classList.contains('qu-reactions-pill-mine'));
