@@ -161,7 +161,7 @@ import { paths, formatActorLabel, getPrivate, putPrivate, getPrivateChildren, de
 import { rankFor } from '@qu/foundation';
 import { createI18n } from '@qu/i18n';
 import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage } from '@qu/ui';
-import { renderEmojiPicker, renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, insertAtCursor } from '@qu/thread-ui';
+import { renderEmojiPicker, renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, insertAtCursor, copyToClipboard } from '@qu/thread-ui';
 
 // See this file's own top doc comment's "MESSAGE CHROME" section - the
 // SAME two default-order maps `apps/forum/client.js` uses (keep both files'
@@ -169,7 +169,7 @@ import { renderEmojiPicker, renderContextMenu, mountMentionAutocomplete, mountEm
 // `content.messageMenu` render in the same default order in both apps
 // before an admin configures relay-settings' own `extensionOrder`.
 const FOOTER_ORDER_DEFAULT = { reactions: 0, 'core.menu': 10, 'core.timestamp': 20, 'core.readReceipt': 30 };
-const MENU_ORDER_DEFAULT = { edit: 0, reply: 5, pin: 10, bookmark: 20 };
+const MENU_ORDER_DEFAULT = { edit: 0, reply: 5, pin: 10, bookmark: 20, copyText: 30, copyLink: 40 };
 
 const DICT = {
   en: {
@@ -184,6 +184,8 @@ const DICT = {
     edit: 'Edit', save: 'Save', cancel: 'Cancel',
     reply: 'Reply', replyingTo: 'Replying to {name}',
     moreActions: 'More actions',
+    copyText: 'Copy text',
+    copyLink: 'Copy link',
     attachRemove: 'Remove attachment',
     insertEmoji: 'Insert emoji',
     recordVoice: 'Record a voice message',
@@ -227,6 +229,8 @@ const DICT = {
     edit: 'Bearbeiten', save: 'Speichern', cancel: 'Abbrechen',
     reply: 'Antworten', replyingTo: 'Antwort an {name}',
     moreActions: 'Weitere Aktionen',
+    copyText: 'Text kopieren',
+    copyLink: 'Link kopieren',
     attachRemove: 'Anhang entfernen',
     insertEmoji: 'Emoji einfügen',
     recordVoice: 'Sprachnachricht aufnehmen',
@@ -425,10 +429,16 @@ const STYLE = `
   .qu-chat-settings { display: flex; flex-direction: column; gap: 0.4rem; max-width: 24rem; }
   .qu-chat-settings label { display: flex; align-items: center; gap: 0.5rem; }
   .qu-chat-settings-status { font-size: 0.85em; opacity: 0.75; }
-  .qu-chat-search-result { display: block; padding: 0.6rem 0.8rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); text-decoration: none; color: inherit; }
+  .qu-chat-search-result { display: block; padding: 0.6rem 0.8rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); }
   .qu-chat-search-result:hover { background: var(--qu-color-surface, #8882); }
+  .qu-chat-search-result-link { display: block; text-decoration: none; color: inherit; }
   .qu-chat-search-result-meta { font-size: 0.8em; opacity: 0.7; }
   .qu-chat-search-result-snippet { margin: 0.25rem 0 0; overflow-wrap: anywhere; }
+  /* See apps/forum/client.js's own identical rule on
+     .qu-forum-search-result-attachment for why this is a SIBLING of the
+     link, never nested inside it. */
+  .qu-chat-search-result-attachment { display: block; margin-top: 0.4rem; max-width: 16rem; max-height: 12rem; }
+  .qu-chat-search-result-attachment img, .qu-chat-search-result-attachment video { max-width: 100%; max-height: 12rem; border-radius: var(--qu-radius-sm, 0.3rem); }
 `;
 
 function formatTs(ts) {
@@ -1035,6 +1045,21 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   // at the bottom to see it, never interrupting whatever they were reading.
   let pendingScrollTarget = target.messageId || null;
   let stuckToBottom = !pendingScrollTarget;
+  // The message id we're currently "stuck" to after landing on a permalink
+  // (mirrors `stuckToBottom`, just anchored to a message instead of the
+  // bottom) - ported from apps/forum/client.js's own identical fix (see
+  // that file's own doc comment for the full "why"): a permalinked message
+  // with an attachment still loading landed the viewport short of the
+  // actual target, because nothing ever re-corrected the scroll position
+  // once that attachment grew the layout ABOVE it. Set right after the
+  // initial scrollIntoView() below, released the moment `messagesScroll`'s
+  // own 'scroll' listener sees the viewport move away from where our own
+  // last correction (`correctStuckMessageScroll()` below, or the initial
+  // scrollIntoView() itself) put it - see `lastKnownAnchorScrollTop`'s own
+  // doc comment for exactly why a geometry comparison, not an event-timing
+  // guard flag.
+  let stuckToMessageId = null;
+  let lastKnownAnchorScrollTop = null;
   // Whether a message arrived while NOT stuck to the bottom - purely
   // cosmetic (see syncScrollToBottomButton()'s own doc comment for what it
   // changes about the button), never what decides the button's visibility.
@@ -1067,6 +1092,21 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     if (messagesScroll.scrollTo) messagesScroll.scrollTo({ top: messagesScroll.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
     else messagesScroll.scrollTop = messagesScroll.scrollHeight; // jsdom (this repo's test DOM) has no scrollTo() at all
   }
+  /**
+   * Re-aligns the viewport back on `stuckToMessageId`'s own row (if still
+   * stuck to one) - the permalink counterpart of `scrollToBottom(...,
+   * true)` above, invoked by the SAME ResizeObserver/viewport-resize
+   * handler below whenever `messagesRoot`'s size (or the visible viewport)
+   * changes. Ported from apps/forum/client.js's own identical helper - see
+   * that file's own doc comment on `stuckToMessageId`.
+   */
+  function correctStuckMessageScroll() {
+    if (!stuckToMessageId) return;
+    const anchorEl = messagesRoot.querySelector(`[data-message-id="${CSS.escape(stuckToMessageId)}"]`);
+    if (!anchorEl?.scrollIntoView) return;
+    anchorEl.scrollIntoView({ block: 'start' });
+    lastKnownAnchorScrollTop = messagesScroll.scrollTop;
+  }
   // TRUE BOTTOM, EVEN WITH LATE-LOADING CONTENT - scrollToBottom() above
   // reads messagesScroll.scrollHeight AT CALL TIME, which understates the
   // real total height whenever an attachment (an image, a video's first
@@ -1084,7 +1124,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   // included) - the position is still CORRECT for text-only messages
   // either way, this only ever matters for the async-attachment case.
   const resizeObserver = typeof ResizeObserver !== 'undefined'
-    ? new ResizeObserver(() => scrollToBottom(false, true))
+    ? new ResizeObserver(() => { correctStuckMessageScroll(); scrollToBottom(false, true); })
     : null;
   resizeObserver?.observe(messagesRoot);
   // VISUAL-VIEWPORT SHRINK (mobile on-screen keyboard opening - most
@@ -1108,7 +1148,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   // guard as the image-driven case above: only re-snaps while already stuck
   // to the bottom, never yanking the view while the user is reading further up.
   const viewportResizeTarget = window.visualViewport ?? window;
-  const onViewportResize = () => scrollToBottom(false, true);
+  const onViewportResize = () => { correctStuckMessageScroll(); scrollToBottom(false, true); };
   viewportResizeTarget.addEventListener('resize', onViewportResize);
   /**
    * Shows/hides/labels the persistent "scroll to bottom" button - visible
@@ -1132,6 +1172,12 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   function messagePermalink(message) {
     return `${roomHash()}/m/${message.id}`;
   }
+  // See apps/forum/client.js's own identical helper - the "Copy link" menu
+  // item needs a link that still works pasted elsewhere, not just a bare
+  // hash meaningful only relative to this tab's current page.
+  function absoluteMessagePermalink(message) {
+    return new URL(messagePermalink(message), window.location.href).href;
+  }
   // Landing back at the very bottom RELEASES a permalink anchor still
   // sitting in the URL, the same way stuckToBottom itself already releases
   // the IN-MEMORY "don't auto-scroll away from this" behavior - without
@@ -1144,12 +1190,22 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   }
   scrollToBottomBtn.addEventListener('click', () => {
     stuckToBottom = true;
+    stuckToMessageId = null;
+    lastKnownAnchorScrollTop = null;
     hasUnseenMessage = false;
     syncScrollToBottomButton();
     scrollToBottom(true);
     releasePermalinkAnchor();
   });
   messagesScroll.addEventListener('scroll', () => {
+    // Releases `stuckToMessageId` only when THIS scroll moved the viewport
+    // away from where our own last correction put it - see that variable's
+    // own doc comment for why a geometry comparison, not an event-timing
+    // guard flag.
+    if (lastKnownAnchorScrollTop !== null && Math.abs(messagesScroll.scrollTop - lastKnownAnchorScrollTop) > 1) {
+      stuckToMessageId = null;
+      lastKnownAnchorScrollTop = null;
+    }
     const nowAtBottom = messagesScroll.scrollHeight - messagesScroll.scrollTop - messagesScroll.clientHeight < BOTTOM_FOLLOW_THRESHOLD_PX;
     if (nowAtBottom && !stuckToBottom) {
       // The user just scrolled themselves back down to "now" - see
@@ -1622,9 +1678,14 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
         // link to should land clearly at the TOP of the visible area, not
         // buried in the middle where it's easy to miss which one it was.
         targetRow.scrollIntoView?.({ block: 'start' });
+        lastKnownAnchorScrollTop = messagesScroll.scrollTop;
         targetRow.classList.add('qu-chat-bubble-row-highlight');
         setTimeout(() => targetRow.classList.remove('qu-chat-bubble-row-highlight'), 2000);
         stuckToBottom = false;
+        // Stays "stuck" to this message (re-corrected by the ResizeObserver/
+        // viewport-resize handler above) until the user scrolls on their
+        // own - see `stuckToMessageId`'s own doc comment.
+        stuckToMessageId = targetRow.dataset.messageId;
         syncScrollToBottomButton();
         return;
       }
@@ -1765,6 +1826,8 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
                   composerInput.focus();
                 },
               });
+              nativeItems.push({ id: 'copyText', label: t('copyText'), icon: '📋', onClick: () => copyToClipboard(message.body) });
+              nativeItems.push({ id: 'copyLink', label: t('copyLink'), icon: '🔗', onClick: () => copyToClipboard(absoluteMessagePermalink(message)) });
               const pluginItems = extensionPoints ? await extensionPoints.collect('content.messageMenu', menuPayload) : [];
               return [...nativeItems, ...pluginItems].sort(
                 (a, b) => rankFor(extensionPoints?.order, 'content.messageMenu', a.id, MENU_ORDER_DEFAULT[a.id] ?? 50)
@@ -2020,18 +2083,22 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
 // round"). Chat never imports apps/search; apps/search never imports Chat -
 // both only agree on these two point strings, same shape apps/forum's own
 // identically-named contributors already establish (see that file's own
-// doc comment). Chat's composer never attaches files (see this file's own
-// top doc comment's SCOPE note - no `<qu-asset-upload>` here, unlike
-// Forum), so `classifyMessageContentType()` below only ever returns
-// `'post'`/`'link'` for a chat message - the `'image'`/`'video'`/`'file'`
-// filters simply never match here, not a bug.
+// doc comment). Chat's composer DOES attach files/images/videos and record
+// voice messages (`<qu-asset-upload>` - see this file's own top doc
+// comment's "Attachments" bullet) - `classifyMessageContentType()` below
+// classifies every one of them (a voice message is just an audio
+// attachment with `message.extra.voice: true` layered on top, same
+// `message.attachment.mime` this already reads), so the `'image'`/
+// `'video'`/`'audio'`/`'file'` filters all genuinely match real chat
+// content, not just Forum's.
 // ===================================================================
 
-/** @param {object} message @returns {'post'|'image'|'video'|'file'|'link'} */
+/** @param {object} message @returns {'post'|'image'|'video'|'audio'|'file'|'link'} */
 function classifyMessageContentType(message) {
   const mime = message.attachment?.mime ?? '';
   if (mime.startsWith('image/')) return 'image';
   if (mime.startsWith('video/')) return 'video';
+  if (mime.startsWith('audio/')) return 'audio';
   if (message.attachment) return 'file';
   if (detectLinks(message.body ?? '').some((seg) => seg.type === 'link')) return 'link';
   return 'post';
@@ -2084,7 +2151,14 @@ export async function searchChat({ services, apps, myPub, query, types, scope, s
       const contentType = classifyMessageContentType(message);
       if (types?.length && !types.includes(contentType)) continue;
       if (q && !message.body?.toLowerCase().includes(q)) continue;
-      out.push({ contentType, ts: message.ts, author: message.author, snippet: buildSnippet(message.body, q), href: `${href}/m/${message.id}`, roomId, roomName });
+      out.push({
+        contentType, ts: message.ts, author: message.author, snippet: buildSnippet(message.body, q),
+        href: `${href}/m/${message.id}`, roomId, roomName,
+        // See apps/forum/client.js's own identical fields on its own
+        // messagesOfTopic() - carried through so renderSearchResult() below
+        // can render a real <qu-asset> preview/player, not just text.
+        spaceId: SPACE_ID, attachment: message.attachment ?? null,
+      });
     }
     return out;
   }
@@ -2155,6 +2229,7 @@ export async function resolveChatReference({ services, syncFetch, myPub, spaceId
     contentType: classifyMessageContentType(message), ts: message.ts, author: message.author,
     snippet: buildSnippet(message.body, ''),
     href, roomId: threadId, roomName,
+    spaceId, attachment: message.attachment ?? null,
   };
 }
 
@@ -2162,13 +2237,18 @@ export async function resolveChatReference({ services, syncFetch, myPub, spaceId
  * The `content.searchResultTemplate` contributor - renders one row for an
  * entry THIS SAME app returned from `searchChat()`/`resolveChatReference()`
  * above (both callers, Search and Notifications, share this one template).
+ * See apps/forum/client.js's own identical `renderSearchResult()` for the
+ * full "RENDERS MEDIA AS SUCH" reasoning - this is that same fix, ported.
  * @param {HTMLElement} container
  * @param {{entry: object, services: object}} payload
  */
 export async function renderSearchResult(container, { entry, services }) {
-  const wrap = document.createElement('a');
+  const wrap = document.createElement('div');
   wrap.className = 'qu-chat-search-result';
-  wrap.href = entry.href;
+
+  const link = document.createElement('a');
+  link.className = 'qu-chat-search-result-link';
+  link.href = entry.href;
 
   let authorLabel = entry.author ?? '';
   try {
@@ -2179,11 +2259,23 @@ export async function renderSearchResult(container, { entry, services }) {
   const meta = document.createElement('div');
   meta.className = 'qu-chat-search-result-meta';
   meta.textContent = `${authorLabel} · ${t('searchResultIn', { room: entry.roomName ?? entry.roomId ?? '' })} · ${new Date(entry.ts).toLocaleString()}`;
+  link.appendChild(meta);
 
-  const snippet = document.createElement('p');
-  snippet.className = 'qu-chat-search-result-snippet';
-  snippet.textContent = entry.snippet ?? '';
+  if (entry.snippet) {
+    const snippet = document.createElement('p');
+    snippet.className = 'qu-chat-search-result-snippet';
+    snippet.textContent = entry.snippet;
+    link.appendChild(snippet);
+  }
+  wrap.appendChild(link);
 
-  wrap.append(meta, snippet);
+  if (entry.attachment && entry.spaceId) {
+    const assetEl = document.createElement('qu-asset');
+    assetEl.className = 'qu-chat-search-result-attachment';
+    assetEl.setAttribute('space-id', entry.spaceId);
+    assetEl.setAttribute('asset-id', entry.attachment.assetId);
+    wrap.appendChild(assetEl);
+  }
+
   container.appendChild(wrap);
 }

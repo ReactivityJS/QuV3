@@ -172,7 +172,7 @@ import { rankFor } from '@qu/foundation';
 import { paths, formatActorLabel, detectLinks } from '@qu/services';
 import { createI18n } from '@qu/i18n';
 import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage } from '@qu/ui';
-import { renderEmojiPicker, renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, insertAtCursor } from '@qu/thread-ui';
+import { renderEmojiPicker, renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, insertAtCursor, copyToClipboard } from '@qu/thread-ui';
 
 // Default fallback order for `content.messageFooter`/`content.messageMenu`
 // items when an admin hasn't configured `relay-settings`' `extensionOrder`
@@ -182,7 +182,7 @@ import { renderEmojiPicker, renderContextMenu, mountMentionAutocomplete, mountEm
 // default ordering without either importing the other (an admin can still
 // reorder either point via Relay Admin - see that app's own doc comment).
 const FOOTER_ORDER_DEFAULT = { reactions: 0, 'core.menu': 10, 'core.timestamp': 20 };
-const MENU_ORDER_DEFAULT = { edit: 0, reply: 5, pin: 10, bookmark: 20 };
+const MENU_ORDER_DEFAULT = { edit: 0, reply: 5, pin: 10, bookmark: 20, copyText: 30, copyLink: 40 };
 
 const DICT = {
   en: {
@@ -194,6 +194,8 @@ const DICT = {
     reply: 'Reply', replyingTo: 'Replying to {name}',
     originalMessageUnavailable: 'Original message',
     moreActions: 'More actions',
+    copyText: 'Copy text',
+    copyLink: 'Copy link',
     attachRemove: 'Remove attachment',
     insertEmoji: 'Insert emoji',
     channels: 'Channels',
@@ -217,6 +219,7 @@ const DICT = {
     searchResultIn: 'in "{topic}"',
     permalink: 'Link to this post',
     unread: 'New',
+    unreadTopicCount: '{count} new',
     newMessagesBelow: '↓ New posts',
     scrollToBottomButton: '↓',
   },
@@ -229,6 +232,8 @@ const DICT = {
     reply: 'Antworten', replyingTo: 'Antwort an {name}',
     originalMessageUnavailable: 'Ursprünglicher Beitrag',
     moreActions: 'Weitere Aktionen',
+    copyText: 'Text kopieren',
+    copyLink: 'Link kopieren',
     attachRemove: 'Anhang entfernen',
     insertEmoji: 'Emoji einfügen',
     channels: 'Kanäle',
@@ -252,6 +257,7 @@ const DICT = {
     searchResultIn: 'in „{topic}“',
     permalink: 'Link zu diesem Beitrag',
     unread: 'Neu',
+    unreadTopicCount: '{count} neu',
     newMessagesBelow: '↓ Neue Beiträge',
     scrollToBottomButton: '↓',
   },
@@ -260,6 +266,10 @@ const { t } = createI18n(DICT);
 
 function formatReplies(count) {
   return t('replies', { count });
+}
+
+function formatUnreadTopicCount(count) {
+  return t('unreadTopicCount', { count });
 }
 
 const STYLE_ID = 'qu-forum-style';
@@ -399,17 +409,147 @@ const STYLE = `
   .qu-forum-topics { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
   .qu-forum-topic-row a { display: block; padding: 0.5rem 0.7rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); text-decoration: none; color: inherit; }
   .qu-forum-topic-row a:hover { background: var(--qu-color-border, #8884); }
+  .qu-forum-topic-title-row { display: flex; align-items: center; gap: 0.4rem; }
   .qu-forum-topic-title { font-weight: 600; }
+  /* Topic-level "unread by me" badge (buildTopicRow()'s own doc comment) -
+     same accent pill language as the per-message unread badge inside a
+     topic view (.qu-forum-message-unread-badge), just filled instead of
+     outlined, so it reads as a COUNT rather than a per-item flag. */
+  .qu-forum-topic-unread-badge { font-size: 0.68em; font-weight: 700; letter-spacing: 0.02em; color: white; background: var(--qu-color-accent, #5b5bd6); border-radius: 999px; padding: 0.1rem 0.5rem; white-space: nowrap; }
   .qu-forum-topic-meta { font-size: 0.8em; opacity: 0.7; margin-top: 0.15rem; }
   .qu-forum-channel-heading { display: flex; align-items: center; gap: 0.5rem; }
-  .qu-forum-search-result { display: block; padding: 0.6rem 0.8rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); text-decoration: none; color: inherit; }
+  .qu-forum-search-result { display: block; padding: 0.6rem 0.8rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); }
   .qu-forum-search-result:hover { background: var(--qu-color-surface, #8882); }
+  .qu-forum-search-result-link { display: block; text-decoration: none; color: inherit; }
   .qu-forum-search-result-meta { font-size: 0.8em; opacity: 0.7; }
   .qu-forum-search-result-snippet { margin: 0.25rem 0 0; overflow-wrap: anywhere; }
+  /* The real preview/player for an image/video/audio/file result (see
+     renderSearchResult()'s own doc comment) - a SIBLING of the link, not
+     nested inside it, so a video/audio's own native controls (or an
+     image's click-to-lightbox) never fight the row's own "click anywhere
+     to open the message" navigation. */
+  .qu-forum-search-result-attachment { display: block; margin-top: 0.4rem; max-width: 16rem; max-height: 12rem; }
+  .qu-forum-search-result-attachment img, .qu-forum-search-result-attachment video { max-width: 100%; max-height: 12rem; border-radius: var(--qu-radius-sm, 0.3rem); }
 `;
 
 function formatTs(ts) {
   return new Date(ts).toLocaleString();
+}
+
+/**
+ * One topic row - shared by the board view's merged activity feed
+ * (`mountBoardView()`) and a channel view's own topic list
+ * (`mountChannelView()`), so the reply-count/unread-badge markup only
+ * exists once. `topic` is a `ChannelService.listTopics()` result (or the
+ * board view's own `{...topic, channelTitle}` merge of one).
+ * @param {object} topic @param {string} [channelTitle] - board view only; a channel view already shows one channel's own heading.
+ * @returns {HTMLLIElement}
+ */
+function buildTopicRow(topic, channelTitle) {
+  const li = document.createElement('li');
+  li.className = 'qu-forum-topic-row';
+  const a = document.createElement('a');
+  a.href = `#/forum/t/${topic._id}`;
+  const titleRow = document.createElement('div');
+  titleRow.className = 'qu-forum-topic-title-row';
+  const titleEl = document.createElement('span');
+  titleEl.className = 'qu-forum-topic-title';
+  titleEl.textContent = topic.title;
+  titleRow.appendChild(titleEl);
+  // UNREAD-BY-ME, aggregated per topic (see ChannelService.listTopics()'s
+  // own doc comment on `unreadCount`) - the overview-level counterpart of
+  // the per-message badge inside a topic view (renderMessage()'s own
+  // "UNREAD-BY-ME" doc comment), so a board/channel list actually shows
+  // there's something new WITHOUT opening every topic to find out.
+  if (topic.unreadCount > 0) {
+    const badge = document.createElement('span');
+    badge.className = 'qu-forum-topic-unread-badge';
+    badge.textContent = formatUnreadTopicCount(topic.unreadCount);
+    titleRow.appendChild(badge);
+  }
+  const metaEl = document.createElement('div');
+  metaEl.className = 'qu-forum-topic-meta';
+  const parts = [formatReplies(topic.replyCount), formatTs(topic.lastActivityAt)];
+  if (channelTitle) parts.unshift(channelTitle);
+  metaEl.textContent = parts.join(' · ');
+  a.append(titleRow, metaEl);
+  li.appendChild(a);
+  return li;
+}
+
+/**
+ * Keeps a render callback current as new messages land in ANY of the given
+ * topics, or their unread-by-me state changes (`services.messages.
+ * markRead()` writes the SAME per-thread read-marker `getLastReadAt()`
+ * reads - see ChannelService.listTopics()'s own `unreadCount` doc comment).
+ * FIXES a confirmed bug: `ChannelService.listTopics()`'s own reply/unread
+ * counts are computed fresh on every CALL, but nothing previously
+ * re-invoked it when a message posted to an topic already on screen - only
+ * a topic/channel being ADDED re-triggered a render (via the
+ * topics/channels list watch every caller already has), so an open board/
+ * channel overview's own reply counts (and, until this round, its unread
+ * counts - not shown here at all before) silently went stale the moment
+ * you left a topic and it kept getting new posts. One
+ * `watchChildren()` per topic id - the SAME per-topic thread-messages path
+ * a topic view itself already watches (`mountTopicView()`'s own
+ * `offMessages`) - diffed against the topic id set on every call so
+ * watchers are added/removed as the topic LIST itself changes, never
+ * leaked across re-renders. `initial: false` - the caller just rendered
+ * with fresh data moments ago, a redundant immediate re-fire would only
+ * waste a render pass.
+ * Also watches each topic's own PRIVATE read-marker (`MessageService.
+ * markRead()`'s own `threadReadMarkerPath()`) - the other half of
+ * `unreadCount` going stale in place: reading a topic on ANOTHER device (or
+ * in another tab) moves that marker without ever touching the topic's own
+ * messages, so the message-only watch above would miss it. `services` is
+ * only needed for the one `whoAmI()` call this requires (the read marker
+ * path is per-actor) - resolved once, lazily, on the first `sync()` call.
+ * @param {object} qu @param {Function|undefined} syncFetch @param {string|number} SPACE_ID
+ * @param {object} services
+ * @param {() => void} onChange
+ * @returns {{sync: (topicIds: string[]) => void, stop: () => void}}
+ */
+function watchTopicsActivity(qu, syncFetch, SPACE_ID, services, onChange) {
+  const messageWatchers = new Map(); // topicId -> stop function
+  const readMarkerWatchers = new Map(); // topicId -> stop function
+  let myPubPromise = null;
+  let stopped = false;
+
+  function sync(topicIds) {
+    const wanted = new Set(topicIds);
+    for (const [id, off] of messageWatchers) {
+      if (!wanted.has(id)) { off(); messageWatchers.delete(id); }
+    }
+    for (const [id, off] of readMarkerWatchers) {
+      if (!wanted.has(id)) { off(); readMarkerWatchers.delete(id); }
+    }
+    for (const id of wanted) {
+      if (!messageWatchers.has(id)) {
+        messageWatchers.set(id, watchChildren(qu, paths.threadMessagesParentPath(SPACE_ID, id), () => onChange(), { syncFetch, initial: false }));
+      }
+    }
+    // Read-marker watchers need `myPub` first (one async whoAmI() call,
+    // cached/shared across every topic) - added once it resolves, same
+    // `wanted` set re-checked in case sync() has since been called again
+    // (a topic removed before this resolves must never get a watcher).
+    myPubPromise ??= services.actors.whoAmI();
+    myPubPromise.then((myPub) => {
+      if (stopped) return;
+      for (const id of wanted) {
+        if (!readMarkerWatchers.has(id)) {
+          readMarkerWatchers.set(id, watch(qu, paths.threadReadMarkerPath(SPACE_ID, id, myPub), () => onChange(), { syncFetch, initial: false }));
+        }
+      }
+    });
+  }
+  function stop() {
+    stopped = true;
+    for (const off of messageWatchers.values()) off();
+    for (const off of readMarkerWatchers.values()) off();
+    messageWatchers.clear();
+    readMarkerWatchers.clear();
+  }
+  return { sync, stop };
 }
 
 /**
@@ -601,6 +741,11 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
   const activityRoot = document.createElement('div');
   mainRoot.append(heading, activityRoot);
 
+  // Keeps reply/unread counts current as messages land in any topic
+  // already on screen, not just when a channel/topic is added - see
+  // watchTopicsActivity()'s own doc comment for the confirmed bug this fixes.
+  const topicsActivity = watchTopicsActivity(qu, syncFetch, SPACE_ID, services, () => render());
+
   let renderToken = 0;
   async function render() {
     const token = ++renderToken;
@@ -615,6 +760,7 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
       for (const topic of topicsPerChannel[i]) merged.push({ ...topic, channelTitle: channel.title });
     });
     merged.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+    topicsActivity.sync(merged.map((topic) => topic._id));
     renderActivityFeed(activityRoot, merged);
   }
 
@@ -633,26 +779,8 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
     }
     const ul = document.createElement('ul');
     ul.className = 'qu-forum-topics';
-    for (const topic of topics) ul.appendChild(topicRow(topic, topic.channelTitle));
+    for (const topic of topics) ul.appendChild(buildTopicRow(topic, topic.channelTitle));
     root.appendChild(ul);
-  }
-
-  function topicRow(topic, channelTitle) {
-    const li = document.createElement('li');
-    li.className = 'qu-forum-topic-row';
-    const a = document.createElement('a');
-    a.href = `#/forum/t/${topic._id}`;
-    const titleEl = document.createElement('div');
-    titleEl.className = 'qu-forum-topic-title';
-    titleEl.textContent = topic.title;
-    const metaEl = document.createElement('div');
-    metaEl.className = 'qu-forum-topic-meta';
-    const parts = [formatReplies(topic.replyCount), formatTs(topic.lastActivityAt)];
-    if (channelTitle) parts.unshift(channelTitle);
-    metaEl.textContent = parts.join(' · ');
-    a.append(titleEl, metaEl);
-    li.appendChild(a);
-    return li;
   }
 
   const off = watch(qu, paths.listPath(SPACE_ID, 'channels'), () => render(), { syncFetch });
@@ -660,6 +788,7 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
   return () => {
     stopped = true;
     off();
+    topicsActivity.stop();
     stopSidebar();
   };
 }
@@ -790,11 +919,15 @@ function mountChannelView(container, { qu, services, syncFetch, SPACE_ID, channe
 
   let currentChannel = null;
   let topicsRenderToken = 0;
+  // Keeps reply/unread counts current as messages land in any topic
+  // already on screen - see watchTopicsActivity()'s own doc comment.
+  const topicsActivity = watchTopicsActivity(qu, syncFetch, SPACE_ID, services, () => renderTopics());
   async function renderTopics() {
     const token = ++topicsRenderToken;
     if (stopped) return;
     const topics = await services.channels.listTopics(SPACE_ID, channelId);
     if (stopped || token !== topicsRenderToken) return;
+    topicsActivity.sync(topics.map((topic) => topic._id));
 
     topicsRoot.textContent = '';
     if (topics.length === 0) {
@@ -805,21 +938,7 @@ function mountChannelView(container, { qu, services, syncFetch, SPACE_ID, channe
     } else {
       const ul = document.createElement('ul');
       ul.className = 'qu-forum-topics';
-      for (const topic of topics) {
-        const li = document.createElement('li');
-        li.className = 'qu-forum-topic-row';
-        const a = document.createElement('a');
-        a.href = `#/forum/t/${topic._id}`;
-        const titleEl = document.createElement('div');
-        titleEl.className = 'qu-forum-topic-title';
-        titleEl.textContent = topic.title;
-        const metaEl = document.createElement('div');
-        metaEl.className = 'qu-forum-topic-meta';
-        metaEl.textContent = `${formatReplies(topic.replyCount)} · ${formatTs(topic.lastActivityAt)}`;
-        a.append(titleEl, metaEl);
-        li.appendChild(a);
-        ul.appendChild(li);
-      }
+      for (const topic of topics) ul.appendChild(buildTopicRow(topic));
       topicsRoot.appendChild(ul);
     }
     topicsRoot.appendChild(newTopicForm());
@@ -915,6 +1034,7 @@ function mountChannelView(container, { qu, services, syncFetch, SPACE_ID, channe
     stopped = true;
     offTopics();
     offChannel();
+    topicsActivity.stop();
     stopSidebar();
   };
 }
@@ -1085,6 +1205,35 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
   // new post arrives.
   let pendingScrollTarget = messageId;
   let stuckToBottom = !pendingScrollTarget;
+  // The message id we're currently "stuck" to after landing on a permalink
+  // (mirrors `stuckToBottom`, just anchored to a message instead of the
+  // bottom) - see the ResizeObserver below's own doc comment for why this
+  // exists: FIXES a confirmed bug where a pinned/permalinked message with
+  // attachments still loading (an image/video `<qu-asset>` resolves well
+  // after the initial scrollIntoView() already ran, per this file's own
+  // "TRUE BOTTOM" doc comment) landed the viewport up to a couple of posts
+  // short of the actual target, because nothing ever re-corrected the
+  // scroll position once those attachments grew the layout ABOVE it. Set
+  // right after the initial scrollIntoView() below, cleared on any
+  // subsequent GENUINE (non-programmatic) scroll - the same "stuck until
+  // the user scrolls away" contract `stuckToBottom` already has.
+  let stuckToMessageId = null;
+  // The scrollTop WE last put the viewport at while anchored to
+  // `stuckToMessageId` (read back from the DOM immediately after our own
+  // scrollIntoView() call, never predicted ahead of time - scrollIntoView's
+  // exact resulting offset is browser/layout-computed). The messagesScroll
+  // 'scroll' listener below compares against this on every event (both a
+  // genuine user scroll AND our own corrective one fire the identical
+  // event - there is no reliable "who caused this" signal on a plain
+  // 'scroll' event) - a mismatch means something ELSE moved the scroll
+  // position since our last correction, i.e. a real user scroll, which
+  // releases the anchor. Deliberately NOT a "was this programmatic" boolean
+  // guard (an earlier version of this fix used one, and broke: jsdom (this
+  // repo's test DOM) has no real scrollIntoView() at all, so the guard's
+  // matching "consume the flag" scroll event never arrived, silently
+  // eating the NEXT real scroll event instead - the geometry-comparison
+  // approach here needs no such event-timing assumption).
+  let lastKnownAnchorScrollTop = null;
   // Whether a post arrived while NOT stuck to the bottom - purely cosmetic
   // (see syncScrollToBottomButton()'s own doc comment), never what decides
   // the button's visibility.
@@ -1104,12 +1253,29 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     if (messagesScroll.scrollTo) messagesScroll.scrollTo({ top: messagesScroll.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
     else messagesScroll.scrollTop = messagesScroll.scrollHeight; // jsdom (this repo's test DOM) has no scrollTo() at all
   }
+  /**
+   * Re-aligns the viewport back on `stuckToMessageId`'s own element (if
+   * still stuck to one) - the permalink counterpart of `scrollToBottom(...,
+   * true)` above, invoked by the SAME ResizeObserver below whenever
+   * `messagesRoot`'s size changes (a late-loading attachment being the
+   * confirmed real-world trigger - see `stuckToMessageId`'s own doc
+   * comment).
+   */
+  function correctStuckMessageScroll() {
+    if (!stuckToMessageId) return;
+    const anchorEl = messagesRoot.querySelector(`[data-message-id="${CSS.escape(stuckToMessageId)}"]`);
+    if (!anchorEl?.scrollIntoView) return;
+    anchorEl.scrollIntoView({ block: 'start' });
+    lastKnownAnchorScrollTop = messagesScroll.scrollTop;
+  }
   // TRUE BOTTOM, EVEN WITH LATE-LOADING CONTENT - see apps/chat/client.js's
   // own identical ResizeObserver for the full reasoning (an attachment's
   // <qu-asset> resolves and inserts its real <img>/<video> asynchronously,
-  // well after renderMessage() already returned).
+  // well after renderMessage() already returned). Also re-corrects a
+  // permalink/pinned-message anchor for the identical reason - see
+  // `stuckToMessageId`'s own doc comment.
   const resizeObserver = typeof ResizeObserver !== 'undefined'
-    ? new ResizeObserver(() => scrollToBottom(false, true))
+    ? new ResizeObserver(() => { correctStuckMessageScroll(); scrollToBottom(false, true); })
     : null;
   resizeObserver?.observe(messagesRoot);
   /** Shows/hides/labels the persistent scroll-to-bottom button - see apps/chat/client.js's own identical function for the full reasoning. */
@@ -1124,6 +1290,19 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
   function messagePermalink(message) {
     return `${topicHash()}/m/${message.id}`;
   }
+  // The "Copy link" menu item needs a link that still works PASTED
+  // elsewhere (a chat message, an email) - a bare hash like
+  // messagePermalink()'s own return value only means anything relative to
+  // this same tab's current page. Resolved against the page's own current
+  // full URL (not just `location.origin`) so it survives being served from
+  // a subpath too - same reasoning `apps/shell/sw.js`'s own
+  // `notificationclick` handler now resolves a push notification's stored
+  // hash against `self.location.origin` for (see that file's own doc
+  // comment on the bug THAT was: a bare hash resolved against the wrong
+  // base).
+  function absoluteMessagePermalink(message) {
+    return new URL(messagePermalink(message), window.location.href).href;
+  }
   // Landing back at the very bottom RELEASES a permalink anchor still
   // sitting in the URL - see apps/chat/client.js's own identical
   // `releasePermalinkAnchor()` for the full reasoning.
@@ -1133,12 +1312,24 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
   }
   scrollToBottomBtn.addEventListener('click', () => {
     stuckToBottom = true;
+    stuckToMessageId = null;
+    lastKnownAnchorScrollTop = null;
     hasUnseenMessage = false;
     syncScrollToBottomButton();
     scrollToBottom(true);
     releasePermalinkAnchor();
   });
   messagesScroll.addEventListener('scroll', () => {
+    // Releases `stuckToMessageId` only when THIS scroll moved the viewport
+    // away from where our own last correction put it - see that variable's
+    // own doc comment for why a geometry comparison, not an event-timing
+    // guard flag. `lastKnownAnchorScrollTop === null` means we were never
+    // anchored to a message in the first place (a plain "at the bottom"
+    // mount) - nothing to release.
+    if (lastKnownAnchorScrollTop !== null && Math.abs(messagesScroll.scrollTop - lastKnownAnchorScrollTop) > 1) {
+      stuckToMessageId = null;
+      lastKnownAnchorScrollTop = null;
+    }
     const nowAtBottom = messagesScroll.scrollHeight - messagesScroll.scrollTop - messagesScroll.clientHeight < BOTTOM_FOLLOW_THRESHOLD_PX;
     if (nowAtBottom && !stuckToBottom) {
       releasePermalinkAnchor();
@@ -1338,13 +1529,19 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
         // A permalink target is, by definition, not the bottom - the
         // button must show here so there's a way back down.
         hasUnseenMessage = false;
+        stuckToBottom = false;
+        // Stays "stuck" to this message (re-corrected by the ResizeObserver
+        // above) until the user scrolls on their own - see
+        // `stuckToMessageId`'s own doc comment for the late-loading-
+        // attachment bug this fixes.
+        stuckToMessageId = targetLi.dataset.messageId;
         // jsdom (this repo's test DOM) has no layout engine and doesn't
         // implement scrollIntoView() at all - optional-chained so tests
         // exercise every line around it without stubbing it out.
         targetLi.scrollIntoView?.({ block: 'start' });
+        lastKnownAnchorScrollTop = messagesScroll.scrollTop;
         targetLi.classList.add('qu-forum-message-highlight');
         setTimeout(() => targetLi.classList.remove('qu-forum-message-highlight'), 2000);
-        stuckToBottom = false;
         syncScrollToBottomButton();
         return;
       }
@@ -1448,6 +1645,8 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
                   composerInput.focus();
                 },
               });
+              nativeItems.push({ id: 'copyText', label: t('copyText'), icon: '📋', onClick: () => copyToClipboard(message.body) });
+              nativeItems.push({ id: 'copyLink', label: t('copyLink'), icon: '🔗', onClick: () => copyToClipboard(absoluteMessagePermalink(message)) });
               const pluginItems = extensionPoints ? await extensionPoints.collect('content.messageMenu', menuPayload) : [];
               return [...nativeItems, ...pluginItems].sort(
                 (a, b) => rankFor(extensionPoints?.order, 'content.messageMenu', a.id, MENU_ORDER_DEFAULT[a.id] ?? 50)
@@ -1651,11 +1850,12 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
 // content.messageReactions above.
 // ===================================================================
 
-/** @param {object} message @returns {'post'|'image'|'video'|'file'|'link'} */
+/** @param {object} message @returns {'post'|'image'|'video'|'audio'|'file'|'link'} */
 function classifyMessageContentType(message) {
   const mime = message.attachment?.mime ?? '';
   if (mime.startsWith('image/')) return 'image';
   if (mime.startsWith('video/')) return 'video';
+  if (mime.startsWith('audio/')) return 'audio';
   if (message.attachment) return 'file';
   if (detectLinks(message.body ?? '').some((seg) => seg.type === 'link')) return 'link';
   return 'post';
@@ -1711,6 +1911,11 @@ export async function searchForum({ services, qu, apps, query, types, scope, seg
         snippet: buildSnippet(message.body, q),
         href: `#/forum/t/${topicId}/m/${message.id}`,
         topicId, channelId, topicTitle: topicTitle ?? topicId,
+        // Carried through so renderSearchResult() below can actually render
+        // an image/video/audio/file result AS SUCH (a real <qu-asset>
+        // preview/player), not just its caption text - see that function's
+        // own doc comment.
+        spaceId: SPACE_ID, attachment: message.attachment ?? null,
       });
     }
     return out;
@@ -1760,6 +1965,7 @@ export async function resolveForumReference({ services, qu, syncFetch, spaceId, 
     snippet: buildSnippet(message.body, ''),
     href: `#/forum/t/${threadId}/m/${messageId}`,
     topicId: threadId, channelId: topicBit?.val?.channelId ?? null, topicTitle: topicBit?.val?.title ?? threadId,
+    spaceId, attachment: message.attachment ?? null,
   };
 }
 
@@ -1767,13 +1973,34 @@ export async function resolveForumReference({ services, qu, syncFetch, spaceId, 
  * The `content.searchResultTemplate` contributor - renders one row for an
  * entry THIS SAME app returned from `searchForum()`/`resolveForumReference()`
  * above (both callers, Search and Notifications, share this one template).
+ *
+ * RENDERS MEDIA AS SUCH - an image/video/audio/file result (`entry.
+ * attachment` present, see either caller's own doc comment on that field)
+ * gets a real `<qu-asset>` preview/player, the SAME widget a topic view's
+ * own message list already uses for this exact attachment (`kind="auto"` -
+ * resolves image/video/audio/file from the asset's own real MIME, not
+ * `entry.contentType`, which only exists to drive the search TYPE FILTER).
+ * Confirmed, previously-reported gap: every result rendered as plain
+ * meta+snippet text regardless of `contentType`, so an image/video/audio
+ * hit was indistinguishable from a plain text post until you actually
+ * clicked through. Deliberately a SIBLING of the `<a>` (not nested inside
+ * it) - a video/audio result's own native controls (play/seek/volume), or
+ * an image's click-to-lightbox, must not also trigger the row's "navigate
+ * to the message" link underneath them. Requires `container.assetService`
+ * set somewhere up this row's own ancestor chain - both real callers
+ * (`apps/search/client.js`, `apps/notifications/client.js`) set it once on
+ * their own top-level mount `container`, the same "set on an ancestor
+ * before children connect" discipline `<qu-asset>` needs everywhere else.
  * @param {HTMLElement} container
  * @param {{entry: object, services: object}} payload
  */
 export async function renderSearchResult(container, { entry, services }) {
-  const wrap = document.createElement('a');
+  const wrap = document.createElement('div');
   wrap.className = 'qu-forum-search-result';
-  wrap.href = entry.href;
+
+  const link = document.createElement('a');
+  link.className = 'qu-forum-search-result-link';
+  link.href = entry.href;
 
   let authorLabel = entry.author ?? '';
   try {
@@ -1784,11 +2011,23 @@ export async function renderSearchResult(container, { entry, services }) {
   const meta = document.createElement('div');
   meta.className = 'qu-forum-search-result-meta';
   meta.textContent = `${authorLabel} · ${t('searchResultIn', { topic: entry.topicTitle ?? entry.topicId ?? '' })} · ${formatTs(entry.ts)}`;
+  link.appendChild(meta);
 
-  const snippet = document.createElement('p');
-  snippet.className = 'qu-forum-search-result-snippet';
-  snippet.textContent = entry.snippet ?? '';
+  if (entry.snippet) {
+    const snippet = document.createElement('p');
+    snippet.className = 'qu-forum-search-result-snippet';
+    snippet.textContent = entry.snippet;
+    link.appendChild(snippet);
+  }
+  wrap.appendChild(link);
 
-  wrap.append(meta, snippet);
+  if (entry.attachment && entry.spaceId) {
+    const assetEl = document.createElement('qu-asset');
+    assetEl.className = 'qu-forum-search-result-attachment';
+    assetEl.setAttribute('space-id', entry.spaceId);
+    assetEl.setAttribute('asset-id', entry.attachment.assetId);
+    wrap.appendChild(assetEl);
+  }
+
   container.appendChild(wrap);
 }

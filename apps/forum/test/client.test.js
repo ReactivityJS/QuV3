@@ -12,7 +12,7 @@ import { installDom, waitFor } from '@qu/ui/testing';
 import { register as registerForum } from '../index.js';
 
 installDom();
-const { mount, searchForum } = await import('../client.js');
+const { mount, searchForum, renderSearchResult } = await import('../client.js');
 
 function createQu() {
   const qu = new QuStore();
@@ -582,9 +582,37 @@ test('content.messageMenu: without extensionPoints/a contributing app, the menu 
     const panel = await openMessageMenu(container);
     assert.ok(menuItemButton(panel, 'Edit')); // this app's own native item, unaffected by the missing extensionPoints
     assert.ok(menuItemButton(panel, 'Reply')); // native too - any message, not just mine
-    assert.equal(panel.querySelectorAll('.qu-thread-ui-context-menu-item').length, 2); // Edit + Reply - no plugin contributed
+    assert.ok(menuItemButton(panel, 'Copy text'));
+    assert.ok(menuItemButton(panel, 'Copy link'));
+    assert.equal(panel.querySelectorAll('.qu-thread-ui-context-menu-item').length, 4); // Edit + Reply + Copy text + Copy link - no plugin contributed
   } finally {
     stop();
+  }
+});
+
+test('content.messageMenu: "Copy text"/"Copy link" copy the message body and an ABSOLUTE permalink (not a bare hash) to the clipboard', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  const posted = await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'copy me please' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  const written = [];
+  const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', { value: { clipboard: { writeText: async (text) => { written.push(text); } } }, configurable: true });
+  try {
+    let panel = await openMessageMenu(container);
+    menuItemButton(panel, 'Copy text').click();
+    await waitFor(() => written.length === 1);
+    assert.equal(written[0], 'copy me please');
+
+    panel = await openMessageMenu(container);
+    menuItemButton(panel, 'Copy link').click();
+    await waitFor(() => written.length === 2);
+    assert.equal(written[1], `http://localhost/#/forum/t/general/m/${posted.id}`); // absolute, not the bare "#/forum/t/general/m/<id>" hash
+  } finally {
+    stop();
+    Object.defineProperty(globalThis, 'navigator', originalDescriptor);
   }
 });
 
@@ -1021,6 +1049,53 @@ test('searchForum(): a TYPE filter with no text query returns every locally-avai
   assert.equal(results[0].contentType, 'image');
 });
 
+test('searchForum(): an audio attachment classifies as "audio", not the generic "file" (regression: audio used to fall through to "file", losing the type)', async () => {
+  const ada = await freshEnv('Ada');
+  await ada.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  await ada.services.messages.postMessage(FORUM_SPACE_ID, 'general', {
+    body: '', extra: { attachment: { assetId: 'snd1', mime: 'audio/mpeg', name: 'clip.mp3', size: 200 } },
+  });
+
+  const results = await searchForum({
+    services: ada.services, qu: ada.qu, apps: FORUM_APPS, query: '', types: ['audio'],
+    scope: 'subpage', segments: TOPIC_SEGMENTS,
+  });
+  assert.equal(results.length, 1);
+  assert.equal(results[0].contentType, 'audio');
+});
+
+test('renderSearchResult(): an image/video/audio/file result renders a real <qu-asset> preview (not just text) - AS SUCH, per that attachment\'s own MIME, using entry.spaceId/entry.attachment (regression: every result used to render as plain meta+snippet text regardless of contentType)', async () => {
+  const ada = await freshEnv('Ada');
+  await ada.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  const withImage = await ada.services.messages.postMessage(FORUM_SPACE_ID, 'general', {
+    body: 'a caption', extra: { attachment: { assetId: 'img1', mime: 'image/png', name: 'photo.png', size: 100 } },
+  });
+
+  const [entry] = await searchForum({
+    services: ada.services, qu: ada.qu, apps: FORUM_APPS, query: '', types: ['image'],
+    scope: 'subpage', segments: TOPIC_SEGMENTS,
+  });
+  assert.equal(entry.spaceId, FORUM_SPACE_ID);
+  assert.equal(entry.attachment.assetId, 'img1');
+
+  const row = document.createElement('div');
+  row.assetService = ada.services.assets; // <qu-asset>'s own ancestor-walk requirement - a real caller (apps/search/client.js) sets this once on its own top-level mount container
+  await renderSearchResult(row, { entry, services: ada.services });
+
+  const assetEl = row.querySelector('qu-asset');
+  assert.ok(assetEl, 'expected a real <qu-asset> element, not just plain text');
+  assert.equal(assetEl.getAttribute('space-id'), FORUM_SPACE_ID);
+  assert.equal(assetEl.getAttribute('asset-id'), 'img1');
+  // The link (navigates to the message) must be a SEPARATE element from the
+  // asset preview, never wrapping it - see renderSearchResult()'s own doc
+  // comment on why (a video/audio's native controls, or an image's
+  // click-to-lightbox, must not also trigger row navigation).
+  const link = row.querySelector('.qu-forum-search-result-link');
+  assert.ok(link);
+  assert.equal(link.getAttribute('href'), `#/forum/t/general/m/${withImage.id}`);
+  assert.equal(link.contains(assetEl), false);
+});
+
 // Regression: formattedHtml is inserted via innerHTML - a message body
 // containing a <script> tag must render as literal, escaped text, never as
 // an actual executable element (see client.js's own doc comment on why
@@ -1275,6 +1350,66 @@ test('channel view lists its topics with a live reply count, and a "new topic" f
     titleInput.value = 'Second topic';
     container.querySelector('.qu-forum-new-topic-form button').click();
     await waitFor(() => [...container.querySelectorAll('.qu-forum-topic-title')].some((el) => el.textContent === 'Second topic'));
+  } finally {
+    stop();
+  }
+});
+
+test('channel view: the reply count updates live when a message is posted to an already-listed topic, without leaving the view (regression: only a NEW topic used to re-render)', async () => {
+  const a = await freshEnv('Ada');
+  const channel = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Announcements' });
+  const topic = await a.services.channels.createTopic(FORUM_SPACE_ID, channel._id, { title: 'Welcome' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', channel._id] });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-topic-row a') !== null);
+    assert.match(container.querySelector('.qu-forum-topic-meta').textContent, /^0 replies/);
+
+    await a.services.messages.postMessage(FORUM_SPACE_ID, topic._id, { body: 'a reply' });
+    await waitFor(() => /^1 repl/.test(container.querySelector('.qu-forum-topic-meta').textContent));
+  } finally {
+    stop();
+  }
+});
+
+test('board view: the merged activity feed\'s reply count updates live too', async () => {
+  const a = await freshEnv('Ada');
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-topic-row a') !== null);
+    assert.match(container.querySelector('.qu-forum-topic-meta').textContent, /0 replies/); // "General · 0 replies · ..." - channel title prefix included in the merged feed
+
+    await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'a reply' });
+    await waitFor(() => /1 repl/.test(container.querySelector('.qu-forum-topic-meta').textContent));
+  } finally {
+    stop();
+  }
+});
+
+test('channel view: shows a live "unread by me" badge per topic - someone else\'s post shows it, markRead() clears it, all without leaving the view', async () => {
+  const a = await freshEnv('Ada');
+  const channel = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Announcements' });
+  const topic = await a.services.channels.createTopic(FORUM_SPACE_ID, channel._id, { title: 'Welcome' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', channel._id] });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-topic-row a') !== null);
+    assert.equal(container.querySelector('.qu-forum-topic-unread-badge'), null);
+
+    // `asSpaceId` signs with a different derived key than Ada's own main
+    // key (see ChannelService's own listTopics() test for the same
+    // technique) - simulates "someone else" posted, without a second
+    // identity/store pair.
+    await a.services.messages.postMessage(FORUM_SPACE_ID, topic._id, { body: 'from someone else', asSpaceId: 'other-space' });
+    await waitFor(() => container.querySelector('.qu-forum-topic-unread-badge') !== null);
+    assert.match(container.querySelector('.qu-forum-topic-unread-badge').textContent, /1/);
+
+    await a.services.messages.markRead(FORUM_SPACE_ID, topic._id);
+    await waitFor(() => container.querySelector('.qu-forum-topic-unread-badge') === null);
   } finally {
     stop();
   }

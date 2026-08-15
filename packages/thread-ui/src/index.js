@@ -5,3 +5,4 @@ export { renderContextMenu } from './context-menu.js';
 export { mountTriggerAutocomplete } from './trigger-autocomplete.js';
 export { mountMentionAutocomplete } from './mention-autocomplete.js';
 export { mountEmojiAutocomplete } from './emoji-autocomplete.js';
+export { copyToClipboard } from './clipboard.js';

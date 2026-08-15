@@ -210,22 +210,35 @@ export class ChannelService {
 
   /**
    * @param {string|number} spaceId @param {string} channelId
-   * @returns {Promise<Array<object & {replyCount: number, lastActivityAt: number, lastAuthor: string}>>}
+   * @returns {Promise<Array<object & {replyCount: number, lastActivityAt: number, lastAuthor: string, unreadCount: number}>>}
    *   Newest activity first - cheap at community-forum scale (one
    *   `listMessages()` per topic, no pagination), same accepted cost model
    *   `apps/forum/client.js`'s own per-message watchers already use.
+   *   `unreadCount` - this identity's own count of THIS topic's messages
+   *   posted by someone else since its own `MessageService.markRead()`
+   *   marker (0 if never marked, i.e. everyone else's posts count) - the
+   *   same "unread-by-me" definition `apps/forum/client.js`'s own per-
+   *   message badge already uses (see that file's own "UNREAD-BY-ME" doc
+   *   comment), just aggregated per topic instead of per message, so a
+   *   board/channel overview can show it without opening every topic.
    */
   async listTopics(spaceId, channelId) {
     const itemPaths = await this.list.listCuratedRawPaths(this.#topicsListPath(spaceId, channelId));
     const topics = await this.#resolveItems(itemPaths);
+    const myPub = await this.#myActorPub();
     const withActivity = await Promise.all(topics.map(async (topic) => {
-      const { messages } = await this.messages.listMessages(spaceId, topic._id, { order: 'desc' });
+      const [{ messages }, lastReadAt] = await Promise.all([
+        this.messages.listMessages(spaceId, topic._id, { order: 'desc' }),
+        this.messages.getLastReadAt(spaceId, topic._id),
+      ]);
       const last = messages[0];
+      const unreadCount = messages.filter((m) => m.author !== myPub && m.ts > lastReadAt).length;
       return {
         ...topic,
         replyCount: messages.length,
         lastActivityAt: last?.ts ?? topic.createdAt,
         lastAuthor: last?.author ?? topic.author,
+        unreadCount,
       };
     }));
     return withActivity.sort((a, b) => b.lastActivityAt - a.lastActivityAt);

@@ -75,7 +75,20 @@ self.addEventListener('push', (event) => {
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const url = event.notification.data?.url ?? '/';
+  const rawUrl = event.notification.data?.url ?? '/';
+  // `rawUrl` is always a bare hash (`#/forum/t/<id>/m/<id>`, see
+  // push-delivery.js's own `resolveNotification`/`#genericNotification()` -
+  // this app is a single hash-routed page, there's no separate server-side
+  // route per app). Both `WindowClient.navigate()` and `Clients.
+  // openWindow()` resolve a relative URL against THIS SCRIPT's own location
+  // (`self.location`, e.g. `/dist/sw.js`), NEVER the page being navigated -
+  // a bare hash therefore resolved to the SERVICE WORKER'S OWN SOURCE FILE
+  // with the hash tacked on, and THAT'S what actually opened - confirmed,
+  // reported live as "clicking a notification opens the service worker
+  // source instead of the message." Resolving explicitly against
+  // `self.location.origin` (the site's real root, where the SPA itself is
+  // served) fixes both call sites at once.
+  const url = new URL(rawUrl, self.location.origin).href;
   event.waitUntil(
     (async () => {
       const clientsList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });

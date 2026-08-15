@@ -104,6 +104,13 @@ export function mount(container, { qu, services, subscribe, syncFetch, extension
   let off = null;
   let myPub = null;
 
+  // See apps/search/client.js's own identical line - a resolved item's own
+  // `content.searchResultTemplate` rendering (this file's own "RICH
+  // RENDERING" doc comment above) may include a real `<qu-asset>` preview
+  // (e.g. Forum's/Chat's `renderSearchResult()`), which resolves this via
+  // an ancestor walk.
+  container.assetService = services.assets;
+
   const heading = document.createElement('h1');
   heading.textContent = t('title');
   const listRoot = document.createElement('div');

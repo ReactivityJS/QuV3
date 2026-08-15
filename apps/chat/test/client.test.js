@@ -11,7 +11,7 @@ import { ExtensionPointHost } from '@qu/foundation';
 import { installDom, waitFor } from '@qu/ui/testing';
 
 installDom();
-const { mount, renderChatSettings, searchChat, resolveChatReference } = await import('../client.js');
+const { mount, renderChatSettings, searchChat, resolveChatReference, renderSearchResult } = await import('../client.js');
 
 /** A minimal MediaRecorder test double - start()/pause()/resume()/stop(), stop() synchronously fires ondataavailable then onstop, matching real MediaRecorder's own event order closely enough for startRecording()'s own handler. pause()/resume() just track state (this file's own tests only assert on the DOM state the client itself derives, not on MediaRecorder.state). */
 class FakeMediaRecorder {
@@ -749,6 +749,35 @@ test('a message\'s timestamp IS its permalink - #/chat/<peer>/m/<id> for a 1:1 r
   }
 });
 
+test('content.messageMenu: "Copy text"/"Copy link" copy the message body and an ABSOLUTE permalink (not a bare hash) to the clipboard', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  const posted = await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'copy me please' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  const written = [];
+  const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', { value: { clipboard: { writeText: async (text) => { written.push(text); } } }, configurable: true });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-bubble-text')?.textContent.includes('copy me please'));
+    let panel = await openMessageMenu(container);
+    menuItemButton(panel, 'Copy text').click();
+    await waitFor(() => written.length === 1);
+    assert.equal(written[0], 'copy me please');
+
+    panel = await openMessageMenu(container);
+    menuItemButton(panel, 'Copy link').click();
+    await waitFor(() => written.length === 2);
+    assert.equal(written[1], `http://localhost/#/chat/${bob.myPub}/m/${posted.id}`); // absolute, not the bare hash
+  } finally {
+    stop();
+    Object.defineProperty(globalThis, 'navigator', originalDescriptor);
+  }
+});
+
 test('a reply quote is a real link to its parent message\'s own permalink, not just a text snippet - regression: it used to be a plain, unclickable <div>', async () => {
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');
@@ -1089,6 +1118,47 @@ test('searchChat(): a TYPE filter with no text query returns every locally-avail
   assert.equal(results.length, 1);
   assert.equal(results[0].href, `#/chat/${bob.myPub}/m/${withImage.id}`);
   assert.equal(results[0].contentType, 'image');
+});
+
+test('searchChat(): a voice message classifies as "audio", not the generic "file" (regression: audio used to fall through to "file", losing the type)', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, {
+    body: '🎙️ Voice message', extra: { attachment: { assetId: 'v1', mime: 'audio/webm', name: 'voice.webm', size: 500 }, voice: true },
+  });
+
+  const results = await searchChat({ services: alice.services, apps: CHAT_APPS, myPub: alice.myPub, query: '', types: ['audio'], scope: 'subpage', segments: ['chat', bob.myPub] });
+  assert.equal(results.length, 1);
+  assert.equal(results[0].contentType, 'audio');
+});
+
+test('renderSearchResult(): an image/video/audio/file result renders a real <qu-asset> preview (not just text) - AS SUCH, per that attachment\'s own MIME, using entry.spaceId/entry.attachment (regression: every result used to render as plain meta+snippet text regardless of contentType)', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  const withImage = await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, {
+    body: 'a caption', extra: { attachment: { assetId: 'img1', mime: 'image/png', name: 'photo.png', size: 100 } },
+  });
+
+  const [entry] = await searchChat({ services: alice.services, apps: CHAT_APPS, myPub: alice.myPub, query: '', types: ['image'], scope: 'subpage', segments: ['chat', bob.myPub] });
+  assert.equal(entry.spaceId, CHAT_SPACE_ID);
+  assert.equal(entry.attachment.assetId, 'img1');
+
+  const row = document.createElement('div');
+  row.assetService = alice.services.assets; // <qu-asset>'s own ancestor-walk requirement - a real caller (apps/search/client.js) sets this once on its own top-level mount container
+  await renderSearchResult(row, { entry, services: alice.services });
+
+  const assetEl = row.querySelector('qu-asset');
+  assert.ok(assetEl, 'expected a real <qu-asset> element, not just plain text');
+  assert.equal(assetEl.getAttribute('space-id'), CHAT_SPACE_ID);
+  assert.equal(assetEl.getAttribute('asset-id'), 'img1');
+  const link = row.querySelector('.qu-chat-search-result-link');
+  assert.ok(link);
+  assert.equal(link.getAttribute('href'), `#/chat/${bob.myPub}/m/${withImage.id}`);
+  assert.equal(link.contains(assetEl), false);
 });
 
 test('the room view uses the fixed-layout structure: a back link in the header, and the message list wrapped in a scrollable container', async () => {

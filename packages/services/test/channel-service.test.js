@@ -79,6 +79,36 @@ test('listTopics() reports a live reply count and last-activity, newest activity
   assert.deepEqual(topics.map((t) => t._id), [topicA._id, topicB._id]);
 });
 
+test('listTopics() reports a live "unread by me" count per topic - someone else\'s posts count until markRead(), my own never do', async () => {
+  const { channels, messages } = await freshSetup();
+  const channel = await channels.createChannel(SPACE, { title: 'General' });
+  const topic = await channels.createTopic(SPACE, channel._id, { title: 'A' });
+
+  // `asSpaceId` signs with a DIFFERENT derived key than the reading
+  // identity's own main key (see MessageService.postMessage()'s own doc
+  // comment) - the simplest way to get a message authored by "someone
+  // else" without standing up a second full identity/store pair.
+  await messages.postMessage(SPACE, topic._id, { body: 'from someone else', asSpaceId: 'other-space' });
+
+  let topics = await channels.listTopics(SPACE, channel._id);
+  assert.equal(topics.find((t) => t._id === topic._id).unreadCount, 1);
+
+  await messages.markRead(SPACE, topic._id);
+  topics = await channels.listTopics(SPACE, channel._id);
+  assert.equal(topics.find((t) => t._id === topic._id).unreadCount, 0, 'marking read clears it');
+
+  // A message from "me" (the reading identity's own main key) never counts
+  // as unread, even posted after the read marker.
+  await messages.postMessage(SPACE, topic._id, { body: 'from me' });
+  topics = await channels.listTopics(SPACE, channel._id);
+  assert.equal(topics.find((t) => t._id === topic._id).unreadCount, 0);
+
+  // A second post from someone else, after markRead(), is unread again.
+  await messages.postMessage(SPACE, topic._id, { body: 'another from someone else', asSpaceId: 'other-space' });
+  topics = await channels.listTopics(SPACE, channel._id);
+  assert.equal(topics.find((t) => t._id === topic._id).unreadCount, 1);
+});
+
 test('double "create channel" for two different titles never collapses into one - each is a genuine, separate channel (regression: QuV2\'s missing double-submit guard)', async () => {
   const { channels } = await freshSetup();
   // Simulates two near-simultaneous submits (the client-side fix is

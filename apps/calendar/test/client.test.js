@@ -361,6 +361,149 @@ test('an invited member sees the shared calendar (correctly labeled "Shared with
   stop();
 });
 
+/**
+ * Shared setup for the two tests below: an owner creates+shares one
+ * calendar with a guest, and the guest's OWN client has synced in exactly
+ * what a real relay connection would deliver (same technique/reasoning as
+ * the "an invited member sees the shared calendar" test above - see its
+ * own comments for why each specific path is mirrored).
+ */
+async function ownerSharesCalendarWithGuest() {
+  const CAL_SPACE = 'ff73365b-144a-4285-8e98-ac7f9928a95f';
+  const { qu: ownerQu, services: ownerServices, myPub: ownerPub } = await freshEnv();
+  const { qu: guestQu, services: guestServices, myPub: guestPub } = await createPeer(ownerQu, { alias: 'Ada' });
+  await ownerServices.contacts.addContact(guestPub, {});
+
+  const ownerContainer = makeContainer();
+  let stop = mount(ownerContainer, { qu: ownerQu, services: ownerServices, segments: ['calendar'], subscribe: noopSubscribe });
+  await createCalendarViaForm(ownerContainer);
+  const [{ id: calId }] = await ownerServices.flags.listPrivate('calendar', 'calendar');
+  stop();
+
+  stop = mount(ownerContainer, { qu: ownerQu, services: ownerServices, segments: segmentsFor(`#/calendar/${calId}/share`), subscribe: noopSubscribe });
+  await waitFor(() => ownerContainer.querySelector('.qu-cal-picker input') !== null);
+  const picker = ownerContainer.querySelector('.qu-cal-picker input');
+  picker.value = 'Ada';
+  picker.dispatchEvent(new window.Event('input', { bubbles: true }));
+  await waitFor(() => ownerContainer.querySelector('.qu-cal-picker-option') !== null);
+  ownerContainer.querySelector('.qu-cal-picker-option').click();
+  await waitForAsync(async () => (await ownerServices.access.getAcl(CAL_SPACE, 'docs', `cal-${calId}-events`)).writers.length === 2);
+  stop();
+
+  await mirrorPaths(ownerQu, guestQu, [
+    actorPath(ownerPub, 'profile'),
+    paths.documentPath(CAL_SPACE, `cal-${calId}-meta`),
+    paths.documentPath(CAL_SPACE, `cal-${calId}-events`),
+    paths.threadMetaPath(CAL_SPACE, `invite-${guestPub}`),
+    paths.threadMetaPath(CAL_SPACE, `activity-${calId}`),
+  ]);
+  await mirrorChildren(ownerQu, guestQu, paths.threadMessagesParentPath(CAL_SPACE, `invite-${guestPub}`));
+
+  return { CAL_SPACE, ownerQu, ownerServices, ownerPub, guestQu, guestServices, guestPub, calId };
+}
+
+test('a shared calendar is marked as such (a real per-row badge, not just the section heading), and clicking its title reveals the owner - previously nowhere in the app showed WHO shared it', async () => {
+  const { ownerQu, ownerServices, guestQu, guestServices, calId } = await ownerSharesCalendarWithGuest();
+
+  // The OWNER's own list: their own calendar carries no "shared" badge.
+  const ownerContainer = makeContainer();
+  let stop = mount(ownerContainer, { qu: ownerQu, services: ownerServices, segments: ['calendar'], subscribe: noopSubscribe });
+  await waitFor(() => ownerContainer.querySelector('.qu-cal-row-title') !== null);
+  assert.equal(ownerContainer.querySelector('.qu-cal-shared-badge'), null);
+  stop();
+
+  // The GUEST's own list: the shared calendar IS badged, and its title is
+  // a clickable button that reveals the owner's alias on click.
+  const guestContainer = makeContainer();
+  stop = mount(guestContainer, { qu: guestQu, services: guestServices, segments: ['calendar'], subscribe: noopSubscribe });
+  await waitFor(() => guestContainer.querySelector('.qu-cal-row-title') !== null);
+
+  assert.ok(guestContainer.querySelector('.qu-cal-shared-badge'), 'expected a per-row "shared" badge');
+  const titleBtn = guestContainer.querySelector('.qu-cal-row-title-btn');
+  assert.ok(titleBtn, 'expected the shared calendar\'s title to be a real button, not plain text');
+  assert.equal(titleBtn.textContent, 'Team calendar');
+
+  const ownerLine = guestContainer.querySelector('.qu-cal-owner-line');
+  assert.equal(ownerLine.hidden, true, 'hidden until clicked');
+  titleBtn.click();
+  await waitFor(() => !ownerLine.hidden && /Me/.test(ownerLine.textContent));
+  assert.match(ownerLine.textContent, /Owned by Me/);
+
+  // Clicking again hides it.
+  titleBtn.click();
+  assert.equal(ownerLine.hidden, true);
+  stop();
+});
+
+test('leaving a shared calendar hides it AND notifies the owner (via the same activity-thread mechanism every real create/update/delete already uses) - it must never delete/edit the calendar itself, only end this identity\'s own subscription to it', async () => {
+  const { CAL_SPACE, ownerQu, ownerServices, guestQu, guestServices, guestPub, calId } = await ownerSharesCalendarWithGuest();
+
+  const guestContainer = makeContainer();
+  window.confirm = () => true;
+  const stop = mount(guestContainer, { qu: guestQu, services: guestServices, segments: ['calendar'], subscribe: noopSubscribe });
+  await waitFor(() => guestContainer.querySelector('.qu-cal-row button[title="Leave"]') !== null);
+  guestContainer.querySelector('.qu-cal-row button[title="Leave"]').click();
+
+  // Hidden from the guest's own list.
+  await waitForAsync(async () => (await guestServices.flags.listPrivate('calendar', 'calendar')).length === 0);
+
+  // The calendar itself is untouched - still exists, guest is still
+  // formally a member (leaving only un-stars; a plain member has no write
+  // access to the owner-only meta document to revoke their own ACL entry
+  // even in principle - see calendarsSection()'s own doc comment).
+  const metaBit = await ownerQu.get(paths.documentPath(CAL_SPACE, `cal-${calId}-meta`));
+  assert.ok(metaBit.val, 'the calendar itself must still exist');
+  assert.ok(metaBit.val.members.some((m) => m.actorPub === guestPub));
+
+  // The owner is notified: a "left" message landed in the calendar's own
+  // activity thread (the SAME thread/mechanism a real event create/update/
+  // delete already notifies through - see notifyActivity()'s own doc
+  // comment). Written into the GUEST's own store here (these two identities
+  // are two independent in-memory QuStores with no real sync layer in this
+  // test - propagating it on to the owner's own store is an already-proven,
+  // separate relay/sync concern, not something this test re-verifies); the
+  // owner reads it once it arrives via the exact same mirrorChildren()
+  // technique every other cross-identity test in this file already uses.
+  await waitForAsync(async () => {
+    const { messages } = await guestServices.messages.listMessages(CAL_SPACE, `activity-${calId}`);
+    return messages.some((m) => m.body === 'left');
+  });
+  await mirrorPaths(guestQu, ownerQu, [paths.threadMetaPath(CAL_SPACE, `activity-${calId}`)]);
+  await mirrorChildren(guestQu, ownerQu, paths.threadMessagesParentPath(CAL_SPACE, `activity-${calId}`));
+  const { messages: ownerSeen } = await ownerServices.messages.listMessages(CAL_SPACE, `activity-${calId}`);
+  assert.ok(ownerSeen.some((m) => m.body === 'left'), 'the owner\'s own client can read the "left" notice');
+  stop();
+});
+
+test('a shared calendar can never be deleted or renamed by a non-owner, not just hidden from their own UI - the meta document is owner-only writer, enforced by AccessEngine itself (not merely canManage()\'s own UI gate)', async () => {
+  const { CAL_SPACE, ownerQu, guestQu, guestServices, calId } = await ownerSharesCalendarWithGuest();
+
+  // AccessEngine only enforces a write ACL it can actually SEE locally
+  // (§"No explicit ACL doc" in access-engine.js's own #handlePut() - an
+  // unmirrored ACL document reads as "nothing protected here yet", not
+  // "denied"). A real relay round-trip would have delivered this already;
+  // mirrored explicitly here for the same reason every other cross-store
+  // path in this file is.
+  await mirrorPaths(ownerQu, guestQu, [paths.aclPath(CAL_SPACE, 'docs', `cal-${calId}-meta`)]);
+
+  // The guest was invited as an editor (this app's own default role for a
+  // picker-driven invite - see inviteMember()) - real write access to
+  // EVENTS, but the calendar's own meta document (title/color/members/
+  // delete) stays owner-only regardless of role, per this file's own top
+  // doc comment ("OWNER-ONLY writer").
+  const metaPath = paths.documentPath(CAL_SPACE, `cal-${calId}-meta`);
+  const writeOptions = await guestServices.access.writeOptionsFor(CAL_SPACE, 'docs', `cal-${calId}-meta`);
+  // A delete (tombstone) attempt.
+  await assert.rejects(() => guestQu.put(metaPath, null, writeOptions), /not authorized/i);
+  // A rename attempt.
+  const meta = (await guestQu.get(metaPath)).val;
+  await assert.rejects(() => guestQu.put(metaPath, { ...meta, title: 'Hijacked' }, writeOptions), /not authorized/i);
+
+  // The calendar is genuinely untouched either way.
+  const stillThere = await guestQu.get(metaPath);
+  assert.equal(stillThere.val.title, 'Team calendar');
+});
+
 // ===== content.messageMenu contributor - chat/forum -> calendar bridge ====
 
 test('createEventMenuItem(): resolves a menu entry that prefills sessionStorage from the message body and navigates to the New Event page', async () => {

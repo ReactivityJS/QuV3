@@ -57,6 +57,7 @@ const DICT = {
     filterPost: 'Text',
     filterImage: 'Images',
     filterVideo: 'Videos',
+    filterAudio: 'Audio',
     filterFile: 'Files',
     filterLink: 'Links',
     typeToSearch: 'Type to search.',
@@ -73,6 +74,7 @@ const DICT = {
     filterPost: 'Text',
     filterImage: 'Bilder',
     filterVideo: 'Videos',
+    filterAudio: 'Audio',
     filterFile: 'Dateien',
     filterLink: 'Links',
     typeToSearch: 'Suchbegriff eingeben.',
@@ -83,7 +85,7 @@ const DICT = {
 };
 const { t } = createI18n(DICT);
 
-const TYPES = ['post', 'image', 'video', 'file', 'link'];
+const TYPES = ['post', 'image', 'video', 'audio', 'file', 'link'];
 
 const STYLE_ID = 'qu-search-style';
 const STYLE = `
@@ -109,6 +111,14 @@ export function mount(container, ctx) {
   injectStyle(STYLE_ID, STYLE);
   const { services, qu, syncFetch, apps, segments = [], extensionPoints } = ctx;
   let stopped = false;
+
+  // A result row's own `<qu-asset>` (rendered by a contributor's
+  // `content.searchResultTemplate` - see e.g. apps/forum/client.js's own
+  // `renderSearchResult()`) resolves this via an ancestor walk - same "set
+  // on an ancestor before children connect" discipline `@qu/ui` requires
+  // everywhere else. This app never renders an asset itself; it only ever
+  // hosts one, for whichever contributor's template needs it.
+  container.assetService = services.assets;
 
   const [, scopeSeg, contextAppId = null, ...rest] = segments;
   let scope = 'global';

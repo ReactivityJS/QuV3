@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { QuStore, MemoryStoreAdapter } from '@qu/core';
-import { AccessEngine, ThreadEngine, CollectionEngine } from '@qu/engines';
+import { AccessEngine, ThreadEngine, AssetEngine, CollectionEngine } from '@qu/engines';
 import { QuIdentityEngine, actorPath } from '@qu/identity';
 import {
   ListService, AccessService, MessageService, ChannelService, ChatService,
-  ActorService, ProfileService, ContactsService, FlagService,
+  ActorService, ProfileService, ContactsService, FlagService, AssetService,
 } from '@qu/services';
 import { ExtensionPointHost } from '@qu/foundation';
 import { installDom, waitFor } from '@qu/ui/testing';
@@ -59,6 +59,7 @@ async function freshEnv() {
     channels: new ChannelService(qu, identity, list, access, messages),
     contacts: new ContactsService(flags, identity),
     chat: new ChatService(messages, identity),
+    assets: new AssetService(qu, new AssetEngine(qu), identity),
   };
   const myPub = await services.actors.whoAmI();
   return { qu, identity, services, myPub };
@@ -228,6 +229,36 @@ test('type filter chips: selecting "Links" excludes a plain-text match and keeps
 
     assert.equal(container.querySelectorAll('.qu-chat-search-result').length, 1, 'the chat message contains a real link');
     assert.equal(container.querySelectorAll('.qu-forum-search-result').length, 0, 'the forum message is plain text, no link');
+  } finally {
+    stop();
+  }
+});
+
+test('an image result renders a real <qu-asset> preview end to end, not just plain text (regression: every result used to render as plain meta+snippet text regardless of type)', async () => {
+  const env = await freshEnv();
+  const channel = await env.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Pics' });
+  const topic = await env.services.channels.createTopic(FORUM_SPACE_ID, channel._id, { title: 'Pics topic' });
+  await env.services.messages.postMessage(FORUM_SPACE_ID, topic._id, {
+    body: '', extra: { attachment: { assetId: 'search-img-1', mime: 'image/png', name: 'photo.png', size: 100 } },
+  });
+
+  const container = makeContainer();
+  const extensionPoints = new ExtensionPointHost(APPS);
+  const stop = mount(container, {
+    services: env.services, qu: env.qu, apps: APPS, segments: ['search', 'global'], extensionPoints,
+  });
+  try {
+    const imageChip = [...container.querySelectorAll('.qu-search-chip')].find((c) => c.textContent === 'Images');
+    imageChip.click();
+    await waitFor(() => container.querySelector('qu-asset') !== null, { timeout: 4000 });
+
+    const assetEl = container.querySelector('qu-asset');
+    assert.equal(assetEl.getAttribute('space-id'), FORUM_SPACE_ID);
+    assert.equal(assetEl.getAttribute('asset-id'), 'search-img-1');
+    // The link (navigates to the message) never wraps the asset preview -
+    // see apps/forum/client.js's own renderSearchResult() doc comment.
+    const link = container.querySelector('.qu-forum-search-result-link');
+    assert.equal(link.contains(assetEl), false);
   } finally {
     stop();
   }
