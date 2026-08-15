@@ -285,3 +285,18 @@ test('shell.headerAction: the payload carries getContext/onContextChange/service
     stop();
   }
 });
+
+test('.qu-shell-user has min-width: 0 so it can shrink/ellipsis instead of pushing the bell/App Action Slot off-screen on narrow viewports', async (t) => {
+  const { qu, services } = await freshEnv();
+  t.mock.method(globalThis, 'fetch', mockAppsFetch());
+  const container = makeContainer();
+  const stop = mountHeader(container, { qu, services, subscribe: noopSubscribe });
+  try {
+    await waitForOwnName(container);
+    const css = document.getElementById('qu-shell-header-style').textContent;
+    const rule = css.match(/\.qu-shell-user\s*\{[^}]*\}/)[0];
+    assert.match(rule, /min-width:\s*0/, 'the .qu-shell-user flex item must set min-width: 0 to allow it to shrink below its content size');
+  } finally {
+    stop();
+  }
+});

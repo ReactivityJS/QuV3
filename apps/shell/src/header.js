@@ -107,7 +107,7 @@ const STYLE = `
   .qu-shell-bell { position: relative; display: inline-flex; background: none; border: none; cursor: pointer; text-decoration: none; color: inherit; font-size: 1.2em; padding: 0.35rem 0.55rem; border-radius: var(--qu-radius-sm, 0.3rem); }
   .qu-shell-bell:hover { background: var(--qu-color-surface, #8882); }
   .qu-shell-badge { position: absolute; top: 0.05rem; right: 0.05rem; min-width: 1rem; height: 1rem; padding: 0 0.2rem; border-radius: 999px; background: var(--qu-color-danger, #c00); color: #fff; font-size: 0.62rem; font-weight: 700; line-height: 1rem; text-align: center; }
-  .qu-shell-user { position: relative; }
+  .qu-shell-user { position: relative; min-width: 0; }
   .qu-shell-user-btn { display: flex; align-items: center; gap: 0.4rem; max-width: 11rem; background: none; border: none; cursor: pointer; padding: 0.25rem 0.6rem 0.25rem 0.25rem; border-radius: 999px; color: inherit; font: inherit; }
   .qu-shell-user-btn:hover { background: var(--qu-color-surface, #8882); }
   .qu-shell-user-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.88em; }
