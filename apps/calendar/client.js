@@ -93,7 +93,8 @@ const DICT = {
     share: 'Share', shareTitle: 'Share "{title}"', people: 'People', role_owner: 'Owner', role_editor: 'Editor', role_viewer: 'Viewer',
     invite: 'Invite', invitePlaceholder: 'Search by alias or paste a public key…',
     noMatches: 'No matches.', pasteAsIs: 'Invite "~{pub}…"',
-    remove: 'Remove', leave: 'Leave', leaveConfirm: 'Leave "{title}"? You will lose access unless invited again.',
+    remove: 'Remove', leave: 'Leave', leaveConfirm: 'Leave "{title}"? You will lose access unless invited again, and the owner will be notified.',
+    sharedBadge: 'Shared', showOwner: 'Show owner', ownedBy: 'Owned by {name}',
     deleteCalendar: 'Delete calendar', deleteCalendarConfirm: 'Delete "{title}"? This removes it for everyone and cannot be undone.',
     renameLabel: 'Name', colorLabel: 'Color', viewOnly: 'View only',
     noAccessTitle: 'No access', noAccessBody: 'You don’t have access to "{title}" — ask the owner to invite you.',
@@ -121,7 +122,8 @@ const DICT = {
     share: 'Teilen', shareTitle: '"{title}" teilen', people: 'Personen', role_owner: 'Besitzer', role_editor: 'Bearbeiter', role_viewer: 'Betrachter',
     invite: 'Einladen', invitePlaceholder: 'Nach Alias suchen oder Public Key einfügen…',
     noMatches: 'Keine Treffer.', pasteAsIs: '"~{pub}…" einladen',
-    remove: 'Entfernen', leave: 'Verlassen', leaveConfirm: '"{title}" verlassen? Der Zugriff geht verloren, bis erneut eingeladen wird.',
+    remove: 'Entfernen', leave: 'Verlassen', leaveConfirm: '"{title}" verlassen? Der Zugriff geht verloren, bis erneut eingeladen wird, und der Besitzer wird benachrichtigt.',
+    sharedBadge: 'Geteilt', showOwner: 'Besitzer anzeigen', ownedBy: 'Besitzer: {name}',
     deleteCalendar: 'Kalender löschen', deleteCalendarConfirm: '"{title}" löschen? Das entfernt ihn für alle und kann nicht rückgängig gemacht werden.',
     renameLabel: 'Name', colorLabel: 'Farbe', viewOnly: 'Nur Ansicht',
     noAccessTitle: 'Kein Zugriff', noAccessBody: 'Kein Zugriff auf "{title}" — bitte vom Besitzer einladen lassen.',
@@ -159,9 +161,19 @@ const STYLE = `
   .qu-cal-section-heading { font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.6; margin: 0.6rem 0 0.3rem; }
   .qu-cal-calendars { display: flex; flex-direction: column; gap: 0.2rem; }
   .qu-cal-row { display: flex; align-items: center; gap: 0.3rem; }
-  .qu-cal-row label { display: flex; align-items: center; gap: 0.5rem; flex: 1; min-width: 0; cursor: pointer; padding: 0.3rem 0.1rem; }
+  .qu-cal-row label { display: flex; align-items: center; gap: 0.5rem; flex-shrink: 0; cursor: pointer; padding: 0.3rem 0.1rem; }
   .qu-cal-row input[type="checkbox"] { width: 1.15rem; height: 1.15rem; flex-shrink: 0; }
-  .qu-cal-row label span.qu-cal-row-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .qu-cal-row-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* A SHARED calendar's own title is a button (not plain text) - clicking
+     it reveals who owns it (see calendarsSection()'s own doc comment) - a
+     ".qu-cal-owner-line" row appended right after this one. */
+  .qu-cal-row-title-btn { background: none; border: none; padding: 0.3rem 0.1rem; font: inherit; text-align: left; color: inherit; cursor: pointer; }
+  .qu-cal-row-title-btn:hover { text-decoration: underline; }
+  /* Marks a shared (non-owned) calendar AS SUCH beyond just which section
+     heading it's grouped under - see calendarsSection()'s own doc comment. */
+  .qu-cal-shared-badge { flex-shrink: 0; font-size: 0.85em; opacity: 0.55; }
+  .qu-cal-owner-line { font-size: 0.78em; opacity: 0.7; padding: 0 0.5rem 0.3rem 2.3rem; }
+  .qu-cal-owner-line[hidden] { display: none; }
   .qu-cal-swatch { width: 0.8rem; height: 0.8rem; border-radius: 50%; display: inline-block; flex-shrink: 0; }
   .qu-cal-row button, .qu-cal-row a { flex-shrink: 0; opacity: 0.65; background: none; border: none; cursor: pointer; font-size: 1.05em; padding: 0.35rem 0.4rem; text-decoration: none; }
   .qu-cal-row button:hover, .qu-cal-row a:hover { opacity: 1; }
@@ -810,6 +822,23 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     container.appendChild(root);
   }
 
+  /**
+   * One calendar section (owner) - "My calendars" for those this identity
+   * OWNS, "Shared with me" for the rest. A calendar in the latter group
+   * gets marked AS SUCH beyond just that section heading (a real 🔗 badge
+   * per row - a row scrolled past the heading, or read out of context, e.g.
+   * a screen reader stepping row by row, otherwise carries no per-row
+   * signal it isn't one of "my" own calendars), and its title becomes a
+   * button: clicking it reveals who owns it (an ".qu-cal-owner-line" row
+   * appended right after, resolved the same alias-lookup way
+   * `renderMembers()`'s own per-member name does) - previously nowhere in
+   * this app did a non-owner ever see WHO shared a calendar with them.
+   * `canManage()`/`canEdit()` (both already gate every actual
+   * write - `renderSharePage()`'s own guard, `deleteCalendar()`'s ACL, see
+   * either's doc comment) mean a shared calendar was already never
+   * deletable/editable here; this only changes what's SHOWN, never a
+   * permission decision.
+   */
   function calendarsSection(infos, heading) {
     const wrap = document.createElement('div');
     const h = document.createElement('div');
@@ -820,6 +849,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     const list = document.createElement('div');
     list.className = 'qu-cal-calendars';
     for (const info of infos) {
+      const shared = !canManage(info.role);
       const row = document.createElement('div');
       row.className = 'qu-cal-row';
 
@@ -835,11 +865,43 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
       const swatch = document.createElement('span');
       swatch.className = 'qu-cal-swatch';
       swatch.style.background = info.color;
-      const titleSpan = document.createElement('span');
-      titleSpan.className = 'qu-cal-row-title';
-      titleSpan.textContent = info.meta.title || t('untitled');
-      label.append(checkbox, swatch, titleSpan);
+      label.append(checkbox, swatch);
       row.appendChild(label);
+
+      // A shared row's own owner line - built either way (cheap, plain
+      // DOM), only ever shown once its title is clicked.
+      const ownerLine = document.createElement('div');
+      ownerLine.className = 'qu-cal-owner-line';
+      ownerLine.hidden = true;
+
+      if (shared) {
+        const titleBtn = document.createElement('button');
+        titleBtn.type = 'button';
+        titleBtn.className = 'qu-cal-row-title qu-cal-row-title-btn';
+        titleBtn.textContent = info.meta.title || t('untitled');
+        titleBtn.title = t('showOwner');
+        titleBtn.addEventListener('click', () => {
+          const opening = ownerLine.hidden;
+          ownerLine.hidden = !opening;
+          if (!opening || !info.meta.ownerPub) return;
+          ownerLine.textContent = t('ownedBy', { name: shortPerson(info.meta.ownerPub, null) });
+          services.profile.getPublicProfile(info.meta.ownerPub).then((profile) => {
+            if (profile) ownerLine.textContent = t('ownedBy', { name: shortPerson(info.meta.ownerPub, profile) });
+          }).catch(() => {});
+        });
+        row.appendChild(titleBtn);
+
+        const badge = document.createElement('span');
+        badge.className = 'qu-cal-shared-badge';
+        badge.textContent = '🔗';
+        badge.title = t('sharedBadge');
+        row.appendChild(badge);
+      } else {
+        const titleSpan = document.createElement('span');
+        titleSpan.className = 'qu-cal-row-title';
+        titleSpan.textContent = info.meta.title || t('untitled');
+        row.appendChild(titleSpan);
+      }
 
       if (canManage(info.role)) {
         const shareLink = document.createElement('a');
@@ -865,12 +927,23 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
         leaveBtn.textContent = '✕';
         leaveBtn.addEventListener('click', async () => {
           if (!window.confirm(t('leaveConfirm', { title: info.meta.title || t('untitled') }))) return;
+          // "Ending the subscription" = un-starring (hides it from THIS
+          // identity's own list, below) - a plain member/viewer/editor has
+          // no write access to the owner-only meta document, so there is
+          // no ACL membership for them to revoke here even in principle
+          // (see this file's own top doc comment on `cal-<calId>-meta`
+          // being OWNER-ONLY writer). The owner (and every other current
+          // member) still gets told, via the SAME already-wired
+          // activity-thread notification every real create/update/delete
+          // already uses - see notifyActivity()'s own doc comment.
           await services.flags.setPrivate('calendar', 'calendar', info.id, false);
+          await notifyActivity(info.id, 'left');
           await renderMain();
         });
         row.appendChild(leaveBtn);
       }
       list.appendChild(row);
+      if (shared) list.appendChild(ownerLine);
     }
     wrap.appendChild(list);
     return wrap;
