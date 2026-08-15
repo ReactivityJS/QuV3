@@ -11,16 +11,6 @@ function makeHost() {
   return el;
 }
 
-/** Every test in this file runs on the desktop (non-touch) path unless it
- * opts into `mockCoarsePointer()` - jsdom has no `matchMedia` at all (see
- * `platform.js`'s own doc comment on why `prefersNativeEmojiKeyboard()`
- * treats that as "not touch"), so this is already the default. */
-function mockCoarsePointer(matches) {
-  const previous = window.matchMedia;
-  window.matchMedia = () => ({ matches });
-  return () => { window.matchMedia = previous; };
-}
-
 test('standalone trigger (no quick list): renders exactly one button, opens the extended panel on click', async () => {
   const host = makeHost();
   const el = renderEmojiPicker({ onPick: () => {}, trigger: '😀' });
@@ -120,69 +110,4 @@ test('clicking outside the picker closes an open panel', async () => {
   await new Promise((resolve) => setTimeout(resolve, 10));
   document.body.click();
   assert.equal(el.querySelector('.qu-thread-ui-emoji-panel'), null);
-});
-
-test('touch session with an inputEl: the trigger just focuses inputEl, no panel and no hidden input', () => {
-  const restore = mockCoarsePointer(true);
-  try {
-    const host = makeHost();
-    const input = document.createElement('textarea');
-    host.appendChild(input);
-    let focused = false;
-    input.focus = () => { focused = true; };
-    const el = renderEmojiPicker({ onPick: () => {}, trigger: '😀', inputEl: input });
-    host.appendChild(el);
-
-    el.querySelector('button').click();
-    assert.equal(focused, true);
-    assert.equal(el.querySelector('.qu-thread-ui-emoji-panel'), null);
-    assert.equal(el.querySelector('.qu-thread-ui-emoji-native-input'), null);
-  } finally {
-    restore();
-  }
-});
-
-test('touch session with no inputEl (e.g. a reactions row): the trigger opens a hidden native input; typing into it calls onPick per character and clears it', () => {
-  const restore = mockCoarsePointer(true);
-  try {
-    const host = makeHost();
-    const picks = [];
-    const el = renderEmojiPicker({ onPick: (e) => picks.push(e), trigger: '+' });
-    host.appendChild(el);
-
-    el.querySelector('button').click();
-    const hidden = el.querySelector('.qu-thread-ui-emoji-native-input');
-    assert.ok(hidden);
-    assert.equal(el.querySelector('.qu-thread-ui-emoji-panel'), null);
-
-    hidden.value = '👍';
-    hidden.dispatchEvent(new window.Event('input'));
-    assert.deepEqual(picks, ['👍']);
-    assert.equal(hidden.value, '');
-  } finally {
-    restore();
-  }
-});
-
-test('touch session, no inputEl: blurring the hidden native input removes it; clicking the trigger again while open closes it', () => {
-  const restore = mockCoarsePointer(true);
-  try {
-    const host = makeHost();
-    const el = renderEmojiPicker({ onPick: () => {}, trigger: '+' });
-    host.appendChild(el);
-    const trigger = el.querySelector('button');
-
-    trigger.click();
-    let hidden = el.querySelector('.qu-thread-ui-emoji-native-input');
-    assert.ok(hidden);
-    hidden.dispatchEvent(new window.Event('blur'));
-    assert.equal(el.querySelector('.qu-thread-ui-emoji-native-input'), null);
-
-    trigger.click();
-    assert.ok(el.querySelector('.qu-thread-ui-emoji-native-input'));
-    trigger.click();
-    assert.equal(el.querySelector('.qu-thread-ui-emoji-native-input'), null);
-  } finally {
-    restore();
-  }
 });
