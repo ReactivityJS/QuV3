@@ -53,33 +53,47 @@ async function isAuthentic(quBit) {
  *      QuStore's notify bus (`qu.onStorageChange`, see `@qu/core`'s
  *      `store.js`) - it is NOT part of the value-transform pipeline, so a
  *      network hiccup here can never affect what gets written locally.
- *   2. Incoming synced QuBits from peers are written straight to the mounted
- *      adapter, bypassing QuStore's seal step - a synced QuBit already
- *      carries its original signature/timestamp; re-signing it locally
- *      would forge a new signature from data we didn't actually write. They
- *      ARE checked for authenticity first (see `isAuthentic()` above), THEN
- *      for write authorization (see the class's own §3.3 note below), and
- *      only then re-broadcast to this peer's OWN subscribers (excluding
- *      whoever just sent it), so a relay acts as a genuine hub - not just a
+ *   2. Incoming QuBits from peers - whether pushed via sync, returned as a
+ *      `fetch()`/`fetchPrefix()` response, or otherwise handed to us by a
+ *      peer we do not control - are written straight to the mounted
+ *      adapter, bypassing QuStore's seal step: a QuBit arriving this way
+ *      already carries its own original signature/timestamp; re-signing it
+ *      locally would forge a new signature from data we didn't actually
+ *      write. EVERY one of these paths runs through the SAME gate,
+ *      `#validateIncomingWrite()` (see its own doc comment below), before
+ *      anything is persisted. A synced write is additionally re-broadcast
+ *      to this peer's OWN subscribers (excluding whoever just sent it)
+ *      once accepted, so a relay acts as a genuine hub - not just a
  *      dead-end recipient - for however many clients are subscribed to it.
- *   3. `fetch(path)` lets a peer explicitly request a value it doesn't have
- *      yet (e.g. after subscribing, to backfill history).
+ *   3. `fetch(path)`/`fetchPrefix(prefix)` let a peer explicitly request
+ *      value(s) it doesn't have yet (e.g. after subscribing, to backfill
+ *      history) - answered by whatever the OTHER side's adapter happens to
+ *      hold, which this side must never blindly trust just because it
+ *      asked for it (see `#validateIncomingWrite()`).
  *
- * ACL ENFORCEMENT ON SYNCED WRITES (docs/v3-technical-concept.md §3.3, V3
- * milestone #1) — `#handleSync` calls `@qu/engines`' `assertWriteAuthorized()`
- * on every incoming synced write, the exact same decision `AccessEngine`
- * makes for a LOCALLY-originated `put()` (see that function's own doc
- * comment for why it's exported specifically for this). This closes a real,
- * confirmed gap in the prototype this is rebuilt from: `AccessEngine` only
- * ever ran as part of `QuStore.put()`'s TRANSFORM step, which
- * `#persistDirectly()`'s `putSealed()` call deliberately bypasses (see
- * point 2 above) - so a synced write used to reach the adapter with NO
- * write-ACL check at all, meaning a malicious or compromised peer could
- * write to any protected resource just by sending a correctly-SIGNED (but
- * unauthorized) QuBit over the wire. A write that fails this check is
- * rejected silently: not persisted, not acked, not re-broadcast - exactly
- * as if it had never arrived, no different information leaked to the
- * sender than any other dropped message.
+ * INCOMING-WRITE VALIDATION (docs/v3-technical-concept.md §3.3, V3
+ * milestone #1, since broadened beyond just sync) — every path that can
+ * cause a network-originated QuBit to be persisted (`#handleSync`,
+ * `#handleResponse`/`fetch()`, `fetchPrefix()`) runs `#validateIncomingWrite()`,
+ * which throws unless the QuBit is well-formed, its OWN `path` field
+ * matches the path it's being persisted under, its signature verifies, AND
+ * `@qu/engines`' `assertWriteAuthorized()` - the exact same decision
+ * `AccessEngine` makes for a LOCALLY-originated `put()` - accepts the
+ * writer for this path (see that method's own doc comment for why each
+ * check exists). This closes a real, confirmed gap in the prototype this
+ * is rebuilt from: `AccessEngine` only ever ran as part of `QuStore.put()`'s
+ * TRANSFORM step, which `#persistDirectly()`'s `putSealed()` call
+ * deliberately bypasses (see point 2 above) - so a network-originated write
+ * used to be able to reach the adapter with no write-ACL check at all
+ * (`#handleSync`'s old behavior), or with no authenticity check at all
+ * (`fetch()`/`fetchPrefix()`'s old behavior), meaning a peer this side
+ * merely talks to - not necessarily trusts - could write to, or splice
+ * validly-signed-but-misplaced content onto, any resource it could reach.
+ * A write that fails validation is rejected silently for sync (not
+ * persisted, not acked, not re-broadcast - exactly as if it had never
+ * arrived, no different information leaked to the sender than any other
+ * dropped message), rejects the caller's own pending promise for `fetch()`,
+ * and is skipped (uncounted) for `fetchPrefix()`.
  *
  * What this does NOT (and structurally cannot) cover: a peer's own
  * genuinely-authorized write, once accepted, is exactly as re-broadcastable
@@ -530,10 +544,26 @@ export class SyncEngine {
    * instead of one generic bidirectional protocol neither side's topology
    * actually needs.
    *
+   * Entries are validated+persisted with bounded concurrency (see
+   * `FETCH_PREFIX_CONCURRENCY` below), not strictly one-at-a-time: a large
+   * catch-up batch would otherwise pay a full validate+read+write round
+   * trip serially per entry even though different paths never contend with
+   * each other (`FsAdapter.put()`'s own lock is keyed per path). This does
+   * NOT introduce a new ordering hazard - `entries` itself already arrives
+   * in filesystem iteration order, not causal order (see `getAll()`'s own
+   * "UNSORTED" doc comment, which is what serves this response on the
+   * peer's side), so same-batch ordering was never a guarantee this method
+   * could rely on in the first place.
+   *
    * @param {string} prefix
    * @param {string|null} [targetPeerId]
    * @param {number} [timeoutMs=15000]
-   * @returns {Promise<number>} How many QuBits were received and merged.
+   * @returns {Promise<number>} How many QuBits actually passed validation
+   *   (see `#validateIncomingWrite()`) AND were persisted - not merely how
+   *   many entries the peer sent back. An entry that fails validation is
+   *   skipped and not counted; one skipped by `#persistDirectly()`'s own
+   *   anti-regression ts-guard, or one whose persistence itself failed, is
+   *   not counted either.
    */
   async fetchPrefix(prefix, targetPeerId = null, timeoutMs = 15000) {
     const requestId = `${Date.now()}-${this.#requestCounter++}`;
@@ -557,11 +587,15 @@ export class SyncEngine {
       else this.#transport.send(message);
     });
 
-    for (const { path, quBit } of entries) {
-      if (!isValidQuBit(quBit)) continue; // same shape guard #handleResponse applies to a single fetch()
-      await this.#persistDirectly(path, quBit);
-    }
-    return entries.length;
+    return mapWithConcurrency(entries, FETCH_PREFIX_CONCURRENCY, async ({ path, quBit }) => {
+      try {
+        await this.#validateIncomingWrite(path, quBit);
+      } catch (err) {
+        console.warn(`[SyncEngine] fetchPrefix(): skipping invalid entry for "${path}": ${err.message}`);
+        return false;
+      }
+      return this.#persistDirectly(path, quBit);
+    });
   }
 
   /**
@@ -605,6 +639,50 @@ export class SyncEngine {
   }
 
   /**
+   * ONE shared gate every path that can cause a network-originated QuBit to
+   * be persisted - `#handleSync`, `#handleResponse` (`fetch()`), and
+   * `fetchPrefix()`'s own loop - runs identically, in this exact order:
+   *   1. shape (`isValidQuBit`)
+   *   2. `quBit.path === path` - the QuBit's OWN `path` field must match
+   *      the path it is being persisted under. This is the one check
+   *      `isAuthentic()` structurally CANNOT make: it verifies a signature
+   *      over `{path: quBit.path, val, ts, pub}` - i.e. over `quBit.path`,
+   *      never over whatever transport-level `path` this call happens to be
+   *      persisting it at. Without this check, a validly-signed QuBit for
+   *      resource A could be relayed (or served back via fetch) under an
+   *      unrelated resource B: the signature would still verify (it only
+   *      ever attested to A), the ACL check below would be asked about B,
+   *      and `#persistDirectly()` would store it AT B - three different
+   *      resources, one accepted write. Requiring equality here means the
+   *      resource a write is authenticated for and the resource it ends up
+   *      stored at are always, structurally, the same one.
+   *   3. signature (`isAuthentic`)
+   *   4. write ACL (`assertWriteAuthorized`) - the SAME decision
+   *      `AccessEngine` makes for a locally-originated `put()`.
+   * Throws a descriptive Error on the first failing check. Deliberately
+   * silent about HOW a rejection should surface - each call site decides
+   * that for itself (silently drop-and-log for `#handleSync`, reject the
+   * pending promise for `fetch()`, skip-and-continue for `fetchPrefix()`) -
+   * this method only ever decides whether the write is valid.
+   * @param {string} path
+   * @param {object} quBit
+   * @returns {Promise<void>}
+   */
+  async #validateIncomingWrite(path, quBit) {
+    if (!isValidQuBit(quBit)) {
+      throw new Error('malformed QuBit');
+    }
+    if (quBit.path !== path) {
+      throw new Error(`QuBit's own path "${quBit.path}" does not match the path it arrived under ("${path}")`);
+    }
+    if (!(await isAuthentic(quBit))) {
+      throw new Error('signature does not verify');
+    }
+    const writerPub = quBit.pub ? QuCrypto.fromBase64(quBit.pub) : null;
+    await assertWriteAuthorized(this.#qu, path, writerPub);
+  }
+
+  /**
    * @param {{path: string, quBit: object}} message
    * @param {string} originPeerId - Whoever sent this over the transport - a
    *   relay re-broadcasting this to ITS OWN subscribers must never echo it
@@ -615,27 +693,8 @@ export class SyncEngine {
       console.warn(`[SyncEngine] refusing synced write for local-only path "${path}"`);
       return;
     }
-    if (!isValidQuBit(quBit)) {
-      console.warn(`[SyncEngine] ignoring malformed synced QuBit for "${path}"`);
-      return;
-    }
-    if (!(await isAuthentic(quBit))) {
-      console.warn(`[SyncEngine] rejecting synced QuBit for "${path}": signature does not verify`);
-      return;
-    }
-
-    // ACL ENFORCEMENT (docs/v3-technical-concept.md §3.3) - the SAME
-    // decision @qu/engines' AccessEngine makes for a locally-originated
-    // put(), applied here for the first time to an INCOMING synced write.
-    // `quBit.pub` is base64 (QuBit's own on-wire shape); assertWriteAuthorized()
-    // wants raw bytes, same conversion AccessEngine itself does from
-    // `ctx.options.writerPub`. Rejected silently: not persisted, not acked,
-    // not re-broadcast - see this class's own doc comment for why that's
-    // the right failure mode (indistinguishable from the message never
-    // having arrived).
     try {
-      const writerPub = quBit.pub ? QuCrypto.fromBase64(quBit.pub) : null;
-      await assertWriteAuthorized(this.#qu, path, writerPub);
+      await this.#validateIncomingWrite(path, quBit);
     } catch (err) {
       console.warn(`[SyncEngine] rejecting synced QuBit for "${path}": ${err.message}`);
       return;
@@ -655,8 +714,8 @@ export class SyncEngine {
     // ONE of them just sent to the OTHER N-1, not just persist it locally -
     // otherwise only writes the relay itself originates would ever reach a
     // second client, which defeats the entire point of a shared relay (see
-    // the class doc comment's ACL note for what this re-broadcast does and
-    // does not additionally guarantee).
+    // the class doc comment's validation note for what this re-broadcast
+    // does and does not additionally guarantee).
     this.#broadcastToSubscribers(path, { type: 'sync', path, quBit }, originPeerId);
     // Unconditional ack back to whoever sent this - see outbox.js. A peer
     // with no outbox configured (a relay's own SyncEngine, a plain Node
@@ -687,12 +746,18 @@ export class SyncEngine {
     clearTimeout(pending.timeout);
     this.#pendingRequests.delete(requestId);
 
-    if (quBit && !isValidQuBit(quBit)) {
-      pending.reject(new Error(`SyncEngine.fetch: peer returned an invalid QuBit for "${path}"`));
+    if (!quBit) {
+      pending.resolve(null); // peer doesn't have it
       return;
     }
-    if (quBit) await this.#persistDirectly(path, quBit);
-    pending.resolve(quBit ?? null);
+    try {
+      await this.#validateIncomingWrite(path, quBit);
+    } catch (err) {
+      pending.reject(new Error(`SyncEngine.fetch: invalid response for "${path}": ${err.message}`));
+      return;
+    }
+    await this.#persistDirectly(path, quBit);
+    pending.resolve(quBit);
   }
 
   /** @param {{requestId: string, prefix: string}} message @param {string} peerId - see fetchPrefix() */
@@ -782,16 +847,26 @@ export class SyncEngine {
    * writing) - a slow response arriving AFTER that newer local write would
    * otherwise silently overwrite it with the older data it fetched, making
    * a just-sent change vanish again.
+   *
+   * @param {string} path
+   * @param {object} quBit
+   * @returns {Promise<boolean>} Whether this call actually wrote a NEW
+   *   value - `false` if skipped by the anti-regression ts-guard below, or
+   *   if persistence itself threw (caught and logged here, never thrown to
+   *   the caller). `fetchPrefix()`'s own merged-count return value counts
+   *   only calls that return `true` here.
    */
   async #persistDirectly(path, quBit) {
     try {
       const existing = await this.#qu.get(path);
       if (existing && typeof existing.ts === 'number' && typeof quBit.ts === 'number' && existing.ts > quBit.ts) {
-        return; // local data is already newer than this incoming write - never regress
+        return false; // local data is already newer than this incoming write - never regress
       }
       await this.#qu.putSealed(path, quBit);
+      return true;
     } catch (err) {
       console.error(`[SyncEngine] failed to persist synced QuBit for "${path}":`, err);
+      return false;
     }
   }
 }
@@ -809,4 +884,30 @@ function capCache(map, maxEntries = MAX_ACK_CACHE_ENTRIES) {
   while (map.size > maxEntries) {
     map.delete(map.keys().next().value);
   }
+}
+
+const FETCH_PREFIX_CONCURRENCY = 8; // see fetchPrefix()'s own doc comment for why bounding (not unbounding) this is the right call
+
+/**
+ * Runs `worker` over every item in `items` with at most `limit` calls
+ * in flight at once (a small worker-pool, not a naive `chunk-then-
+ * Promise.all` - the next item starts the instant a slot frees up, rather
+ * than waiting for a whole batch of `limit` to finish together).
+ * @param {Array<T>} items
+ * @param {number} limit
+ * @param {(item: T) => Promise<boolean>} worker
+ * @returns {Promise<number>} How many calls to `worker` resolved truthy.
+ * @template T
+ */
+async function mapWithConcurrency(items, limit, worker) {
+  let cursor = 0;
+  let truthyCount = 0;
+  async function runOne() {
+    while (cursor < items.length) {
+      const item = items[cursor++];
+      if (await worker(item)) truthyCount++;
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, runOne));
+  return truthyCount;
 }

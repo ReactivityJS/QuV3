@@ -1,7 +1,7 @@
 {
   "name": "@qu/sync",
   "version": "0.1.0",
-  "description": "Peer-to-peer replication: subscribe to paths, get notified when peers write, request/response fetch for data you don't have yet. Persistent outbox (survives a reload while offline) and reconnect catch-up (fetchPrefix) are both built in. SyncEngine applies @qu/engines' assertWriteAuthorized() to every incoming synced write - the V3 fix for the confirmed ACL-bypass-on-sync gap (docs/v3-technical-concept.md §3.3).",
+  "description": "Peer-to-peer replication: subscribe to paths, get notified when peers write, request/response fetch for data you don't have yet. Persistent outbox (survives a reload while offline) and reconnect catch-up (fetchPrefix) are both built in. SyncEngine runs every network-originated write - synced, fetch()ed, or fetchPrefix()ed - through one shared validation gate (shape, path-identity, signature, then @qu/engines' assertWriteAuthorized()) before persisting it, closing both the original confirmed ACL-bypass-on-sync gap and the broader path-splicing/missing-validation gap on fetch()/fetchPrefix() (docs/v3-technical-concept.md §3.3).",
   "type": "module",
   "main": "src/index.js",
   "exports": {

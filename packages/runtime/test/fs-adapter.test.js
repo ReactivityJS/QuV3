@@ -113,6 +113,34 @@ test('getChildren() limit+cursor pagination covers every child exactly once, no 
   assert.deepEqual(seen, ['/x/m0', '/x/m1', '/x/m2', '/x/m3', '/x/m4']);
 });
 
+test('put() does not leave an unhandled rejection behind when the underlying write fails', async () => {
+  const unhandled = [];
+  const onUnhandledRejection = (err) => unhandled.push(err);
+  process.on('unhandledRejection', onUnhandledRejection);
+  try {
+    // basePath points AT a plain file, not a directory - #ensureDir()'s
+    // fs.mkdir(dirname(filePath), {recursive: true}) then genuinely rejects
+    // (ENOTDIR), giving #putLocked() a real rejection to propagate, the
+    // same shape of failure a real EACCES/ENOSPC would produce.
+    const dir = await mkdtemp(join(tmpdir(), 'qu-fs-adapter-test-'));
+    const fileAsBasePath = join(dir, 'not-a-directory');
+    await writeFile(fileAsBasePath, 'x', 'utf8');
+    const adapter = new FsAdapter(fileAsBasePath);
+
+    await assert.rejects(() => adapter.put('/a', quBit(1, 1)));
+    // A second put() to the SAME path must still get its own fair attempt
+    // (see put()'s own doc comment on the `.then(fn, fn)` lock chain) -
+    // this is also what gives the `.finally()` cleanup a chance to run and,
+    // if unobserved, produce the unhandled rejection this test guards against.
+    await assert.rejects(() => adapter.put('/a', quBit(2, 2)));
+
+    await new Promise((resolve) => setImmediate(resolve)); // let any unhandledRejection fire
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off('unhandledRejection', onUnhandledRejection);
+  }
+});
+
 test('getChildren() skips a corrupt child file instead of throwing', async () => {
   const adapter = await freshAdapter();
   await adapter.put('/x/good', quBit('fine', 1));
