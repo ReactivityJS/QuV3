@@ -207,7 +207,7 @@ export function mountHeader(container, { qu, services, adminPubs = [], subscribe
   menu.hidden = true;
 
   userWrap.append(userBtn, menu);
-  header.append(home, backBtn, forwardBtn, spacer, headerSlot, bell, userWrap);
+  header.append(home, backBtn, forwardBtn, headerSlot, spacer, bell, userWrap);
   container.appendChild(header);
 
   // See this file's own "SEARCH SLOT" doc comment above - one

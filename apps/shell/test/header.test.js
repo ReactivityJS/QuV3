@@ -69,6 +69,25 @@ test('renders the Home logo, Back/Forward buttons, and the notification bell', a
   }
 });
 
+test('the App Action Slot sits right after Back/Forward, not next to the bell/avatar', async (t) => {
+  const { qu, services } = await freshEnv();
+  t.mock.method(globalThis, 'fetch', mockAppsFetch());
+  const container = makeContainer();
+  const stop = mountHeader(container, { qu, services, subscribe: noopSubscribe });
+  try {
+    await waitForOwnName(container);
+    const classNames = [...container.querySelector('.qu-shell-header').children].map((el) => el.className);
+    const slotIndex = classNames.indexOf('qu-shell-header-slot');
+    const spacerIndex = classNames.indexOf('qu-shell-header-spacer');
+    const bellIndex = classNames.indexOf('qu-shell-bell');
+    assert.ok(slotIndex > classNames.lastIndexOf('qu-shell-histbtn'), 'the App Action Slot must come after Back/Forward');
+    assert.ok(slotIndex < spacerIndex, 'the App Action Slot must come before the spacer, so it stays left-aligned next to Back/Forward');
+    assert.ok(spacerIndex < bellIndex, 'the spacer must still separate the App Action Slot from the bell/avatar on the right');
+  } finally {
+    stop();
+  }
+});
+
 test('the user menu shows Profile/Settings/App List links and no Relay Admin link for a non-admin', async (t) => {
   const { qu, services, myPub } = await freshEnv();
   t.mock.method(globalThis, 'fetch', mockAppsFetch());
