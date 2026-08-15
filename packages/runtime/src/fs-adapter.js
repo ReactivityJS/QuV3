@@ -106,10 +106,19 @@ export class FsAdapter {
     // Once this write settles, only remove the map entry if nothing newer
     // has replaced it in the meantime (a later put() for the same path may
     // already be the current tail) - otherwise we'd drop a still-pending
-    // chain and let a future call start unserialized.
-    thisWrite.finally(() => {
-      if (this.#writeLocks.get(filePath) === thisWrite) this.#writeLocks.delete(filePath);
-    });
+    // chain and let a future call start unserialized. `.finally()`'s own
+    // returned promise adopts `thisWrite`'s rejection if it rejects - and
+    // since nothing else observes THAT derived promise, a real write
+    // failure would otherwise surface as a SECOND, unhandled rejection here
+    // even though `thisWrite` itself (returned below) is already correctly
+    // handled by the caller. The trailing `.catch(() => {})` exists solely
+    // to keep that already-observed rejection from also being reported as
+    // unhandled a second time.
+    thisWrite
+      .finally(() => {
+        if (this.#writeLocks.get(filePath) === thisWrite) this.#writeLocks.delete(filePath);
+      })
+      .catch(() => {});
     return thisWrite;
   }
 

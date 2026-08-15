@@ -319,6 +319,139 @@ test('a synced write to an UNPROTECTED resource is accepted regardless of signer
   await waitUntil(async () => (await relayQu.get('/store/space/docs/open'))?.val?.title === 'anyone can write this');
 });
 
+// ===== path/quBit.path consistency (splicing defense) + validation on fetch()/fetchPrefix() ====
+
+test('REGRESSION: a validly-signed QuBit for one path is rejected by #handleSync when relayed under a different outer path', async () => {
+  const network = new TestNetwork();
+  const relayQu = freshQu();
+  new SyncEngine(relayQu, new RelayTransport(network));
+
+  // A genuinely validly-signed QuBit for its OWN path - nothing forged here.
+  const kp = await QuCrypto.generateKeypair();
+  const realQu = freshQu();
+  const real = await realQu.put('/store/space/docs/real', { title: 'real' }, signedPutOptions(kp));
+
+  // Relayed (or replayed by an attacker who merely observed it) under a
+  // DIFFERENT outer path - the signature still verifies (it only ever
+  // attested to quBit.path === '/store/space/docs/real'), so without the
+  // path-identity check this would be accepted and stored at the decoy path.
+  const attackerTransport = new ClientTransport('attacker', network);
+  attackerTransport.sendTo('relay', { type: 'sync', path: '/store/space/docs/decoy', quBit: real });
+
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(await relayQu.get('/store/space/docs/decoy'), null); // never stored under the mismatched path
+  assert.equal(await relayQu.get('/store/space/docs/real'), null); // never touched the real path either - this relay never received a write for it directly
+});
+
+test('fetch() rejects a response whose QuBit.path does not match the requested path', async () => {
+  const network = new TestNetwork();
+  const decoyQuBit = { path: '/store/space/docs/elsewhere', val: { title: 'spliced' }, ts: Date.now(), pub: null, sig: null };
+  network.registerRelay(({ data, peerId }) => {
+    if (data.type === 'request') {
+      network.fromRelayToClient(peerId, { type: 'response', requestId: data.requestId, path: data.path, quBit: decoyQuBit });
+    }
+  });
+  const clientQu = freshQu();
+  const client = new SyncEngine(clientQu, new ClientTransport('client-a', network));
+
+  await assert.rejects(() => client.fetch('/store/space/docs/decoy'), /does not match/);
+  assert.equal(await clientQu.get('/store/space/docs/decoy'), null);
+  assert.equal(await clientQu.get('/store/space/docs/elsewhere'), null);
+});
+
+test('fetchPrefix() skips (and does not count) an entry whose QuBit.path does not match its outer path', async () => {
+  const network = new TestNetwork();
+  const decoyQuBit = { path: '/store/space/docs/elsewhere', val: { title: 'spliced' }, ts: Date.now(), pub: null, sig: null };
+  network.registerRelay(({ data, peerId }) => {
+    if (data.type === 'prefix-request') {
+      network.fromRelayToClient(peerId, {
+        type: 'prefix-response',
+        requestId: data.requestId,
+        entries: [{ path: '/store/space/docs/decoy', quBit: decoyQuBit }],
+      });
+    }
+  });
+  const clientQu = freshQu();
+  const client = new SyncEngine(clientQu, new ClientTransport('client-a', network));
+
+  const count = await client.fetchPrefix('/store/space/docs');
+  assert.equal(count, 0);
+  assert.equal(await clientQu.get('/store/space/docs/decoy'), null);
+});
+
+test('fetch() applies write-ACL to the response too, even if the serving peer itself never enforced it', async () => {
+  const network = new TestNetwork();
+  // The relay serving this fetch() has NO AccessEngine at all - it will
+  // happily store+serve an ACL-violating write, modeling a misconfigured,
+  // stale, or outright compromised peer we are fetching from.
+  const relayQu = freshQu();
+  new SyncEngine(relayQu, new RelayTransport(network));
+
+  const ownerKp = await QuCrypto.generateKeypair();
+  const ownerPub = QuCrypto.toBase64Url(ownerKp.publicKey);
+  await relayQu.put('/store/space/acl/docs/protected', { writers: [ownerPub], readers: '*' });
+
+  // A validly-signed (by the ATTACKER, not the owner) QuBit, same forging
+  // technique as the existing "REGRESSION: ... UNAUTHORIZED signer" sync
+  // test above: sealed by a real QuStore, so its signature genuinely
+  // verifies - the only thing wrong with it is who signed it.
+  const attackerQu = freshQu();
+  const attackerKp = await QuCrypto.generateKeypair();
+  const forged = await attackerQu.put('/store/space/docs/protected', { title: 'hacked' }, signedPutOptions(attackerKp));
+  await relayQu.putSealed('/store/space/docs/protected', forged);
+
+  // The FETCHING client already knows about this protected resource (e.g.
+  // from earlier legitimate sync) - it must still enforce the ACL itself,
+  // not just trust whatever the serving peer hands back.
+  const clientQu = freshQu();
+  await clientQu.put('/store/space/acl/docs/protected', { writers: [ownerPub], readers: '*' });
+  const client = new SyncEngine(clientQu, new ClientTransport('client-a', network));
+
+  await assert.rejects(() => client.fetch('/store/space/docs/protected'));
+  assert.equal(await clientQu.get('/store/space/docs/protected'), null);
+});
+
+test('fetchPrefix() applies write-ACL per entry, excluding unauthorized entries from both persistence and the returned count', async () => {
+  const network = new TestNetwork();
+  const relayQu = freshQu(); // no AccessEngine - same "misbehaving peer" setup as the fetch() test above
+  new SyncEngine(relayQu, new RelayTransport(network));
+
+  const ownerKp = await QuCrypto.generateKeypair();
+  const ownerPub = QuCrypto.toBase64Url(ownerKp.publicKey);
+  await relayQu.put('/store/space/acl/docs/protected', { writers: [ownerPub], readers: '*' });
+
+  const attackerKp = await QuCrypto.generateKeypair();
+  await relayQu.put('/store/space/docs/protected', { title: 'hacked' }, signedPutOptions(attackerKp));
+  await relayQu.put('/store/space/docs/open', { title: 'anyone can write this' });
+
+  const clientQu = freshQu();
+  await clientQu.put('/store/space/acl/docs/protected', { writers: [ownerPub], readers: '*' });
+  const client = new SyncEngine(clientQu, new ClientTransport('client-a', network));
+
+  const count = await client.fetchPrefix('/store/space/docs');
+  assert.equal(count, 1);
+  assert.equal(await clientQu.get('/store/space/docs/protected'), null);
+  assert.equal((await clientQu.get('/store/space/docs/open')).val.title, 'anyone can write this');
+});
+
+test('fetchPrefix() return value counts only entries actually persisted - excludes ones skipped by the anti-regression ts-guard', async () => {
+  const network = new TestNetwork();
+  const relayQu = freshQu();
+  await relayQu.put('/store/space/docs/stale', { title: 'older (relay)' });
+  await relayQu.put('/store/space/docs/fresh', { title: 'new (relay)' });
+  new SyncEngine(relayQu, new RelayTransport(network));
+
+  const clientQu = freshQu();
+  await new Promise((resolve) => setTimeout(resolve, 5)); // ensure a strictly later ts than the relay's write above
+  await clientQu.put('/store/space/docs/stale', { title: 'newer (client)' });
+  const client = new SyncEngine(clientQu, new ClientTransport('client-a', network));
+
+  const count = await client.fetchPrefix('/store/space/docs');
+  assert.equal(count, 1); // only /fresh actually merged - /stale was skipped by the ts-guard
+  assert.equal((await clientQu.get('/store/space/docs/stale')).val.title, 'newer (client)'); // untouched
+  assert.equal((await clientQu.get('/store/space/docs/fresh')).val.title, 'new (relay)');
+});
+
 // ===== onPeerIdentified =============================================================
 
 test('onPeerIdentified fires with the verified actorPub of a signed synced write, never for an unsigned one', async () => {
