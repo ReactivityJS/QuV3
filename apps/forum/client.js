@@ -1234,6 +1234,36 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
   // eating the NEXT real scroll event instead - the geometry-comparison
   // approach here needs no such event-timing assumption).
   let lastKnownAnchorScrollTop = null;
+  // The scrollTop a RESIZE-TRIGGERED bottom correction (`scrollToBottom(_,
+  // true)` below) last set - narrower in scope than `lastKnownAnchorScrollTop`
+  // above ON PURPOSE: tracked ONLY for a `correcting: true` call, never the
+  // plain first-render "jump to bottom" or an explicit smooth catch-up (see
+  // `scrollToBottom()`'s own doc comment on why those two stay untracked).
+  //
+  // FIXES A CONFIRMED, REPRODUCIBLE RACE: an attachment's `<qu-asset>` can
+  // grow `messagesRoot`'s height across MULTIPLE steps as it decodes/lays
+  // out (e.g. a large image resolving its real dimensions well after an
+  // initial, smaller placeholder size), each one firing the ResizeObserver
+  // below. The native 'scroll' event for one of OUR OWN corrective
+  // `scrollTo()` calls is dispatched ASYNCHRONOUSLY (browsers coalesce it
+  // to "before the next paint") - if the content grows AGAIN before that
+  // event actually fires, the event's "am I at the bottom" check runs
+  // against the NOW-LARGER `scrollHeight` but the scrollTop from a moment
+  // ago, reads as "the user scrolled away", and permanently sets
+  // `stuckToBottom` to false - after which NO further correction ever runs
+  // again (`scrollToBottom(_, true)`'s own guard bails on `!stuckToBottom`),
+  // stranding the view mid-load with the newest/active post pushed out of
+  // sight. Verified live with a real (non-trivial, network-throttled) image
+  // attachment - `scrollTop` got stuck at an early, now-stale "bottom"
+  // while `scrollHeight` kept growing underneath it. The messagesScroll
+  // 'scroll' listener below SKIPS recomputing `stuckToBottom` entirely for
+  // an event whose scrollTop still matches this value - unlike the anchor
+  // case above (where a match only decides whether to keep the anchor;
+  // `stuckToBottom` still recomputes normally either way, since a
+  // permalinked target is virtually never actually at the bottom) - so the
+  // next (guaranteed, since content is still resizing) ResizeObserver
+  // firing keeps correcting until it actually settles.
+  let lastKnownBottomScrollTop = null;
   // Whether a post arrived while NOT stuck to the bottom - purely cosmetic
   // (see syncScrollToBottomButton()'s own doc comment), never what decides
   // the button's visibility.
@@ -1252,6 +1282,11 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     if (correcting && !stuckToBottom) return;
     if (messagesScroll.scrollTo) messagesScroll.scrollTo({ top: messagesScroll.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
     else messagesScroll.scrollTop = messagesScroll.scrollHeight; // jsdom (this repo's test DOM) has no scrollTo() at all
+    // Only a RESIZE-triggered correction is tracked - see
+    // `lastKnownBottomScrollTop`'s own doc comment for exactly why the
+    // narrower scope (a SMOOTH scroll doesn't reach its target
+    // synchronously either, so it couldn't be tracked accurately anyway).
+    if (correcting) lastKnownBottomScrollTop = messagesScroll.scrollTop;
   }
   /**
    * Re-aligns the viewport back on `stuckToMessageId`'s own element (if
@@ -1314,12 +1349,19 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     stuckToBottom = true;
     stuckToMessageId = null;
     lastKnownAnchorScrollTop = null;
+    lastKnownBottomScrollTop = null; // scrollToBottom(true) below is smooth - never tracked, see that function's own doc comment
     hasUnseenMessage = false;
     syncScrollToBottomButton();
     scrollToBottom(true);
     releasePermalinkAnchor();
   });
   messagesScroll.addEventListener('scroll', () => {
+    // A resize-correction echo (see `lastKnownBottomScrollTop`'s own doc
+    // comment) - skip recomputing ANYTHING here, unlike the anchor-echo
+    // check below (which only decides whether to release the anchor;
+    // `stuckToBottom` still recomputes normally either way).
+    if (lastKnownBottomScrollTop !== null && Math.abs(messagesScroll.scrollTop - lastKnownBottomScrollTop) <= 1) return;
+    lastKnownBottomScrollTop = null;
     // Releases `stuckToMessageId` only when THIS scroll moved the viewport
     // away from where our own last correction put it - see that variable's
     // own doc comment for why a geometry comparison, not an event-timing

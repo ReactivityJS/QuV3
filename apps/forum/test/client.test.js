@@ -963,6 +963,68 @@ test('clicking the persistent scroll-to-bottom button scrolls to the bottom and 
   }
 });
 
+test('a resize-triggered "stay at bottom" correction is never falsely undone by its own scroll event catching up mid-content-growth (regression: an attachment growing messagesRoot across MULTIPLE steps - e.g. a large image resolving its real size well after an initial placeholder - could race the native \'scroll\' event for our OWN correction, read as "the user scrolled away", and permanently strand the newest message off-screen with no further correction ever attempted)', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'first' });
+
+  // jsdom (this repo's test DOM) has no ResizeObserver at all - the real
+  // one only exists in a real browser, so the client code guards its
+  // construction with `typeof ResizeObserver !== 'undefined'`. A minimal
+  // fake, installed just for this test, lets it manually drive the exact
+  // callback a real browser would invoke on each layout step, without
+  // needing an actual browser.
+  let roInstance = null;
+  class FakeResizeObserver {
+    constructor(cb) { this.cb = cb; roInstance = this; }
+    observe() {}
+    disconnect() {}
+  }
+  const originalRO = globalThis.ResizeObserver;
+  globalThis.ResizeObserver = FakeResizeObserver;
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-message-text')?.textContent.includes('first'));
+    assert.ok(roInstance, 'expected the client to have constructed a ResizeObserver');
+    const scroll = container.querySelector('.qu-forum-messages-scroll');
+    // Emulates a real browser's own clamping - jsdom's plain scrollTop
+    // property doesn't clamp on its own.
+    scroll.scrollTo = (opts) => { scroll.scrollTop = Math.max(0, Math.min(opts.top, scroll.scrollHeight - scroll.clientHeight)); };
+    Object.defineProperty(scroll, 'clientHeight', { value: 519, configurable: true });
+
+    // STEP 1: an attachment is still mid-decode - content is 548px tall.
+    // The ResizeObserver fires, correcting to what's CURRENTLY the bottom.
+    Object.defineProperty(scroll, 'scrollHeight', { value: 548, configurable: true });
+    roInstance.cb();
+    assert.equal(scroll.scrollTop, 29); // clamped: 548 - 519
+
+    // STEP 2: content grows FURTHER (868px) before the native 'scroll'
+    // event for step 1's own correction ever gets a chance to fire - the
+    // exact async-echo race this fix closes. scrollTop is untouched (still
+    // 29, a stale echo of step 1), so this dispatched event looks
+    // identical to what a delayed native event for step 1 would look like.
+    Object.defineProperty(scroll, 'scrollHeight', { value: 868, configurable: true });
+    scroll.dispatchEvent(new window.Event('scroll'));
+
+    assert.equal(
+      container.querySelector('.qu-forum-scroll-bottom-btn').hidden, true,
+      'must still be considered "at the bottom" - the button must not appear just because content grew underneath a not-yet-corrected view'
+    );
+
+    // STEP 3: the NEXT ResizeObserver firing (guaranteed, since content is
+    // still growing) picks up exactly where step 1 left off and finishes
+    // the job.
+    roInstance.cb();
+    assert.equal(scroll.scrollTop, 349); // clamped: 868 - 519
+    assert.equal(container.querySelector('.qu-forum-scroll-bottom-btn').hidden, true);
+  } finally {
+    stop();
+    globalThis.ResizeObserver = originalRO;
+  }
+});
+
 test('sending a post always scrolls the view to the bottom, even if the user had scrolled away from it (stuckToBottom released)', async () => {
   const a = await freshEnv('Ada');
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
