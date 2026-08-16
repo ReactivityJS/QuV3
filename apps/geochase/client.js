@@ -18,9 +18,9 @@
  *     here as-is, just pointed at the game's own thread id for signaling
  *     (safe - see `setupLiveMesh()`'s own doc comment) instead of the
  *     pilot's hardcoded 'lobby'.
- *   - `src/geometry.js`/`src/map-canvas.js`/`src/map-embed.js` - pure math
- *     + a canvas renderer (`mapMode: 'plane'`) + an OpenStreetMap iframe
- *     embed (`mapMode: 'osm'`).
+ *   - `src/geometry.js`/`src/map-canvas.js`/`src/map-leaflet.js` - pure math
+ *     + an abstract canvas renderer (`mapMode: 'plane'`) + a real
+ *     interactive Leaflet/OpenStreetMap-tiles map (`mapMode: 'osm'`).
  *
  * ROUTES: `#/geochase` (my games - chased or invited-as-chaser), `#/geochase/new`
  * (creates a fresh game, redirects straight into it - no form, see
@@ -30,7 +30,7 @@
 import { createI18n } from '@qu/i18n';
 import { watch } from '@qu/reactive';
 import { paths, matchesActorQuery, formatActorLabel } from '@qu/services';
-import { injectStyle, ensureTheme, renderSubpage, mountAppHeaderAction, renderNavPointsMenu, mountActorPicker } from '@qu/ui';
+import { injectStyle, ensureTheme, renderSubpage, mountAppHeaderAction, renderNavPointsMenu, mountActorPicker, mountWakeLock } from '@qu/ui';
 import { copyToClipboard } from '@qu/thread-ui';
 import { createGeochaseMesh } from './src/mesh.js';
 import { startLocationSharing } from './src/location.js';
@@ -39,7 +39,7 @@ import {
 } from './src/game-service.js';
 import { possibleRadiusMeters, haversineMeters, bearingDegrees } from './src/geometry.js';
 import { renderPlaneMap } from './src/map-canvas.js';
-import { osmEmbedSrc } from './src/map-embed.js';
+import { mountLeafletMap } from './src/map-leaflet.js';
 
 const DICT = {
   en: {
@@ -52,7 +52,7 @@ const DICT = {
     invalidLink: 'This game link is invalid, or the game isn’t reachable right now.',
     noAccessTitle: 'No access', noAccessBody: 'You don’t have access to this game.',
     copyLink: 'Copy link', linkCopied: 'Link copied',
-    settingsHeading: 'Settings', chasedInterval: 'Chased update interval (s)', chaserInterval: 'Chaser update interval (s)',
+    settingsHeading: 'Settings', chasedInterval: 'Chased update interval (min)', chaserInterval: 'Chaser update interval (min)',
     mapMode: 'Map style', mapModePlane: 'Abstract (plane)', mapModeOsm: 'Abstract + OpenStreetMap',
     showRadius: 'Show the chased player’s possible-radius circle',
     saveSettings: 'Save settings',
@@ -77,7 +77,7 @@ const DICT = {
     invalidLink: 'Dieser Spiellink ist ungültig oder das Spiel ist gerade nicht erreichbar.',
     noAccessTitle: 'Kein Zugriff', noAccessBody: 'Du hast keinen Zugriff auf dieses Spiel.',
     copyLink: 'Link kopieren', linkCopied: 'Link kopiert',
-    settingsHeading: 'Einstellungen', chasedInterval: 'Update-Intervall Gejagter (s)', chaserInterval: 'Update-Intervall Fänger (s)',
+    settingsHeading: 'Einstellungen', chasedInterval: 'Update-Intervall Gejagter (min)', chaserInterval: 'Update-Intervall Fänger (min)',
     mapMode: 'Kartenstil', mapModePlane: 'Abstrakt (Ebene)', mapModeOsm: 'Abstrakt + OpenStreetMap',
     showRadius: 'Möglichen Radius des Gejagten anzeigen',
     saveSettings: 'Einstellungen speichern',
@@ -113,7 +113,7 @@ const STYLE = `
   .qu-geochase-form input, .qu-geochase-form select { padding: 0.45rem; font: inherit; box-sizing: border-box; border-radius: var(--qu-radius-sm, 0.3rem); border: 1px solid var(--qu-color-border, #8884); }
   .qu-geochase-form-checkbox { flex-direction: row !important; align-items: center; gap: 0.5rem !important; }
   .qu-geochase-map-canvas { width: 100%; max-width: 32rem; height: 20rem; border-radius: var(--qu-radius-md, 0.4rem); border: 1px solid var(--qu-color-border, #8884); display: block; }
-  .qu-geochase-osm-frame { width: 100%; max-width: 32rem; height: 16rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); margin-bottom: 0.6rem; }
+  .qu-geochase-leaflet-map { width: 100%; max-width: 32rem; height: 20rem; border-radius: var(--qu-radius-md, 0.4rem); border: 1px solid var(--qu-color-border, #8884); margin-bottom: 0.6rem; }
   .qu-geochase-players { list-style: none; margin: 0.6rem 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
   .qu-geochase-players li { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.6rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-sm, 0.3rem); }
   .qu-geochase-player-name { flex: 1; }
@@ -169,6 +169,9 @@ export function mount(container, ctx) {
   let stopLocation = null;
   let stopWatchPlayers = null;
   let meshStarted = false; // guards setupLiveMesh() against re-running on every meta-triggered re-render
+  let releaseWakeLock = null; // see setupLiveMesh()'s own doc comment - held for as long as a game is actively being tracked
+  let leafletMap = null; // mapMode: 'osm' only - see updateLiveView()'s own doc comment
+  let leafletMapContainer = null;
 
   function clearWatches() {
     for (const u of unwatches) u();
@@ -356,16 +359,21 @@ export function mount(container, ctx) {
           }
 
           if (meta.settings.mapMode === 'osm') {
-            const iframe = document.createElement('iframe');
-            iframe.className = 'qu-geochase-osm-frame';
-            iframe.src = osmEmbedSrc([], null); // filled in by updateLiveView() once positions are known
-            page.appendChild(iframe);
+            // A real Leaflet map, mounted/updated by setupLiveMesh()'s own
+            // updateLiveView() the moment at least one position is known -
+            // see that function's own doc comment for why the map INSTANCE
+            // (not just its markers) is recreated whenever this container
+            // itself is (a meta-triggered renderGameView() rebuild).
+            const mapContainer = document.createElement('div');
+            mapContainer.className = 'qu-geochase-leaflet-map';
+            page.appendChild(mapContainer);
+          } else {
+            const canvas = document.createElement('canvas');
+            canvas.className = 'qu-geochase-map-canvas';
+            canvas.width = 640;
+            canvas.height = 400;
+            page.appendChild(canvas);
           }
-          const canvas = document.createElement('canvas');
-          canvas.className = 'qu-geochase-map-canvas';
-          canvas.width = 640;
-          canvas.height = 400;
-          page.appendChild(canvas);
 
           const playersList = document.createElement('ul');
           playersList.className = 'qu-geochase-players';
@@ -403,8 +411,17 @@ export function mount(container, ctx) {
    * status watch below). `updateLiveView()` queries the CURRENT map
    * canvas/player-list DOM fresh on every position tick instead of holding
    * a stale reference across `renderGameView()`'s own DOM rebuilds.
+   *
+   * Also where the Wake Lock (`@qu/ui`'s `mountWakeLock()`) gets acquired -
+   * a chase is worthless if the phone's screen locks mid-run (geolocation
+   * watches and the WebRTC mesh both keep running in the background for a
+   * while on most platforms, but the live map/radius circle a chaser
+   * actually needs to LOOK AT obviously can't render on a locked screen).
+   * Held for as long as this mount's own live view is - released in the
+   * mount's own teardown (`return () => {...}` below), never per-render.
    */
   async function setupLiveMesh(gameId, meta, isChased) {
+    releaseWakeLock = mountWakeLock();
     const readyMesh = await createGeochaseMesh({
       qu, identity, services, spaceId: SPACE_ID, threadId: gameThreadId(gameId), gameId, iceServers,
     });
@@ -423,9 +440,9 @@ export function mount(container, ctx) {
     function updateLiveView(players) {
       if (stopped) return;
       const canvas = container.querySelector('.qu-geochase-map-canvas');
+      const leafletContainer = container.querySelector('.qu-geochase-leaflet-map');
       const playersList = container.querySelector('.qu-geochase-players');
-      const osmFrame = container.querySelector('.qu-geochase-osm-frame');
-      if (!canvas && !playersList) return; // navigated away from the live view
+      if (!canvas && !leafletContainer && !playersList) return; // navigated away from the live view
 
       const chasedPlayer = players.find((p) => p.actorPub === meta.chasedPub);
       const radiusMeters = meta.settings.showRadius && chasedPlayer
@@ -435,15 +452,37 @@ export function mount(container, ctx) {
             minSpeedMps: meta.settings.assumedMinSpeedMps,
           })
         : 0;
+      const labelFor = (pub) => (pub === myPub ? t('you') : pub.slice(0, 6));
 
       if (canvas) {
-        renderPlaneMap(canvas, {
-          players, chasedPub: meta.chasedPub, selfPub: myPub, radiusMeters,
-          labelFor: (pub) => (pub === myPub ? t('you') : pub.slice(0, 6)),
-        });
+        renderPlaneMap(canvas, { players, chasedPub: meta.chasedPub, selfPub: myPub, radiusMeters, labelFor });
       }
-      if (osmFrame && players.length) {
-        osmFrame.src = osmEmbedSrc(players.map((p) => p.position), chasedPlayer?.position ?? null);
+      if (leafletContainer) {
+        // renderGameView() rebuilding the page (a meta change) replaces this
+        // container element - detected here by identity, not just presence,
+        // so a stale Leaflet instance bound to a now-detached container gets
+        // torn down and a fresh one mounted, rather than silently doing
+        // nothing (or throwing) against DOM that's no longer on screen.
+        if (leafletMapContainer !== leafletContainer) {
+          leafletMap?.destroy();
+          leafletMapContainer = leafletContainer;
+          try {
+            leafletMap = mountLeafletMap(leafletContainer);
+          } catch (err) {
+            console.error('[geochase] mountLeafletMap() failed:', err);
+            leafletMap = null;
+          }
+        }
+        try {
+          leafletMap?.update({ players, chasedPub: meta.chasedPub, selfPub: myPub, radiusMeters, labelFor });
+        } catch (err) {
+          console.error('[geochase] Leaflet map update() failed:', err);
+        }
+      } else if (leafletMap) {
+        // Switched to 'plane' mode, or navigated away - nothing left to update.
+        leafletMap.destroy();
+        leafletMap = null;
+        leafletMapContainer = null;
       }
 
       if (playersList) {
@@ -491,17 +530,17 @@ export function mount(container, ctx) {
 
     const chasedIntervalInput = document.createElement('input');
     chasedIntervalInput.type = 'number';
-    chasedIntervalInput.min = '1';
-    chasedIntervalInput.step = '1';
-    chasedIntervalInput.value = String(meta.settings.chasedIntervalMs / 1000);
+    chasedIntervalInput.min = '0.5';
+    chasedIntervalInput.step = '0.5';
+    chasedIntervalInput.value = String(meta.settings.chasedIntervalMs / 60_000);
     const chasedIntervalLabel = document.createElement('label');
     chasedIntervalLabel.append(t('chasedInterval'), chasedIntervalInput);
 
     const chaserIntervalInput = document.createElement('input');
     chaserIntervalInput.type = 'number';
-    chaserIntervalInput.min = '1';
-    chaserIntervalInput.step = '1';
-    chaserIntervalInput.value = String(meta.settings.chaserIntervalMs / 1000);
+    chaserIntervalInput.min = '0.5';
+    chaserIntervalInput.step = '0.5';
+    chaserIntervalInput.value = String(meta.settings.chaserIntervalMs / 60_000);
     const chaserIntervalLabel = document.createElement('label');
     chaserIntervalLabel.append(t('chaserInterval'), chaserIntervalInput);
 
@@ -534,8 +573,8 @@ export function mount(container, ctx) {
       try {
         await updateGame(qu, identity, services, SPACE_ID, gameId, {
           settings: {
-            chasedIntervalMs: Math.max(1, Number(chasedIntervalInput.value) || 1) * 1000,
-            chaserIntervalMs: Math.max(1, Number(chaserIntervalInput.value) || 1) * 1000,
+            chasedIntervalMs: Math.max(0.5, Number(chasedIntervalInput.value) || 0.5) * 60_000,
+            chaserIntervalMs: Math.max(0.5, Number(chaserIntervalInput.value) || 0.5) * 60_000,
             mapMode: mapModeSelect.value,
             showRadius: showRadiusInput.checked,
           },
@@ -606,5 +645,7 @@ export function mount(container, ctx) {
     stopLocation?.();
     stopWatchPlayers?.();
     mesh?.close();
+    releaseWakeLock?.();
+    leafletMap?.destroy();
   };
 }

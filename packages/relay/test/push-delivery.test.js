@@ -546,6 +546,75 @@ test('createManifestNotificationResolver(): a pushAction\'s own urlTemplate/acti
   ]);
 });
 
+const GEOCHASE_MANIFEST = {
+  name: 'geochase',
+  label: 'Geo Chase',
+  spaceId: 'geochase-space-uuid',
+  // type: 'mention', not 'create' - see notifyChaserInvite()'s own doc
+  // comment: a public thread only notifies EXPLICIT mentions (never every
+  // reader, unlike a private thread - see deliverThreadMessage()'s own
+  // public/private branch), so the invited chaser's pub rides in `mentions`,
+  // making every geochase invite delivery a "mention" candidate mechanically.
+  pushActions: [{ id: 'geochase-invite', label: 'Geo Chase game invitations', type: 'mention', urlTemplate: '#/geochase/{gameId}' }],
+};
+
+test('createManifestNotificationResolver(): a non-{pub} placeholder is substituted from context.extra (Geo Chase\'s own {gameId})', () => {
+  const resolve = createManifestNotificationResolver(fakeLoader([GEOCHASE_MANIFEST]));
+  // mention: true - see GEOCHASE_MANIFEST's own doc comment on why a
+  // geochase invite is mechanically always a "mention" candidate.
+  const result = resolve('geochase-space-uuid', 'invite-someone', { authorPub: 'ChasedPub', mention: true, mentions: [], extra: { gameId: 'game-42' } });
+
+  assert.equal(result.url, '#/geochase/game-42');
+});
+
+test('createManifestNotificationResolver(): a {field} placeholder with no matching extra field is left LITERAL, not silently blanked', () => {
+  const resolve = createManifestNotificationResolver(fakeLoader([GEOCHASE_MANIFEST]));
+  const result = resolve('geochase-space-uuid', 'invite-someone', { authorPub: 'ChasedPub', mention: true, mentions: [], extra: {} });
+
+  assert.equal(result.url, '#/geochase/{gameId}');
+});
+
+test('INTEGRATION: deliverThreadMessage() passes an UNENCRYPTED message\'s own plain fields through as context.extra, letting the manifest urlTemplate reference them', async () => {
+  const env = await freshEnv();
+  const recipient = await freshRecipient(env);
+  const resolveNotification = createManifestNotificationResolver(fakeLoader([GEOCHASE_MANIFEST]));
+  const delivery = pushDeliveryFor(env, recipient, { resolveNotification });
+  // A deliberately PUBLIC thread (readers: '*') - same as
+  // apps/geochase/src/game-service.js's own notifyChaserInvite() - so the
+  // message body lands in storage unencrypted and is genuinely readable
+  // here. The chaser's own pub in `mentions` is what makes them a
+  // notification candidate at all on a public thread (see
+  // deliverThreadMessage()'s own public-thread branch).
+  await env.messages.createThread('geochase-space-uuid', `invite-${recipient.pub}`, { writers: '*', readers: '*' });
+
+  await postAndDeliver(env, delivery, 'geochase-space-uuid', `invite-${recipient.pub}`, { body: 'geochase-invite', extra: { gameId: 'game-99', mentions: [recipient.pub] } });
+
+  const [notification] = await readOwnNotifications(env, recipient);
+  assert.equal(notification.url, '#/geochase/game-99');
+});
+
+test('INTEGRATION: deliverThreadMessage() never exposes an ENCRYPTED message\'s own fields as context.extra - the resolver can\'t even see the mentions needed to pick the "mention" pushAction, so it falls all the way back to the generic notice', async () => {
+  const env = await freshEnv();
+  const recipient = await freshRecipient(env);
+  const resolveNotification = createManifestNotificationResolver(fakeLoader([GEOCHASE_MANIFEST]));
+  const delivery = pushDeliveryFor(env, recipient, { resolveNotification });
+  // A PRIVATE (reader-restricted) thread - the message body IS encrypted,
+  // including its own `mentions` field, which is what a public thread's
+  // notifyChaserInvite() relies on to become a "mention" candidate at all
+  // (see GEOCHASE_MANIFEST's own doc comment) - encrypted here, so this
+  // candidate resolves as a plain (mention: false) reader instead, for
+  // which GEOCHASE_MANIFEST declares no pushAction, falling through to
+  // #genericNotification()'s own flat `#/<spaceId>` - proof the private
+  // gameId never influenced the resolved URL at all, not even as a
+  // stray literal placeholder.
+  await env.messages.createThread('geochase-space-uuid', `invite-${recipient.pub}`, { writers: '*', readers: [recipient.pub] });
+
+  await postAndDeliver(env, delivery, 'geochase-space-uuid', `invite-${recipient.pub}`, { body: 'geochase-invite', extra: { gameId: 'game-99' } });
+
+  const [notification] = await readOwnNotifications(env, recipient);
+  assert.equal(notification.url, '#/geochase-space-uuid'); // generic fallback - never the game-specific URL, never even the raw {gameId} placeholder
+});
+
 test('createManifestNotificationResolver(): a pushAction with no urlTemplate/actions/bypassPresence (every existing app) omits those keys entirely, not undefined-valued ones', () => {
   const resolve = createManifestNotificationResolver(fakeLoader([FORUM_MANIFEST]));
   const result = resolve('forum-space-uuid', 'general', { authorPub: 'Alice', mention: true, mentions: [] });

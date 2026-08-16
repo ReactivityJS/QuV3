@@ -18,5 +18,8 @@
   "devDependencies": {
     "esbuild": "^0.25.0"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "leaflet": "^1.9.4"
+  }
 }

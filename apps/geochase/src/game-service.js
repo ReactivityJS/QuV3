@@ -28,19 +28,34 @@ import { paths } from '@qu/services';
  *     shaped `members` array as a side effect of the real ACL (`readers`)
  *     update they also have to do.
  *
- *   - Invites are the SAME `services.messages.notify()` "personal mailbox"
- *     push every other app's own invite flow uses (ToDo/Calendar) -
+ *   - Invites use the SAME `invite-<pub>` "personal mailbox" thread
+ *     convention every other app's own invite flow uses (ToDo/Calendar) -
  *     `discoverPendingInvites()`'s `resourceKey: 'gameId'` reads it back off
- *     that notification's own `extra`.
+ *     that notification's own `extra` - but written DIRECTLY (see
+ *     `notifyChaserInvite()` below) rather than via `services.messages.
+ *     notify()`, which defaults to an ENCRYPTED, reader-restricted mailbox.
+ *     `@qu/relay`'s push-delivery resolver can only ever read a message's
+ *     own fields (to fill a `urlTemplate` placeholder like `{gameId}` -
+ *     see `packages/relay/src/push-delivery.js`'s own doc comment) when
+ *     they were never encrypted in the first place - an invite notice
+ *     ("you were invited to a Geo Chase game") isn't sensitive enough to
+ *     be worth losing a real deep link over, unlike this game's own
+ *     position/settings data (still fully ACL-protected, see above).
  */
 
 const FLAG_TYPE = 'geochase';
 const ENTITY_KIND = 'game';
 
 export const DEFAULT_SETTINGS = {
-  chasedIntervalMs: 5_000, // how often the CHASED device pushes its own position
-  chaserIntervalMs: 3_000, // how often each CHASER device pushes its own position
-  mapMode: 'plane', // 'plane' (abstract canvas) | 'osm' (+ an OpenStreetMap embed)
+  // The chased player updates LESS often than chasers by default - a longer
+  // interval means a real, live-battery-cost trade-off in their favor (see
+  // client.js's own Wake Lock addition - it's already their screen staying
+  // on that costs the most), while chasers - actively hunting - want a
+  // tighter fix on each other. 3min/5min per this app's own explicit design
+  // discussion, not the original pilot's placeholder few-second values.
+  chasedIntervalMs: 3 * 60_000, // how often the CHASED device pushes its own position
+  chaserIntervalMs: 5 * 60_000, // how often each CHASER device pushes its own position
+  mapMode: 'plane', // 'plane' (abstract canvas) | 'osm' (a real interactive Leaflet+OpenStreetMap-tiles map)
   showRadius: true, // the chased player's speed-based "could be anywhere in here" circle
   assumedMinSpeedMps: 1.2, // see geometry.js's own possibleRadiusMeters() doc comment
 };
@@ -77,11 +92,37 @@ export async function readGame(services, spaceId, gameId) {
 }
 
 /**
+ * Writes the chaser's own invite notification into their `invite-<pub>`
+ * mailbox (same thread id/convention `services.messages.notify()` uses -
+ * see this file's own top doc comment for why this one is hand-rolled
+ * rather than calling that shared helper directly) - DELIBERATELY
+ * UNENCRYPTED (`readers: '*'`), the only way `gameId` can ever reach
+ * `@qu/relay`'s push-delivery resolver to fill `apps/geochase/manifest.
+ * quapp`'s own `geochase-invite` pushAction's `urlTemplate:
+ * '#/geochase/{gameId}'` - a private/encrypted thread's content is
+ * genuinely opaque to the relay, by design (see push-delivery.js's own doc
+ * comment), so an invite through `notify()`'s default encrypted mailbox
+ * could only ever deep-link to the generic `#/geochase` app root, not the
+ * specific running game. `mentions: [chaserPub]` is what makes this a
+ * notification candidate on a PUBLIC thread at all (see
+ * `PushDeliveryService.deliverThreadMessage()`'s own public-thread branch -
+ * a public thread only notifies explicit mentions, never blanket "every
+ * reader" the way a private one does, since there IS no restricted reader
+ * list to enumerate).
+ */
+async function notifyChaserInvite(spaceId, services, chaserPub, gameId, chasedPub) {
+  const threadId = `invite-${chaserPub}`;
+  await services.messages.createThread(spaceId, threadId, { writers: '*', readers: '*', replyMode: 'flat', formatting: [] });
+  await services.messages.postMessage(spaceId, threadId, { body: 'geochase-invite', extra: { gameId, chasedPub, mentions: [chaserPub] } });
+}
+
+/**
  * Invites `chaserPub` - grows BOTH `members` (role introspection, see this
  * file's own top doc comment) and `readers` (the actual encryption ACL) in
- * one write, then pushes a personal-mailbox notification so their own
- * `discoverInvites()` (and, per the existing pushActions convention, a real
- * push notification) picks it up even before they open Geo Chase at all.
+ * one write, then pushes a personal-mailbox notification (see
+ * `notifyChaserInvite()` above) so their own `discoverInvites()` (and, per
+ * the existing pushActions convention, a real push notification straight to
+ * this specific game) picks it up even before they open Geo Chase at all.
  * CHASED-ONLY in practice - `writers: [chasedPub]` means AccessEngine
  * rejects this write outright from anyone else, this function has no
  * additional guard of its own.
@@ -101,7 +142,7 @@ export async function inviteChaser(qu, identity, services, spaceId, gameId, chas
     readers: [...config.readers, chaserPub],
   };
   await writeThreadMeta(qu, identity, services, spaceId, threadId, updated);
-  await services.messages.notify(spaceId, chaserPub, 'geochase-invite', { gameId, chasedPub: config.chasedPub });
+  await notifyChaserInvite(spaceId, services, chaserPub, gameId, config.chasedPub);
   return updated;
 }
 

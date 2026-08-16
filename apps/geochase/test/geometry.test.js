@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { haversineMeters, bearingDegrees, possibleRadiusMeters, projectLocal, fitScaleMetersPerPixel, boundingBox } from '../src/geometry.js';
+import { haversineMeters, bearingDegrees, possibleRadiusMeters, projectLocal, fitScaleMetersPerPixel } from '../src/geometry.js';
 
 test('haversineMeters(): a known 1-degree-of-latitude span is ~111.2km', async () => {
   const d = haversineMeters({ lat: 0, lng: 0 }, { lat: 1, lng: 0 });
@@ -71,17 +71,4 @@ test('fitScaleMetersPerPixel(): scales so the furthest offset fits within the ca
 test('fitScaleMetersPerPixel(): a single stationary point (all ~0) still gets a sane, non-infinite scale via minSpanMeters', async () => {
   const scale = fitScaleMetersPerPixel([{ xMeters: 0, yMeters: 0 }], 200, { minSpanMeters: 40 });
   assert.equal(scale, 40 / 200);
-});
-
-test('boundingBox(): pads a single point out to a non-degenerate box', async () => {
-  const bbox = boundingBox([{ lat: 52.5, lng: 13.4 }], { paddingDeg: 0.01 });
-  assert.equal(bbox.minLat, 52.49);
-  assert.equal(bbox.maxLat, 52.51);
-  assert.equal(bbox.minLng, 13.39);
-  assert.equal(bbox.maxLng, 13.41);
-});
-
-test('boundingBox(): covers every point exactly at the padded edges for multiple points', async () => {
-  const bbox = boundingBox([{ lat: 10, lng: 10 }, { lat: 20, lng: 30 }], { paddingDeg: 0 });
-  assert.deepEqual(bbox, { minLat: 10, minLng: 10, maxLat: 20, maxLng: 30 });
 });
