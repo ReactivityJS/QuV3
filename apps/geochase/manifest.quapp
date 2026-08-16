@@ -10,7 +10,7 @@
   "spaceId": "65a3739c-e0a5-443b-a5ef-4005c8412659",
   "requires": [],
   "pushActions": [
-    { "id": "geochase-invite", "label": "Geo Chase game invitations", "type": "create" }
+    { "id": "geochase-invite", "label": "Geo Chase game invitations", "type": "mention", "urlTemplate": "#/geochase/{gameId}" }
   ],
   "contributes": [
     { "point": "shell.headerNavPoints", "export": "renderHeaderNavPoints", "kind": "ui", "order": 10 }

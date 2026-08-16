@@ -103,23 +103,3 @@ export function fitScaleMetersPerPixel(offsets, canvasPx, { margin = 1.3, minSpa
   const spanMeters = Math.max(maxAbs * 2 * margin, minSpanMeters);
   return spanMeters / canvasPx;
 }
-
-/**
- * A padded lat/lng bounding box around every given point - the `mapMode:
- * 'osm'` embed's own `bbox` parameter (see map-embed.js). A single point
- * gets a fixed minimum span (same reasoning as `fitScaleMetersPerPixel()`'s
- * `minSpanMeters`) rather than a degenerate zero-size box.
- * @param {Array<{lat: number, lng: number}>} points
- * @param {{paddingDeg?: number}} [options]
- * @returns {{minLat: number, minLng: number, maxLat: number, maxLng: number}}
- */
-export function boundingBox(points, { paddingDeg = 0.003 } = {}) {
-  let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
-  for (const { lat, lng } of points) {
-    minLat = Math.min(minLat, lat);
-    maxLat = Math.max(maxLat, lat);
-    minLng = Math.min(minLng, lng);
-    maxLng = Math.max(maxLng, lng);
-  }
-  return { minLat: minLat - paddingDeg, minLng: minLng - paddingDeg, maxLat: maxLat + paddingDeg, maxLng: maxLng + paddingDeg };
-}

@@ -94,13 +94,21 @@ test('inviteChaser(): grows members+readers and is idempotent for an already-inv
   assert.equal(updated.members[1].role, 'chaser');
   assert.deepEqual(updated.readers, [myPub, chaserPub]);
 
-  // The invite notification itself lands in the CHASER's own mailbox thread
-  // (readers: [chaserPub] only - see THREAD_PRESETS.mail()) - its content
-  // isn't decryptable from the inviter's own side, so (same as apps/todo's
-  // own inviteMember test) this only asserts the mailbox thread's own
-  // (unencrypted) config, not the message body.
+  // The invite notification lands in the CHASER's own mailbox thread, but
+  // DELIBERATELY UNENCRYPTED (readers: '*', not services.messages.notify()'s
+  // own encrypted default - see notifyChaserInvite()'s own doc comment on
+  // why) - readable straight from the inviter's own side, unlike apps/todo's
+  // encrypted equivalent, and carrying the real gameId + a mentions entry
+  // for the chaser (what makes @qu/relay's push-delivery notice them at all
+  // on a public thread).
   const inviteConfig = await services.messages.getConfig(SPACE_ID, `invite-${chaserPub}`);
-  assert.deepEqual(inviteConfig.readers, [chaserPub]);
+  assert.equal(inviteConfig.readers, '*');
+  const { messages: inviteMessages } = await services.messages.listMessages(SPACE_ID, `invite-${chaserPub}`);
+  assert.equal(inviteMessages.length, 1);
+  assert.equal(inviteMessages[0].body, 'geochase-invite');
+  assert.equal(inviteMessages[0].gameId, 'g1');
+  assert.equal(inviteMessages[0].chasedPub, myPub);
+  assert.deepEqual(inviteMessages[0].mentions, [chaserPub]);
 
   // Idempotent - inviting the same chaser again is a no-op, not a duplicate member.
   const again = await inviteChaser(qu, identity, services, SPACE_ID, 'g1', chaserPub);
