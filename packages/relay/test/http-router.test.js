@@ -12,7 +12,7 @@ function fakeLoader(manifests = []) {
   return { listManifests: () => manifests.map((manifest) => ({ manifest, originUrl: null })) };
 }
 
-async function freshEnv({ manifests = [], serveShell = false, shellDir = null, getLinkPreviewImpl } = {}) {
+async function freshEnv({ manifests = [], serveShell = false, shellDir = null, getLinkPreviewImpl, iceServers } = {}) {
   const appsDir = await mkdtemp(join(tmpdir(), 'qu-http-router-apps-'));
   const qu = new QuStore();
   qu.mount('store', new MemoryStoreAdapter());
@@ -26,7 +26,7 @@ async function freshEnv({ manifests = [], serveShell = false, shellDir = null, g
     handleDataImport(req, res) { this.dataImportCalls++; res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}'); },
   };
   const loader = fakeLoader(manifests);
-  const router = new HttpRouter(qu, adminHttp, loader, { adminPubs: ['admin-pub-1'], appsDir, serveShell, shellDir, state, getLinkPreviewImpl });
+  const router = new HttpRouter(qu, adminHttp, loader, { adminPubs: ['admin-pub-1'], appsDir, serveShell, shellDir, state, iceServers, getLinkPreviewImpl });
 
   const httpServer = createServer((req, res) => router.handle(req, res));
   await new Promise((resolve) => httpServer.listen(0, resolve));
@@ -83,6 +83,27 @@ test('GET /config.json reflects a saved settings change', async () => {
     const res = await fetch(`http://localhost:${env.port}/config.json`);
     const body = await res.json();
     assert.equal(body.settings.defaultLocale, 'de');
+  } finally {
+    await env.teardown();
+  }
+});
+
+test('GET /config.json defaults iceServers to an empty array when the operator configured none', async () => {
+  const env = await freshEnv();
+  try {
+    const res = await fetch(`http://localhost:${env.port}/config.json`);
+    assert.deepEqual((await res.json()).iceServers, []);
+  } finally {
+    await env.teardown();
+  }
+});
+
+test('GET /config.json reflects an operator-configured iceServers list', async () => {
+  const iceServers = [{ urls: 'turn:turn.example.com:3478', username: 'u', credential: 'p' }];
+  const env = await freshEnv({ iceServers });
+  try {
+    const res = await fetch(`http://localhost:${env.port}/config.json`);
+    assert.deepEqual((await res.json()).iceServers, iceServers);
   } finally {
     await env.teardown();
   }

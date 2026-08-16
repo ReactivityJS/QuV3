@@ -237,16 +237,23 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
   // a reload" trade-off `adminPubs` itself already has - and threaded into
   // every `ExtensionPointHost` built below, so a point's configured order
   // renders identically regardless of which app happens to be mounted.
+  // `iceServers` (this operator's own `RTCIceServer[]` list, see
+  // `@qu/relay`'s `http-router.js` and `@qu/webrtc`'s `ice-config.js`) is
+  // threaded into every mounted app's own `ctx` below, for apps built on
+  // `@qu/webrtc`'s `WebRTCTransport` (e.g. `apps/geochase`) - unset/empty
+  // just means those apps fall back to the built-in free STUN default.
   let adminPubs = [];
   let extensionOrder = {};
+  let iceServers = [];
   try {
     const res = await fetch('/config.json');
     if (res.ok) {
       const data = await res.json();
       adminPubs = data.adminPubs ?? [];
       extensionOrder = data.settings?.extensionOrder ?? {};
+      iceServers = data.iceServers ?? [];
     }
-  } catch { /* offline/unreachable - header just shows no admin link, extension points fall back to their own default order */ }
+  } catch { /* offline/unreachable - header just shows no admin link, extension points fall back to their own default order/ICE servers */ }
   // A boot-time snapshot of the SAME catalog `renderRoute()` re-fetches on
   // every navigation below - the header is mounted exactly once for the
   // whole session (see its own "SEARCH SLOT" doc comment), so a snapshot
@@ -335,7 +342,7 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
     // placeholder rather than throwing on `mod.mount is not a function`.
     if (typeof mod.mount !== 'function') { renderPlaceholder(t('appNotFound')); return; }
     const extensionPoints = new ExtensionPointHost(apps, { extensionOrder });
-    const stopFn = (await mod.mount(screen, { qu, identity, services, apps, segments, subscribe, syncFetch, extensionPoints })) ?? null;
+    const stopFn = (await mod.mount(screen, { qu, identity, services, apps, segments, subscribe, syncFetch, extensionPoints, iceServers })) ?? null;
     if (stopped || token !== navToken) {
       // A newer navigation already won control of `screen` while this
       // mount() call was itself in flight - never leave this one mounted

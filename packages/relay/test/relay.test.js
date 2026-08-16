@@ -462,7 +462,7 @@ test('booting with the REAL repo apps/ directory also loads app-list/user-list/c
   try {
     const relay = await new QuRelay({ storeDir: join(base, 'store'), blobDir: join(base, 'blob'), appsDir: REPO_APPS_DIR, port: 0 }).boot();
     try {
-      for (const name of ['app-list', 'user-list', 'contact-list', 'profile', 'forum', 'bookmarks', 'notifications', 'reactions', 'pins', 'relay-admin', 'chat', 'search', 'calendar']) assert.equal(relay.loader.isLoaded(name), true);
+      for (const name of ['app-list', 'user-list', 'contact-list', 'profile', 'forum', 'bookmarks', 'notifications', 'reactions', 'pins', 'relay-admin', 'chat', 'search', 'calendar', 'geochase']) assert.equal(relay.loader.isLoaded(name), true);
 
       const res = await fetch(`http://localhost:${relay.port}/apps.json`);
       const catalog = await res.json();
@@ -479,7 +479,9 @@ test('booting with the REAL repo apps/ directory also loads app-list/user-list/c
       // `shell.headerAction` contribution, see its own doc comment).
       // apps/calendar is the mobile-first shared calendar app (own space,
       // own pushActions - see its own manifest.quapp/client.js doc comments).
-      assert.deepEqual(names, ['app-list', 'bookmarks', 'calendar', 'chat', 'contact-list', 'forum', 'notifications', 'pins', 'profile', 'reactions', 'relay-admin', 'search', 'user-list']);
+      // apps/geochase is the WebRTC-as-app-feature pilot (own space, see
+      // its own manifest.quapp/client.js doc comments).
+      assert.deepEqual(names, ['app-list', 'bookmarks', 'calendar', 'chat', 'contact-list', 'forum', 'geochase', 'notifications', 'pins', 'profile', 'reactions', 'relay-admin', 'search', 'user-list']);
       for (const app of catalog) assert.equal(app.clientMainUrl, `/apps/${app.name}/dist/client.js`);
     } finally {
       await relay.close();

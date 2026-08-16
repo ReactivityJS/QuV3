@@ -86,6 +86,15 @@ export class QuRelay {
    *   Additional apps to load from remote manifest URLs at boot (see
    *   `@qu/loader`'s `RemoteLoader.loadRemote()` for the integrity/signature
    *   guarantees this goes through).
+   * @param {Array<{urls: string|string[], username?: string, credential?: string}>} [options.iceServers] -
+   *   This relay operator's own `RTCIceServer[]` list, exposed via
+   *   `/config.json` for `apps/shell` to thread into `@qu/webrtc`'s
+   *   `WebRTCTransport` (see `ice-config.js`'s own doc comment for the
+   *   default-STUN / operator-list / explicit-override layering this feeds
+   *   the middle layer of). Unset means "apps fall back to the built-in free
+   *   STUN default" - this relay never needs to run or know about TURN for
+   *   WebRTC-as-app-feature to work at all, only to add a fallback for
+   *   restrictive NATs.
    */
   constructor(options = {}) {
     this.options = {
@@ -99,6 +108,7 @@ export class QuRelay {
       vapidSubject: 'mailto:admin@example.com',
       resolveNotification: null,
       remoteApps: [],
+      iceServers: [],
       ...options,
     };
 
@@ -160,6 +170,7 @@ export class QuRelay {
       serveShell: this.options.serveShell,
       shellDir: this.options.shellDir,
       state: this._state,
+      iceServers: this.options.iceServers,
     }));
     this.runtime.register('pushDelivery', (rt) => new PushDeliveryService({
       messages: this.messages,
