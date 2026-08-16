@@ -59,7 +59,7 @@ const THREAD_ID = 'lobby';
 export function mount(container, ctx) {
   ensureTheme();
   injectStyle(STYLE_ID, STYLE);
-  const { qu, identity, services, apps, segments = [], iceServers } = ctx;
+  const { qu, identity, services, apps, segments = [], iceServers, subscribe, syncFetch } = ctx;
   const SPACE_ID = apps?.find((a) => a.name === 'geochase')?.spaceId;
   if (!SPACE_ID) throw new Error('[geochase] no "spaceId" found in the apps catalog for "geochase" - check manifest.quapp');
   const gameId = segments[1] || DEFAULT_GAME_ID;
@@ -144,7 +144,7 @@ export function mount(container, ctx) {
       });
 
       (async () => {
-        const readyMesh = await createGeochaseMesh({ qu, identity, services, spaceId: SPACE_ID, threadId: THREAD_ID, gameId, iceServers });
+        const readyMesh = await createGeochaseMesh({ qu, identity, services, spaceId: SPACE_ID, threadId: THREAD_ID, gameId, iceServers, subscribe, syncFetch });
         if (stopped) {
           readyMesh.close();
           return;

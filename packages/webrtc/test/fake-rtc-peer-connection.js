@@ -49,6 +49,8 @@ export class FakeRTCPeerConnection {
   #remote = null;
   #localChannel = null;
   #localTracks = []; // {track, stream} pairs added via addTrack()
+  /** Every track.id ever delivered to `ontrack` - see `#deliverTrack()`. Prevents a renegotiation's `#markConnected()` re-firing from re-delivering tracks that already arrived. */
+  #deliveredTrackIds = new Set();
   /** Test-only: records call ORDER (not just occurrence) of the methods a reliability test cares about - see `getCallLog()`. */
   #callLog = [];
   connectionState = 'new';
@@ -66,10 +68,28 @@ export class FakeRTCPeerConnection {
     return this.#localChannel;
   }
 
-  /** Records the track for delivery to the remote side's `ontrack` once connected - see `#markConnected()`. Returns a minimal fake `RTCRtpSender` (unused by production code today). */
+  /**
+   * Records the track for delivery to the remote side's `ontrack`. Two
+   * cases: called BEFORE the initial connect (the common case, still
+   * pending delivery until `#markConnected()` runs), or called on an
+   * ALREADY-connected pair - a renegotiation (`PeerConnection.addTrack()`
+   * mid-call, e.g. Phone's audio-call-upgrades-to-video) - delivered
+   * directly here instead of waiting for `#markConnected()`, which only
+   * ever fires once per initial handshake. A real negotiation would only
+   * deliver once the fresh offer/answer round trip settles; this fake
+   * simplifies that to "immediately on addTrack()" (same "just enough of
+   * the real API surface, not spec-complete" philosophy as the rest of this
+   * file) - the actual offer/answer round trip still runs for real via
+   * `PeerConnection.addTrack()`'s own `#negotiate()` call, this only
+   * simplifies WHEN the fake hands the track to the remote's `ontrack`.
+   * Returns a minimal fake `RTCRtpSender` (unused by production code today).
+   */
   addTrack(track, stream) {
     this.#callLog.push('addTrack');
     this.#localTracks.push({ track, stream });
+    if (this.connectionState === 'connected' && this.#remote) {
+      queueMicrotask(() => this.#remote.#deliverTrack(track, stream));
+    }
     return { track };
   }
 
@@ -93,13 +113,21 @@ export class FakeRTCPeerConnection {
   async setRemoteDescription(desc) {
     if (desc.type === 'offer') {
       const offererTag = desc.sdp.slice('offer:'.length);
+      // A RENEGOTIATION offer (mid-call, e.g. PeerConnection.addTrack())
+      // arrives on a pair that's already fully wired - `#remote` is already
+      // set from the initial handshake, and re-running the data-channel
+      // pairing below would replace an already-open channel with a fresh,
+      // never-opened one. Only the very FIRST offer does that setup.
+      const isRenegotiation = this.#remote != null;
       this.#remote = registry.get(offererTag);
-      const offererChannel = this.#remote.#localChannel;
-      const answererChannel = new FakeRTCDataChannel();
-      answererChannel._link(offererChannel);
-      offererChannel._link(answererChannel);
-      this.#localChannel = answererChannel;
-      queueMicrotask(() => this.ondatachannel?.({ channel: answererChannel }));
+      if (!isRenegotiation) {
+        const offererChannel = this.#remote.#localChannel;
+        const answererChannel = new FakeRTCDataChannel();
+        answererChannel._link(offererChannel);
+        offererChannel._link(answererChannel);
+        this.#localChannel = answererChannel;
+        queueMicrotask(() => this.ondatachannel?.({ channel: answererChannel }));
+      }
     } else if (desc.type === 'answer') {
       const [, , answererTag] = desc.sdp.split(':');
       this.#remote = registry.get(answererTag);
@@ -110,13 +138,21 @@ export class FakeRTCPeerConnection {
 
   async addIceCandidate(_candidate) {}
 
+  /** @param {MediaStreamTrack} track @param {MediaStream} stream */
+  #deliverTrack(track, stream) {
+    if (this.#deliveredTrackIds.has(track.id)) return; // already delivered (e.g. an earlier #markConnected(), or addTrack()'s own immediate delivery) - see #deliveredTrackIds' own doc comment
+    this.#deliveredTrackIds.add(track.id);
+    this.ontrack?.({ streams: [stream], track });
+  }
+
+  /** Idempotent-safe to call more than once (a renegotiation's answer receipt calls this again) - `#deliverTrack()`'s own dedup is what makes a second call harmless rather than re-delivering every track a second time. */
   #markConnected() {
     this.connectionState = 'connected';
     const remoteTracks = this.#remote?.#localTracks ?? [];
     queueMicrotask(() => {
       this.onconnectionstatechange?.();
       this.#localChannel?._open();
-      for (const { track, stream } of remoteTracks) this.ontrack?.({ streams: [stream], track });
+      for (const { track, stream } of remoteTracks) this.#deliverTrack(track, stream);
     });
   }
 

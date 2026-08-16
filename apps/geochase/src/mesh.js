@@ -35,9 +35,16 @@ const log = createLogger('geochase:mesh');
  * `services.messages` Thread, via `WebRtcSignalService` - entirely separate
  * machinery from the mesh `SyncEngine` above, on purpose.
  *
- * @param {{qu: import('@qu/core').QuStore, identity: import('@qu/identity').QuIdentityEngine, services: object, spaceId: string, threadId: string, gameId: string, iceServers?: Array<object>}} options
+ * @param {{qu: import('@qu/core').QuStore, identity: import('@qu/identity').QuIdentityEngine, services: object, spaceId: string, threadId: string, gameId: string, iceServers?: Array<object>, subscribe?: (prefix: string) => void, syncFetch?: (prefix: string) => Promise<*>}} options -
+ *   `subscribe`/`syncFetch` are the ordinary `ctx.subscribe`/`ctx.syncFetch`
+ *   every app gets - threaded straight through to `WebRtcSignalService`,
+ *   without which an offer/answer/ICE write here never actually reaches
+ *   another player's local store at all (see that service's own constructor
+ *   doc comment for the full "signal never arrives" bug this fixes -
+ *   discovered via `apps/phone`, but this mesh's own signaling rides the
+ *   exact same mechanism and had the identical gap).
  */
-export async function createGeochaseMesh({ qu, identity, services, spaceId, threadId, gameId, iceServers } = {}) {
+export async function createGeochaseMesh({ qu, identity, services, spaceId, threadId, gameId, iceServers, subscribe, syncFetch } = {}) {
   const mainKey = await identity.getMainKey();
   const selfPub = QuCrypto.toBase64Url(mainKey.publicKey);
 
@@ -50,7 +57,7 @@ export async function createGeochaseMesh({ qu, identity, services, spaceId, thre
   // No `publishAllTo` - see this file's own top doc comment. `subscribe()`
   // is what makes this a genuine N-peer mesh rather than a star.
   const meshSync = new SyncEngine(p2pQu, webrtcTransport);
-  const signalService = new WebRtcSignalService(qu, identity, webrtcTransport);
+  const signalService = new WebRtcSignalService(qu, identity, webrtcTransport, { subscribe, syncFetch });
 
   const playersPrefix = `/p2p/geochase/${gameId}/players`;
 

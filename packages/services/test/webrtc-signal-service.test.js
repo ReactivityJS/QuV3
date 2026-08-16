@@ -102,6 +102,82 @@ test('connectPeer() passes an explicit initiator/localStream override through to
   assert.deepEqual(transport.addPeerCalls[0], { peerId: pubB, options: { initiator: true, localStream: fakeStream } });
 });
 
+// ===== subscribe()/syncFetch() - the "signal never reaches the other side" bugfix =====
+
+test('connectPeer() calls subscribe() and syncFetch() with the pair\'s own webrtc namespace prefix, BEFORE transport.addPeer()', async () => {
+  const qu = freshQu();
+  const { identity: identityA, pub: pubA } = await freshIdentity();
+  const { pub: pubB } = await freshIdentity();
+  const transport = new FakeWebRTCTransport();
+  const calls = [];
+  const subscribe = (prefix) => calls.push(['subscribe', prefix]);
+  const syncFetch = async (prefix) => { calls.push(['syncFetch', prefix]); };
+  const service = new WebRtcSignalService(qu, identityA, transport, { subscribe, syncFetch });
+
+  await service.connectPeer('space1', 'thread1', pubB, [pubA, pubB]);
+
+  const pairKey = webrtcPairKey(pubA, pubB);
+  const expectedPrefix = `/store/space1/threads/thread1/webrtc/${pairKey}/`;
+  assert.deepEqual(calls, [['subscribe', expectedPrefix], ['syncFetch', expectedPrefix]]);
+  // addPeer() only happens after both - a subscribe/syncFetch failure (or a
+  // slow syncFetch) must never let the transport start negotiating blind.
+  assert.equal(transport.addPeerCalls.length, 1);
+});
+
+test('connectPeer() only subscribes/syncFetches ONCE per pair, even if called again for the same remotePub', async () => {
+  const qu = freshQu();
+  const { identity: identityA, pub: pubA } = await freshIdentity();
+  const { pub: pubB } = await freshIdentity();
+  const transport = new FakeWebRTCTransport();
+  let subscribeCalls = 0;
+  let syncFetchCalls = 0;
+  const service = new WebRtcSignalService(qu, identityA, transport, {
+    subscribe: () => { subscribeCalls++; },
+    syncFetch: async () => { syncFetchCalls++; },
+  });
+
+  await service.connectPeer('space1', 'thread1', pubB, [pubA, pubB]);
+  await service.connectPeer('space1', 'thread1', pubB, [pubA, pubB]); // e.g. the callee's own re-render calling connectPeer() again
+
+  assert.equal(subscribeCalls, 1);
+  assert.equal(syncFetchCalls, 1);
+  assert.equal(transport.addPeerCalls.length, 2); // addPeer() itself is already idempotent, unaffected
+});
+
+test('a signal written BEFORE connectPeer() was ever called is delivered once syncFetch() backfills it - the exact "offer already existed" race the callee hits in practice', async () => {
+  const qu = freshQu();
+  const { identity: identityA, pub: pubA } = await freshIdentity();
+  const { identity: identityB, pub: pubB } = await freshIdentity();
+  const transportB = new FakeWebRTCTransport();
+
+  // Simulates the CALLER having already written an offer well before the
+  // callee ever calls connectPeer() - written directly (standing in for
+  // "already applied to this store by a real subscribe() from EARLIER, or
+  // simply present because both sides happen to share one qu in this test").
+  const pairKey = webrtcPairKey(pubA, pubB);
+  const signKeyA = await identityA.getMainKey();
+  await qu.put(
+    webrtcOfferPath('space1', 'thread1', pairKey),
+    { sdp: 'pre-existing-offer', from: pubA },
+    { signWith: signKeyA.privateKeyPkcs8, writerPub: signKeyA.publicKey }
+  );
+
+  // A real `syncFetch()` (SyncEngine.fetchPrefix()) re-applies whatever the
+  // relay already has for this prefix to the LOCAL store - modeled here as
+  // reading it back and re-putting it, which is what actually makes
+  // `#handleStorageChange()` fire (a bare qu.get() would NOT).
+  const syncFetch = async (prefix) => {
+    const existing = await qu.get(prefix.replace(/\/$/, '') + '/offer');
+    if (existing) await qu.putSealed(prefix.replace(/\/$/, '') + '/offer', existing);
+  };
+  const serviceB = new WebRtcSignalService(qu, identityB, transportB, { syncFetch });
+
+  await serviceB.connectPeer('space1', 'thread1', pubA, [pubA, pubB]);
+
+  await waitUntil(() => transportB.handleIncomingSignalCalls.length > 0);
+  assert.deepEqual(transportB.handleIncomingSignalCalls[0], { peerId: pubA, signal: { type: 'offer', sdp: 'pre-existing-offer' } });
+});
+
 test('an outgoing offer is written as a signed QuBit at the deterministic pair offer path', async () => {
   const qu = freshQu();
   const { identity: identityA, pub: pubA } = await freshIdentity();
@@ -228,6 +304,30 @@ test('once onPeerConnected fires, the pair signaling paths are tombstoned after 
 
   transportA.emitPeerConnected(pubB);
   await waitUntil(async () => (await qu.get(offerPath))?.val === null, 500);
+});
+
+test('a signal sent AFTER the post-connect cleanup delay still gets written (the pair tracking survives connecting, only the QuBits themselves get tombstoned) - what makes mid-call renegotiation possible', async () => {
+  const qu = freshQu();
+  const { identity: identityA, pub: pubA } = await freshIdentity();
+  const { pub: pubB } = await freshIdentity();
+  const transportA = new FakeWebRTCTransport();
+  const service = new WebRtcSignalService(qu, identityA, transportA, { cleanupDelayMs: 10, negotiationTimeoutMs: 100_000 });
+  await service.connectPeer('space1', 'thread1', pubB, [pubA, pubB]);
+
+  const pairKey = webrtcPairKey(pubA, pubB);
+  const offerPath = webrtcOfferPath('space1', 'thread1', pairKey);
+  transportA.emitOutgoingSignal(pubB, { type: 'offer', sdp: 'initial-offer' });
+  await waitUntil(() => qu.get(offerPath));
+
+  transportA.emitPeerConnected(pubB);
+  // Past the post-connect cleanup delay - the initial offer is now tombstoned.
+  await waitUntil(async () => (await qu.get(offerPath))?.val === null, 500);
+
+  // A renegotiation offer (e.g. WebRTCTransport.addTrackToPeer() upgrading
+  // to video) - if the pair tracking had been deleted, #sendSignal() would
+  // silently no-op here (see its own "nothing to address it with" comment).
+  transportA.emitOutgoingSignal(pubB, { type: 'offer', sdp: 'renegotiation-offer' });
+  await waitUntil(async () => (await qu.get(offerPath))?.val?.sdp === 'renegotiation-offer', 500);
 });
 
 test('connecting shortly before negotiationTimeoutMs would fire cancels the pending timeout cleanup - a slow-to-answer call still survives', async () => {

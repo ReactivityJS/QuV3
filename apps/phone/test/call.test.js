@@ -191,6 +191,102 @@ test('caller and callee complete a call handshake, exchange tracks, and can hang
   calleeCall.hangUp();
 });
 
+test('upgradeToVideo() adds a video track to an already-connected audio-only call, and the callee receives it via onTrack() without a fresh onPeerConnected()', async () => {
+  const network = new TestNetwork();
+  const relayQu = new QuStore();
+  relayQu.mount('store', new MemoryStoreAdapter());
+  new SyncEngine(relayQu, new RelayTransport(network));
+
+  const caller = await freshParticipant('client-caller9', network);
+  const callee = await freshParticipant('client-callee9', network);
+  await mirrorProfiles(caller, callee);
+
+  const spaceId = 'phone-test-space-9';
+  caller.sync.subscribe(paths.spacePath(spaceId));
+  callee.sync.subscribe(paths.spacePath(spaceId));
+
+  const calleeStreams = [];
+  let callerConnectedCount = 0;
+  let calleeConnectedCount = 0;
+
+  const callerCall = await createPhoneCall({
+    qu: caller.qu, identity: caller.identity, services: caller.services, spaceId, remotePub: callee.pub,
+    initiator: true, mode: 'audio',
+    onPeerConnected: () => { callerConnectedCount++; },
+  });
+  const calleeCall = await createPhoneCall({
+    qu: callee.qu, identity: callee.identity, services: callee.services, spaceId, remotePub: caller.pub,
+    initiator: false, mode: 'audio',
+    onTrack: (stream) => calleeStreams.push(stream),
+    onPeerConnected: () => { calleeConnectedCount++; },
+  });
+
+  await waitUntil(() => callerConnectedCount === 1 && calleeConnectedCount === 1);
+
+  assert.equal(callerCall.localStream.getVideoTracks().length, 0); // audio-only so far, confirmed before upgrading
+
+  await callerCall.upgradeToVideo();
+
+  assert.equal(callerCall.localStream.getVideoTracks().length, 1);
+  await waitUntil(() => calleeStreams.some((s) => s.getVideoTracks().length > 0));
+  // Renegotiation, not a fresh connection - onPeerConnected() must not fire again.
+  assert.equal(callerConnectedCount, 1);
+  assert.equal(calleeConnectedCount, 1);
+
+  callerCall.hangUp();
+  calleeCall.hangUp();
+});
+
+test('REGRESSION: with NO manual sync.subscribe() at the test level at all, and a REALISTIC delay before the callee even starts - createPhoneCall()\'s own subscribe/syncFetch wiring is what makes the handshake reach the other side', async () => {
+  const network = new TestNetwork();
+  const relayQu = new QuStore();
+  relayQu.mount('store', new MemoryStoreAdapter());
+  new SyncEngine(relayQu, new RelayTransport(network));
+
+  const caller = await freshParticipant('client-caller8', network);
+  const callee = await freshParticipant('client-callee8', network);
+  await mirrorProfiles(caller, callee);
+  const spaceId = 'phone-test-space-8';
+  // Deliberately NO caller.sync.subscribe()/callee.sync.subscribe() here -
+  // every other test in this file calls these manually, which is exactly
+  // the step the real apps/phone/client.js never did before this fix (see
+  // this plan's own "Bugfix: WebRTC-Signaling erreicht die Gegenseite nie"
+  // section) - this test proves createPhoneCall()'s own subscribe/syncFetch
+  // params (passed through from ctx in the real app) are SUFFICIENT on
+  // their own, not merely a nice-to-have on top of something else already
+  // making it work.
+  const callerSubscribe = (prefix) => caller.sync.subscribe(prefix);
+  const callerSyncFetch = (prefix) => caller.sync.fetchPrefix(prefix);
+  const calleeSubscribe = (prefix) => callee.sync.subscribe(prefix);
+  const calleeSyncFetch = (prefix) => callee.sync.fetchPrefix(prefix);
+
+  let callerConnected = false;
+  const callerCall = await createPhoneCall({
+    qu: caller.qu, identity: caller.identity, services: caller.services, spaceId, remotePub: callee.pub,
+    initiator: true, subscribe: callerSubscribe, syncFetch: callerSyncFetch,
+    onPeerConnected: () => { callerConnected = true; },
+  });
+
+  // The realistic race this bug actually hits in production: the offer is
+  // already written and synced to the relay well BEFORE the callee ever
+  // opens the call view (they're reacting to a notification, not staring
+  // at the screen) - subscribe() alone (future writes only) would still
+  // fail here; only the ALSO-required syncFetch() backfill saves it.
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  let calleeConnected = false;
+  const calleeCall = await createPhoneCall({
+    qu: callee.qu, identity: callee.identity, services: callee.services, spaceId, remotePub: caller.pub,
+    initiator: false, subscribe: calleeSubscribe, syncFetch: calleeSyncFetch,
+    onPeerConnected: () => { calleeConnected = true; },
+  });
+
+  await waitUntil(() => callerConnected && calleeConnected);
+
+  callerCall.hangUp();
+  calleeCall.hangUp();
+});
+
 test('toggleAudio()/toggleVideo() flip track.enabled without stopping or removing the track', async () => {
   const network = new TestNetwork();
   const relayQu = new QuStore();
@@ -204,8 +300,8 @@ test('toggleAudio()/toggleVideo() flip track.enabled without stopping or removin
   caller.sync.subscribe(paths.spacePath(spaceId));
   callee.sync.subscribe(paths.spacePath(spaceId));
 
-  const callerCall = await createPhoneCall({ qu: caller.qu, identity: caller.identity, services: caller.services, spaceId, remotePub: callee.pub, initiator: true });
-  await createPhoneCall({ qu: callee.qu, identity: callee.identity, services: callee.services, spaceId, remotePub: caller.pub, initiator: false });
+  const callerCall = await createPhoneCall({ qu: caller.qu, identity: caller.identity, services: caller.services, spaceId, remotePub: callee.pub, initiator: true, mode: 'video' });
+  await createPhoneCall({ qu: callee.qu, identity: callee.identity, services: callee.services, spaceId, remotePub: caller.pub, initiator: false, mode: 'video' });
 
   const [audioTrack] = callerCall.localStream.getAudioTracks();
   const [videoTrack] = callerCall.localStream.getVideoTracks();

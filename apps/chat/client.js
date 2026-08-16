@@ -344,8 +344,10 @@ const STYLE = `
   .qu-chat-room-view { position: fixed; top: 3.25rem; right: 0; bottom: 0; left: 0; display: flex; flex-direction: column; background: var(--qu-color-surface, #ffffff); z-index: 10; }
   .qu-chat-header { flex-shrink: 0; display: flex; align-items: center; gap: 0.6rem; padding: 0.6rem 1rem; border-bottom: 1px solid var(--qu-color-border, #8884); background: var(--qu-color-surface, #ffffff); }
   .qu-chat-header-namewrap { min-width: 0; overflow: hidden; }
+  .qu-chat-header-nameline { display: flex; align-items: center; gap: 0.35rem; min-width: 0; }
   .qu-chat-header-name { font-weight: 700; font-size: 1.1em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .qu-chat-header-status { font-size: 0.8em; opacity: 0.65; }
+  .qu-chat-header-muted, .qu-chat-room-muted { flex-shrink: 0; font-size: 0.9em; opacity: 0.75; }
   .qu-chat-header-menu-btn { margin-left: auto; }
   .qu-chat-messages-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 1rem; }
   /* NEW MESSAGE BANNER - see mountRoomView()'s own creation site and
@@ -674,13 +676,15 @@ function mountRoomListView(container, { qu, services, subscribe, syncFetch, SPAC
     const identity = services.messages.identity;
     if (stopped || token !== renderToken) return;
 
-    const [contacts, groupIds, dmRequests, dismissed] = await Promise.all([
+    const [contacts, groupIds, dmRequests, dismissed, prefs] = await Promise.all([
       services.contacts.listContacts(),
       services.chat.listMyGroups(),
       services.chat.listMyDmRequests(),
       getPrivateChildren(qu, identity, paths.privateFlagParentPath(myPub, 'dismissed', 'chat-request')),
+      services.notificationPrefs.getOwnPrefs(),
     ]);
     if (stopped || token !== renderToken) return;
+    const mutedThreads = new Set(prefs.apps?.chat?.mutedThreads ?? []);
 
     // MESSAGE REQUESTS - see ChatService's own "1:1 DISCOVERY" doc comment.
     // A request is worth SHOWING only while it's neither already accepted
@@ -714,6 +718,7 @@ function mountRoomListView(container, { qu, services, subscribe, syncFetch, SPAC
         kind: 'dm', roomId, href: `#/chat/${c.actorPub}`,
         name: formatActorLabel(c.actorPub, c.profile), avatarSeed: c.actorPub, avatar: c.profile?.avatar,
         lastMessage: last, unread: !!last && last.author !== myPub && last.ts > lastReadAt,
+        muted: mutedThreads.has(roomId),
       };
     }));
     const groupRooms = (await Promise.all(groupIds.map(async (groupId) => {
@@ -726,6 +731,7 @@ function mountRoomListView(container, { qu, services, subscribe, syncFetch, SPAC
         kind: 'group', roomId: groupId, href: `#/chat/g/${groupId}`,
         name: config.name ?? groupId, avatarSeed: groupId, avatar: null,
         lastMessage: last, unread: !!last && last.author !== myPub && last.ts > lastReadAt,
+        muted: mutedThreads.has(groupId),
       };
     }))).filter(Boolean);
 
@@ -764,6 +770,12 @@ function mountRoomListView(container, { qu, services, subscribe, syncFetch, SPAC
     nameEl.className = 'qu-chat-room-name';
     nameEl.textContent = room.name;
     nameRow.appendChild(nameEl);
+    if (room.muted) {
+      const mutedIcon = document.createElement('span');
+      mutedIcon.className = 'qu-chat-room-muted';
+      mutedIcon.textContent = '🔕';
+      nameRow.appendChild(mutedIcon);
+    }
     if (room.lastMessage) {
       const tsEl = document.createElement('span');
       tsEl.className = 'qu-chat-room-ts';
@@ -962,11 +974,25 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   const headerAvatarSlot = document.createElement('div');
   const headerName = document.createElement('div');
   headerName.className = 'qu-chat-header-namewrap';
+  const headerNameLine = document.createElement('div');
+  headerNameLine.className = 'qu-chat-header-nameline';
   const headerNameEl = document.createElement('div');
   headerNameEl.className = 'qu-chat-header-name';
+  const headerMutedIcon = document.createElement('span');
+  headerMutedIcon.className = 'qu-chat-header-muted';
+  headerMutedIcon.textContent = '🔕';
+  headerMutedIcon.title = t('muteChat');
+  headerMutedIcon.hidden = true;
+  headerNameLine.append(headerNameEl, headerMutedIcon);
   const headerStatusEl = document.createElement('div');
   headerStatusEl.className = 'qu-chat-header-status';
-  headerName.append(headerNameEl, headerStatusEl);
+  headerName.append(headerNameLine, headerStatusEl);
+
+  async function refreshHeaderMuted() {
+    if (!roomId) return;
+    const prefs = await services.notificationPrefs.getOwnPrefs();
+    headerMutedIcon.hidden = !(prefs.apps?.chat?.mutedThreads?.includes(roomId) ?? false);
+  }
   // The room's own "⋮" context menu (content.chatRoomMenu) - this app's own
   // native "Mute" toggle, merged with whatever a plugin app contributes
   // (apps/phone's Audio-Call/Video-Call, 1:1 rooms only - see
@@ -1001,6 +1027,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
               ...current,
               apps: { ...current.apps, chat: { ...chatPrefs, mutedThreads: [...mutedThreads] } },
             });
+            headerMutedIcon.hidden = muted; // toggled, so the icon shows the NEW state - no need to re-fetch prefs
           },
         },
       ];
@@ -2192,6 +2219,8 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
       headerAvatarSlot.appendChild(renderAvatarOrAsset(roomId, headerNameEl.textContent, null, { size: '2.6rem' }));
     }
     roomReady = true;
+    await refreshHeaderMuted();
+    if (stopped) return;
 
     stopHeartbeat = services.presence.startHeartbeat(SPACE_ID, roomId);
     renderPresence();

@@ -95,3 +95,36 @@ test('mute is a local track.enabled toggle, not a renegotiation - the track stay
   aStream.getAudioTracks()[0].enabled = false;
   assert.equal(received[0].enabled, false); // same track object, no new negotiation, no new onTrack fire
 });
+
+// ===== addTrackToPeer() - mid-call renegotiation (e.g. an audio call upgrading to video) =====
+
+test('addTrackToPeer() on an already-connected peer delivers the new track to the OTHER side via onTrack(), without a fresh onPeerConnected()', async () => {
+  const a = new WebRTCTransport({ selfPeerId: 'peer-a' });
+  const b = new WebRTCTransport({ selfPeerId: 'peer-b' });
+  connectPair(a, b);
+
+  const aStream = fakeLocalStream(['audio']); // starts audio-only
+  let connectedCount = 0;
+  a.onPeerConnected(() => { connectedCount++; });
+  const received = [];
+  b.onTrack((peerId, stream, track) => received.push({ peerId, track }));
+
+  a.addPeer('peer-b', { localStream: aStream });
+  await waitUntil(() => received.length === 1);
+  assert.equal(received[0].track.kind, 'audio');
+
+  const videoTrack = { kind: 'video', id: 'video-track', enabled: true, stopped: false, stop() { this.stopped = true; } };
+  aStream.getTracks().push(videoTrack); // mirrors real MediaStream.addTrack()'s in-place mutation
+  await a.addTrackToPeer('peer-b', videoTrack, aStream);
+
+  await waitUntil(() => received.length === 2);
+  assert.equal(received[1].track.kind, 'video');
+  assert.equal(received[1].peerId, 'peer-a');
+  assert.equal(connectedCount, 1); // still just the ONE original connect - renegotiation isn't a fresh connection
+});
+
+test('addTrackToPeer() for a peer that was never added is a harmless no-op (with a warning), not a throw', async () => {
+  const a = new WebRTCTransport({ selfPeerId: 'peer-a' });
+  const fakeTrack = { kind: 'video', id: 'orphan-track' };
+  await assert.doesNotReject(() => a.addTrackToPeer('never-added-peer', fakeTrack, fakeLocalStream()));
+});

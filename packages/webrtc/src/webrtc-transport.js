@@ -194,6 +194,23 @@ export class WebRTCTransport extends Transport {
     return this.onPeerConnected(callback);
   }
 
+  /**
+   * Adds a track to an ALREADY-connected peer and renegotiates - see
+   * `PeerConnection.addTrack()`'s own doc comment for the full mechanics
+   * (this is a thin "find the right instance" wrapper, same shape as
+   * `sendTo()`). A no-op with a warning if `peerId` isn't connected at all
+   * (same "call addPeer() first" discipline `sendTo()` already enforces).
+   * @param {string} peerId @param {MediaStreamTrack} track @param {MediaStream} stream
+   */
+  addTrackToPeer(peerId, track, stream) {
+    const pc = this.#peers.get(peerId);
+    if (!pc) {
+      log.warn(`addTrackToPeer("${peerId}"): no such peer - call addPeer() first`);
+      return Promise.resolve();
+    }
+    return pc.addTrack(track, stream);
+  }
+
   /** @param {string} peerId */
   removePeer(peerId) {
     const pc = this.#peers.get(peerId);

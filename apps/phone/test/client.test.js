@@ -75,18 +75,18 @@ test('#/phone/<pub> (caller) shows "Calling…" and enables controls once local 
   }
 });
 
-test('#/phone/<pub>/audio (caller, audio-only) never requests video, and hides the local PiP + video toggle button', async () => {
+test('#/phone/<pub> (caller, audio-only default) never requests video up front, and hides the local PiP until upgraded', async () => {
   const calls = installFakeMediaDevices();
   const { qu, identity, services, apps } = await freshEnv();
   const container = makeContainer();
-  const stop = mount(container, { qu, identity, services, apps, segments: ['phone', 'remote-pub-audio', 'audio'] });
+  const stop = mount(container, { qu, identity, services, apps, segments: ['phone', 'remote-pub-audio'] });
   try {
     assert.ok(container.querySelector('.qu-phone-status').textContent.match(/calling|rufe an/i)); // still the CALLER
     await waitFor(() => calls.length > 0); // getUserMedia() only actually runs inside the async createPhoneCall() below
     assert.deepEqual(calls, [{ audio: true, video: false }]);
     assert.equal(container.querySelector('.qu-phone-local-video').hidden, true);
-    // Only mute + hangup remain visible - the video toggle is meaningless with no video track at all.
-    assert.equal(container.querySelectorAll('.qu-phone-controls button:not([hidden])').length, 2);
+    // Mute, video (now an "upgrade to video" trigger, not a toggle), and hangup are all visible.
+    assert.equal(container.querySelectorAll('.qu-phone-controls button:not([hidden])').length, 3);
   } finally {
     stop();
     installFakeMediaDevices(); // restore the default (both tracks) for any later test in this file
@@ -171,17 +171,17 @@ test('renderCallMenuItems() returns nothing for a group (no contactPub) - Phone 
   assert.deepEqual(renderCallMenuItems({ contactPub: null }), []);
 });
 
-test('renderCallMenuItems() returns Video Call/Audio Call for a 1:1 room, linking to #/phone/<pub> and #/phone/<pub>/audio', () => {
+test('renderCallMenuItems() returns Audio Call/Video Call for a 1:1 room, linking to #/phone/<pub> (audio default) and #/phone/<pub>/video', () => {
   const items = renderCallMenuItems({ contactPub: 'peer-a' });
   assert.equal(items.length, 2);
-  assert.deepEqual(items.map((i) => i.id), ['videoCall', 'audioCall']);
+  assert.deepEqual(items.map((i) => i.id), ['audioCall', 'videoCall']);
 
   const originalHash = window.location.hash;
   try {
-    items.find((i) => i.id === 'videoCall').onClick();
-    assert.equal(window.location.hash, '#/phone/peer-a');
     items.find((i) => i.id === 'audioCall').onClick();
-    assert.equal(window.location.hash, '#/phone/peer-a/audio');
+    assert.equal(window.location.hash, '#/phone/peer-a');
+    items.find((i) => i.id === 'videoCall').onClick();
+    assert.equal(window.location.hash, '#/phone/peer-a/video');
   } finally {
     window.location.hash = originalHash;
   }
