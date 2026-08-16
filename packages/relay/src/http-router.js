@@ -25,7 +25,7 @@ export class HttpRouter {
    *   fresh on every request via `loader.listManifests()`, so apps loaded
    *   partway through `boot()` (see `relay.js`) show up the moment they're
    *   actually loaded, not just after `boot()` fully completes.
-   * @param {{adminPubs: string[], appsDir: string, serveShell: boolean, shellDir: string, state: {transport: object|null, vapidKeys: {publicKey: string}|null}, getLinkPreviewImpl?: typeof getLinkPreview}} options -
+   * @param {{adminPubs: string[], appsDir: string, serveShell: boolean, shellDir: string, state: {transport: object|null, vapidKeys: {publicKey: string}|null}, iceServers?: Array<object>, getLinkPreviewImpl?: typeof getLinkPreview}} options -
    *   `state` is a mutable, shared reference the caller keeps populating as
    *   the relay boots (`transport`/`vapidKeys` aren't known until partway
    *   through `boot()` - see `relay.js`) - read fresh on every request
@@ -34,7 +34,7 @@ export class HttpRouter {
    *   (`/healthz`'s own `peerId` field, `/push/vapid-public-key`'s
    *   `publicKey` field) instead of a stale/undefined value.
    */
-  constructor(qu, adminHttp, loader, { adminPubs, appsDir, serveShell: serveShellOption, shellDir, state, getLinkPreviewImpl = getLinkPreview }) {
+  constructor(qu, adminHttp, loader, { adminPubs, appsDir, serveShell: serveShellOption, shellDir, state, iceServers = [], getLinkPreviewImpl = getLinkPreview }) {
     this.qu = qu;
     this.adminHttp = adminHttp;
     this.loader = loader;
@@ -43,6 +43,7 @@ export class HttpRouter {
     this.serveShellOption = serveShellOption;
     this.shellDir = shellDir;
     this.state = state;
+    this.iceServers = iceServers;
     // Injectable (see link-preview.test.js style DI) so this route's own
     // tests don't have to make REAL outbound network requests - defaults to
     // the real, caching, SSRF-guarded implementation in link-preview.js.
@@ -78,21 +79,25 @@ export class HttpRouter {
       // Public, non-secret config a client needs before it knows anything
       // else: which actor pubkeys are relay admins, so a UI can show (or
       // hide) an admin nav entry for the connected identity, this relay's
-      // current admin-configurable settings, and `relayPub` - this relay's
+      // current admin-configurable settings, `relayPub` - this relay's
       // own signing identity, what `apps/app-list` checks each
       // `/store/apps/catalog/<name>` entry's signer against before trusting
       // it (see `apps-catalog-store.js`'s own doc comment: no AccessEngine
       // ACL guards that path, the reader verifies the signer instead, same
-      // as every other derived list in this codebase). This is a UX
-      // convenience ONLY, never an authorization boundary - all of this is
-      // public information anyone could read here regardless; the actual
-      // privileged admin ACTION (`POST /admin/settings`) independently
-      // verifies a signed request against `adminPubs` server-side, exactly
-      // like every other writer/reader ACL in this codebase, never trusting
-      // that only an admin's client would ever render the button.
+      // as every other derived list in this codebase), and `iceServers` -
+      // this operator's own `RTCIceServer[]` list (see this class's own
+      // constructor doc comment), which `apps/shell` threads into every
+      // mounted app's `ctx` for `@qu/webrtc`'s `WebRTCTransport` to use.
+      // This is a UX convenience ONLY, never an authorization boundary -
+      // all of this is public information anyone could read here
+      // regardless; the actual privileged admin ACTION (`POST
+      // /admin/settings`) independently verifies a signed request against
+      // `adminPubs` server-side, exactly like every other writer/reader ACL
+      // in this codebase, never trusting that only an admin's client would
+      // ever render the button.
       if (req.url === '/config.json') {
         const settings = await getSettings(this.qu);
-        res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }).end(JSON.stringify({ adminPubs: this.adminPubs, relayPub: this.state.relayPub, settings }));
+        res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }).end(JSON.stringify({ adminPubs: this.adminPubs, relayPub: this.state.relayPub, settings, iceServers: this.iceServers }));
         return;
       }
 

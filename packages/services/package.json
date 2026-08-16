@@ -31,7 +31,8 @@
     "./actor-format": "./src/actor-format.js",
     "./actor-service": "./src/actor-service.js",
     "./asset-service": "./src/asset-service.js",
-    "./bookmarks-service": "./src/bookmarks-service.js"
+    "./bookmarks-service": "./src/bookmarks-service.js",
+    "./webrtc-signal-service": "./src/webrtc-signal-service.js"
   },
   "dependencies": {
     "@qu/core": "^0.1.0",

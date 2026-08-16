@@ -59,6 +59,10 @@ const ENV_MAPPING = {
   // one option that doesn't reduce to a single scalar, so it's still JSON
   // rather than getting its own ad-hoc mini-syntax.
   QU_REMOTE_APPS_JSON: { key: 'remoteApps', parse: (raw) => JSON.parse(raw) },
+  // JSON array of RTCIceServer objects (e.g. '[{"urls":"turn:turn.example:3478","username":"...","credential":"..."}]') -
+  // see relay.js's own constructor doc comment on `iceServers`. Same
+  // JSON-not-ad-hoc-syntax reasoning as QU_REMOTE_APPS_JSON above.
+  QU_ICE_SERVERS: { key: 'iceServers', parse: (raw) => JSON.parse(raw) },
 };
 
 async function loadFileConfig() {

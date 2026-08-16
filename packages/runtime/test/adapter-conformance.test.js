@@ -1,12 +1,12 @@
-// CONFORMANCE SUITE — runs the identical scenario against all three
-// QuAdapter implementations (MemoryStoreAdapter, FsAdapter, IndexedDBAdapter)
-// and asserts they agree. MemoryStoreAdapter is the reference implementation
-// of the getChildren() contract (docs/v3-technical-concept.md §1.2); this
-// file is what actually proves FsAdapter/IndexedDBAdapter live up to it,
-// rather than just each independently believing their own tests. A one-way
-// dependency on @qu/core for the reference adapter is fine here (this
-// package already depends on @qu/core); @qu/core's own tests never import
-// anything from @qu/runtime.
+// CONFORMANCE SUITE — runs the identical scenario against every QuAdapter
+// implementation (MemoryStoreAdapter, FsAdapter, IndexedDBAdapter,
+// SessionStorageAdapter, LocalStorageAdapter) and asserts they agree.
+// MemoryStoreAdapter is the reference implementation of the getChildren()
+// contract (docs/v3-technical-concept.md §1.2); this file is what actually
+// proves the others live up to it, rather than just each independently
+// believing their own tests. A one-way dependency on @qu/core for the
+// reference adapter is fine here (this package already depends on
+// @qu/core); @qu/core's own tests never import anything from @qu/runtime.
 import 'fake-indexeddb/auto';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -16,13 +16,22 @@ import { join } from 'node:path';
 import { MemoryStoreAdapter } from '@qu/core/adapters/memory';
 import { FsAdapter } from '../src/fs-adapter.js';
 import { IndexedDBAdapter } from '../src/indexeddb-adapter.js';
+import { SessionStorageAdapter } from '../src/session-storage-adapter.js';
+import { LocalStorageAdapter } from '../src/local-storage-adapter.js';
+import { installWebStoragePolyfill } from './web-storage-polyfill.js';
+
+installWebStoragePolyfill();
 
 let idbCounter = 0;
+let sessionStorageCounter = 0;
+let localStorageCounter = 0;
 
 const adapterFactories = {
   Memory: async () => new MemoryStoreAdapter(),
   Fs: async () => new FsAdapter(await mkdtemp(join(tmpdir(), 'qu-conformance-'))),
   IndexedDB: async () => new IndexedDBAdapter(`qu-conformance-${idbCounter++}`),
+  SessionStorage: async () => new SessionStorageAdapter(`qu-conformance-session-${sessionStorageCounter++}`),
+  LocalStorage: async () => new LocalStorageAdapter(`qu-conformance-local-${localStorageCounter++}`),
 };
 
 function quBit(val, ts) {

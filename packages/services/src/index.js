@@ -14,9 +14,11 @@
  * messages, the same `FlagService`-wrapper shape as `FavoritesService`),
  * createTrustedCatalogStore (the signer-filtered `/store/apps/catalog`
  * facade shared by `apps/app-list` and `apps/shell`), ChannelService
- * (Forum's Channel -> Topic hierarchy), and ChatService (`apps/chat`'s
+ * (Forum's Channel -> Topic hierarchy), ChatService (`apps/chat`'s
  * 1:1-room-id-derivation + group-invite mechanism, on top of
- * MessageService). See each file's own doc comment.
+ * MessageService), and WebRtcSignalService (bridges `@qu/webrtc`'s generic
+ * `WebRTCTransport` to a Thread's own signaling namespace, carrying SDP/ICE
+ * over the existing relay-backed sync stack). See each file's own doc comment.
  */
 export * as paths from './paths.js';
 export { unwrap, unwrapAll } from './unwrap.js';
@@ -46,3 +48,4 @@ export { formatActorLabel, matchesActorQuery } from './actor-format.js';
 export { ActorService } from './actor-service.js';
 export { createTrustedCatalogStore } from './apps-catalog-store.js';
 export { AssetService } from './asset-service.js';
+export { WebRtcSignalService } from './webrtc-signal-service.js';

@@ -368,3 +368,61 @@ export function appCatalogEntryPath(name) {
 export function appCatalogParentPath() {
   return '/store/apps/catalog';
 }
+
+/**
+ * Deterministic per-pair key for WebRTC signaling paths (`WebRtcSignalService`)
+ * - the two participants' pubkeys, lexicographically sorted and joined, so
+ * BOTH sides independently compute the exact same path with no prior
+ * negotiation. Same "both sides derive the same answer locally, no extra
+ * message needed" pattern `@qu/webrtc`'s `WebRTCTransport` uses for its own
+ * deterministic-initiator tie-break.
+ * @param {string} pubA @param {string} pubB @returns {string}
+ */
+export function webrtcPairKey(pubA, pubB) {
+  return pubA < pubB ? `${pubA}~${pubB}` : `${pubB}~${pubA}`;
+}
+
+/**
+ * One pair's SDP offer, written by whichever side is the deterministic
+ * initiator - see `webrtcPairKey()`. Lives under the Thread's own namespace
+ * (a sibling of `meta`/`msgs`, same convention `threadPresencePath()` uses)
+ * so it inherits the existing relay-backed sync stack's offline-tolerant
+ * delivery (outbox replay, reconnect catch-up) for free - no new relay
+ * message type needed. NOT covered by `AccessEngine` (its thread-path regex
+ * only recognizes `meta`/`msgs/...`) - `WebRtcSignalService` itself checks a
+ * signal's verified `pub` against the Thread's known member list before
+ * trusting it, same discipline `PresenceService`/`ReactionService` already
+ * document.
+ * @param {string|number} spaceId @param {string} threadId @param {string} pairKey @returns {string}
+ */
+export function webrtcOfferPath(spaceId, threadId, pairKey) {
+  return `/store/${spaceId}/threads/${threadId}/webrtc/${pairKey}/offer`;
+}
+
+/** The answerer's SDP answer - see `webrtcOfferPath()`'s own doc comment. @param {string|number} spaceId @param {string} threadId @param {string} pairKey @returns {string} */
+export function webrtcAnswerPath(spaceId, threadId, pairKey) {
+  return `/store/${spaceId}/threads/${threadId}/webrtc/${pairKey}/answer`;
+}
+
+/**
+ * One trickled ICE candidate, keyed by `fromActorPub` (each side writes
+ * under its OWN pubkey, never the other's) and an incrementing `seq` - one
+ * QuBit per candidate, same "one item per path under a shared parent,
+ * enumerate via getChildren" shape thread messages/reactions/pins already
+ * use.
+ * @param {string|number} spaceId @param {string} threadId @param {string} pairKey
+ * @param {string} fromActorPub @param {number} seq @returns {string}
+ */
+export function webrtcIceCandidatePath(spaceId, threadId, pairKey, fromActorPub, seq) {
+  return `/store/${spaceId}/threads/${threadId}/webrtc/${pairKey}/ice/${fromActorPub}/${seq}`;
+}
+
+/**
+ * The PARENT path of one side's own trickled ICE candidates - one level
+ * above `webrtcIceCandidatePath()`. A caller watches the OTHER side's own
+ * pubkey here to receive their trickled candidates.
+ * @param {string|number} spaceId @param {string} threadId @param {string} pairKey @param {string} fromActorPub @returns {string}
+ */
+export function webrtcIceCandidatesParentPath(spaceId, threadId, pairKey, fromActorPub) {
+  return `/store/${spaceId}/threads/${threadId}/webrtc/${pairKey}/ice/${fromActorPub}`;
+}

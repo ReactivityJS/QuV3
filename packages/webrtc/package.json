@@ -1,0 +1,21 @@
+{
+  "name": "@qu/webrtc",
+  "version": "0.1.0",
+  "description": "WebRTC as an app-level feature, not a network transport: WebRTCTransport is a general implementation of @qu/sync's Transport interface (RTCDataChannel) usable behind any SyncEngine, and WebRTCAdapter exposes it as an ordinary QuMount with both idioms Qu apps already know - put/get/getAll/getChildren (state, backed by a pluggable local adapter) and on/emit (event/listener, pass-through like @qu/core's VolatileAdapter). Signaling (SDP/ICE) is deliberately NOT this package's concern - see @qu/services' WebRtcSignalService, which carries it over the existing relay-backed sync stack instead of inventing a new one. Browser-only (RTCPeerConnection has no realistic Node implementation) - deliberately no shared '.' entry point, same reasoning as @qu/runtime's own package.json.",
+  "type": "module",
+  "exports": {
+    "./transport": "./src/webrtc-transport.js",
+    "./adapter": "./src/webrtc-adapter.js",
+    "./ice-config": "./src/ice-config.js"
+  },
+  "dependencies": {
+    "@qu/core": "^0.1.0",
+    "@qu/sync": "^0.1.0",
+    "@qu/log": "^0.1.0"
+  },
+  "devDependencies": {
+    "@qu/runtime": "^0.1.0",
+    "fake-indexeddb": "^6.0.0"
+  },
+  "license": "MIT"
+}
