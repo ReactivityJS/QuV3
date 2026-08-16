@@ -1,0 +1,19 @@
+{
+  "name": "todo",
+  "version": "1.0.0",
+  "kind": "app",
+  "main": "./index.js",
+  "clientMain": "./dist/client.js",
+  "label": "ToDo",
+  "icon": "✅",
+  "navOrder": 15,
+  "spaceId": "63f5cc6f-62f6-4a43-a889-33900138f8b0",
+  "requires": [],
+  "pushActions": [
+    { "id": "invite", "label": "List invitations & task assignments", "type": "create" },
+    { "id": "listChange", "label": "Shared list changes", "type": "update" }
+  ],
+  "contributes": [
+    { "point": "shell.headerAction", "export": "renderHeaderAction", "kind": "ui", "order": 10 }
+  ]
+}

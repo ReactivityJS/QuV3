@@ -4,7 +4,7 @@ import { QuStore, MemoryStoreAdapter } from '@qu/core';
 import { QuIdentityEngine, actorPath } from '@qu/identity';
 import { AccessEngine, ThreadEngine } from '@qu/engines';
 import {
-  ListService, AccessService, MessageService, FlagService, ContactsService,
+  ListService, AccessService, SharingService, MessageService, FlagService, ContactsService,
   DirectoryService, ProfileService, ActorService, paths,
 } from '@qu/services';
 import { installDom, waitFor } from '@qu/ui/testing';
@@ -41,6 +41,7 @@ async function freshEnv() {
     access,
     messages,
     flags,
+    sharing: new SharingService(qu, identity, access, messages, flags),
     contacts: new ContactsService(flags, identity),
     directory: new DirectoryService(qu, identity, list),
     profile: new ProfileService(qu, identity),
@@ -83,6 +84,7 @@ async function createPeer(ownerQu, { alias } = {}) {
   const flags = new FlagService(peerQu, identity, list);
   const services = {
     actors: new ActorService(identity), access, messages, flags,
+    sharing: new SharingService(peerQu, identity, access, messages, flags),
     contacts: new ContactsService(flags, identity),
     directory: new DirectoryService(peerQu, identity, list),
     profile: new ProfileService(peerQu, identity),
@@ -330,12 +332,12 @@ test('inviteMember flow: inviting a known contact grants them a role, grows the 
   stop();
 
   stop = mount(container, { qu, services, segments: segmentsFor(`#/calendar/${calId}/share`), subscribe: noopSubscribe });
-  await waitFor(() => container.querySelector('.qu-cal-picker input') !== null);
-  const picker = container.querySelector('.qu-cal-picker input');
+  await waitFor(() => container.querySelector('.qu-actor-picker input') !== null);
+  const picker = container.querySelector('.qu-actor-picker input');
   picker.value = 'Ada';
   picker.dispatchEvent(new window.Event('input', { bubbles: true }));
-  await waitFor(() => container.querySelector('.qu-cal-picker-option') !== null);
-  container.querySelector('.qu-cal-picker-option').click();
+  await waitFor(() => container.querySelector('.qu-actor-picker-option') !== null);
+  container.querySelector('.qu-actor-picker-option').click();
 
   // `ensureCalendarMembership()` writes the meta doc and then, separately,
   // syncs the events ACL - two distinct documents, not one atomic write (the
@@ -394,12 +396,12 @@ test('an invited member sees the shared calendar (correctly labeled "Shared with
   stop();
 
   stop = mount(ownerContainer, { qu: ownerQu, services: ownerServices, segments: segmentsFor(`#/calendar/${calId}/share`), subscribe: noopSubscribe });
-  await waitFor(() => ownerContainer.querySelector('.qu-cal-picker input') !== null);
-  const picker = ownerContainer.querySelector('.qu-cal-picker input');
+  await waitFor(() => ownerContainer.querySelector('.qu-actor-picker input') !== null);
+  const picker = ownerContainer.querySelector('.qu-actor-picker input');
   picker.value = 'Ada';
   picker.dispatchEvent(new window.Event('input', { bubbles: true }));
-  await waitFor(() => ownerContainer.querySelector('.qu-cal-picker-option') !== null);
-  ownerContainer.querySelector('.qu-cal-picker-option').click();
+  await waitFor(() => ownerContainer.querySelector('.qu-actor-picker-option') !== null);
+  ownerContainer.querySelector('.qu-actor-picker-option').click();
   await waitForAsync(async () => (await ownerServices.access.getAcl(CAL_SPACE, 'docs', `cal-${calId}-events`)).writers.length === 2);
   stop();
 
@@ -466,12 +468,12 @@ async function ownerSharesCalendarWithGuest() {
   stop();
 
   stop = mount(ownerContainer, { qu: ownerQu, services: ownerServices, segments: segmentsFor(`#/calendar/${calId}/share`), subscribe: noopSubscribe });
-  await waitFor(() => ownerContainer.querySelector('.qu-cal-picker input') !== null);
-  const picker = ownerContainer.querySelector('.qu-cal-picker input');
+  await waitFor(() => ownerContainer.querySelector('.qu-actor-picker input') !== null);
+  const picker = ownerContainer.querySelector('.qu-actor-picker input');
   picker.value = 'Ada';
   picker.dispatchEvent(new window.Event('input', { bubbles: true }));
-  await waitFor(() => ownerContainer.querySelector('.qu-cal-picker-option') !== null);
-  ownerContainer.querySelector('.qu-cal-picker-option').click();
+  await waitFor(() => ownerContainer.querySelector('.qu-actor-picker-option') !== null);
+  ownerContainer.querySelector('.qu-actor-picker-option').click();
   await waitForAsync(async () => (await ownerServices.access.getAcl(CAL_SPACE, 'docs', `cal-${calId}-events`)).writers.length === 2);
   stop();
 

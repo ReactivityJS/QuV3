@@ -16,6 +16,7 @@
     "./favorites-service": "./src/favorites-service.js",
     "./contacts-service": "./src/contacts-service.js",
     "./access-service": "./src/access-service.js",
+    "./sharing-service": "./src/sharing-service.js",
     "./crypto-envelope": "./src/crypto-envelope.js",
     "./thread-formatting": "./src/thread-formatting.js",
     "./link-detect": "./src/link-detect.js",

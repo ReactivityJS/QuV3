@@ -66,7 +66,7 @@
 import { watch } from '@qu/reactive';
 import { paths, THREAD_PRESETS, formatActorLabel, matchesActorQuery } from '@qu/services';
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme, renderSubpage, mountContextSwitcher, renderContextListPage, mountAppHeaderAction } from '@qu/ui';
+import { injectStyle, ensureTheme, renderSubpage, mountContextSwitcher, renderContextListPage, mountAppHeaderAction, mountActorPicker } from '@qu/ui';
 
 const SPACE_ID = 'ff73365b-144a-4285-8e98-ac7f9928a95f'; // this app's own manifest.spaceId - see index.js's own copy of this constant
 const PALETTE = ['#e0483e', '#3e7fe0', '#3ea05e', '#d0a02a', '#9a4fe0', '#e0648a', '#2ab3a6', '#c47a2a'];
@@ -236,14 +236,8 @@ const STYLE = `
   .qu-cal-badge { font-size: 0.75em; opacity: 0.65; border: 1px solid var(--qu-color-border, #8884); border-radius: 999px; padding: 0.1rem 0.55rem; }
   .qu-cal-noaccess { max-width: 28rem; }
 
-  /* ---- Actor picker (alias/pub autocomplete) - Share + Guest invite ---- */
-  .qu-cal-picker { position: relative; }
-  .qu-cal-picker-row { display: flex; gap: 0.4rem; align-items: center; }
-  .qu-cal-picker-row input { flex: 1; min-width: 0; }
-  .qu-cal-picker-dropdown { position: absolute; left: 0; right: 0; top: 100%; margin-top: 0.2rem; background: var(--qu-color-surface, Canvas); border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); max-height: 13rem; overflow-y: auto; z-index: 5; box-shadow: 0 0.3rem 0.8rem rgba(0,0,0,0.15); }
-  .qu-cal-picker-option { padding: 0.55rem 0.7rem; cursor: pointer; font-size: 0.9em; }
-  .qu-cal-picker-option:hover, .qu-cal-picker-option[data-active="true"] { background: #8882; }
-  .qu-cal-picker-empty { padding: 0.55rem 0.7rem; font-size: 0.85em; opacity: 0.65; }
+  /* Actor picker (alias/pub autocomplete, Share + Guest invite) is @qu/ui's
+     own mountActorPicker() now - it injects its own .qu-actor-picker* styles. */
 
   /* ---- ≥720px: back to a desktop-style toolbar layout ---- */
   @media (min-width: 720px) {
@@ -372,132 +366,47 @@ function eventsTouching(events, day) {
 // ===========================================================================
 // Actor picker - alias/pub search-as-you-type with live autocomplete,
 // shared by the Share page's "invite a member" row and the Event Detail
-// page's "invite a guest" row (requirements: share by alias/pub with
-// autocomplete; guest invites use the identical mechanism). Candidate pool
-// mirrors @qu/thread-ui's mountMentionAutocomplete(): DirectoryService.
+// page's "invite a guest" row. The widget itself (dropdown, keyboard nav,
+// caret-safe pick, "paste a pub key" fallback) is `@qu/ui`'s generic
+// `mountActorPicker()` (extracted from what used to be this app's own
+// private copy, once `apps/todo` needed the identical mechanism) - this
+// wrapper only supplies CALENDAR'S candidate-pool policy: DirectoryService.
 // listVisible() + ContactsService.listContacts(), deduped by actorPub,
-// resolved to a profile ONCE per mount, filtered synchronously per
-// keystroke via matchesActorQuery()/formatActorLabel() (both @qu/services).
-// A query that matches no candidate but looks like a real actor pubkey
-// (long enough, no whitespace) still offers a literal "invite ~xyz…" option
-// - the "or paste a public key" half of the requirement, for someone not
-// (yet) in the directory or contacts.
+// resolved to a profile ONCE per mount, matched via matchesActorQuery()/
+// formatActorLabel() (both @qu/services).
 // ===========================================================================
-function looksLikeActorPub(query) {
-  return query.length >= 32 && !/\s/.test(query);
+async function buildDirectoryAndContactsPool(services) {
+  const [visible, contacts] = await Promise.all([
+    services.directory.listVisible().catch(() => []),
+    services.contacts.listContacts().catch(() => []),
+  ]);
+  const byPub = new Map();
+  for (const entry of visible) byPub.set(entry.actorPub, null);
+  for (const c of contacts) byPub.set(c.actorPub, c.profile ?? null);
+  return Promise.all([...byPub.keys()].map(async (actorPub) => ({
+    actorPub,
+    profile: byPub.get(actorPub) ?? (await services.profile.getPublicProfile(actorPub).catch(() => null)),
+  })));
 }
 
 /**
- * @param {HTMLElement} container - Gets one `.qu-cal-picker` block appended.
+ * @param {HTMLElement} container
  * @param {{services: object, subscribe?: Function, excludePubs?: Set<string>, onPick: (actorPub: string, label: string) => void}} opts
  * @returns {() => void} destroy
  */
-function mountActorPicker(container, { services, subscribe, excludePubs = new Set(), onPick }) {
+function mountCalendarActorPicker(container, { services, subscribe, ...opts }) {
   subscribe?.(paths.directoryEntriesParentPath());
-
-  const wrap = document.createElement('div');
-  wrap.className = 'qu-cal-picker';
-  const row = document.createElement('div');
-  row.className = 'qu-cal-picker-row';
-  const input = document.createElement('input');
-  input.type = 'text';
-  input.placeholder = t('invitePlaceholder');
-  row.appendChild(input);
-  wrap.appendChild(row);
-  const dropdown = document.createElement('div');
-  dropdown.className = 'qu-cal-picker-dropdown';
-  dropdown.hidden = true;
-  wrap.appendChild(dropdown);
-  container.appendChild(wrap);
-
-  let pool = null; // [{actorPub, profile}] - resolved once, lazily
-  let activeIndex = -1;
-  let destroyed = false;
-
-  async function ensurePool() {
-    if (pool) return pool;
-    const [visible, contacts] = await Promise.all([
-      services.directory.listVisible().catch(() => []),
-      services.contacts.listContacts().catch(() => []),
-    ]);
-    const byPub = new Map();
-    for (const entry of visible) byPub.set(entry.actorPub, null);
-    for (const c of contacts) byPub.set(c.actorPub, c.profile ?? null);
-    pool = await Promise.all([...byPub.keys()].map(async (actorPub) => ({
-      actorPub,
-      profile: byPub.get(actorPub) ?? (await services.profile.getPublicProfile(actorPub).catch(() => null)),
-    })));
-    return pool;
-  }
-
-  function closeDropdown() {
-    dropdown.hidden = true;
-    dropdown.textContent = '';
-    activeIndex = -1;
-  }
-
-  function choose(actorPub, label) {
-    input.value = '';
-    closeDropdown();
-    onPick(actorPub, label);
-  }
-
-  async function renderDropdown() {
-    if (destroyed) return;
-    const query = input.value.trim();
-    const candidates = await ensurePool();
-    const matches = candidates
-      .filter((c) => !excludePubs.has(c.actorPub) && (query ? matchesActorQuery(c.actorPub, c.profile, query) : false))
-      .slice(0, 8);
-
-    dropdown.textContent = '';
-    activeIndex = -1;
-    if (!query) { closeDropdown(); return; }
-
-    if (matches.length === 0 && !looksLikeActorPub(query)) {
-      const empty = document.createElement('div');
-      empty.className = 'qu-cal-picker-empty';
-      empty.textContent = t('noMatches');
-      dropdown.appendChild(empty);
-      dropdown.hidden = false;
-      return;
-    }
-    for (const c of matches) {
-      const opt = document.createElement('div');
-      opt.className = 'qu-cal-picker-option';
-      opt.textContent = shortPerson(c.actorPub, c.profile);
-      opt.addEventListener('click', () => choose(c.actorPub, shortPerson(c.actorPub, c.profile)));
-      dropdown.appendChild(opt);
-    }
-    if (matches.length === 0 && looksLikeActorPub(query) && !excludePubs.has(query)) {
-      const opt = document.createElement('div');
-      opt.className = 'qu-cal-picker-option';
-      opt.textContent = t('pasteAsIs', { pub: query.slice(0, 12) });
-      opt.addEventListener('click', () => choose(query, `~${query.slice(0, 10)}…`));
-      dropdown.appendChild(opt);
-    }
-    dropdown.hidden = dropdown.children.length === 0;
-  }
-
-  input.addEventListener('input', () => { renderDropdown(); });
-  input.addEventListener('focus', () => { if (input.value.trim()) renderDropdown(); });
-  input.addEventListener('keydown', (e) => {
-    const options = [...dropdown.querySelectorAll('.qu-cal-picker-option')];
-    if (e.key === 'ArrowDown') { e.preventDefault(); activeIndex = Math.min(activeIndex + 1, options.length - 1); }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); activeIndex = Math.max(activeIndex - 1, 0); }
-    else if (e.key === 'Escape') { closeDropdown(); return; }
-    else if (e.key === 'Enter' && activeIndex >= 0) { e.preventDefault(); options[activeIndex]?.click(); return; }
-    else return;
-    options.forEach((el, i) => { el.dataset.active = String(i === activeIndex); });
+  return mountActorPicker(container, {
+    loadPool: () => buildDirectoryAndContactsPool(services),
+    matchesQuery: matchesActorQuery,
+    formatLabel: shortPerson,
+    labels: {
+      placeholder: t('invitePlaceholder'),
+      noMatches: t('noMatches'),
+      pasteAsIs: (pub) => t('pasteAsIs', { pub }),
+    },
+    ...opts,
   });
-  const onDocClick = (e) => { if (!wrap.contains(e.target)) closeDropdown(); };
-  document.addEventListener('click', onDocClick);
-
-  return () => {
-    destroyed = true;
-    document.removeEventListener('click', onDocClick);
-    wrap.remove();
-  };
 }
 
 // ===========================================================================
@@ -613,21 +522,20 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
   const fetchMeta = (id) => fetchDoc(metaResourceId(id), null);
   const fetchEvents = (id) => fetchDoc(eventsResourceId(id), { events: [] });
 
-  function roleOf(meta, actorPub) {
-    return meta?.members?.find((m) => m.actorPub === actorPub)?.role ?? null;
-  }
-  function canEdit(role) { return role === 'owner' || role === 'editor'; }
-  function canManage(role) { return role === 'owner'; }
+  // Role/membership/invite mechanics below are thin forwards onto
+  // `services.sharing` (`SharingService` - see its own doc comment) - the
+  // generic version of what used to be this app's own private logic,
+  // shared with `apps/todo` now that both need the identical shape.
+  function roleOf(meta, actorPub) { return services.sharing.roleOf(meta, actorPub); }
+  function canEdit(role) { return services.sharing.canEdit(role); }
+  function canManage(role) { return services.sharing.canManage(role); }
 
   async function listMine() {
-    return services.flags.listPrivate('calendar', 'calendar');
+    return services.sharing.listMine('calendar', 'calendar');
   }
 
   async function starIfMember(id, meta) {
-    if (!roleOf(meta, myActorPub)) return false;
-    if (await services.flags.hasPrivate('calendar', 'calendar', id)) return false;
-    await services.flags.setPrivate('calendar', 'calendar', id, true, {});
-    return true;
+    return services.sharing.starIfMember('calendar', 'calendar', id, meta);
   }
 
   /**
@@ -654,14 +562,9 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
    * later visit, not a growing re-scan cost.
    */
   async function discoverPendingInvites() {
-    const threadId = `invite-${myActorPub}`;
-    if (syncFetch) await syncFetch(paths.threadMessagesParentPath(SPACE_ID, threadId)).catch(() => {});
-    const { messages } = await services.messages.listMessages(SPACE_ID, threadId).catch(() => ({ messages: [] }));
-    const calIds = [...new Set(messages.map((m) => m.calendarId).filter(Boolean))];
-    for (const calId of calIds) {
-      const meta = await fetchMeta(calId);
-      await starIfMember(calId, meta);
-    }
+    await services.sharing.discoverPendingInvites(SPACE_ID, {
+      flagType: 'calendar', entityKind: 'calendar', resourceKey: 'calendarId', fetchMeta,
+    });
   }
 
   // ---------------------------------------------------------------------
@@ -947,7 +850,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
           // member) still gets told, via the SAME already-wired
           // activity-thread notification every real create/update/delete
           // already uses - see notifyActivity()'s own doc comment.
-          await services.flags.setPrivate('calendar', 'calendar', info.id, false);
+          await services.sharing.unstar('calendar', 'calendar', info.id);
           await notifyActivity(info.id, 'left');
           await onChange();
         });
@@ -1644,7 +1547,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     const pickerHost = document.createElement('div');
     listEl.appendChild(pickerHost);
     listEl.appendChild(status);
-    const cleanup = mountActorPicker(pickerHost, {
+    const cleanup = mountCalendarActorPicker(pickerHost, {
       services,
       subscribe,
       excludePubs: new Set(guests.map((g) => g.actorPub)),
@@ -1781,7 +1684,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
         status.className = 'qu-cal-status';
         page.appendChild(status);
 
-        const cleanup = mountActorPicker(pickerHost, {
+        const cleanup = mountCalendarActorPicker(pickerHost, {
           services,
           subscribe,
           excludePubs: new Set(meta.members.map((m) => m.actorPub)),
@@ -1853,27 +1756,19 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
 
   async function createCalendar(title) {
     const calId = crypto.randomUUID();
-    const members = [{ actorPub: myActorPub, role: 'owner', addedAt: Date.now() }];
-
-    await services.access.protect(SPACE_ID, 'docs', metaResourceId(calId), { writers: [myActorPub] });
-    const metaWriteOptions = await services.access.writeOptionsFor(SPACE_ID, 'docs', metaResourceId(calId));
-    await qu.put(paths.documentPath(SPACE_ID, metaResourceId(calId)), {
-      id: calId, title, color: null, ownerPub: myActorPub, members, createdAt: Date.now(),
-    }, metaWriteOptions);
+    await services.sharing.createOwned(SPACE_ID, 'docs', metaResourceId(calId), { id: calId, title, color: null }, { flagType: 'calendar', entityKind: 'calendar' });
 
     await services.access.protect(SPACE_ID, 'docs', eventsResourceId(calId), { writers: [myActorPub] });
     const eventsWriteOptions = await services.access.writeOptionsFor(SPACE_ID, 'docs', eventsResourceId(calId));
     await qu.put(paths.documentPath(SPACE_ID, eventsResourceId(calId)), { events: [] }, eventsWriteOptions);
 
     await services.messages.createThread(SPACE_ID, activityThreadId(calId), THREAD_PRESETS.activity([myActorPub]));
-    await services.flags.setPrivate('calendar', 'calendar', calId, true, {});
     return calId;
   }
 
   /** Grows/shrinks the `events` document's writer ACL to exactly "owner + every current editor" - called after any membership/role change. */
   async function syncEventsAcl(id, members) {
-    const writers = members.filter((m) => m.role === 'owner' || m.role === 'editor').map((m) => m.actorPub);
-    await services.access.protect(SPACE_ID, 'docs', eventsResourceId(id), { writers }, { includeSelfAsWriter: false });
+    await services.sharing.syncWriterAcl(SPACE_ID, 'docs', eventsResourceId(id), members);
   }
 
   /**
@@ -1884,14 +1779,12 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
    * calendar member yet needs at least viewer access to see it at all).
    */
   async function ensureCalendarMembership(id, actorPub, role) {
-    const meta = await fetchMeta(id);
-    if (meta.members.some((m) => m.actorPub === actorPub)) return meta;
-    const members = [...meta.members, { actorPub, role, addedAt: Date.now() }];
-    const writeOptions = await services.access.writeOptionsFor(SPACE_ID, 'docs', metaResourceId(id));
-    await qu.put(paths.documentPath(SPACE_ID, metaResourceId(id)), { ...meta, members }, writeOptions);
-    await syncEventsAcl(id, members);
-    await services.messages.addReader(SPACE_ID, activityThreadId(id), actorPub);
-    return { ...meta, members };
+    return services.sharing.ensureMembership(SPACE_ID, 'docs', metaResourceId(id), actorPub, role, {
+      onMembersChanged: async (members) => {
+        await syncEventsAcl(id, members);
+        await services.messages.addReader(SPACE_ID, activityThreadId(id), actorPub);
+      },
+    });
   }
 
   async function inviteMember(id, actorPub, role) {
@@ -1900,12 +1793,14 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     // key failure aborts the whole invite instead of silently granting
     // access nobody was actually notified about (same ordering QuV2's own
     // calendar used, and every other real-invite flow in this codebase).
-    try {
-      await services.messages.notify(SPACE_ID, actorPub, 'invited', { calendarId: id, calendarTitle: meta?.title ?? t('untitled') });
-    } catch {
-      throw new Error('their profile hasn’t synced yet - try again shortly');
-    }
-    await ensureCalendarMembership(id, actorPub, role);
+    await services.sharing.inviteMember(SPACE_ID, 'docs', metaResourceId(id), actorPub, role, {
+      notifyBody: 'invited',
+      notifyExtra: { calendarId: id, calendarTitle: meta?.title ?? t('untitled') },
+      onMembersChanged: async (members) => {
+        await syncEventsAcl(id, members);
+        await services.messages.addReader(SPACE_ID, activityThreadId(id), actorPub);
+      },
+    });
   }
 
   /**
@@ -1939,20 +1834,16 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
   }
 
   async function changeMemberRole(id, actorPub, role) {
-    const meta = await fetchMeta(id);
-    const members = meta.members.map((m) => (m.actorPub === actorPub ? { ...m, role } : m));
-    const writeOptions = await services.access.writeOptionsFor(SPACE_ID, 'docs', metaResourceId(id));
-    await qu.put(paths.documentPath(SPACE_ID, metaResourceId(id)), { ...meta, members }, writeOptions);
-    await syncEventsAcl(id, members);
+    return services.sharing.changeMemberRole(SPACE_ID, 'docs', metaResourceId(id), actorPub, role, {
+      onMembersChanged: (members) => syncEventsAcl(id, members),
+    });
   }
 
   async function removeMember(id, actorPub) {
-    const meta = await fetchMeta(id);
-    const members = meta.members.filter((m) => m.actorPub !== actorPub);
-    const writeOptions = await services.access.writeOptionsFor(SPACE_ID, 'docs', metaResourceId(id));
-    await qu.put(paths.documentPath(SPACE_ID, metaResourceId(id)), { ...meta, members }, writeOptions);
-    await syncEventsAcl(id, members);
-    try { await services.messages.removeReader(SPACE_ID, activityThreadId(id), actorPub); } catch { /* no activity thread yet - nothing to revoke */ }
+    return services.sharing.removeMember(SPACE_ID, 'docs', metaResourceId(id), actorPub, {
+      activityThreadId: activityThreadId(id),
+      onMembersChanged: (members) => syncEventsAcl(id, members),
+    });
   }
 
   /**
@@ -1968,7 +1859,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
   async function deleteCalendar(id) {
     const writeOptions = await services.access.writeOptionsFor(SPACE_ID, 'docs', metaResourceId(id));
     await qu.put(paths.documentPath(SPACE_ID, metaResourceId(id)), null, writeOptions);
-    await services.flags.setPrivate('calendar', 'calendar', id, false);
+    await services.sharing.unstar('calendar', 'calendar', id);
     checked?.delete(id);
   }
 

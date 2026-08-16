@@ -1,4 +1,4 @@
-import { ListService, FlagService, ContactsService, FavoritesService, ProfileService, DirectoryService, ActorService, AccessService, MessageService, ReactionService, PinService, PresenceService, AssetService, BookmarksService, NotificationPrefsService, PushSubscriptionService, ChannelService, ChatService } from '@qu/services';
+import { ListService, FlagService, ContactsService, FavoritesService, ProfileService, DirectoryService, ActorService, AccessService, SharingService, MessageService, ReactionService, PinService, PresenceService, AssetService, BookmarksService, NotificationPrefsService, PushSubscriptionService, ChannelService, ChatService } from '@qu/services';
 import { AssetEngine, CollectionEngine } from '@qu/engines';
 
 /**
@@ -75,6 +75,12 @@ export function createClientServices(qu, identity, { syncFetch = null, getGenera
     directory: new DirectoryService(qu, identity, list),
     actors: new ActorService(identity),
     access,
+    // The generic "shared resource with owner/editor/viewer members, invite
+    // by alias/pub, ACL kept in sync as roles change" Entity API (see its
+    // own doc comment) - extracted FROM apps/calendar's own inline logic
+    // once a second real caller (apps/todo's shared lists) needed the exact
+    // same shape. Shares this same `access`/`messages`/`flags` instance.
+    sharing: new SharingService(qu, identity, access, messages, flags, syncFetch),
     // `apps/forum`'s first real client caller (see its own doc comment) -
     // MessageService/ReactionService/PinService existed fully tested since
     // early in this session, with nothing wiring them to a real client
