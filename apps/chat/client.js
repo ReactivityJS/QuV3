@@ -167,7 +167,7 @@ import { watch, watchChildren } from '@qu/reactive';
 import { paths, formatActorLabel, getPrivate, putPrivate, getPrivateChildren, detectLinks, ChatService } from '@qu/services';
 import { rankFor } from '@qu/foundation';
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage, mountAppHeaderAction } from '@qu/ui';
+import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage, mountAppHeaderAction, renderNavPointsMenu } from '@qu/ui';
 import {
   renderEmojiPicker, renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, insertAtCursor, copyToClipboard,
   mountComposerAutogrow, COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS,
@@ -213,7 +213,7 @@ const DICT = {
     voiceMessage: '🎙️ Voice message',
     shareLocation: 'Share my location',
     locationMessage: 'Location',
-    newGroup: 'New group',
+    newChatGroup: 'New chat group',
     createGroup: 'Create group',
     groupName: 'Group name',
     selectMembers: 'Add members',
@@ -259,7 +259,7 @@ const DICT = {
     voiceMessage: '🎙️ Sprachnachricht',
     shareLocation: 'Meinen Standort teilen',
     locationMessage: 'Standort',
-    newGroup: 'Neue Gruppe',
+    newChatGroup: 'Neue Chat-Gruppe',
     createGroup: 'Gruppe erstellen',
     groupName: 'Gruppenname',
     selectMembers: 'Mitglieder hinzufügen',
@@ -559,15 +559,18 @@ export async function renderChatSettings(container, { myPub, services }) {
 // ===================================================================
 
 /**
- * The `shell.headerAction` contributor (see `apps/chat/manifest.quapp`'s
+ * The `shell.headerNavPoints` contributor (see `apps/chat/manifest.quapp`'s
  * `contributes`) - shows a single "+" icon in the GLOBAL header, only while
  * Chat is the active app, linking to the New Group form - gated by the SAME
  * `fetchChatPolicy()` check the old inline "+ New group" room-list link used
- * (below, moved here). Replaces that inline link entirely.
+ * (below, moved here). Replaces that inline link entirely. Its label is
+ * `newChatGroup` ("New chat group"), not the more generic "New group" the
+ * old inline link used - a hover tooltip is read with no surrounding page
+ * context, so it needs to name what it creates on its own.
  * @param {HTMLElement} container
  * @param {{getContext: Function, onContextChange: Function, services: object}} payload
  */
-export function renderHeaderAction(container, { getContext, onContextChange, services }) {
+export function renderHeaderNavPoints(container, { getContext, onContextChange, services }) {
   mountAppHeaderAction(container, {
     appId: 'chat', getContext, onContextChange,
     render: (wrap) => {
@@ -575,13 +578,7 @@ export function renderHeaderAction(container, { getContext, onContextChange, ser
       (async () => {
         const { allowMemberCreateGroup, isAdmin } = await fetchChatPolicy(services);
         if (stopped || !(isAdmin || allowMemberCreateGroup)) return;
-        const link = document.createElement('a');
-        link.className = 'qu-app-action-btn';
-        link.textContent = '+';
-        link.title = t('newGroup');
-        link.setAttribute('aria-label', t('newGroup'));
-        link.href = '#/chat/new-group';
-        wrap.appendChild(link);
+        renderNavPointsMenu(wrap, { items: [{ label: t('newChatGroup'), href: '#/chat/new-group' }] });
       })();
       return () => { stopped = true; };
     },
@@ -741,7 +738,7 @@ function mountRoomListView(container, { qu, services, subscribe, syncFetch, SPAC
       listRoot.appendChild(ul);
     }
     // No inline "+ New group" link here anymore - it's the global header's
-    // App Action Slot now (see renderHeaderAction() below and
+    // App Navigation Points Slot now (see renderHeaderNavPoints() below and
     // docs/app-navigation-standard.md Rule 2), same policy check.
   }
 

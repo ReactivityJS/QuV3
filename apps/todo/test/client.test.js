@@ -11,7 +11,7 @@ import { AssetEngine } from '@qu/engines';
 import { installDom, waitFor } from '@qu/ui/testing';
 
 installDom();
-const { mount, renderHeaderAction } = await import('../client.js');
+const { mount, renderHeaderNavPoints } = await import('../client.js');
 
 const TODO_SPACE_ID = '63f5cc6f-62f6-4a43-a889-33900138f8b0'; // real UUID from apps/todo/manifest.quapp
 
@@ -439,7 +439,7 @@ test('the returned stop function tears down cleanly - no error thrown', async ()
   assert.doesNotThrow(() => stop());
 });
 
-test('renderHeaderAction(): hidden while another app is active, shown with a "+" link to the first editable list\'s New Task page once ToDo becomes active', async () => {
+test('renderHeaderNavPoints(): hidden while another app is active, shown immediately (pointing at #/todo) then upgraded to the first editable list\'s New Task page once ToDo becomes active', async () => {
   const { qu, services } = await freshEnv();
   const container = makeContainer();
   const stopMain = mount(makeContainer(), { qu, services, segments: ['todo'], subscribe: noopSubscribe });
@@ -449,7 +449,7 @@ test('renderHeaderAction(): hidden while another app is active, shown with a "+"
 
   let appId = 'chat';
   const listeners = [];
-  renderHeaderAction(container, {
+  renderHeaderNavPoints(container, {
     getContext: () => ({ appId, segments: [appId] }),
     onContextChange: (cb) => listeners.push(cb),
     services, qu,
@@ -460,5 +460,6 @@ test('renderHeaderAction(): hidden while another app is active, shown with a "+"
   appId = 'todo';
   listeners.forEach((cb) => cb());
   assert.equal(wrap.hidden, false);
+  assert.equal(wrap.querySelector('a')?.getAttribute('href'), '#/todo');
   await waitFor(() => wrap.querySelector('a')?.getAttribute('href') === `#/todo/${listId}/new`);
 });

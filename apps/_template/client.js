@@ -25,11 +25,14 @@
  *     (`renderNoteDetail()`, `renderNewNoteForm()`) goes through
  *     `renderSubpage({ showBackLink: false, ... })` - no bespoke back link
  *     anywhere in this file.
- *   - Rule 2 (App Action Slot): `renderHeaderAction()` at the bottom, wired
- *     via `manifest.quapp`'s `contributes: [{point: 'shell.headerAction', ...}]`
- *     - a single "+" icon in the GLOBAL header, visible only while this app
- *     is active, using `@qu/ui`'s `mountAppHeaderAction()` to handle that
- *     show/hide.
+ *   - Rule 2 (App Navigation Points Slot): `renderHeaderNavPoints()` at the
+ *     bottom, wired via `manifest.quapp`'s `contributes: [{point:
+ *     'shell.headerNavPoints', ...}]` - a single "+" icon in the GLOBAL
+ *     header (left of the spacer, next to Back/Forward), visible only while
+ *     this app is active, using `@qu/ui`'s `mountAppHeaderAction()` to
+ *     handle that show/hide and `renderNavPointsMenu()` to render it (1
+ *     item = plain link, 2+ = a dropdown - see the commented-out
+ *     alternative right below `renderHeaderNavPoints()`).
  *   - Rule 3 (Context Switcher): `renderFolderView()` below uses
  *     `@qu/ui`'s `mountContextSwitcher(..., variant: 'tabs')` - the right
  *     choice here since FOLDERS is a short, fixed list (mirrors
@@ -39,14 +42,14 @@
  *     alternative right below `renderFolderView()`'s own
  *     `mountContextSwitcher()` call for exactly what that looks like.
  *   - Rule 4 (icon tooltips): the header action's icon sets both `title`
- *     and `aria-label` - see `renderHeaderAction()`.
+ *     and `aria-label` - see `renderHeaderNavPoints()`.
  *
  * Routes: `#/template` (defaults to the first folder), `#/template/f/<folderId>`
  * (a folder's notes), `#/template/n/<noteId>` (note detail), `#/template/new`
  * (new note form).
  */
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme, renderSubpage, mountContextSwitcher, mountAppHeaderAction } from '@qu/ui';
+import { injectStyle, ensureTheme, renderSubpage, mountContextSwitcher, mountAppHeaderAction, renderNavPointsMenu } from '@qu/ui';
 
 const FOLDERS = [
   { id: 'inbox', label: 'Inbox' },
@@ -247,31 +250,54 @@ export function mount(container, { services, segments = [] }) {
 }
 
 // ===========================================================================
-// Header action - "+ New note" (see docs/app-navigation-standard.md Rule 2)
+// App Navigation Points - "+ New note" (see docs/app-navigation-standard.md Rule 2)
 // ===========================================================================
 
 /**
- * The `shell.headerAction` contributor (see `manifest.quapp`'s
- * `contributes`) - a single "+" icon in the GLOBAL header, shown only while
- * this app is active, linking to the New Note form. Mirrors
- * `apps/calendar/client.js`'s/`apps/chat/client.js`'s own real
- * `renderHeaderAction()` exports - copy this shape verbatim.
+ * The `shell.headerNavPoints` contributor (see `manifest.quapp`'s
+ * `contributes`) - shown only while this app is active, left of the header
+ * spacer next to Back/Forward. Mirrors `apps/calendar/client.js`'s/
+ * `apps/chat/client.js`'s own real `renderHeaderNavPoints()` exports - copy
+ * this shape verbatim. `renderNavPointsMenu()` renders however many items
+ * you pass it: exactly 1 (this example) is a plain icon link, identical in
+ * weight to the old single "+"; 2+ becomes a small dropdown automatically -
+ * see the commented-out alternative right below for that shape
+ * (`apps/forum/client.js`'s real "New channel"/"New topic" contributor is
+ * the working reference for it).
  * @param {HTMLElement} container
  * @param {{getContext: Function, onContextChange: Function}} payload
  */
-export function renderHeaderAction(container, { getContext, onContextChange }) {
+export function renderHeaderNavPoints(container, { getContext, onContextChange }) {
   mountAppHeaderAction(container, {
     appId: 'template', getContext, onContextChange,
     render: (wrap) => {
-      const link = document.createElement('a');
-      link.className = 'qu-app-action-btn';
-      link.textContent = '+';
-      // Rule 4 - every icon-only control carries a real tooltip/label, not
-      // just the glyph.
-      link.title = t('newNote');
-      link.setAttribute('aria-label', t('newNote'));
-      link.href = '#/template/new';
-      wrap.appendChild(link);
+      // Rule 4 - every icon-only control carries a real tooltip/label
+      // (here, each item's own `label`), not just the glyph.
+      renderNavPointsMenu(wrap, { items: [{ label: t('newNote'), href: '#/template/new' }] });
     },
   });
 }
+
+// Alternative: 2+ items - renderNavPointsMenu() renders a small dropdown
+// instead of a plain link once there's more than one. Useful when your app
+// has more than one dedicated-route "create X" action (see
+// apps/forum/client.js's real renderHeaderNavPoints() for the working
+// version of this, including reacting to WITHIN-app navigation via its own
+// onContextChange listener, since a 2nd item's relevance can depend on the
+// current route the way Forum's "New topic" only makes sense once a
+// channel is open):
+//
+// export function renderHeaderNavPoints(container, { getContext, onContextChange }) {
+//   mountAppHeaderAction(container, {
+//     appId: 'template', getContext, onContextChange,
+//     render: (wrap) => {
+//       renderNavPointsMenu(wrap, {
+//         items: [
+//           { label: t('newNote'), href: '#/template/new' },
+//           { label: t('newFolder'), href: '#/template/new-folder' },
+//         ],
+//         menuLabel: t('createNew'), // the dropdown button's own title/aria-label
+//       });
+//     },
+//   });
+// }

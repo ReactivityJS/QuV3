@@ -57,7 +57,7 @@
 import { watch } from '@qu/reactive';
 import { paths, THREAD_PRESETS, formatActorLabel, matchesActorQuery } from '@qu/services';
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme, renderSubpage, mountAppHeaderAction, mountActorPicker } from '@qu/ui';
+import { injectStyle, ensureTheme, renderSubpage, mountAppHeaderAction, renderNavPointsMenu, mountActorPicker } from '@qu/ui';
 
 const SPACE_ID = '63f5cc6f-62f6-4a43-a889-33900138f8b0'; // this app's own manifest.spaceId - see index.js's own copy of this constant
 
@@ -176,19 +176,19 @@ function formatDueDate(ms) {
 }
 
 // ===========================================================================
-// Header action - "+ New task" (see docs/app-navigation-standard.md Rule 2)
+// Header nav points - "+ New task" (see docs/app-navigation-standard.md Rule 2)
 // ===========================================================================
-export function renderHeaderAction(container, { getContext, onContextChange, services, qu }) {
+export function renderHeaderNavPoints(container, { getContext, onContextChange, services, qu }) {
   mountAppHeaderAction(container, {
     appId: 'todo', getContext, onContextChange,
     render: (wrap) => {
-      const link = document.createElement('a');
-      link.className = 'qu-app-action-btn';
-      link.textContent = '+';
-      link.title = t('newTask');
-      link.setAttribute('aria-label', t('newTask'));
-      link.href = '#/todo';
-      wrap.appendChild(link);
+      // Shown immediately, pointing at the list picker (#/todo) - unlike
+      // Calendar's "+ New event" (which needs an editable CALENDAR to exist
+      // first), a user with no editable list yet can still use this to reach
+      // the page where they create one. Upgraded in place to the resolved
+      // list's own new-task route once/if an editable list is found.
+      renderNavPointsMenu(wrap, { items: [{ label: t('newTask'), href: '#/todo' }] });
+      const link = wrap.querySelector('a');
 
       let stopped = false;
       (async () => {

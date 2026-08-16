@@ -8,6 +8,6 @@
   "navOrder": 0,
   "requires": [],
   "contributes": [
-    { "point": "shell.headerAction", "export": "renderHeaderAction", "kind": "ui", "order": 10 }
+    { "point": "shell.headerNavPoints", "export": "renderHeaderNavPoints", "kind": "ui", "order": 10 }
   ]
 }

@@ -23,6 +23,6 @@
     { "point": "content.search", "export": "searchForum", "kind": "query" },
     { "point": "content.searchResultTemplate", "export": "renderSearchResult", "kind": "ui" },
     { "point": "content.resolveReference", "export": "resolveForumReference", "kind": "query" },
-    { "point": "shell.headerAction", "export": "renderHeaderAction", "kind": "ui", "order": 10 }
+    { "point": "shell.headerNavPoints", "export": "renderHeaderNavPoints", "kind": "ui", "order": 10 }
   ]
 }

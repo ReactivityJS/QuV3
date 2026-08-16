@@ -10,7 +10,7 @@ import {
 import { installDom, waitFor } from '@qu/ui/testing';
 
 installDom();
-const { mount, createEventMenuItem, renderHeaderAction } = await import('../client.js');
+const { mount, createEventMenuItem, renderHeaderNavPoints } = await import('../client.js');
 
 const CAL_SPACE_ID = 'ff73365b-144a-4285-8e98-ac7f9928a95f'; // real UUID from apps/calendar/manifest.quapp
 
@@ -161,8 +161,8 @@ test('creating a calendar via the sidebar form shows it under "My calendars" and
     assert.equal(container.querySelector('.qu-cal-row-title').textContent, 'Team calendar');
     assert.equal(container.querySelector('.qu-cal-month-grid') !== null, true);
     // No FAB/inline "+ New event" link anymore - that's the global header's
-    // App Action Slot now (renderHeaderAction, tested in isolation below),
-    // reachable at every width instead of only on mobile.
+    // App Navigation Points Slot now (renderHeaderNavPoints, tested in
+    // isolation below), reachable at every width instead of only on mobile.
     assert.equal(container.querySelector('.qu-cal-fab'), null);
     assert.equal(container.querySelector('.qu-cal-new-event-inline'), null);
   } finally {
@@ -225,9 +225,9 @@ test('every subpage (new event, event detail, share) has no bespoke back link - 
   }
 });
 
-// ===== renderHeaderAction() - the shell.headerAction contributor (see docs/app-navigation-standard.md Rule 2) =====
+// ===== renderHeaderNavPoints() - the shell.headerNavPoints contributor (see docs/app-navigation-standard.md Rule 2) =====
 
-test('renderHeaderAction(): hidden while another app is active, shown with a "+" link once Calendar becomes active and an editable calendar resolves', async () => {
+test('renderHeaderNavPoints(): hidden while another app is active, shown with a "+" link once Calendar becomes active and an editable calendar resolves', async () => {
   const { qu, services } = await freshEnv();
   const container = makeContainer();
   const stop = mount(makeContainer(), { qu, services, segments: ['calendar'], subscribe: noopSubscribe });
@@ -237,7 +237,7 @@ test('renderHeaderAction(): hidden while another app is active, shown with a "+"
 
   let appId = 'chat';
   const listeners = [];
-  renderHeaderAction(container, {
+  renderHeaderNavPoints(container, {
     getContext: () => ({ appId, segments: [appId] }),
     onContextChange: (cb) => listeners.push(cb),
     services, qu,

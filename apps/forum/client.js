@@ -14,8 +14,12 @@
  * `docs/building-an-app.md` §5.1):
  *   - `#/forum` - a merged recent-activity topic feed across every channel,
  *     newest first.
- *   - `#/forum/c/<channelId>` - one channel's topic list, a "new topic"
- *     form, and (if restricted) an "invite member" field.
+ *   - `#/forum/c/<channelId>` - one channel's topic list, and (if
+ *     restricted) an "invite member" field.
+ *   - `#/forum/c/<channelId>/new-topic` - the "create a topic in this
+ *     channel" form, its own subpage (see `mountNewTopicView()`'s own doc
+ *     comment) - replaces what used to be an inline title field at the
+ *     bottom of the topic list.
  *   - `#/forum/t/<topicId>` - one topic's thread: message list, composer,
  *     attachments, plus whatever admin-enabled plugins render into this
  *     app's own extension points (reactions/pins/bookmarks - see EXTENSION
@@ -26,6 +30,11 @@
  *     out of the board view - see `mountMiniChannelSidebar()`'s own doc
  *     comment on why), policy-gated the same way the sidebar's own "+ New
  *     channel" link is.
+ *
+ * Both create-forms above are reachable from the global header's App
+ * Navigation Points Slot (`renderHeaderNavPoints()`, `shell.headerNavPoints`)
+ * rather than from inline links/forms - see `docs/app-navigation-standard.md`
+ * Rule 2.
  *
  * EVERY view above shares ONE persistent channel list (`mountMiniChannelSidebar()`),
  * not just the board view - esoTalk's own "the channel list never disappears,
@@ -179,7 +188,7 @@ import { watchChildren, watch } from '@qu/reactive';
 import { rankFor } from '@qu/foundation';
 import { paths, formatActorLabel, detectLinks } from '@qu/services';
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage, mountContextSwitcher, mountAppHeaderAction } from '@qu/ui';
+import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage, mountContextSwitcher, mountAppHeaderAction, renderNavPointsMenu } from '@qu/ui';
 import {
   renderEmojiPicker, renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, insertAtCursor, copyToClipboard,
   mountComposerAutogrow, COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS,
@@ -221,6 +230,8 @@ const DICT = {
     newChannelPlaceholder: 'New channel name…',
     createChannel: 'Create channel',
     newChannelLink: 'New channel',
+    newTopicLink: 'New topic',
+    newActions: 'Create new…',
     notAllowedToCreateChannel: 'This relay does not allow you to create a channel right now - ask an admin.',
     restrictedChannel: 'Restricted (only invited members)',
     membersPlaceholder: 'Member pubkeys, comma-separated',
@@ -261,6 +272,8 @@ const DICT = {
     newChannelPlaceholder: 'Name des neuen Kanals…',
     createChannel: 'Kanal erstellen',
     newChannelLink: 'Neuer Kanal',
+    newTopicLink: 'Neues Thema',
+    newActions: 'Neu erstellen…',
     notAllowedToCreateChannel: 'Auf diesem Relay darfst du aktuell keinen Kanal anlegen - wende dich an einen Admin.',
     restrictedChannel: 'Geschützt (nur eingeladene Mitglieder)',
     membersPlaceholder: 'Mitglieder-Pubkeys, kommagetrennt',
@@ -623,6 +636,8 @@ export function mount(container, ctx) {
   let stopView;
   if (kindSeg === 't' && idSeg) {
     stopView = mountTopicView(container, { ...viewCtx, topicId: idSeg, messageId: seg3 === 'm' ? seg4 : null });
+  } else if (kindSeg === 'c' && idSeg && seg3 === 'new-topic') {
+    stopView = mountNewTopicView(container, { ...viewCtx, channelId: idSeg });
   } else if (kindSeg === 'c' && idSeg) {
     stopView = mountChannelView(container, { ...viewCtx, channelId: idSeg });
   } else if (kindSeg === 'new') {
@@ -862,7 +877,7 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
  * channel, topic) - esoTalk's own "channel tabs stay visible no matter how
  * deep you've drilled in" idiom. Channel creation lives on its own subpage
  * (`mountNewChannelView()`, `#/forum/new`), reachable via the global
- * header's App Action Slot (`renderHeaderAction()` below, see
+ * header's App Navigation Points Slot (`renderHeaderNavPoints()` below, see
  * docs/app-navigation-standard.md Rule 2) - not from this list itself.
  *
  * RESPONSIVE: two presentations of the SAME data, built every render -
@@ -952,30 +967,47 @@ function mountMiniChannelSidebar(root, { qu, services, syncFetch, SPACE_ID }, ac
 // ===================================================================
 
 /**
- * The `shell.headerAction` contributor (see `apps/forum/manifest.quapp`'s
- * `contributes`) - a single "+" icon in the GLOBAL header, shown only while
- * Forum is active, linking to the New Channel form - gated by the SAME
- * `fetchChannelPolicy()` check the old inline "+ New channel" list entry
- * used (moved here from `mountMiniChannelSidebar()` above).
+ * The `shell.headerNavPoints` contributor (see `apps/forum/manifest.quapp`'s
+ * `contributes`) - shown only while Forum is active. Contributes 1 or 2
+ * items, so this is the first real case of `renderNavPointsMenu()`'s
+ * dropdown shape (see that file's own doc comment): "New channel" (gated by
+ * the SAME `fetchChannelPolicy()` check the old inline "+ New channel" list
+ * entry used, moved here from `mountMiniChannelSidebar()` above) is always
+ * the first item while Forum is active; "New topic" is added ONLY while a
+ * specific channel is open (`getContext().segments` is `['forum', 'c',
+ * <channelId>, ...]`) - on the board view (no channel open), "create a
+ * topic in THIS channel" isn't meaningful, so Forum contributes just the 1
+ * item there (a plain link, no dropdown). Unlike Calendar/Chat/ToDo's
+ * contributors, this one stays reactive to WITHIN-app navigation (switching
+ * channels) by registering its own `onContextChange` listener from inside
+ * `render()`, since `mountAppHeaderAction()` itself only re-renders on
+ * activate/deactivate, not on every route change within the same app.
  * @param {HTMLElement} container
  * @param {{getContext: Function, onContextChange: Function, services: object}} payload
  */
-export function renderHeaderAction(container, { getContext, onContextChange, services }) {
+export function renderHeaderNavPoints(container, { getContext, onContextChange, services }) {
   mountAppHeaderAction(container, {
     appId: 'forum', getContext, onContextChange,
     render: (wrap) => {
       let stopped = false;
-      (async () => {
-        const policy = await fetchChannelPolicy(services);
-        if (stopped || !(policy.isAdmin || policy.channelPolicy.allowMemberCreate)) return;
-        const link = document.createElement('a');
-        link.className = 'qu-app-action-btn';
-        link.textContent = '+';
-        link.title = t('newChannelLink');
-        link.setAttribute('aria-label', t('newChannelLink'));
-        link.href = '#/forum/new';
-        wrap.appendChild(link);
-      })();
+      let policyCache = null;
+      let lastChannelId;
+      async function update() {
+        if (stopped) return;
+        if (!policyCache) policyCache = await fetchChannelPolicy(services);
+        if (stopped) return;
+        const { segments } = getContext();
+        const channelId = segments[1] === 'c' ? segments[2] : null;
+        if (channelId === lastChannelId) return; // nothing this depends on actually changed
+        lastChannelId = channelId;
+        const items = [];
+        if (policyCache.isAdmin || policyCache.channelPolicy.allowMemberCreate) items.push({ label: t('newChannelLink'), href: '#/forum/new' });
+        if (channelId) items.push({ label: t('newTopicLink'), href: `#/forum/c/${channelId}/new-topic` });
+        wrap.textContent = '';
+        renderNavPointsMenu(wrap, { items, menuLabel: t('newActions') });
+      }
+      update();
+      onContextChange(update);
       return () => { stopped = true; };
     },
   });
@@ -1033,35 +1065,6 @@ function mountChannelView(container, { qu, services, syncFetch, SPACE_ID, channe
       for (const topic of topics) ul.appendChild(buildTopicRow(topic));
       topicsRoot.appendChild(ul);
     }
-    topicsRoot.appendChild(newTopicForm());
-  }
-
-  function newTopicForm() {
-    const form = document.createElement('form');
-    form.className = 'qu-forum-new-topic-form';
-    const titleInput = document.createElement('input');
-    titleInput.type = 'text';
-    titleInput.placeholder = t('newTopicPlaceholder');
-    titleInput.required = true;
-    const submit = document.createElement('button');
-    submit.type = 'submit';
-    submit.textContent = t('createTopic');
-    form.append(titleInput, submit);
-
-    // Same double-submit guard as the board view's "create channel" form.
-    form.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const title = titleInput.value.trim();
-      if (!title) return;
-      submit.disabled = true;
-      try {
-        await services.channels.createTopic(SPACE_ID, channelId, { title });
-        titleInput.value = '';
-      } finally {
-        submit.disabled = false;
-      }
-    });
-    return form;
   }
 
   function renderInvite() {
@@ -1129,6 +1132,56 @@ function mountChannelView(container, { qu, services, syncFetch, SPACE_ID, channe
     topicsActivity.stop();
     stopSidebar();
   };
+}
+
+// ===================================================================
+// NEW TOPIC - #/forum/c/<channelId>/new-topic
+// ===================================================================
+// A real subpage (Rule 2 - see renderHeaderNavPoints() below), replacing
+// the old inline title-field form that used to sit at the bottom of every
+// channel's topic list. No policy gate of its own - same as the inline form
+// it replaces, `services.channels.createTopic()` relies entirely on the
+// channel's own writer ACL (restricted or not) to enforce who can actually
+// post; this view has nothing extra to check client-side.
+
+function mountNewTopicView(container, { services, SPACE_ID, channelId }) {
+  let stopped = false;
+  const formRoot = document.createElement('div');
+  const heading = document.createElement('h1');
+  heading.textContent = t('newTopicLink');
+
+  renderSubpage(container, {
+    showBackLink: false, // the shell header's own Back/Forward already covers this - see this app's own top doc comment
+    render: (content) => content.append(heading, formRoot),
+  });
+
+  const form = document.createElement('form');
+  form.className = 'qu-forum-new-topic-form';
+  const titleInput = document.createElement('input');
+  titleInput.type = 'text';
+  titleInput.placeholder = t('newTopicPlaceholder');
+  titleInput.required = true;
+  const submit = document.createElement('button');
+  submit.type = 'submit';
+  submit.textContent = t('createTopic');
+  form.append(titleInput, submit);
+
+  // Same double-submit guard as the board view's "create channel" form.
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const title = titleInput.value.trim();
+    if (!title) return;
+    submit.disabled = true;
+    try {
+      const topic = await services.channels.createTopic(SPACE_ID, channelId, { title });
+      if (!stopped) window.location.hash = `#/forum/t/${topic._id}`;
+    } finally {
+      submit.disabled = false;
+    }
+  });
+  formRoot.appendChild(form);
+
+  return () => { stopped = true; };
 }
 
 // ===================================================================
