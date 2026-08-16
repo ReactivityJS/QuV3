@@ -5,6 +5,15 @@
  * comment for why it does NOT cache any app data) and `apps/shell/
  * manifest.webmanifest` (the web app manifest `index.html` links to).
  *
+ * Pure browser-API logic only - no UI of its own. `apps/shell/src/header.js`
+ * is the caller: an "Install app" entry in the avatar menu (shown only once
+ * `captureInstallPrompt()`'s `onInstallable` fires) and a small, otherwise-
+ * hidden update icon in the header itself (shown only once
+ * `registerServiceWorker()`'s `onUpdateAvailable` fires) - a single
+ * always-visible bar with two mostly-disabled buttons was the original
+ * shape here; both affordances are rare/one-shot enough that they belong
+ * folded into chrome that already exists, not a permanent extra row.
+ *
  * UPDATE FLOW: `sw.js` deliberately does NOT call `skipWaiting()`
  * automatically on install - a new worker sits in `.waiting` until this
  * module explicitly tells it to take over, which is what makes an
@@ -36,29 +45,8 @@
  * round's actual ask ("PWA, updater") needs.
  */
 import { createLogger } from '@qu/log';
-import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme } from '@qu/ui';
 
 const log = createLogger('shell:pwa');
-
-const DICT = {
-  en: { updateAvailable: 'Update available — reload', installApp: 'Install app' },
-  de: { updateAvailable: 'Update verfügbar — neu laden', installApp: 'App installieren' },
-};
-const { t } = createI18n(DICT);
-
-const STYLE_ID = 'qu-shell-pwa-style';
-const STYLE = `
-  .qu-pwa-bar { display: flex; gap: 0.5rem; padding: 0.4rem 0.8rem; border-bottom: 1px solid var(--qu-color-border, #8884); background: color-mix(in srgb, var(--qu-color-accent, #5b5bd6) 10%, transparent); }
-  /* Without this, bar.hidden = true (the default, until something is
-     actually actionable - see mountPwaUi()) would have no visual effect: a
-     plain author-stylesheet class selector beats the UA's own [hidden]
-     rule at equal specificity, so an empty, permanently-visible bar with
-     its own border/background would show on every single page load. */
-  .qu-pwa-bar[hidden] { display: none; }
-  .qu-pwa-bar button { padding: 0.3rem 0.7rem; border-radius: var(--qu-radius-sm, 0.3rem); border: 1px solid var(--qu-color-border, #8884); background: var(--qu-color-accent, #5b5bd6); color: white; cursor: pointer; font: inherit; }
-  .qu-pwa-bar button:disabled { opacity: 0.6; cursor: default; }
-`;
 
 /**
  * Registers `/sw.js` and reports genuine updates (not first installs).
@@ -146,63 +134,4 @@ export function captureInstallPrompt({ onInstallable } = {}) {
       return outcome === 'accepted';
     },
   };
-}
-
-/**
- * A single, unobtrusive bar shown only once something is actually
- * actionable - hidden entirely otherwise (not two permanently-visible,
- * mostly-disabled buttons).
- * @param {HTMLElement} container
- */
-export function mountPwaUi(container) {
-  ensureTheme();
-  injectStyle(STYLE_ID, STYLE);
-
-  const bar = document.createElement('div');
-  bar.className = 'qu-pwa-bar';
-  bar.hidden = true;
-
-  const updateBtn = document.createElement('button');
-  updateBtn.type = 'button';
-  updateBtn.textContent = t('updateAvailable');
-  updateBtn.hidden = true;
-
-  const installBtn = document.createElement('button');
-  installBtn.type = 'button';
-  installBtn.textContent = t('installApp');
-  installBtn.hidden = true;
-
-  bar.append(updateBtn, installBtn);
-  container.appendChild(bar);
-
-  function syncBarVisibility() {
-    bar.hidden = updateBtn.hidden && installBtn.hidden;
-  }
-
-  let registration = null;
-  registerServiceWorker({
-    onUpdateAvailable: (reg) => {
-      registration = reg;
-      updateBtn.hidden = false;
-      syncBarVisibility();
-    },
-  });
-  updateBtn.addEventListener('click', () => {
-    updateBtn.disabled = true;
-    applyUpdate(registration);
-  });
-
-  const { installApp } = captureInstallPrompt({
-    onInstallable: () => {
-      installBtn.hidden = false;
-      syncBarVisibility();
-    },
-  });
-  installBtn.addEventListener('click', async () => {
-    installBtn.disabled = true;
-    await installApp(); // one-shot regardless of outcome - the native prompt won't fire again either way
-    installBtn.hidden = true;
-    installBtn.disabled = false;
-    syncBarVisibility();
-  });
 }

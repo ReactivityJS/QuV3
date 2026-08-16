@@ -44,7 +44,18 @@
  *      itself isn't built yet (see `apps/shell/client.js`'s own top doc
  *      comment's "DELIBERATELY NOT BUILT" list) - the link degrades to the
  *      same graceful "app not found" placeholder every other not-yet-loaded
- *      catalog entry already does.
+ *      catalog entry already does. A third, conditional entry - "Install
+ *      app" - only appears once the browser has actually offered an
+ *      install prompt (`./pwa.js`'s `captureInstallPrompt()`); absent
+ *      otherwise, not a permanently-visible disabled one.
+ *
+ * PWA UPDATE ICON: a small, otherwise-`hidden` button (🔄, right of the App
+ * Action Slot) that only appears once `./pwa.js`'s `registerServiceWorker()`
+ * reports a genuine update - clicking it calls `applyUpdate()`. Both this
+ * and the install menu entry above replace what used to be a single,
+ * separate, always-in-the-DOM bar under the header (`mountPwaUi()`,
+ * removed) - folded into chrome that already exists instead of a permanent
+ * extra row for two affordances that are each rare and one-shot.
  *
  * TWO HEADER EXTENSION POINTS (see `docs/app-navigation-standard.md` for the
  * full standard these are Rules 2): the header defines two separate
@@ -87,17 +98,20 @@ import { createI18n } from '@qu/i18n';
 import { injectStyle, ensureTheme, renderAvatarOrAsset } from '@qu/ui';
 import { ExtensionPointHost } from '@qu/foundation';
 import { parseHash } from './router.js';
+import { registerServiceWorker, applyUpdate, captureInstallPrompt } from './pwa.js';
 
 const DICT = {
   en: {
     home: 'Home', back: 'Back', forward: 'Forward', notifications: 'Notifications',
     menu: 'Main menu', noFavorites: 'No favorite apps yet.',
     profile: 'Profile', settings: 'Settings', appList: 'App List', relayAdmin: 'Relay Admin',
+    installApp: 'Install app', updateAvailable: 'Update available — click to reload',
   },
   de: {
     home: 'Start', back: 'Zurück', forward: 'Vor', notifications: 'Benachrichtigungen',
     menu: 'Hauptmenü', noFavorites: 'Noch keine favorisierten Apps.',
     profile: 'Profil', settings: 'Einstellungen', appList: 'App-Liste', relayAdmin: 'Relay-Admin',
+    installApp: 'App installieren', updateAvailable: 'Update verfügbar — zum Neuladen klicken',
   },
 };
 const { t } = createI18n(DICT);
@@ -114,6 +128,10 @@ const STYLE = `
   .qu-shell-nav-slot { display: flex; align-items: center; }
   .qu-shell-header-spacer { flex: 1; }
   .qu-shell-header-slot { display: flex; align-items: center; }
+  .qu-shell-update-btn { display: inline-flex; background: none; border: none; cursor: pointer; font-size: 1.1em; line-height: 1; padding: 0.35rem 0.5rem; border-radius: var(--qu-radius-sm, 0.3rem); color: inherit; }
+  .qu-shell-update-btn:hover { background: var(--qu-color-surface, #8882); }
+  .qu-shell-update-btn[hidden] { display: none; }
+  .qu-shell-update-btn:disabled { opacity: 0.6; cursor: default; }
   .qu-shell-bell { position: relative; display: inline-flex; background: none; border: none; cursor: pointer; text-decoration: none; color: inherit; font-size: 1.2em; padding: 0.35rem 0.55rem; border-radius: var(--qu-radius-sm, 0.3rem); }
   .qu-shell-bell:hover { background: var(--qu-color-surface, #8882); }
   .qu-shell-badge { position: absolute; top: 0.05rem; right: 0.05rem; min-width: 1rem; height: 1rem; padding: 0 0.2rem; border-radius: 999px; background: var(--qu-color-danger, #c00); color: #fff; font-size: 0.62rem; font-weight: 700; line-height: 1rem; text-align: center; }
@@ -187,6 +205,18 @@ export function mountHeader(container, { qu, services, adminPubs = [], subscribe
   const headerSlot = document.createElement('div');
   headerSlot.className = 'qu-shell-header-slot';
 
+  // Hidden until a genuine update is actually available (see this file's
+  // own "PWA UPDATE/INSTALL" doc comment below) - a small icon instead of a
+  // permanent extra row, and never shown for the routine "first ever
+  // install" case, only a real code update sitting behind a reload.
+  const updateBtn = document.createElement('button');
+  updateBtn.type = 'button';
+  updateBtn.className = 'qu-shell-update-btn';
+  updateBtn.textContent = '🔄';
+  updateBtn.title = t('updateAvailable');
+  updateBtn.setAttribute('aria-label', t('updateAvailable'));
+  updateBtn.hidden = true;
+
   const bell = document.createElement('a');
   bell.className = 'qu-shell-bell';
   bell.href = '#/notifications';
@@ -221,7 +251,7 @@ export function mountHeader(container, { qu, services, adminPubs = [], subscribe
   menu.hidden = true;
 
   userWrap.append(userBtn, menu);
-  header.append(home, backBtn, forwardBtn, navPointsSlot, spacer, headerSlot, bell, userWrap);
+  header.append(home, backBtn, forwardBtn, navPointsSlot, spacer, headerSlot, updateBtn, bell, userWrap);
   container.appendChild(header);
 
   // See this file's own "SEARCH SLOT" doc comment above - one
@@ -260,6 +290,35 @@ export function mountHeader(container, { qu, services, adminPubs = [], subscribe
   // many items it contributes (1 = plain link, 2+ = a dropdown).
   extensionPoints.renderSlot('shell.headerNavPoints', navPointsSlot, { getContext, onContextChange, services, qu, subscribe, syncFetch });
 
+  // PWA UPDATE/INSTALL (`./pwa.js`) - both best-effort, same "an optional
+  // browser feature degrades gracefully" reasoning that file's own doc
+  // comment already documents; a browser lacking the underlying API just
+  // never calls these callbacks, `updateBtn` stays hidden and no "Install
+  // app" entry ever appears, nothing else about this header is affected.
+  let updateRegistration = null;
+  registerServiceWorker({
+    onUpdateAvailable: (registration) => {
+      updateRegistration = registration;
+      updateBtn.hidden = false;
+    },
+  });
+  updateBtn.addEventListener('click', () => {
+    updateBtn.disabled = true;
+    applyUpdate(updateRegistration);
+  });
+
+  // `installable` is read by renderMenu() below (rebuilt from scratch on
+  // every open, see its own doc comment) - if `beforeinstallprompt` fires
+  // while the menu already happens to be open, re-render it in place so the
+  // entry doesn't wait for a close/reopen to show up.
+  let installable = false;
+  const { installApp } = captureInstallPrompt({
+    onInstallable: () => {
+      installable = true;
+      if (!menu.hidden) renderMenu();
+    },
+  });
+
   function closeMenu() {
     menu.hidden = true;
     userBtn.setAttribute('aria-expanded', 'false');
@@ -272,11 +331,12 @@ export function mountHeader(container, { qu, services, adminPubs = [], subscribe
   }
   document.addEventListener('click', onDocClick);
   document.addEventListener('keydown', onKeydown);
-  // Any link click inside the menu should close it - simplest is a single
-  // delegated listener rather than one per rendered link (the menu's own
-  // content is rebuilt from scratch on every open, see renderMenu() below).
+  // Any link OR action button (e.g. "Install app") click inside the menu
+  // should close it - simplest is a single delegated listener rather than
+  // one per rendered item (the menu's own content is rebuilt from scratch
+  // on every open, see renderMenu() below).
   menu.addEventListener('click', (e) => {
-    if (e.target.closest('a')) closeMenu();
+    if (e.target.closest('a, .qu-shell-menu-item')) closeMenu();
   });
 
   // A promise, not a plain resolved-later variable: `renderMenu()` can run
@@ -345,6 +405,22 @@ export function mountHeader(container, { qu, services, adminPubs = [], subscribe
       adminLink.href = '#/relay-admin';
       adminLink.textContent = `🛡️ ${t('relayAdmin')}`;
       menu.appendChild(adminLink);
+    }
+
+    // Only present once the browser has actually offered an install prompt
+    // (`installable`, set by captureInstallPrompt()'s onInstallable above) -
+    // absent otherwise, not a permanently-visible disabled entry.
+    if (installable) {
+      const installBtn = document.createElement('button');
+      installBtn.type = 'button';
+      installBtn.className = 'qu-shell-menu-item';
+      installBtn.textContent = `⬇️ ${t('installApp')}`;
+      installBtn.addEventListener('click', async () => {
+        installBtn.disabled = true;
+        await installApp(); // one-shot regardless of outcome - the native prompt won't fire again either way
+        installable = false;
+      });
+      menu.appendChild(installBtn);
     }
   }
 

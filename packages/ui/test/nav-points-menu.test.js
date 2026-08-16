@@ -50,6 +50,29 @@ test('2+ items render a toggle button + dropdown menu of links', () => {
   assert.equal(links[1].getAttribute('href'), '#/forum/c/1/new-topic');
 });
 
+test('the dropdown button carries a visible caret so it reads as a menu, distinct from the 1-item plain-link case', () => {
+  const wrap = document.createElement('span');
+  document.body.appendChild(wrap);
+  renderNavPointsMenu(wrap, {
+    items: [{ label: 'New channel', href: '#/forum/new' }, { label: 'New topic', href: '#/forum/c/1/new-topic' }],
+    menuLabel: 'Actions',
+  });
+  const btn = wrap.querySelector('button.qu-app-action-btn');
+  assert.ok(btn.querySelector('.qu-navpoints-caret'), 'expected a caret marking this as a menu trigger');
+  assert.equal(btn.querySelector('.qu-navpoints-caret').textContent, '▾');
+});
+
+test('omitting menuLabel falls back to the first item\'s label, never the bare icon glyph', () => {
+  const wrap = document.createElement('span');
+  document.body.appendChild(wrap);
+  renderNavPointsMenu(wrap, {
+    items: [{ label: 'New channel', href: '#/forum/new' }, { label: 'New topic', href: '#/forum/c/1/new-topic' }],
+  });
+  const btn = wrap.querySelector('button.qu-app-action-btn');
+  assert.equal(btn.title, 'New channel');
+  assert.equal(btn.getAttribute('aria-label'), 'New channel');
+});
+
 test('the dropdown toggles open/closed on button click', () => {
   const wrap = document.createElement('span');
   document.body.appendChild(wrap);

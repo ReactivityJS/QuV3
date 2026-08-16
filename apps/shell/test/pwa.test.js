@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { installDom, waitFor } from '@qu/ui/testing';
+import { installDom } from '@qu/ui/testing';
 
 installDom();
 // @qu/ui's package root transitively evaluates components.js, which extends
 // HTMLElement at module-load time - must come AFTER installDom(), same
 // reason every other app's test in this repo dynamically imports its own
 // client.js/src modules instead of a static top-level import.
-const { registerServiceWorker, applyUpdate, captureInstallPrompt, mountPwaUi } = await import('../src/pwa.js');
+const { registerServiceWorker, applyUpdate, captureInstallPrompt } = await import('../src/pwa.js');
 
 /**
  * Node 22's own built-in `navigator` global (added for fetch/URL spec
@@ -191,54 +191,4 @@ test('installApp() is one-shot - a second call after the prompt was already used
 
   await installApp();
   assert.equal(await installApp(), false);
-});
-
-test('mountPwaUi(): the bar stays hidden until an update or install becomes available, then shows the right button', async () => {
-  const registration = new FakeRegistration();
-  const container = installFakeServiceWorker(registration);
-  container.controller = {};
-
-  const root = document.createElement('div');
-  document.body.appendChild(root);
-  mountPwaUi(root);
-
-  const bar = root.querySelector('.qu-pwa-bar');
-  assert.equal(bar.hidden, true);
-
-  const worker = new FakeWorker();
-  registration.installing = worker;
-  registration.dispatchEvent(new Event('updatefound'));
-  worker.state = 'installed';
-  // A real browser promotes an installed worker to `.waiting` itself; this
-  // fake mirrors that by hand right before the statechange @qu/pwa reacts to.
-  registration.waiting = worker;
-  worker.dispatchEvent(new Event('statechange'));
-  await waitFor(() => bar.hidden === false);
-
-  const buttons = [...bar.querySelectorAll('button')];
-  const updateBtn = buttons.find((b) => !b.hidden);
-  assert.match(updateBtn.textContent, /update/i);
-
-  updateBtn.click();
-  assert.deepEqual(worker.posted, [{ type: 'SKIP_WAITING' }]);
-});
-
-test('mountPwaUi(): clicking Install calls the captured prompt and hides the install button afterward', async () => {
-  const root = document.createElement('div');
-  document.body.appendChild(root);
-  mountPwaUi(root);
-
-  const bar = root.querySelector('.qu-pwa-bar');
-  const event = new window.Event('beforeinstallprompt', { cancelable: true });
-  let prompted = false;
-  event.prompt = () => { prompted = true; };
-  event.userChoice = Promise.resolve({ outcome: 'accepted' });
-  window.dispatchEvent(event);
-  await waitFor(() => bar.hidden === false);
-
-  const installBtn = [...bar.querySelectorAll('button')].find((b) => !b.hidden);
-  assert.match(installBtn.textContent, /install/i);
-  installBtn.click();
-  await waitFor(() => prompted === true);
-  await waitFor(() => bar.hidden === true);
 });
