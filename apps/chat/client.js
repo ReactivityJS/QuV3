@@ -198,6 +198,9 @@ const DICT = {
     edit: 'Edit', save: 'Save', cancel: 'Cancel',
     reply: 'Reply', replyingTo: 'Replying to {name}',
     moreActions: 'More actions',
+    roomMenu: 'Chat options',
+    muteChat: 'Mute notifications',
+    unmuteChat: 'Unmute notifications',
     copyText: 'Copy text',
     copyLink: 'Copy link',
     attachRemove: 'Remove attachment',
@@ -244,6 +247,9 @@ const DICT = {
     edit: 'Bearbeiten', save: 'Speichern', cancel: 'Abbrechen',
     reply: 'Antworten', replyingTo: 'Antwort an {name}',
     moreActions: 'Weitere Aktionen',
+    roomMenu: 'Chat-Optionen',
+    muteChat: 'Benachrichtigungen stummschalten',
+    unmuteChat: 'Stummschaltung aufheben',
     copyText: 'Text kopieren',
     copyLink: 'Link kopieren',
     attachRemove: 'Anhang entfernen',
@@ -340,6 +346,7 @@ const STYLE = `
   .qu-chat-header-namewrap { min-width: 0; overflow: hidden; }
   .qu-chat-header-name { font-weight: 700; font-size: 1.1em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .qu-chat-header-status { font-size: 0.8em; opacity: 0.65; }
+  .qu-chat-header-menu-btn { margin-left: auto; }
   .qu-chat-messages-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 1rem; }
   /* NEW MESSAGE BANNER - see mountRoomView()'s own creation site and
      renderMessages()'s "NO SPURIOUS JUMPS" doc comment. position: sticky
@@ -975,7 +982,53 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   const headerStatusEl = document.createElement('div');
   headerStatusEl.className = 'qu-chat-header-status';
   headerName.append(headerNameEl, headerStatusEl);
-  heading.append(headerAvatarSlot, headerName);
+  // The room's own "⋮" context menu (content.chatRoomMenu) - this app's own
+  // native "Mute" toggle, merged with whatever a plugin app contributes
+  // (apps/phone's Audio-Call/Video-Call, 1:1 rooms only - see
+  // renderCallMenuItems()'s own doc comment). Same trigger/panel/outside-
+  // click-close shape as the composer's own "+" menu just above and the
+  // message "⋮" menu (buildMessageFooter()'s own content.messageMenu) - one
+  // `renderContextMenu()` call, items built lazily on each open since
+  // `roomId`/`memberPubs`/`target` aren't resolved yet at header-build time
+  // (same reasoning the composer's own `getItems()` doc comment already
+  // gives for `roomId`).
+  const roomMenuBtn = renderContextMenu({
+    trigger: '⋮',
+    triggerTitle: t('roomMenu'),
+    getItems: async () => {
+      // "Mute" is chat's own native item, not a plugin contribution - built
+      // inline here exactly like the composer menu's own Attach/Share
+      // location native items above, not routed through `collect()` (that's
+      // for OTHER apps plugging in, e.g. apps/phone's call actions below).
+      const prefs = await services.notificationPrefs.getOwnPrefs();
+      const muted = prefs.apps?.chat?.mutedThreads?.includes(roomId) ?? false;
+      const nativeItems = [
+        {
+          id: 'mute',
+          label: muted ? t('unmuteChat') : t('muteChat'),
+          icon: muted ? '🔔' : '🔕',
+          onClick: async () => {
+            const current = await services.notificationPrefs.getOwnPrefs();
+            const chatPrefs = current.apps?.chat ?? {};
+            const mutedThreads = new Set(chatPrefs.mutedThreads ?? []);
+            if (muted) mutedThreads.delete(roomId); else mutedThreads.add(roomId);
+            await services.notificationPrefs.savePrefs({
+              ...current,
+              apps: { ...current.apps, chat: { ...chatPrefs, mutedThreads: [...mutedThreads] } },
+            });
+          },
+        },
+      ];
+      const payload = {
+        services, qu, syncFetch, spaceId: SPACE_ID, threadId: roomId, memberPubs,
+        contactPub: target.kind === 'dm' ? target.peerPub : null,
+      };
+      const pluginItems = extensionPoints ? await extensionPoints.collect('content.chatRoomMenu', payload) : [];
+      return [...nativeItems, ...pluginItems];
+    },
+  });
+  roomMenuBtn.classList.add('qu-chat-header-menu-btn');
+  heading.append(headerAvatarSlot, headerName, roomMenuBtn);
 
   const messagesScroll = document.createElement('div');
   messagesScroll.className = 'qu-chat-messages-scroll';

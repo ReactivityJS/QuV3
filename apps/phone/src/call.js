@@ -45,10 +45,16 @@ const NEGOTIATION_TIMEOUT_MS = 45_000;
  * that service's own doc comment) - only the ordinary `postMessage()`
  * below rides the thread's own encrypted-private-list config.
  *
- * @param {{qu: import('@qu/core').QuStore, identity: import('@qu/identity').QuIdentityEngine, services: object, spaceId: string, remotePub: string, iceServers?: Array<object>, initiator: boolean, onTrack?: (stream: MediaStream) => void, onPeerConnected?: () => void, onDeclined?: () => void}} options
+ * @param {{qu: import('@qu/core').QuStore, identity: import('@qu/identity').QuIdentityEngine, services: object, spaceId: string, remotePub: string, iceServers?: Array<object>, initiator: boolean, mode?: 'audio'|'video', onTrack?: (stream: MediaStream) => void, onPeerConnected?: () => void, onDeclined?: () => void, onTimeout?: () => void, negotiationTimeoutMs?: number}} options
+ *   `negotiationTimeoutMs` overrides the module's own realistic-ring-duration
+ *   default (below) - exposed mainly for tests that need `onTimeout` to fire
+ *   quickly, mirroring `WebRtcSignalService`'s own constructor option.
+ *   `mode` - see `requestLocalMedia()`'s own doc comment; only meaningful
+ *   for the CALLER (the callee always requests full audio+video, see
+ *   `client.js`'s own router doc comment on why).
  * @returns {Promise<{selfPub: string, localStream: MediaStream, toggleAudio: (enabled: boolean) => void, toggleVideo: (enabled: boolean) => void, hangUp: () => void}>}
  */
-export async function createPhoneCall({ qu, identity, services, spaceId, remotePub, iceServers, initiator, onTrack, onPeerConnected, onDeclined } = {}) {
+export async function createPhoneCall({ qu, identity, services, spaceId, remotePub, iceServers, initiator, mode = 'video', onTrack, onPeerConnected, onDeclined, onTimeout, negotiationTimeoutMs = NEGOTIATION_TIMEOUT_MS } = {}) {
   const mainKey = await identity.getMainKey();
   const selfPub = QuCrypto.toBase64Url(mainKey.publicKey);
   const memberPubs = [selfPub, remotePub];
@@ -61,7 +67,7 @@ export async function createPhoneCall({ qu, identity, services, spaceId, remoteP
   // "never touched the network at all" (see requestLocalMedia()'s own doc
   // comment and this file's own tests) - a failed call shouldn't have
   // already notified the other side it was even attempted.
-  const localStream = await requestLocalMedia();
+  const localStream = await requestLocalMedia(mode);
 
   // A real, ordinary `postMessage()` (not a raw WebRTC signaling QuBit) -
   // this is what actually TRIGGERS the relay's existing `PushDeliveryService.
@@ -94,7 +100,7 @@ export async function createPhoneCall({ qu, identity, services, spaceId, remoteP
   }
 
   const webrtcTransport = new WebRTCTransport({ selfPeerId: selfPub, iceServers });
-  const signalService = new WebRtcSignalService(qu, identity, webrtcTransport, { negotiationTimeoutMs: NEGOTIATION_TIMEOUT_MS });
+  const signalService = new WebRtcSignalService(qu, identity, webrtcTransport, { negotiationTimeoutMs });
 
   const unsubTrack = webrtcTransport.onTrack((peerId, stream) => {
     if (peerId === remotePub) onTrack?.(stream);
@@ -104,6 +110,14 @@ export async function createPhoneCall({ qu, identity, services, spaceId, remoteP
   });
   const unsubDeclined = signalService.onDeclined((peerId) => {
     if (peerId === remotePub) onDeclined?.();
+  });
+  // See WebRtcSignalService.onTimeout()'s own doc comment - fires when this
+  // pair never connects within NEGOTIATION_TIMEOUT_MS (e.g. no usable ICE
+  // candidate pair at all, a classic symmetric-NAT/no-TURN failure). Without
+  // this, `client.js` had no way to ever leave its "Calling…"/"Ringing…"
+  // state - see this plan's own "Bugfix: Keine WebRTC-Verbindung..." section.
+  const unsubTimeout = signalService.onTimeout((peerId) => {
+    if (peerId === remotePub) onTimeout?.();
   });
 
   await signalService.connectPeer(spaceId, threadId, remotePub, memberPubs, { initiator, localStream });
@@ -122,6 +136,7 @@ export async function createPhoneCall({ qu, identity, services, spaceId, remoteP
     unsubTrack();
     unsubConnected();
     unsubDeclined();
+    unsubTimeout();
     signalService.close();
   }
 
@@ -151,17 +166,26 @@ export async function declinePhoneCall({ qu, identity, spaceId, remotePub, iceSe
  * `getUserMedia()` call already uses - but a VISIBLE failure here, not a
  * silent no-op: a failed voice note is a minor inconvenience, a failed call
  * is the entire point of this app not working.
+ *
+ * `mode: 'audio'` never asks for the camera at ALL (not just "video track
+ * disabled after the fact") - a real audio-only call shouldn't turn on the
+ * camera hardware/indicator light for even a moment, which a post-hoc
+ * `track.enabled = false` (the existing mid-call video toggle) does NOT
+ * prevent (the hardware stays active, only the frame is blanked). The
+ * callee is unaffected either way - they simply never receive a video track
+ * from this side; their own video toggle stays independently usable.
+ * @param {'audio'|'video'} [mode]
  * @returns {Promise<MediaStream>}
  * @throws {Error} With a `code` of `'unsupported'` or `'denied'`.
  */
-async function requestLocalMedia() {
+async function requestLocalMedia(mode = 'video') {
   if (!navigator.mediaDevices?.getUserMedia) {
     const err = new Error('getUserMedia() is not available in this browser');
     err.code = 'unsupported';
     throw err;
   }
   try {
-    return await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+    return await navigator.mediaDevices.getUserMedia({ audio: true, video: mode === 'video' });
   } catch (cause) {
     log.warn('getUserMedia() failed:', cause.message);
     const err = new Error('camera/microphone access was denied or unavailable');

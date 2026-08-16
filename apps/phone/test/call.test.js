@@ -222,6 +222,32 @@ test('toggleAudio()/toggleVideo() flip track.enabled without stopping or removin
   callerCall.hangUp();
 });
 
+test('createPhoneCall({mode: "audio"}) never requests video at all - not just a video track disabled after the fact', async () => {
+  const calls = installFakeMediaDevices();
+  const network = new TestNetwork();
+  const relayQu = new QuStore();
+  relayQu.mount('store', new MemoryStoreAdapter());
+  new SyncEngine(relayQu, new RelayTransport(network));
+
+  const caller = await freshParticipant('client-caller2b', network);
+  const callee = await freshParticipant('client-callee2b', network);
+  await mirrorProfiles(caller, callee);
+  const spaceId = 'phone-test-space-2b';
+  caller.sync.subscribe(paths.spacePath(spaceId));
+  callee.sync.subscribe(paths.spacePath(spaceId));
+
+  const callerCall = await createPhoneCall({
+    qu: caller.qu, identity: caller.identity, services: caller.services, spaceId, remotePub: callee.pub,
+    initiator: true, mode: 'audio',
+  });
+
+  assert.deepEqual(calls, [{ audio: true, video: false }]);
+  assert.equal(callerCall.localStream.getVideoTracks().length, 0);
+  assert.equal(callerCall.localStream.getAudioTracks().length, 1);
+
+  callerCall.hangUp();
+});
+
 test('declinePhoneCall() before the callee ever creates a PhoneCall reaches the caller\'s onDeclined()', async () => {
   const network = new TestNetwork();
   const relayQu = new QuStore();
@@ -247,6 +273,37 @@ test('declinePhoneCall() before the callee ever creates a PhoneCall reaches the 
   await declinePhoneCall({ qu: callee.qu, identity: callee.identity, spaceId, remotePub: caller.pub });
 
   await waitUntil(() => declined);
+  callerCall.hangUp();
+});
+
+test('onTimeout() fires when the callee never answers at all - the "stuck on Calling… forever" gap this Bugfix closes', async () => {
+  const network = new TestNetwork();
+  const relayQu = new QuStore();
+  relayQu.mount('store', new MemoryStoreAdapter());
+  new SyncEngine(relayQu, new RelayTransport(network));
+
+  const caller = await freshParticipant('client-caller3b', network);
+  const callee = await freshParticipant('client-callee3b', network);
+  await mirrorProfiles(caller, callee);
+  const spaceId = 'phone-test-space-3b';
+  caller.sync.subscribe(paths.spacePath(spaceId));
+  callee.sync.subscribe(paths.spacePath(spaceId));
+
+  let timedOut = false;
+  let connected = false;
+  const callerCall = await createPhoneCall({
+    qu: caller.qu, identity: caller.identity, services: caller.services, spaceId, remotePub: callee.pub,
+    initiator: true,
+    negotiationTimeoutMs: 30, // short override - see createPhoneCall()'s own doc comment on why this exists
+    onPeerConnected: () => { connected = true; },
+    onTimeout: () => { timedOut = true; },
+  });
+  // The callee NEVER calls createPhoneCall()/declinePhoneCall() at all - a
+  // classic no-usable-ICE-candidate-pair failure (no TURN, symmetric NAT)
+  // looks exactly like this from the caller's own perspective: silence.
+
+  await waitUntil(() => timedOut);
+  assert.equal(connected, false);
   callerCall.hangUp();
 });
 

@@ -8,8 +8,10 @@ function fakeTrack(kind) {
   return { kind, id: `${kind}-track`, enabled: true, stopped: false, stop() { this.stopped = true; } };
 }
 
-function fakeMediaStream() {
-  const tracks = [fakeTrack('audio'), fakeTrack('video')];
+/** Honors `constraints.video` (unlike a real device stub that always granted both) - lets tests confirm an audio-only request never even gets a video track, not just a video track that's later disabled. */
+function fakeMediaStream(constraints) {
+  const tracks = [fakeTrack('audio')];
+  if (constraints?.video !== false) tracks.push(fakeTrack('video'));
   return {
     getTracks: () => tracks,
     getAudioTracks: () => tracks.filter((t) => t.kind === 'audio'),
@@ -28,16 +30,19 @@ function fakeMediaStream() {
  * test needs to stub.
  */
 export function installFakeMediaDevices({ deny = false } = {}) {
+  const calls = [];
   Object.defineProperty(globalThis, 'navigator', {
     value: {
       mediaDevices: {
-        async getUserMedia() {
+        async getUserMedia(constraints) {
+          calls.push(constraints);
           if (deny) throw new Error('Permission denied');
-          return fakeMediaStream();
+          return fakeMediaStream(constraints);
         },
       },
     },
     configurable: true,
     writable: true,
   });
+  return calls; // test-only: every constraints object getUserMedia() was called with, in order
 }

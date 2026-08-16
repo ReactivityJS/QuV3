@@ -102,6 +102,27 @@ test('shouldNotify() is false when a specific function within an app is disabled
   assert.equal(NotificationPrefsService.shouldNotify(prefs, { appId: 'chat', functionName: 'mention' }), true);
 });
 
+test('shouldNotify() is false for a muted thread within an app, but does not affect other threads or the app\'s own global switches', () => {
+  const prefs = { enabled: true, mentions: true, apps: { chat: { mutedThreads: ['room-a'] } } };
+  assert.equal(NotificationPrefsService.shouldNotify(prefs, { appId: 'chat', threadId: 'room-a' }), false);
+  assert.equal(NotificationPrefsService.shouldNotify(prefs, { appId: 'chat', threadId: 'room-b' }), true);
+  assert.equal(NotificationPrefsService.shouldNotify(prefs, { appId: 'chat' }), true); // no threadId given at all - mute is never consulted
+  assert.equal(NotificationPrefsService.shouldNotify(prefs, { appId: 'forum', threadId: 'room-a' }), true); // mutedThreads is per-app, not global
+});
+
+test('shouldPopup() is also false for a muted thread - same reasoning as shouldNotify(), a muted conversation never pops either', () => {
+  const prefs = { enabled: true, mentions: true, apps: { chat: { mutedThreads: ['room-a'] } } };
+  assert.equal(NotificationPrefsService.shouldPopup(prefs, { appId: 'chat', threadId: 'room-a', defaultPopup: true }), false);
+  assert.equal(NotificationPrefsService.shouldPopup(prefs, { appId: 'chat', threadId: 'room-b', defaultPopup: true }), true);
+});
+
+test('savePrefs()/getOwnPrefs() round-trips a mutedThreads array unchanged', async () => {
+  const { prefs } = await freshSetup();
+  await prefs.savePrefs({ apps: { chat: { mutedThreads: ['room-a', 'room-b'] } } });
+  const result = await prefs.getOwnPrefs();
+  assert.deepEqual(result.apps.chat.mutedThreads, ['room-a', 'room-b']);
+});
+
 test('shouldNotify() also honors the newer {enabled, popup} object form for a per-function override, not just the legacy plain boolean', () => {
   const prefs = { enabled: true, mentions: true, apps: { phone: { functions: { incomingCall: { enabled: false, popup: true } } } } };
   assert.equal(NotificationPrefsService.shouldNotify(prefs, { appId: 'phone', functionName: 'incomingCall' }), false);

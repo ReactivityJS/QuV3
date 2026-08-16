@@ -24,5 +24,8 @@
   ],
   "actions": [
     { "slot": "contact-row", "id": "phone", "label": "Anrufen", "icon": "📞", "hrefTemplate": "#/phone/{pub}" }
+  ],
+  "contributes": [
+    { "point": "content.chatRoomMenu", "export": "renderCallMenuItems", "kind": "menu", "order": 10 }
   ]
 }

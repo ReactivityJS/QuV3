@@ -157,8 +157,13 @@ export class PushDeliveryService {
       const appId = resolved.appId ?? String(spaceId);
       const functionName = resolved.functionName ?? hookFunctionName ?? (mention ? 'mention' : 'newMessage');
 
+      // `threadId` here is the REAL thread this message was posted to (e.g.
+      // a chat room's own roomId) - exactly what a per-conversation
+      // `apps[appId].mutedThreads` entry is keyed by (see
+      // NotificationPrefsService.shouldNotify()'s own doc comment, and
+      // `apps/chat`'s chat-room "Mute" menu item that sets it).
       const prefs = await this.notificationPrefs.getPrefsFor(actorPub);
-      if (!NotificationPrefsService.shouldNotify(prefs, { appId, mention, functionName })) continue;
+      if (!NotificationPrefsService.shouldNotify(prefs, { appId, mention, functionName, threadId })) continue;
 
       try {
         const ref = messageId ? { spaceId, threadId, messageId } : undefined;

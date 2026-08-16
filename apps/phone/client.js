@@ -20,6 +20,13 @@
  *   `#/phone/<remotePub>/decline` - declines without ever requesting
  *     camera/mic access or mounting the active-call view - what a
  *     notification's "Ablehnen" action links to.
+ *   `#/phone/<remotePub>/audio` - CALLER's active-call view, audio-only
+ *     (never requests the camera at all - see `src/call.js`'s own
+ *     `requestLocalMedia()` doc comment) - what this app's own
+ *     `content.chatRoomMenu` contribution's "Audio-Call" item links to
+ *     (`renderCallMenuItems()`, below). The CALLEE side is unaffected -
+ *     `/accept` always requests full audio+video, same as ever; they just
+ *     never receive a video track from an audio-only caller.
  */
 import { createI18n } from '@qu/i18n';
 import { formatActorLabel } from '@qu/services';
@@ -30,11 +37,14 @@ const DICT = {
   en: {
     title: 'Phone',
     call: 'Call',
+    videoCall: 'Video Call',
+    audioCall: 'Audio Call',
     noContacts: 'No contacts yet - add some in Contacts first.',
     calling: 'Calling…',
     ringing: 'Ringing…',
     connected: 'Connected',
     declined: 'Call declined',
+    callTimeout: 'Call could not connect - the other side may be behind a restrictive network.',
     mediaUnsupported: 'This browser cannot access camera/microphone.',
     mediaDenied: 'Camera/microphone access was denied.',
     mute: 'Mute',
@@ -47,11 +57,14 @@ const DICT = {
   de: {
     title: 'Telefon',
     call: 'Anrufen',
+    videoCall: 'Video-Anruf',
+    audioCall: 'Audio-Anruf',
     noContacts: 'Noch keine Kontakte - zuerst welche in Kontakte hinzufügen.',
     calling: 'Rufe an…',
     ringing: 'Klingelt…',
     connected: 'Verbunden',
     declined: 'Anruf abgelehnt',
+    callTimeout: 'Anruf konnte nicht verbunden werden - die Gegenseite ist evtl. hinter einem restriktiven Netzwerk.',
     mediaUnsupported: 'Dieser Browser kann nicht auf Kamera/Mikrofon zugreifen.',
     mediaDenied: 'Zugriff auf Kamera/Mikrofon wurde verweigert.',
     mute: 'Stummschalten',
@@ -94,7 +107,7 @@ export function mount(container, ctx) {
 
   if (!remotePub) return mountCallStarter(container, ctx);
   if (mode === 'decline') return mountDecline(container, ctx, SPACE_ID, remotePub);
-  return mountActiveCall(container, ctx, SPACE_ID, remotePub, { initiator: mode !== 'accept' });
+  return mountActiveCall(container, ctx, SPACE_ID, remotePub, { initiator: mode !== 'accept', callMode: mode === 'audio' ? 'audio' : 'video' });
 }
 
 // ===========================================================================
@@ -165,8 +178,12 @@ function mountDecline(container, { qu, identity, iceServers }, spaceId, remotePu
 // ===========================================================================
 // Active call - #/phone/<remotePub> (caller) or #/phone/<remotePub>/accept (callee)
 // ===========================================================================
-function mountActiveCall(container, ctx, spaceId, remotePub, { initiator }) {
-  const { qu, identity, services, iceServers } = ctx;
+function mountActiveCall(container, ctx, spaceId, remotePub, { initiator, callMode = 'video' }) {
+  // `negotiationTimeoutMs` is test-only (real ctx never sets it - see
+  // createPhoneCall()'s own doc comment on why the override exists at all)
+  // - undefined here just means createPhoneCall()'s own default parameter
+  // (the realistic 45s ring duration) applies, unchanged from before.
+  const { qu, identity, services, iceServers, negotiationTimeoutMs } = ctx;
 
   const view = document.createElement('div');
   view.className = 'qu-phone-call-view';
@@ -207,6 +224,15 @@ function mountActiveCall(container, ctx, spaceId, remotePub, { initiator }) {
   hangupBtn.title = t('hangUp');
   hangupBtn.setAttribute('aria-label', t('hangUp'));
   controls.append(muteBtn, videoBtn, hangupBtn);
+
+  // An audio-only call never has a video track to toggle at all (see
+  // requestLocalMedia()'s own doc comment) - hiding both the local PiP
+  // (would just show a black box) and the now-meaningless video toggle
+  // button is clearer than leaving inert UI around.
+  if (callMode === 'audio') {
+    localVideo.hidden = true;
+    videoBtn.hidden = true;
+  }
 
   view.append(remoteVideo, localVideo, status, controls);
   container.appendChild(view);
@@ -253,12 +279,23 @@ function mountActiveCall(container, ctx, spaceId, remotePub, { initiator }) {
     let phoneCall;
     try {
       phoneCall = await createPhoneCall({
-        qu, identity, services, spaceId, remotePub, iceServers, initiator,
+        qu, identity, services, spaceId, remotePub, iceServers, initiator, mode: callMode, negotiationTimeoutMs,
         onTrack: (stream) => { remoteVideo.srcObject = stream; },
         onPeerConnected: () => { status.textContent = t('connected'); },
         onDeclined: () => {
           status.textContent = t('declined');
           setTimeout(goBack, 1500);
+        },
+        // See WebRtcSignalService.onTimeout()'s own doc comment - fires
+        // when the connection never establishes at all (classic symmetric-
+        // NAT/no-TURN failure, see this plan's own "Bugfix: Keine WebRTC-
+        // Verbindung..." section). Without this, "Calling…"/"Ringing…"
+        // used to hang forever with no feedback - unmounting via goBack()
+        // still runs this view's own cleanup (call?.hangUp()), same as the
+        // onDeclined() case above.
+        onTimeout: () => {
+          status.textContent = t('callTimeout');
+          setTimeout(goBack, 2500);
         },
       });
     } catch (err) {
@@ -278,4 +315,23 @@ function mountActiveCall(container, ctx, spaceId, remotePub, { initiator }) {
     stopped = true;
     call?.hangUp();
   };
+}
+
+/**
+ * The `content.chatRoomMenu` contributor (`apps/chat`'s room header "⋮"
+ * menu, see that app's own `mountRoomView()` doc comment) - "Video Call"/
+ * "Audio Call" entries, 1:1 rooms only. `payload.contactPub` is `null` for
+ * a group room (Phone has no notion of a group call) - returning `[]` in
+ * that case is what makes this contributor simply not show up there, same
+ * convention `extensionPoints.collect()` already documents for "an app
+ * doesn't apply here".
+ * @param {{contactPub: string|null}} payload
+ * @returns {Array<{id: string, label: string, icon: string, onClick: () => void}>}
+ */
+export function renderCallMenuItems({ contactPub }) {
+  if (!contactPub) return [];
+  return [
+    { id: 'videoCall', label: t('videoCall'), icon: '📹', onClick: () => { window.location.hash = `#/phone/${contactPub}`; } },
+    { id: 'audioCall', label: t('audioCall'), icon: '🎤', onClick: () => { window.location.hash = `#/phone/${contactPub}/audio`; } },
+  ];
 }

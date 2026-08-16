@@ -277,6 +277,57 @@ test('if negotiation never completes, the pair is cleaned up after negotiationTi
   await waitUntil(async () => (await qu.get(offerPath))?.val === null, 1000);
 });
 
+// ===== onTimeout() =====
+
+test('onTimeout() fires with the remotePub when negotiation never completes within negotiationTimeoutMs', async () => {
+  const qu = freshQu();
+  const { identity: identityA, pub: pubA } = await freshIdentity();
+  const { pub: pubB } = await freshIdentity();
+  const transportA = new FakeWebRTCTransport();
+  const service = new WebRtcSignalService(qu, identityA, transportA, { negotiationTimeoutMs: 20 });
+  const timedOut = [];
+  service.onTimeout((remotePub) => timedOut.push(remotePub));
+
+  await service.connectPeer('space1', 'thread1', pubB, [pubA, pubB]);
+  // Never emitPeerConnected() - this pair simply never connects (e.g. no
+  // usable ICE candidate pair at all - see this plan's own "Bugfix: Keine
+  // WebRTC-Verbindung..." section for the real-world scenario this covers).
+
+  await waitUntil(() => timedOut.length > 0);
+  assert.deepEqual(timedOut, [pubB]);
+});
+
+test('onTimeout() never fires for a pair that connects before negotiationTimeoutMs elapses', async () => {
+  const qu = freshQu();
+  const { identity: identityA, pub: pubA } = await freshIdentity();
+  const { pub: pubB } = await freshIdentity();
+  const transportA = new FakeWebRTCTransport();
+  const service = new WebRtcSignalService(qu, identityA, transportA, { negotiationTimeoutMs: 30 });
+  const timedOut = [];
+  service.onTimeout((remotePub) => timedOut.push(remotePub));
+
+  await service.connectPeer('space1', 'thread1', pubB, [pubA, pubB]);
+  transportA.emitPeerConnected(pubB); // connects well before the 30ms timeout
+
+  await new Promise((resolve) => setTimeout(resolve, 60)); // past the original timeout window
+  assert.deepEqual(timedOut, []);
+});
+
+test('the returned unsubscribe function from onTimeout() stops further delivery', async () => {
+  const qu = freshQu();
+  const { identity: identityA, pub: pubA } = await freshIdentity();
+  const { pub: pubB } = await freshIdentity();
+  const transportA = new FakeWebRTCTransport();
+  const service = new WebRtcSignalService(qu, identityA, transportA, { negotiationTimeoutMs: 15 });
+  const timedOut = [];
+  const unsubscribe = service.onTimeout((remotePub) => timedOut.push(remotePub));
+  unsubscribe();
+
+  await service.connectPeer('space1', 'thread1', pubB, [pubA, pubB]);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.deepEqual(timedOut, []);
+});
+
 // ===== declineCall()/onDeclined() =====
 
 test('declineCall() writes a signed decline QuBit without requiring connectPeer() to have been called first', async () => {

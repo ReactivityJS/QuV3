@@ -5,7 +5,7 @@ import { AccessEngine, ThreadEngine, AssetEngine, CollectionEngine } from '@qu/e
 import { QuIdentityEngine, actorPath } from '@qu/identity';
 import {
   ListService, AccessService, MessageService, ReactionService, PinService, PresenceService, ChatService,
-  ActorService, ProfileService, DirectoryService, ContactsService, FlagService, AssetService, paths,
+  ActorService, ProfileService, DirectoryService, ContactsService, FlagService, AssetService, NotificationPrefsService, paths,
 } from '@qu/services';
 import { ExtensionPointHost } from '@qu/foundation';
 import { installDom, waitFor } from '@qu/ui/testing';
@@ -72,6 +72,7 @@ async function freshEnv(alias) {
     assets: new AssetService(qu, new AssetEngine(qu), identity),
     directory: new DirectoryService(qu, identity, list),
     contacts: new ContactsService(flags, identity),
+    notificationPrefs: new NotificationPrefsService(qu, identity),
   };
   const myPub = await services.actors.whoAmI();
   return { qu, identity, services, myPub };
@@ -437,6 +438,133 @@ test('the "Reply" menu item (native, any message) opens the reply banner and tag
     // sitting on its own line above the composer) even with `hidden` set -
     // see this rule's own doc comment in the STYLE block above.
     assert.equal(window.getComputedStyle(banner).display, 'none');
+  } finally {
+    stop();
+  }
+});
+
+// ===== content.chatRoomMenu - the room header's own "⋮" menu =====
+
+/** Opens the room header's own "⋮" menu (content.chatRoomMenu) - see openMessageMenu()'s own doc comment for why this needs its own scoped selector rather than a bare `.qu-thread-ui-context-menu-trigger` query. */
+async function openRoomMenu(root) {
+  const selector = '.qu-chat-header-menu-btn .qu-thread-ui-context-menu-trigger';
+  await waitFor(() => root.querySelector(selector) !== null);
+  root.querySelector(selector).click();
+  await waitFor(() => root.querySelector('.qu-thread-ui-context-menu-panel') !== null);
+  return root.querySelector('.qu-thread-ui-context-menu-panel');
+}
+
+/**
+ * `waitFor()` (`@qu/ui/testing`) only ever calls its predicate SYNCHRONOUSLY
+ * (`while (!check())` never awaits the result - see apps/notifications/
+ * test/client.test.js's own identical note) - an async predicate's Promise
+ * object is always truthy, so it resolves on the very first check regardless
+ * of what it actually settles to. A real poll loop is needed for an
+ * assertion that depends on an async write (here: the mute toggle's own
+ * `savePrefs()`) having actually landed.
+ */
+async function waitForAsync(check, timeoutMs = 1000) {
+  const start = Date.now();
+  for (;;) {
+    if (await check()) return;
+    if (Date.now() - start > timeoutMs) throw new Error('waitForAsync: condition never became true within ' + timeoutMs + 'ms');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+test('the room "⋮" menu\'s native "Mute notifications" item toggles this room\'s mutedThreads entry, and its own label flips accordingly', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await ChatService.roomId([alice.myPub, bob.myPub]);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
+
+    let panel = await openRoomMenu(container);
+    assert.ok(menuItemButton(panel, 'Mute notifications'));
+    menuItemButton(panel, 'Mute notifications').click();
+
+    await waitForAsync(async () => (await alice.services.notificationPrefs.getOwnPrefs()).apps?.chat?.mutedThreads?.includes(roomId));
+
+    panel = await openRoomMenu(container);
+    assert.ok(menuItemButton(panel, 'Unmute notifications'));
+    menuItemButton(panel, 'Unmute notifications').click();
+
+    await waitForAsync(async () => !(await alice.services.notificationPrefs.getOwnPrefs()).apps?.chat?.mutedThreads?.includes(roomId));
+  } finally {
+    stop();
+  }
+});
+
+test('the room "⋮" menu merges native items with whatever a plugin app contributes to content.chatRoomMenu, passing contactPub for a 1:1 room and null for a group', async () => {
+  const { resetSeenPayloads, getSeenPayloads } = await import('./fake-chat-room-menu-plugin.js');
+  resetSeenPayloads();
+
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+
+  const FAKE_PLUGIN_CLIENT_URL = new URL('./fake-chat-room-menu-plugin.js', import.meta.url).href;
+  const appsWithPlugin = [
+    { name: 'chat', spaceId: CHAT_SPACE_ID },
+    {
+      name: 'fake-plugin', clientMainUrl: FAKE_PLUGIN_CLIENT_URL,
+      contributes: [{ point: 'content.chatRoomMenu', export: 'renderFakeCallItem' }],
+    },
+  ];
+
+  const container = makeContainer();
+  const extensionPoints = new ExtensionPointHost(appsWithPlugin);
+  const stop = mount(container, {
+    qu: alice.qu, services: alice.services, apps: appsWithPlugin, subscribe: noopSubscribe,
+    segments: ['chat', bob.myPub], extensionPoints,
+  });
+  try {
+    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
+    const panel = await openRoomMenu(container);
+    assert.ok(menuItemButton(panel, 'Mute notifications')); // native item still present
+    assert.ok(menuItemButton(panel, 'Fake Call')); // the plugin's own contribution
+
+    const [payload] = getSeenPayloads();
+    assert.equal(payload.contactPub, bob.myPub); // a 1:1 room passes the real contact pub
+    assert.equal(payload.spaceId, CHAT_SPACE_ID);
+  } finally {
+    stop();
+  }
+});
+
+test('a GROUP room passes contactPub: null to content.chatRoomMenu - a group has no single "the contact" to call', async () => {
+  const { resetSeenPayloads, getSeenPayloads } = await import('./fake-chat-room-menu-plugin.js');
+  resetSeenPayloads();
+
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const { groupId } = await alice.services.chat.createGroup(CHAT_SPACE_ID, { name: 'Group A', memberPubs: [alice.myPub, bob.myPub] });
+
+  const FAKE_PLUGIN_CLIENT_URL = new URL('./fake-chat-room-menu-plugin.js', import.meta.url).href;
+  const appsWithPlugin = [
+    { name: 'chat', spaceId: CHAT_SPACE_ID },
+    {
+      name: 'fake-plugin', clientMainUrl: FAKE_PLUGIN_CLIENT_URL,
+      contributes: [{ point: 'content.chatRoomMenu', export: 'renderFakeCallItem' }],
+    },
+  ];
+
+  const container = makeContainer();
+  const extensionPoints = new ExtensionPointHost(appsWithPlugin);
+  const stop = mount(container, {
+    qu: alice.qu, services: alice.services, apps: appsWithPlugin, subscribe: noopSubscribe,
+    segments: ['chat', 'g', groupId], extensionPoints,
+  });
+  try {
+    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
+    await openRoomMenu(container);
+    const [payload] = getSeenPayloads();
+    assert.equal(payload.contactPub, null);
   } finally {
     stop();
   }
