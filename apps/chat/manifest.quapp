@@ -16,6 +16,9 @@
   "actions": [
     { "slot": "contact-row", "id": "chat", "label": "Chat", "icon": "💬", "hrefTemplate": "#/chat/{pub}" }
   ],
+  "definesExtensionPoints": [
+    { "point": "content.chatRoomMenu", "kind": "menu", "description": "The room header's own \"⋮\" menu (Mute is this app's own native item, not a contributor - see client.js's own mountRoomView() doc comment). Payload: {services, qu, syncFetch, spaceId, threadId, memberPubs, contactPub}. contactPub is null for a group (Phone's own call items only make sense for a 1:1 room). Returns {id, label, icon, onClick} (or an array of those)." }
+  ],
   "contributes": [
     { "point": "userSettings.contributions", "export": "renderChatSettings", "kind": "ui", "order": 20 },
     { "point": "content.search", "export": "searchChat", "kind": "query" },

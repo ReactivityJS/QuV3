@@ -34,7 +34,10 @@ const DEFAULT_NEGOTIATION_TIMEOUT_MS = 20_000;
  * candidate must not be lost mid-flight). The same cleanup runs if
  * negotiation never completes within `negotiationTimeoutMs`, so a stale/
  * abandoned exchange doesn't sit in the relay's durable storage forever -
- * or immediately once a `declineCall()` (see below) is observed.
+ * or immediately once a `declineCall()` (see below) is observed. A timeout
+ * ALSO fires `onTimeout()` (below), so a consumer (e.g. `apps/phone`) can
+ * show a visible "couldn't connect" state instead of silently hanging - the
+ * exact gap a symmetric-NAT/no-TURN failure used to fall into unnoticed.
  *
  * CALLER-INITIATED CALLS (`apps/phone`): `connectPeer()`'s deterministic
  * initiator tie-break (see `WebRTCTransport`'s own doc comment) is right for
@@ -58,6 +61,7 @@ export class WebRtcSignalService {
   /** @type {Map<string, {spaceId: string|number, threadId: string, remotePub: string, memberPubs: string[], selfPub: string, iceSeq: number, timeoutTimer: ReturnType<typeof setTimeout>|null}>} */
   #pairs = new Map();
   #declinedCallbacks = [];
+  #timeoutCallbacks = [];
   #unsubscribeOutgoing;
   #unsubscribeConnected;
   #unsubscribeStorage;
@@ -161,10 +165,34 @@ export class WebRtcSignalService {
     };
   }
 
+  /**
+   * Registers a callback fired when a pair this instance called
+   * `connectPeer()` for never reaches `onPeerConnected` within
+   * `negotiationTimeoutMs` - e.g. no usable ICE candidate pair exists at all
+   * (a classic symmetric-NAT/no-TURN failure - see this plan's own "Bugfix:
+   * Keine WebRTC-Verbindung zwischen Smartphone und Desktop" section) or the
+   * other side simply never answers. Without this, a stuck negotiation was
+   * previously silent - `#armTimeout()` only ever tombstoned the signaling
+   * paths, with no way for a caller (e.g. `apps/phone`'s own UI) to learn
+   * the attempt is over and show a visible failure instead of hanging on
+   * "Calling…" forever. Never fires for a pair that DID connect in time -
+   * `#handleConnected()` clears `timeoutTimer` before this can run.
+   * @param {(remotePub: string) => void} callback
+   * @returns {() => void} Unsubscribe function.
+   */
+  onTimeout(callback) {
+    this.#timeoutCallbacks.push(callback);
+    return () => {
+      const idx = this.#timeoutCallbacks.indexOf(callback);
+      if (idx !== -1) this.#timeoutCallbacks.splice(idx, 1);
+    };
+  }
+
   #armTimeout(pairKey) {
     const pair = this.#pairs.get(pairKey);
     if (!pair) return;
     pair.timeoutTimer = setTimeout(() => {
+      for (const cb of this.#timeoutCallbacks) cb(pair.remotePub);
       this.#cleanup(pairKey).catch((err) => console.error('[WebRtcSignalService] cleanup after negotiation timeout failed:', err));
     }, this.#negotiationTimeoutMs);
   }

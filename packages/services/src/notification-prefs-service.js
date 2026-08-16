@@ -42,7 +42,11 @@ function functionPopup(raw, defaultPopup) {
  * built for Phone's incoming-call UX (`apps/shell/src/notification-popups.js`),
  * generalized to any notification type: `enabled` still gates whether a
  * notification happens at all (in-app record + push), `popup` is a SEPARATE,
- * additive question of whether it should also interrupt with a toast.
+ * additive question of whether it should also interrupt with a toast. An
+ * app may also carry `mutedThreads: string[]` - per-CONVERSATION silencing
+ * (e.g. `apps/chat`'s own chat-room "Mute" menu item), independent of the
+ * function-level `enabled`/`popup` split above: muting one 1:1/group thread
+ * never touches this app's OTHER threads or its global on/off switches.
  *
  * DELIBERATELY PUBLIC, not private/encrypted - this is the one piece of
  * "personal settings" data in this codebase that CAN'T be private, because
@@ -66,7 +70,7 @@ export class NotificationPrefsService {
     return QuCrypto.toBase64Url(mainKey.publicKey);
   }
 
-  /** @returns {Promise<{enabled: boolean, mentions: boolean, apps: Record<string, {enabled?: boolean, functions?: Record<string, boolean|{enabled?: boolean, popup?: boolean}>}>}>} */
+  /** @returns {Promise<{enabled: boolean, mentions: boolean, apps: Record<string, {enabled?: boolean, functions?: Record<string, boolean|{enabled?: boolean, popup?: boolean}>, mutedThreads?: string[]}>}>} */
   async getOwnPrefs() {
     return this.getPrefsFor(await this.#myActorPub());
   }
@@ -119,14 +123,21 @@ export class NotificationPrefsService {
    * object, so both the relay (deciding whether to push) and a settings UI
    * (previewing "would this notify me?") share one implementation.
    * @param {object} prefs - As returned by getPrefsFor()/getOwnPrefs().
-   * @param {{appId: string, mention?: boolean, functionName?: string}} event
+   * @param {{appId: string, mention?: boolean, functionName?: string, threadId?: string}} event -
+   *   `threadId` (additive, optional) is the per-CONVERSATION mute this
+   *   identity may have set for `appId` (see `apps[appId].mutedThreads`
+   *   below, and `apps/chat`'s own chat-room "Mute" menu item) - absent for
+   *   any caller that doesn't have a notion of a specific thread (or
+   *   doesn't care), in which case this check is simply skipped, unchanged
+   *   from before this field existed.
    * @returns {boolean}
    */
-  static shouldNotify(prefs, { appId, mention = false, functionName = null }) {
+  static shouldNotify(prefs, { appId, mention = false, functionName = null, threadId = null }) {
     if (!prefs.enabled) return false;
     if (mention && prefs.mentions === false) return false;
     const appPrefs = prefs.apps?.[appId];
     if (appPrefs?.enabled === false) return false;
+    if (threadId && appPrefs?.mutedThreads?.includes(threadId)) return false;
     if (functionName && !functionEnabled(appPrefs?.functions?.[functionName])) return false;
     return true;
   }
@@ -139,17 +150,18 @@ export class NotificationPrefsService {
    * `shouldNotify()` itself is `false` - a popup for a notification that
    * wouldn't even be recorded/pushed makes no sense.
    * @param {object} prefs - As returned by getPrefsFor()/getOwnPrefs().
-   * @param {{appId: string, mention?: boolean, functionName?: string, defaultPopup?: boolean}} event -
+   * @param {{appId: string, mention?: boolean, functionName?: string, threadId?: string, defaultPopup?: boolean}} event -
    *   `defaultPopup` is the CALLER's own suggested default for this specific
    *   function when this identity has never explicitly set one (e.g. Phone's
    *   own `resolveNotification` passing `true` for `incomingCall`, vs. the
    *   overall default of `false` for an ordinary chat message) - this
    *   service has no built-in notion of per-app defaults, so it never
-   *   invents one on its own.
+   *   invents one on its own. `threadId` - see `shouldNotify()`'s own doc
+   *   comment; a muted thread never pops either, same as it's never notified.
    * @returns {boolean}
    */
-  static shouldPopup(prefs, { appId, mention = false, functionName = null, defaultPopup = false }) {
-    if (!NotificationPrefsService.shouldNotify(prefs, { appId, mention, functionName })) return false;
+  static shouldPopup(prefs, { appId, mention = false, functionName = null, threadId = null, defaultPopup = false }) {
+    if (!NotificationPrefsService.shouldNotify(prefs, { appId, mention, functionName, threadId })) return false;
     const raw = functionName ? prefs.apps?.[appId]?.functions?.[functionName] : undefined;
     return functionPopup(raw, defaultPopup);
   }

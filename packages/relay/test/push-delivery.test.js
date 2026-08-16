@@ -240,6 +240,26 @@ test('NotificationPrefsService gating: a candidate with notifications disabled g
   assert.equal(send.calls.length, 0);
 });
 
+test('NotificationPrefsService gating: a candidate who muted THIS thread gets neither in-app nor push, but is unaffected on a different thread of the same app', async () => {
+  const env = await freshEnv();
+  const recipient = await freshRecipient(env);
+  await recipient.notificationPrefs.savePrefs({ apps: { board: { mutedThreads: ['general'] } } });
+  await recipient.pushSubscriptions.subscribe({ endpoint: 'https://push.example.com/x', keys: { p256dh: 'a', auth: 'b' } });
+
+  const send = fakeSendWebPush();
+  const delivery = pushDeliveryFor(env, recipient, { sendWebPush: send });
+  await env.messages.createThread('board', 'general', THREAD_PRESETS.forum());
+  await env.messages.createThread('board', 'other', THREAD_PRESETS.forum());
+
+  await postAndDeliver(env, delivery, 'board', 'general', { body: `hi @${recipient.pub}`, extra: { mentions: [recipient.pub] } });
+  assert.equal(await inAppNotificationCount(env, recipient.pub), 0);
+  assert.equal(send.calls.length, 0);
+
+  await postAndDeliver(env, delivery, 'board', 'other', { body: `hi @${recipient.pub}`, extra: { mentions: [recipient.pub] } });
+  assert.equal(await inAppNotificationCount(env, recipient.pub), 1); // the OTHER thread is unaffected
+  assert.equal(send.calls.length, 1);
+});
+
 test('a recipient with no push subscriptions still gets the in-app notification, just no push attempt', async () => {
   const env = await freshEnv();
   const recipient = await freshRecipient(env);
