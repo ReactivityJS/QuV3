@@ -1,6 +1,6 @@
 import { QuCrypto } from '@qu/core';
 import { WebRTCTransport } from '@qu/webrtc/transport';
-import { ChatService, WebRtcSignalService } from '@qu/services';
+import { ChatService, THREAD_PRESETS, WebRtcSignalService } from '@qu/services';
 import { createLogger } from '@qu/log';
 
 const log = createLogger('phone:call');
@@ -29,15 +29,21 @@ const NEGOTIATION_TIMEOUT_MS = 45_000;
  * dedicated one, deterministically derived the SAME way
  * (`ChatService.roomId()`, reused as-is, not reinvented) but under this
  * app's OWN `spaceId`, so WebRTC signaling QuBits never show up in the
- * chat history. `writers: memberPubs, readers: '*'` (not `THREAD_PRESETS.
- * chat()`'s encrypted-for-a-fixed-member-list shape) - ACL-restricted to
- * the two participants (an outsider can't inject fake signaling), but
- * unencrypted, matching the ALREADY-unencrypted signaling QuBits
- * `WebRtcSignalService` itself writes to this same thread (a deliberate,
- * documented scope decision from the original WebRTC plan - see that
- * service's own doc comment). The one ordinary `postMessage()` this file
- * makes (the "incoming call" announcement, see below) rides the SAME
- * unencrypted config for the same reason, not as a NEW privacy trade-off.
+ * chat history. `THREAD_PRESETS.chat(memberPubs)` (encrypted, `readers` a
+ * fixed 2-member array) - NOT `readers: '*'` - is load-bearing, not just a
+ * privacy nicety: `packages/relay/src/push-delivery.js`'s own
+ * `deliverThreadMessage()` only notifies "every other reader" for an
+ * `Array.isArray(config.readers)` (private) thread; a `readers: '*'`
+ * (public) thread only notifies explicit `@mentions`, which the one-line
+ * announcement message below never has - using `readers: '*'` here once
+ * silently broke incoming-call notifications entirely (no error, no log,
+ * `deliverThreadMessage()`'s own candidate list was just empty - see this
+ * plan's own "Bugfix: Eingehende Anrufe klingeln nicht durch" section for
+ * the full incident). The raw offer/answer/ICE QuBits `WebRtcSignalService`
+ * itself writes to this same thread stay unencrypted regardless (a
+ * separate, deliberate scope decision from the original WebRTC plan, see
+ * that service's own doc comment) - only the ordinary `postMessage()`
+ * below rides the thread's own encrypted-private-list config.
  *
  * @param {{qu: import('@qu/core').QuStore, identity: import('@qu/identity').QuIdentityEngine, services: object, spaceId: string, remotePub: string, iceServers?: Array<object>, initiator: boolean, onTrack?: (stream: MediaStream) => void, onPeerConnected?: () => void, onDeclined?: () => void}} options
  * @returns {Promise<{selfPub: string, localStream: MediaStream, toggleAudio: (enabled: boolean) => void, toggleVideo: (enabled: boolean) => void, hangUp: () => void}>}
@@ -48,7 +54,7 @@ export async function createPhoneCall({ qu, identity, services, spaceId, remoteP
   const memberPubs = [selfPub, remotePub];
   const threadId = await ChatService.roomId(memberPubs);
 
-  await services.messages.createThread(spaceId, threadId, { writers: memberPubs, readers: '*', replyMode: 'flat', formatting: [] });
+  await services.messages.createThread(spaceId, threadId, THREAD_PRESETS.chat(memberPubs));
 
   // Deliberately BEFORE the announcement postMessage() below, not after -
   // `requestLocalMedia()` throwing (denied/unsupported) must still mean
@@ -68,7 +74,24 @@ export async function createPhoneCall({ qu, identity, services, spaceId, remoteP
   // its own answer. Body content is irrelevant - `resolveNotification()`'s
   // own generic title/body wording never reflects the real message content
   // anyway (see that file's own class doc comment).
-  if (initiator) await services.messages.postMessage(spaceId, threadId, { body: '📞' });
+  //
+  // Deliberately swallowed on failure (e.g. `remotePub` never published a
+  // profile, so `postMessage()`'s encryption step can't resolve their
+  // X25519 key - see `THREAD_PRESETS.chat()`'s own note above on why this
+  // thread is encrypted at all) - a failed "ring" announcement must never
+  // block the actual call: `signalService.connectPeer()` below establishes
+  // the real WebRTC connection over unencrypted signaling regardless, same
+  // as it always has. The callee simply doesn't get the push/toast nudge in
+  // that edge case, same known, already-accepted gap `apps/chat`'s own
+  // `sendTextMessage()` has for the identical scenario - see this plan's own
+  // "Bugfix" section for why this is caught here instead of left unhandled.
+  if (initiator) {
+    try {
+      await services.messages.postMessage(spaceId, threadId, { body: '📞' });
+    } catch (err) {
+      log.warn('failed to post incoming-call announcement (call still proceeds):', err.message);
+    }
+  }
 
   const webrtcTransport = new WebRTCTransport({ selfPeerId: selfPub, iceServers });
   const signalService = new WebRtcSignalService(qu, identity, webrtcTransport, { negotiationTimeoutMs: NEGOTIATION_TIMEOUT_MS });

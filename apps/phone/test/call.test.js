@@ -1,12 +1,24 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { QuStore, MemoryStoreAdapter, QuCrypto } from '@qu/core';
-import { QuIdentityEngine } from '@qu/identity';
+import { QuIdentityEngine, actorPath } from '@qu/identity';
 import { SyncEngine } from '@qu/sync';
 import { Transport } from '@qu/sync/transport';
-import { ListService, AccessService, MessageService, ChatService, paths } from '@qu/services';
+import { readFileSync } from 'node:fs';
+import { ListService, AccessService, MessageService, ChatService, NotificationPrefsService, PushSubscriptionService, paths } from '@qu/services';
 import { installFakeRTCPeerConnection } from '../../../packages/webrtc/test/fake-rtc-peer-connection.js';
 import { installFakeMediaDevices } from './fake-media-devices.js';
+import { PushDeliveryService, createManifestNotificationResolver } from '../../../packages/relay/src/push-delivery.js';
+import { PresenceTracker } from '../../../packages/relay/src/presence-tracker.js';
+
+// The REAL apps/phone/manifest.quapp (not a synthetic stand-in) - the whole
+// point of the regression tests below is proving call.js's actual thread
+// config and this actual manifest's actual pushActions work together
+// through a real PushDeliveryService, not two halves separately mocked to
+// look compatible (exactly how the "readers: '*' silently breaks incoming-
+// call notifications" bug slipped through in the first place - see this
+// plan's own "Bugfix" section).
+const PHONE_MANIFEST = JSON.parse(readFileSync(new URL('../manifest.quapp', import.meta.url), 'utf8'));
 
 installFakeRTCPeerConnection();
 installFakeMediaDevices();
@@ -95,6 +107,13 @@ async function freshParticipant(clientPeerId, network) {
   qu.mount('store', new MemoryStoreAdapter());
   const identity = new QuIdentityEngine(qu);
   await identity.importMnemonic(identity.generateMnemonic());
+  // Needed since createPhoneCall() posts a real, encrypted (THREAD_PRESETS.
+  // chat()'s reader-restricted config - see call.js's own doc comment on
+  // why that's load-bearing, not just privacy) announcement message, which
+  // requires every reader's X25519 key to be resolvable - exactly like any
+  // other private-thread postMessage() (see message-service.test.js's own
+  // reader-restricted-thread tests for the identical requirement).
+  await identity.publishMainProfile({});
   const pub = QuCrypto.toBase64Url((await identity.getMainKey()).publicKey);
 
   const clientTransport = new ClientTransport(clientPeerId, network);
@@ -107,6 +126,28 @@ async function freshParticipant(clientPeerId, network) {
   return { qu, identity, pub, sync, services: { messages } };
 }
 
+/**
+ * Each `freshParticipant()` is a genuinely SEPARATE `QuStore` instance, and
+ * the tests below only ever `sync.subscribe()` the phone call's OWN
+ * `spaceId` (never an actor's `/store/actors/~<pub>/profile` path) - so
+ * `publishMainProfile()` above never actually reaches the OTHER
+ * participant's store through this test harness's sync, unlike a real
+ * relay-mediated deployment where both identities' profiles are simply
+ * already-synced, ambient data. Manually mirrors each side's published
+ * profile into the other's store - the exact same "as if sync had already
+ * delivered it" technique `packages/relay/test/push-delivery.test.js`'s own
+ * `freshRecipient()`/`readOwnNotifications()` helpers use for the identical
+ * reason - so `MessageService.postMessage()`'s `resolveReaderXKeys()` can
+ * resolve both readers' X25519 keys, exactly like it would in production
+ * once the two contacts have actually met.
+ */
+async function mirrorProfiles(a, b) {
+  const aProfile = await a.qu.get(actorPath(a.pub, 'profile'));
+  if (aProfile) await b.qu.putSealed(actorPath(a.pub, 'profile'), aProfile);
+  const bProfile = await b.qu.get(actorPath(b.pub, 'profile'));
+  if (bProfile) await a.qu.putSealed(actorPath(b.pub, 'profile'), bProfile);
+}
+
 test('caller and callee complete a call handshake, exchange tracks, and can hang up cleanly', async () => {
   const network = new TestNetwork();
   const relayQu = new QuStore();
@@ -115,6 +156,7 @@ test('caller and callee complete a call handshake, exchange tracks, and can hang
 
   const caller = await freshParticipant('client-caller', network);
   const callee = await freshParticipant('client-callee', network);
+  await mirrorProfiles(caller, callee);
 
   const spaceId = 'phone-test-space';
   caller.sync.subscribe(paths.spacePath(spaceId));
@@ -157,6 +199,7 @@ test('toggleAudio()/toggleVideo() flip track.enabled without stopping or removin
 
   const caller = await freshParticipant('client-caller2', network);
   const callee = await freshParticipant('client-callee2', network);
+  await mirrorProfiles(caller, callee);
   const spaceId = 'phone-test-space-2';
   caller.sync.subscribe(paths.spacePath(spaceId));
   callee.sync.subscribe(paths.spacePath(spaceId));
@@ -187,6 +230,7 @@ test('declinePhoneCall() before the callee ever creates a PhoneCall reaches the 
 
   const caller = await freshParticipant('client-caller3', network);
   const callee = await freshParticipant('client-callee3', network);
+  await mirrorProfiles(caller, callee);
   const spaceId = 'phone-test-space-3';
   caller.sync.subscribe(paths.spacePath(spaceId));
   callee.sync.subscribe(paths.spacePath(spaceId));
@@ -214,6 +258,7 @@ test('the CALLER (only) posts exactly one real thread message announcing the cal
 
   const caller = await freshParticipant('client-caller5', network);
   const callee = await freshParticipant('client-callee5', network);
+  await mirrorProfiles(caller, callee);
   const spaceId = 'phone-test-space-5';
   caller.sync.subscribe(paths.spacePath(spaceId));
   callee.sync.subscribe(paths.spacePath(spaceId));
@@ -227,6 +272,94 @@ test('the CALLER (only) posts exactly one real thread message announcing the cal
 
   callerCall.hangUp();
   calleeCall.hangUp();
+});
+
+test('REGRESSION: the call thread\'s stored config uses an ARRAY of readers, not "*" - the exact property deliverThreadMessage() branches on to decide "private, notify every other reader" vs. "public, mentions only"', async () => {
+  const network = new TestNetwork();
+  const relayQu = new QuStore();
+  relayQu.mount('store', new MemoryStoreAdapter());
+  new SyncEngine(relayQu, new RelayTransport(network));
+
+  const caller = await freshParticipant('client-caller6', network);
+  const callee = await freshParticipant('client-callee6', network);
+  await mirrorProfiles(caller, callee);
+  const spaceId = 'phone-test-space-6';
+  caller.sync.subscribe(paths.spacePath(spaceId));
+  callee.sync.subscribe(paths.spacePath(spaceId));
+
+  const callerCall = await createPhoneCall({ qu: caller.qu, identity: caller.identity, services: caller.services, spaceId, remotePub: callee.pub, initiator: true });
+  const threadId = await ChatService.roomId([caller.pub, callee.pub]);
+
+  const config = await caller.services.messages.getConfig(spaceId, threadId);
+  assert.ok(Array.isArray(config.readers), `expected config.readers to be an array of the two participants, got: ${JSON.stringify(config.readers)}`);
+  assert.deepEqual([...config.readers].sort(), [caller.pub, callee.pub].sort());
+
+  callerCall.hangUp();
+});
+
+test('INTEGRATION: a real createPhoneCall({initiator:true}) announcement, run through the REAL PushDeliveryService + the REAL apps/phone/manifest.quapp, notifies exactly the callee with the incomingCall action - the end-to-end path that regressed silently when the thread was briefly made "readers: \'*\'"', async () => {
+  const network = new TestNetwork();
+  const relayQu = new QuStore();
+  relayQu.mount('store', new MemoryStoreAdapter());
+  new SyncEngine(relayQu, new RelayTransport(network));
+
+  const caller = await freshParticipant('client-caller7', network);
+  const callee = await freshParticipant('client-callee7', network);
+  await mirrorProfiles(caller, callee);
+  // The REAL manifest's own spaceId, not an arbitrary test string -
+  // createManifestNotificationResolver() matches candidates by
+  // `manifest.spaceId === spaceId` (see push-delivery.js's own doc
+  // comment), so this is what makes it actually recognize this thread as
+  // Phone's, not fall through to the generic per-spaceId wording.
+  const spaceId = PHONE_MANIFEST.spaceId;
+  caller.sync.subscribe(paths.spacePath(spaceId));
+  callee.sync.subscribe(paths.spacePath(spaceId));
+
+  const callerCall = await createPhoneCall({ qu: caller.qu, identity: caller.identity, services: caller.services, spaceId, remotePub: callee.pub, initiator: true });
+  const threadId = await ChatService.roomId([caller.pub, callee.pub]);
+
+  const { messages: callerView } = await caller.services.messages.listMessages(spaceId, threadId);
+  assert.equal(callerView.length, 1);
+  const announcement = callerView[0];
+  // deliverThreadMessage() expects the RAW on-wire QuBit shape (see
+  // packages/relay/test/push-delivery.test.js's own postAndDeliver() doc
+  // comment), not postMessage()'s own plain return value.
+  const rawQuBit = await caller.qu.get(`/store/${spaceId}/threads/${threadId}/msgs/${announcement.id}`);
+
+  const list = new ListService(caller.qu);
+  const notifiedFor = [];
+  const delivery = new PushDeliveryService({
+    messages: caller.services.messages,
+    notificationPrefs: new NotificationPrefsService(caller.qu, null),
+    pushSubscriptions: new PushSubscriptionService(caller.qu, null, list),
+    presence: new PresenceTracker(),
+    vapidKeys: null, // only the in-app write matters for this test
+    resolveNotification: createManifestNotificationResolver({ listManifests: () => [{ manifest: PHONE_MANIFEST, originUrl: null }] }),
+  });
+  const seen = [];
+  const originalPost = caller.services.messages.postMessage.bind(caller.services.messages);
+  caller.services.messages.postMessage = async (...args) => {
+    seen.push(args);
+    return originalPost(...args);
+  };
+
+  await delivery.deliverThreadMessage(spaceId, threadId, rawQuBit);
+
+  // Exactly one in-app notification write happened, for the callee's OWN
+  // notifications thread (postMessage() was called a second time, beyond
+  // the original "📞" announcement itself).
+  const inAppWrites = seen.filter(([writeSpaceId]) => writeSpaceId === paths.notificationsSpaceId(callee.pub));
+  assert.equal(inAppWrites.length, 1, `expected exactly one in-app notification write for the callee, got ${inAppWrites.length}`);
+  const [, , { extra }] = inAppWrites[0];
+  assert.equal(extra.appId, 'phone');
+  assert.equal(extra.url, `#/phone/${caller.pub}/accept`);
+  assert.deepEqual(extra.actions, [
+    { action: 'accept', title: 'Annehmen', url: `#/phone/${caller.pub}/accept` },
+    { action: 'decline', title: 'Ablehnen', url: `#/phone/${caller.pub}/decline` },
+  ]);
+
+  caller.services.messages.postMessage = originalPost;
+  callerCall.hangUp();
 });
 
 test('createPhoneCall() throws a code:"denied" error when getUserMedia() rejects, without touching the network at all', async () => {
