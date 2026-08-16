@@ -221,8 +221,19 @@ const STYLE = `
   .qu-cal-page { max-width: 34rem; padding-bottom: 5rem; }
   .qu-cal-notice { font-size: 0.85em; opacity: 0.75; border: 1px dashed var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); padding: 0.5rem 0.7rem; margin-bottom: 0.6rem; }
   .qu-cal-form { display: flex; flex-direction: column; gap: 0.7rem; }
-  .qu-cal-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.9em; }
-  .qu-cal-form input, .qu-cal-form select, .qu-cal-form textarea { padding: 0.55rem; font: inherit; font-size: 1rem; box-sizing: border-box; border-radius: var(--qu-radius-sm, 0.3rem); border: 1px solid var(--qu-color-border, #8884); }
+  /* min-width: 0 on both the label (itself a nested flex container) and its
+     input/select/textarea - without it, a flex item's AUTOMATIC minimum
+     width equals its content's own intrinsic min-content size, which for a
+     native datetime-local control can exceed this row's own min-width
+     below, forcing the whole row wider than the viewport on mobile instead
+     of letting flex-wrap actually stack Start/End on separate lines (same
+     underlying flexbox pitfall as apps/shell/src/header.js's own
+     .qu-shell-user - see that file's own doc comment). width: 100% then
+     makes the control actually fill whatever width it's given, instead of
+     rendering at its own browser-default intrinsic size regardless of the
+     flex layout around it. */
+  .qu-cal-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.9em; min-width: 0; }
+  .qu-cal-form input, .qu-cal-form select, .qu-cal-form textarea { width: 100%; min-width: 0; padding: 0.55rem; font: inherit; font-size: 1rem; box-sizing: border-box; border-radius: var(--qu-radius-sm, 0.3rem); border: 1px solid var(--qu-color-border, #8884); }
   .qu-cal-form-row { display: flex; gap: 0.6rem; flex-wrap: wrap; }
   .qu-cal-form-row > * { flex: 1; min-width: 9rem; }
   .qu-cal-page-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.4rem; }
