@@ -73,6 +73,7 @@ const DICT = {
     deleteListConfirm: 'Delete "{title}"? This removes it for everyone and cannot be undone.',
     leaveConfirm: 'Leave "{title}"? You will lose access unless invited again, and the owner will be notified.',
     newTask: 'New task', noTasks: 'No tasks yet.',
+    listLabel: 'List', sharedListOption: '{title} (shared by {owner})',
     taskTitle: 'Title', taskContent: 'Notes (optional)', dueDate: 'Due date (optional)',
     attachment: 'Attachment (optional)', attachRemove: 'Remove',
     assignee: 'Assignee', unassigned: 'Unassigned', youSuffix: '{name} (you)',
@@ -98,6 +99,7 @@ const DICT = {
     deleteListConfirm: '"{title}" löschen? Dies entfernt sie für alle und kann nicht rückgängig gemacht werden.',
     leaveConfirm: '"{title}" verlassen? Du verlierst den Zugriff, bis du erneut eingeladen wirst, der Eigentümer wird benachrichtigt.',
     newTask: 'Neue Aufgabe', noTasks: 'Noch keine Aufgaben.',
+    listLabel: 'Liste', sharedListOption: '{title} (geteilt von {owner})',
     taskTitle: 'Titel', taskContent: 'Notiz (optional)', dueDate: 'Fälligkeitsdatum (optional)',
     attachment: 'Anhang (optional)', attachRemove: 'Entfernen',
     assignee: 'Bearbeiter', unassigned: 'Nicht zugewiesen', youSuffix: '{name} (du)',
@@ -783,9 +785,41 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
   // ---------------------------------------------------------------------
   // Task form - shared by New Task and Edit Task
   // ---------------------------------------------------------------------
-  function buildTaskForm({ existing, meta, onSubmit, onCancel }) {
+  /**
+   * @param {{existing: object|null, meta: object, myEditableLists?: Array<{id: string, title: string, role: string, ownerPub: string}>,
+   *   selectedListId?: string, lockList?: boolean, onSubmit: Function, onCancel: Function}} opts
+   *   `myEditableLists` is only ever passed for the NEW-task flow (never
+   *   when editing - a task never moves between lists after creation, see
+   *   this file's own top doc comment) - its presence is what turns on the
+   *   "which list" picker at all. `lockList` disables it (still shown, for
+   *   context) when creating a SUBTASK, which must stay in its parent's list.
+   */
+  function buildTaskForm({ existing, meta, myEditableLists, selectedListId, lockList, onSubmit, onCancel }) {
     const form = document.createElement('form');
     form.className = 'qu-todo-form';
+    let currentMeta = meta; // swapped out on listSelect's own 'change' - see below
+
+    let listSelect = null;
+    if (myEditableLists) {
+      listSelect = document.createElement('select');
+      listSelect.className = 'qu-todo-list-select';
+      listSelect.disabled = !!lockList;
+      for (const l of myEditableLists) {
+        const opt = document.createElement('option');
+        opt.value = l.id;
+        opt.textContent = l.role === 'owner' ? l.title : t('sharedListOption', { title: l.title, owner: shortPerson(l.ownerPub, null) });
+        if (l.role !== 'owner') {
+          services.profile.getPublicProfile(l.ownerPub).then((profile) => {
+            if (profile?.alias) opt.textContent = t('sharedListOption', { title: l.title, owner: profile.alias });
+          });
+        }
+        listSelect.appendChild(opt);
+      }
+      listSelect.value = selectedListId;
+      const listLabel = document.createElement('label');
+      listLabel.append(t('listLabel'), listSelect);
+      form.appendChild(listLabel);
+    }
 
     const titleInput = document.createElement('input');
     titleInput.type = 'text';
@@ -806,24 +840,45 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     const dueLabel = document.createElement('label');
     dueLabel.append(t('dueDate'), dueInput);
 
+    // Default assignee is always ME - assigning it to someone else is an
+    // active choice, not the starting state (per this app's own design
+    // discussion). Only applies to a NEW task; editing an existing one keeps
+    // showing whatever is already stored, including an explicit "Unassigned".
     const assigneeSelect = document.createElement('select');
-    const noneOpt = document.createElement('option');
-    noneOpt.value = '';
-    noneOpt.textContent = t('unassigned');
-    assigneeSelect.appendChild(noneOpt);
-    for (const member of meta.members) {
-      const opt = document.createElement('option');
-      opt.value = member.actorPub;
-      opt.textContent = member.actorPub === myActorPub ? t('youSuffix', { name: shortPerson(member.actorPub, null) }) : shortPerson(member.actorPub, null);
-      services.profile.getPublicProfile(member.actorPub).then((profile) => {
-        if (!profile?.alias) return;
-        opt.textContent = member.actorPub === myActorPub ? t('youSuffix', { name: profile.alias }) : profile.alias;
-      });
-      if (existing?.assigneePub === member.actorPub) opt.selected = true;
-      assigneeSelect.appendChild(opt);
+    assigneeSelect.className = 'qu-todo-assignee-select';
+    function renderAssigneeOptions(forMeta) {
+      assigneeSelect.textContent = '';
+      const noneOpt = document.createElement('option');
+      noneOpt.value = '';
+      noneOpt.textContent = t('unassigned');
+      assigneeSelect.appendChild(noneOpt);
+      for (const member of forMeta.members) {
+        const opt = document.createElement('option');
+        opt.value = member.actorPub;
+        opt.textContent = member.actorPub === myActorPub ? t('youSuffix', { name: shortPerson(member.actorPub, null) }) : shortPerson(member.actorPub, null);
+        services.profile.getPublicProfile(member.actorPub).then((profile) => {
+          if (!profile?.alias) return;
+          opt.textContent = member.actorPub === myActorPub ? t('youSuffix', { name: profile.alias }) : profile.alias;
+        });
+        assigneeSelect.appendChild(opt);
+      }
+      assigneeSelect.value = existing ? (existing.assigneePub ?? '') : myActorPub;
     }
+    renderAssigneeOptions(currentMeta);
     const assigneeLabel = document.createElement('label');
     assigneeLabel.append(t('assignee'), assigneeSelect);
+
+    if (listSelect) {
+      // Switching lists changes who's even assignable - re-fetch that
+      // list's own members instead of leaving stale options from the
+      // PREVIOUS list's meta showing.
+      listSelect.addEventListener('change', async () => {
+        const newMeta = await fetchMeta(listSelect.value);
+        if (!newMeta) return;
+        currentMeta = newMeta;
+        renderAssigneeOptions(currentMeta);
+      });
+    }
 
     let pendingAttachment = existing?.attachment ?? null;
     const attachWrap = document.createElement('div');
@@ -870,13 +925,15 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const wasUploadedFresh = pendingAttachment && pendingAttachment.assetId !== existing?.attachment?.assetId;
-      await onSubmit({
+      const values = {
         title: titleInput.value.trim(),
         content: contentInput.value.trim(),
         dueDate: dueInput.value ? fromDateInputValue(dueInput.value) : null,
         assigneePub: assigneeSelect.value || null,
         attachment: pendingAttachment,
-      });
+      };
+      if (listSelect) values.listId = listSelect.value;
+      await onSubmit(values);
       // Only now, once the attachment is genuinely part of a saved task, does
       // the deferred sync-out verification phase start - see
       // <qu-asset-upload>'s own doc comment on confirmSent() for why.
@@ -909,6 +966,24 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
       parentTitle = (doc.items ?? []).find((it) => it.id === parentId)?.title ?? null;
     }
 
+    // Which list this new task can land in - locked to the current one for
+    // a subtask (it must stay in its parent's own list), otherwise every
+    // list this identity can currently add tasks to, shared ones clearly
+    // marked with their owner's alias/pub.
+    let editableLists;
+    if (parentId) {
+      editableLists = [{ id: listId, title: meta.title || t('untitled'), role: roleOf(meta, myActorPub), ownerPub: meta.ownerPub }];
+    } else {
+      const mine = await listMine();
+      editableLists = [];
+      for (const l of mine) {
+        const m = await fetchMeta(l.id);
+        const role = roleOf(m, myActorPub);
+        if (m && canEdit(role)) editableLists.push({ id: l.id, title: m.title || t('untitled'), role, ownerPub: m.ownerPub });
+      }
+    }
+    if (stopped) return;
+
     renderSubpage(container, {
       showBackLink: false,
       render: (content) => {
@@ -918,12 +993,13 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
         h1.textContent = parentTitle ? t('newSubtask', { title: parentTitle }) : t('newTask');
         page.appendChild(h1);
         page.appendChild(buildTaskForm({
-          existing: null, meta,
-          onSubmit: async (values) => {
+          existing: null, meta, myEditableLists: editableLists, selectedListId: listId, lockList: !!parentId,
+          onSubmit: async ({ listId: targetListId, ...values }) => {
+            const finalListId = targetListId || listId;
             const payload = { id: crypto.randomUUID(), parentId: parentId || null, ...values, done: false, createdAt: Date.now(), createdBy: myActorPub, updatedAt: Date.now() };
-            await upsertTask(listId, payload, { isNew: true });
-            if (payload.assigneePub) await notifyAssignment(listId, payload);
-            window.location.hash = listHash(listId);
+            await upsertTask(finalListId, payload, { isNew: true });
+            if (payload.assigneePub && payload.assigneePub !== myActorPub) await notifyAssignment(finalListId, payload);
+            window.location.hash = listHash(finalListId);
           },
           onCancel: () => { window.location.hash = listHash(listId); },
         }));
@@ -987,7 +1063,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
             const prevAssignee = task.assigneePub;
             const payload = { ...task, ...values, updatedAt: Date.now() };
             await upsertTask(listId, payload, { isNew: false });
-            if (payload.assigneePub && payload.assigneePub !== prevAssignee) await notifyAssignment(listId, payload);
+            if (payload.assigneePub && payload.assigneePub !== prevAssignee && payload.assigneePub !== myActorPub) await notifyAssignment(listId, payload);
             window.location.hash = listHash(listId);
           },
           onCancel: () => { window.location.hash = listHash(listId); },
