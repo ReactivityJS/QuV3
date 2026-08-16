@@ -28,6 +28,7 @@ export { FavoritesService } from './favorites-service.js';
 export { BookmarksService } from './bookmarks-service.js';
 export { ContactsService } from './contacts-service.js';
 export { AccessService } from './access-service.js';
+export { SharingService } from './sharing-service.js';
 export { isEncryptedEnvelope, resolveReaderXKeys, decryptEnvelope } from './crypto-envelope.js';
 export { extractMentions, formatMarkdown, applyFormatting } from './thread-formatting.js';
 export { URL_RE_GLOBAL, detectLinks } from './link-detect.js';
