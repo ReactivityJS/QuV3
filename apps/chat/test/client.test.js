@@ -11,7 +11,7 @@ import { ExtensionPointHost } from '@qu/foundation';
 import { installDom, waitFor } from '@qu/ui/testing';
 
 installDom();
-const { mount, renderChatSettings, renderHeaderAction, searchChat, resolveChatReference, renderSearchResult } = await import('../client.js');
+const { mount, renderChatSettings, renderHeaderNavPoints, searchChat, resolveChatReference, renderSearchResult } = await import('../client.js');
 
 /** A minimal MediaRecorder test double - start()/pause()/resume()/stop(), stop() synchronously fires ondataavailable then onstop, matching real MediaRecorder's own event order closely enough for startRecording()'s own handler. pause()/resume() just track state (this file's own tests only assert on the DOM state the client itself derives, not on MediaRecorder.state). */
 class FakeMediaRecorder {
@@ -1322,15 +1322,15 @@ test('the new-group form has no bespoke back link either - just the shell header
   }
 });
 
-// ===== renderHeaderAction() - the shell.headerAction contributor (see docs/app-navigation-standard.md Rule 2) =====
+// ===== renderHeaderNavPoints() - the shell.headerNavPoints contributor (see docs/app-navigation-standard.md Rule 2) =====
 
-test('renderHeaderAction(): hidden while another app is active, shows a "+ New group" link once Chat becomes active', async () => {
+test('renderHeaderNavPoints(): hidden while another app is active, shows a "New chat group" link once Chat becomes active', async () => {
   const { services } = await freshEnv('Alice');
   const container = makeContainer();
 
   let appId = 'calendar';
   const listeners = [];
-  renderHeaderAction(container, {
+  renderHeaderNavPoints(container, {
     getContext: () => ({ appId, segments: [appId] }),
     onContextChange: (cb) => listeners.push(cb),
     services,
@@ -1344,4 +1344,5 @@ test('renderHeaderAction(): hidden while another app is active, shows a "+ New g
   assert.equal(wrap.hidden, false);
   await waitFor(() => wrap.querySelector('a') !== null);
   assert.equal(wrap.querySelector('a').getAttribute('href'), '#/chat/new-group');
+  assert.equal(wrap.querySelector('a').title, 'New chat group');
 });

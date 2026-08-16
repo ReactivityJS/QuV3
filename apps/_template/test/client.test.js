@@ -6,7 +6,7 @@ import { ActorService } from '@qu/services';
 import { installDom, waitFor } from '@qu/ui/testing';
 
 installDom();
-const { mount, renderHeaderAction } = await import('../client.js');
+const { mount, renderHeaderNavPoints } = await import('../client.js');
 
 async function freshEnv() {
   const qu = new QuStore();
@@ -95,13 +95,13 @@ test('creating a note via #/template/new navigates to its own detail page', asyn
   }
 });
 
-// ===== renderHeaderAction() - the shell.headerAction contributor (Rule 2) ==
+// ===== renderHeaderNavPoints() - the shell.headerNavPoints contributor (Rule 2) ==
 
-test('renderHeaderAction(): hidden while another app is active, shows a "+ New note" link once this app becomes active', () => {
+test('renderHeaderNavPoints(): hidden while another app is active, shows a "New note" link once this app becomes active', () => {
   const container = makeContainer();
   let appId = 'chat';
   const listeners = [];
-  renderHeaderAction(container, {
+  renderHeaderNavPoints(container, {
     getContext: () => ({ appId, segments: [appId] }),
     onContextChange: (cb) => listeners.push(cb),
   });

@@ -46,30 +46,39 @@
  *      same graceful "app not found" placeholder every other not-yet-loaded
  *      catalog entry already does.
  *
- * APP ACTION SLOT (`shell.headerAction`, see `docs/app-navigation-standard.md`
- * for the full standard this is Rule 2 of): the header itself defines this
- * one extension point (`@qu/foundation`'s `ExtensionPointHost.renderSlot()`,
- * same mechanism `apps/forum`'s `content.messageActions`/etc. already use,
- * just with the HOST being this file instead of an app) and renders it
- * ONCE, unlike the per-route `extensionPoints` `apps/shell/client.js`
- * rebuilds on every navigation - this header is mounted exactly once for
- * the whole session, so its OWN `ExtensionPointHost` lives for that long
- * too. `apps/search` is the one ALWAYS-VISIBLE contributor (its
- * `renderHeaderSearch` mounts a single 🔍 icon); `apps/calendar`/`apps/chat`
- * are CONDITIONAL contributors (a "+ New event"/"+ New group" icon, shown
- * only while that app is the active one) via `@qu/ui`'s
- * `mountAppHeaderAction()` helper - nothing here is app-specific, any app
- * can contribute a header icon either way. Since the contributed widget is
- * mounted once but the ROUTE changes on every navigation, the payload
- * carries a live `getContext()`/`onContextChange()` pair (a plain mutable
- * `{appId, segments}` object plus a listener list this file updates on
- * every `hashchange`) instead of a fresh payload per render - cheap (a
- * plain object mutation and a DOM attribute write, no re-import, no DOM
- * churn) and avoids a second, ad hoc "watch the route" mechanism. The
- * payload also carries `services`/`qu`/`subscribe`/`syncFetch` (the same
- * ones this header itself was built with) so a CONDITIONAL contributor can
- * resolve its own data once active, without a second trust surface - see
- * the `renderSlot()` call site below.
+ * TWO HEADER EXTENSION POINTS (see `docs/app-navigation-standard.md` for the
+ * full standard these are Rules 2): the header defines two separate
+ * `@qu/foundation` `ExtensionPointHost.renderSlot()` points (same mechanism
+ * `apps/forum`'s `content.messageActions`/etc. already use, just with the
+ * HOST being this file instead of an app), each rendered ONCE - unlike the
+ * per-route `extensionPoints` `apps/shell/client.js` rebuilds on every
+ * navigation, this header is mounted exactly once for the whole session, so
+ * its OWN `ExtensionPointHost` lives for that long too:
+ *
+ *   - `shell.headerAction` (`headerSlot`, right side, next to the bell) -
+ *     for ALWAYS-VISIBLE, cross-app icons. `apps/search`'s
+ *     `renderHeaderSearch` (a single 🔍 icon) is the one contributor.
+ *   - `shell.headerNavPoints` (`navPointsSlot`, LEFT side, right after
+ *     Back/Forward) - for CONDITIONAL, per-app "things you can create/do
+ *     from here" (Calendar's "+ New event", Chat's "+ New group", ToDo's
+ *     "+ New task", Forum's "New channel"/"New topic"), shown only while
+ *     that app is the active one, via `@qu/ui`'s `mountAppHeaderAction()`
+ *     (the "only while active" boilerplate) plus `renderNavPointsMenu()`
+ *     (renders 1 item as a plain link, 2+ as a dropdown - see that file's
+ *     own doc comment). Nothing here is app-specific - any app can
+ *     contribute to either point.
+ *
+ * Since a contributor is mounted once but the ROUTE changes on every
+ * navigation, both points' payload carries a live `getContext()`/
+ * `onContextChange()` pair (a plain mutable `{appId, segments}` object plus
+ * a listener list this file updates on every `hashchange`) instead of a
+ * fresh payload per render - cheap (a plain object mutation and a DOM
+ * attribute write, no re-import, no DOM churn) and avoids a second, ad hoc
+ * "watch the route" mechanism. The payload also carries
+ * `services`/`qu`/`subscribe`/`syncFetch` (the same ones this header itself
+ * was built with) so a CONDITIONAL contributor can resolve its own data once
+ * active, without a second trust surface - see the `renderSlot()` call
+ * sites below.
  */
 import { watch, watchChildren } from '@qu/reactive';
 import { paths, formatActorLabel } from '@qu/services';
@@ -102,6 +111,7 @@ const STYLE = `
   .qu-shell-home img { width: 1.9rem; height: 1.9rem; display: block; }
   .qu-shell-histbtn { background: none; border: none; cursor: pointer; font-size: 1.15em; line-height: 1; padding: 0.4rem 0.5rem; border-radius: var(--qu-radius-sm, 0.3rem); color: inherit; opacity: 0.75; }
   .qu-shell-histbtn:hover { background: var(--qu-color-surface, #8882); opacity: 1; }
+  .qu-shell-nav-slot { display: flex; align-items: center; }
   .qu-shell-header-spacer { flex: 1; }
   .qu-shell-header-slot { display: flex; align-items: center; }
   .qu-shell-bell { position: relative; display: inline-flex; background: none; border: none; cursor: pointer; text-decoration: none; color: inherit; font-size: 1.2em; padding: 0.35rem 0.55rem; border-radius: var(--qu-radius-sm, 0.3rem); }
@@ -128,9 +138,10 @@ const STYLE = `
  * @param {HTMLElement} container
  * @param {{qu: import('@qu/core').QuStore, services: object, adminPubs?: string[], subscribe?: (prefix: string) => void, syncFetch?: (prefix: string) => Promise<*>, apps?: object[]}} deps -
  *   `apps` is the SAME manifest catalog every routed app already receives as
- *   `ctx.apps` (see this file's own "APP ACTION SLOT" doc comment) - defaults
- *   to `[]` so an existing caller that doesn't pass it yet just renders no
- *   `shell.headerAction` contributors, never throws.
+ *   `ctx.apps` (see this file's own "TWO HEADER EXTENSION POINTS" doc
+ *   comment) - defaults to `[]` so an existing caller that doesn't pass it
+ *   yet just renders no `shell.headerAction`/`shell.headerNavPoints`
+ *   contributors, never throws.
  * @returns {() => void} A stop function.
  */
 export function mountHeader(container, { qu, services, adminPubs = [], subscribe, syncFetch, apps = [] }) {
@@ -166,6 +177,9 @@ export function mountHeader(container, { qu, services, adminPubs = [], subscribe
   forwardBtn.title = t('forward');
   forwardBtn.setAttribute('aria-label', t('forward'));
   forwardBtn.addEventListener('click', () => window.history.forward());
+
+  const navPointsSlot = document.createElement('div');
+  navPointsSlot.className = 'qu-shell-nav-slot';
 
   const spacer = document.createElement('div');
   spacer.className = 'qu-shell-header-spacer';
@@ -207,7 +221,7 @@ export function mountHeader(container, { qu, services, adminPubs = [], subscribe
   menu.hidden = true;
 
   userWrap.append(userBtn, menu);
-  header.append(home, backBtn, forwardBtn, spacer, headerSlot, bell, userWrap);
+  header.append(home, backBtn, forwardBtn, navPointsSlot, spacer, headerSlot, bell, userWrap);
   container.appendChild(header);
 
   // See this file's own "SEARCH SLOT" doc comment above - one
@@ -238,6 +252,13 @@ export function mountHeader(container, { qu, services, adminPubs = [], subscribe
   // group" needs `services` for its own policy check. `apps/search`'s
   // existing contributor ignores the extra fields, so this is non-breaking.
   extensionPoints.renderSlot('shell.headerAction', headerSlot, { getContext, onContextChange, services, qu, subscribe, syncFetch });
+  // `shell.headerNavPoints` - a second, LEFT-aligned slot next to Back/Forward
+  // (see this file's own "APP NAVIGATION POINTS SLOT" doc comment above).
+  // Same mechanism, same payload shape as `shell.headerAction` above - a
+  // contributor uses the same `@qu/ui` `mountAppHeaderAction()` helper (only
+  // visible while active) plus `renderNavPointsMenu()` to render however
+  // many items it contributes (1 = plain link, 2+ = a dropdown).
+  extensionPoints.renderSlot('shell.headerNavPoints', navPointsSlot, { getContext, onContextChange, services, qu, subscribe, syncFetch });
 
   function closeMenu() {
     menu.hidden = true;

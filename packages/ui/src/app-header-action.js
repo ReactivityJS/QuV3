@@ -1,21 +1,27 @@
 /**
- * APP HEADER ACTION — the boilerplate every `shell.headerAction` contributor
- * needs when its icon should only show up while ITS OWN app is the active
- * one (e.g. Calendar's "+ New event", Chat's "+ New group") instead of being
- * unconditionally visible everywhere, the way `apps/search`'s own
- * `renderHeaderSearch()` is. `ExtensionPointHost.renderSlot()` mounts every
- * contributor ONCE for the whole session (the shell header itself is mounted
- * once, see `apps/shell/src/header.js`'s own doc comment) - so "only visible
- * for my app" has to be a live, route-driven show/hide inside the
- * contributor itself, not something the host can do for it. This is that
- * show/hide, written once here instead of once per app.
+ * APP HEADER ACTION — the boilerplate every `shell.headerNavPoints`
+ * contributor needs when its icon should only show up while ITS OWN app is
+ * the active one (e.g. Calendar's "+ New event", Forum's "New channel"/"New
+ * topic" dropdown) instead of being unconditionally visible everywhere, the
+ * way `apps/search`'s own `shell.headerAction` contributor
+ * (`renderHeaderSearch()`) is. `ExtensionPointHost.renderSlot()` mounts
+ * every contributor ONCE for the whole session (the shell header itself is
+ * mounted once, see `apps/shell/src/header.js`'s own doc comment) - so
+ * "only visible for my app" has to be a live, route-driven show/hide inside
+ * the contributor itself, not something the host can do for it. This is
+ * that show/hide, written once here instead of once per app - usable by a
+ * `shell.headerAction` contributor too, if a future one ever needs to be
+ * conditional rather than always-visible.
  *
  * `render(wrap)` is called (and its returned cleanup, if any, kept) only
  * while `getContext().appId === appId`; on leaving that app, the cleanup (if
  * returned) runs and `wrap` is cleared, so a contributor's own async setup
  * (a `fetch`, a Services call) can safely bail out via its own `stopped`
  * flag inside that returned cleanup the same way every real `mount()` in
- * this codebase already does (see `docs/building-an-app.md`).
+ * this codebase already does (see `docs/building-an-app.md`). Pair this with
+ * `renderNavPointsMenu()` (`nav-points-menu.js`) inside `render()` to
+ * actually build the icon/dropdown - see `docs/app-navigation-standard.md`
+ * Rule 2.
  *
  * Also injects the shared `.qu-app-action-btn` style every contributor's own
  * icon should use - the same visual language as the shell header's own

@@ -545,15 +545,16 @@ and the shell's own nav (`apps/shell/src/nav.js`) both read.
 
 `packages/ui/src/index.js` exports: `QuViewElement, QuBindElement, QuListElement,
 QuKeyElement, QuIfElement, findQu, renderSubpage, mountAppHeaderAction,
-mountContextSwitcher, renderContextListPage, renderAvatar,
+renderNavPointsMenu, mountContextSwitcher, renderContextListPage, renderAvatar,
 renderAvatarOrAsset, ASSET_AVATAR_PREFIX, injectStyle, renderFlagToggle,
 ensureTheme, DEFAULT_THEME, THEME_PRESETS, getStoredTheme, setStoredTheme,
 QuAssetUploadElement, QuAssetElement, findAssetService`. (`@qu/ui/testing.js`
 is a separate entry point — `installDom()`, `waitFor()` — for tests only, see
-`docs/building-an-app.md` §9.) `renderSubpage`, `mountAppHeaderAction`, and
-`mountContextSwitcher`/`renderContextListPage` are the three building blocks
-behind [`docs/app-navigation-standard.md`](./app-navigation-standard.md) —
-see that doc for the full navigation spec, not just their signatures.
+`docs/building-an-app.md` §9.) `renderSubpage`, `mountAppHeaderAction`,
+`renderNavPointsMenu`, and `mountContextSwitcher`/`renderContextListPage` are
+the four building blocks behind
+[`docs/app-navigation-standard.md`](./app-navigation-standard.md) — see that
+doc for the full navigation spec, not just their signatures.
 
 ### Custom Elements (`components.js`)
 
@@ -592,14 +593,23 @@ from", so a subpage should not also render its own "← back to X" link.
 
 ### `mountAppHeaderAction(container, { appId, getContext, onContextChange, render })` (`app-header-action.js`)
 
-The App Action Slot helper (`docs/app-navigation-standard.md` Rule 2) — shows
-`render(wrap)`'s output only while `getContext().appId === appId`, and runs
-its returned cleanup (if any) on leaving that app. Used from a `shell.headerAction`
-contributor (see `apps/calendar/client.js`'s/`apps/chat/client.js`'s own
-`renderHeaderAction()` exports) to make a header icon conditional on which
-app is currently active, instead of always-visible like `apps/search`'s own
-contributor. Also injects the shared `.qu-app-action-btn` icon style every
-contributor's own icon should use.
+The App Navigation Points Slot helper (`docs/app-navigation-standard.md`
+Rule 2) — shows `render(wrap)`'s output only while `getContext().appId ===
+appId`, and runs its returned cleanup (if any) on leaving that app. Used
+from a `shell.headerNavPoints` contributor (see `apps/calendar/client.js`'s/
+`apps/chat/client.js`'s own `renderHeaderNavPoints()` exports) to make a
+header icon conditional on which app is currently active, instead of
+always-visible like `apps/search`'s own `shell.headerAction` contributor.
+
+### `renderNavPointsMenu(wrap, { items, icon, menuLabel })` (`nav-points-menu.js`)
+
+Renders however many items a `shell.headerNavPoints` contributor passes,
+inside `mountAppHeaderAction()`'s own `render(wrap)` callback: 0 → nothing;
+1 → a plain `<a class="qu-app-action-btn">` (`icon` as its glyph, `items[0]
+.label` as `title`/`aria-label`); 2+ → a `<button class="qu-app-action-btn">`
+that toggles a small dropdown menu, one link per item (`apps/forum/client.js`'s
+"New channel"/"New topic" is the real example). Also injects the shared
+`.qu-app-action-btn` icon style every contributor's own icon should use.
 
 ### `mountContextSwitcher(container, options)` / `renderContextListPage(container, options)` (`context-switcher.js`)
 

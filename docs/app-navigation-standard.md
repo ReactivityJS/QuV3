@@ -56,38 +56,50 @@ function renderDetailPage(container, thing) {
 Getting back to a list/parent view is either the global Back button, or — if
 the app has a Context Switcher (Rule 3) — a real link to a sibling.
 
-### Rule 2 — The App Action Slot
+### Rule 2 — The App Navigation Points Slot
 
-"Create new X" — an event, a group, a channel, anything with **its own
-dedicated route** — is a single icon in the shell header's existing
-`shell.headerAction` extension point, visible **only while that app is the
-active one**. It is never a floating action button, an inline link buried at
-the bottom of a list, or a second element competing with the header.
+"Create new X" — an event, a group, a channel, a task, anything with **its
+own dedicated route** — lives in the shell header's `shell.headerNavPoints`
+extension point: on the **left**, right after the Back/Forward buttons,
+visible **only while that app is the active one**. It is never a floating
+action button, an inline link buried at the bottom of a list, or a second
+element competing with the header.
+
+This is a separate point from `shell.headerAction` (right side, next to the
+bell) — that one is reserved for ALWAYS-VISIBLE, cross-app icons (Search's
+🔍 is the one contributor today). `shell.headerNavPoints` is where every
+per-app "create X" action lives instead.
+
+```
+Home  ←  →  [nav points]  ⋯spacer⋯  [always-visible actions]  🔔  👤
+             shell.headerNavPoints                shell.headerAction
+             (per-app, conditional)                (cross-app, always shown)
+```
 
 Something that's composed *inline*, in place, has no dedicated route — a
-chat message, Chat's/Forum's composer "+" menu for attach/share-location,
-Forum's "new topic" title field at the bottom of an already-open channel —
+chat message, Chat's/Forum's composer "+" menu for attach/share-location —
 stays inline. The rule is about *navigating to a new top-level page*, not
 every form on screen.
 
-`@qu/ui`'s `mountAppHeaderAction()` handles the "only show while my app is
-active" boilerplate, so every app's contributor looks the same:
+An app can contribute **more than one** item — `@qu/ui`'s
+`renderNavPointsMenu()` renders exactly 1 item as a plain icon link (the
+common case: Calendar's "New event", Chat's "New chat group", ToDo's "New
+task"), or 2+ items as a small dropdown menu (Forum: "New channel" always,
+plus "New topic" once a specific channel is open). `@qu/ui`'s
+`mountAppHeaderAction()` still handles the "only show while my app is
+active" boilerplate underneath it — nothing new there:
 
 ```js
 // your app's client.js
-import { mountAppHeaderAction } from '@qu/ui';
+import { mountAppHeaderAction, renderNavPointsMenu } from '@qu/ui';
 
-export function renderHeaderAction(container, { getContext, onContextChange, services }) {
+export function renderHeaderNavPoints(container, { getContext, onContextChange, services }) {
   mountAppHeaderAction(container, {
     appId: 'yourapp', getContext, onContextChange,
     render: (wrap) => {
-      const link = document.createElement('a');
-      link.className = 'qu-app-action-btn'; // shared icon styling, injected by mountAppHeaderAction itself
-      link.textContent = '+';
-      link.title = 'New thing';             // Rule 4 - always a real tooltip
-      link.setAttribute('aria-label', 'New thing');
-      link.href = '#/yourapp/new';
-      wrap.appendChild(link);
+      renderNavPointsMenu(wrap, {
+        items: [{ label: 'New thing', href: '#/yourapp/new' }], // Rule 4 - `label` doubles as the tooltip AND, once 2+ items exist, the visible menu text
+      });
       // return a cleanup function here if your setup needs one (an async
       // fetch, a subscription) - see apps/calendar/client.js's real one for
       // the shape when the target route itself needs resolving first.
@@ -99,12 +111,21 @@ export function renderHeaderAction(container, { getContext, onContextChange, ser
 ```json
 // your manifest.quapp
 "contributes": [
-  { "point": "shell.headerAction", "export": "renderHeaderAction", "kind": "ui", "order": 10 }
+  { "point": "shell.headerNavPoints", "export": "renderHeaderNavPoints", "kind": "ui", "order": 10 }
 ]
 ```
 
-(`order: 0` is `apps/search`'s own always-visible icon — use `order: 10` or
-higher so Search's icon stays leftmost/consistent across apps.)
+(`order: 0` is `apps/search`'s own always-visible `shell.headerAction` icon
+— on the OTHER slot, so it never actually collides with `order: 10`+ here;
+kept consistent anyway.)
+
+If your items depend on more than just "is my app active" — e.g. Forum's
+"New topic" only makes sense once a specific channel is open — register your
+own `onContextChange` listener from inside `render()` to recompute and
+re-render on every route change within your app (`mountAppHeaderAction()`
+itself only re-renders on activate/deactivate, not on every internal route
+change). `apps/forum/client.js`'s real `renderHeaderNavPoints()` is the
+working reference for this shape.
 
 The contributor's payload carries `getContext`/`onContextChange` (the current
 route) plus `services`/`qu`/`subscribe`/`syncFetch` — the same ones the
@@ -186,9 +207,10 @@ icon-only control, not optional polish.
    purpose, so it's never itself bundled/catalog-listed).
 2. No custom back link, anywhere. `renderSubpage({ showBackLink: false })`
    for every subpage.
-3. One `shell.headerAction` contribution if you have a "create new X" action
-   that navigates to its own route. Nothing if every create action is
-   composed inline (a form at the bottom of a list, a composer).
+3. One `shell.headerNavPoints` contribution if you have one or more "create
+   new X" actions that navigate to their own route (`renderNavPointsMenu()`
+   renders 1 as a plain link, 2+ as a dropdown). Nothing if every create
+   action is composed inline (a form at the bottom of a list, a composer).
 4. `mountContextSwitcher()` if you have more than one sibling place to be —
    `variant: 'tabs'` for a short/stable list, `variant: 'page'` for a longer
    one or one with its own management UI.
@@ -220,7 +242,7 @@ Event detail / Share / New-event pages:
 └──────────────────────────────┘
 
 AFTER (mobile):
-Global header:  ←  →  🏠 …  [+]  🔔  👤   <- "+" lives here now, only while Calendar is active
+Global header:  🏠  ←  →  [+]  ⋯  🔔  👤   <- "+" lives here now, next to Back/Forward, only while Calendar is active
 ┌──────────────────────────────┐
 │  „Kalender" ›                 │  <- tap opens the real #/calendar/manage page
 ├──────────────────────────────┤
@@ -254,7 +276,7 @@ Room view:
 └──────────────────────────────┘
 
 AFTER:
-Global header:  ←  →  🏠 …  [+]  🔔  👤   <- "+" lives here now, only while Chat is active
+Global header:  🏠  ←  →  [+]  ⋯  🔔  👤   <- "+" lives here now, next to Back/Forward, only while Chat is active
 Room list:
 ┌──────────────────────────────┐
 │  Chats                        │
@@ -284,13 +306,26 @@ AFTER (mobile) - the shared sidebar list (mountContextSwitcher, variant:
 'tabs') collapses to a native <select> below 720px instead of a
 horizontally-scrolling strip - shows the active channel/"All channels" as
 its current value, no width problem at any channel count, no custom
-open/close/positioning code:
-Global header:  ←  →  🏠 …  [+]  🔔  👤   <- "+" now lives here, only while Forum is active
+open/close/positioning code. The board view (no channel open) contributes
+just 1 nav-points item, a plain "+" (New channel):
+Global header:  🏠  ←  →  [+]  ⋯  🔔  👤   <- "+" = New channel only, next to Back/Forward
 ┌──────────────────────────────┐
 │  ▾ All channels                │
 ├──────────────────────────────┤
 │  Announcements                │
 │  [topics...]                  │
+└──────────────────────────────┘
+
+Opening a channel adds a SECOND nav-points item ("New topic" - its own
+route now, `#/forum/c/<id>/new-topic`, replacing the old inline title field
+at the bottom of the topic list), so the header shows a dropdown instead of
+a plain link:
+Global header:  🏠  ←  →  [⋯▾]  ⋯  🔔  👤   <- 2 items now → a small dropdown, not a plain "+"
+                          ├ New channel
+                          └ New topic
+┌──────────────────────────────┐
+│  Announcements                 │  <- no inline "new topic" form here anymore
+│  [topics...]                   │
 └──────────────────────────────┘
 
 AFTER (desktop, ≥720px) - unchanged, a persistent vertical sidebar:
@@ -309,9 +344,10 @@ a `renderSidebar` override — its channel-list data fetch/live-watch logic is
 non-trivial enough, like Calendar's calendars, to keep self-managed rather
 than flattened into a plain `items` array) so it shares real CSS/layout with
 Calendar's sidebar instead of a parallel, hand-maintained copy — and moved
-"+ New channel" into the global header's App Action Slot (Rule 2), matching
-Calendar's/Chat's own shape exactly, rather than leaving it as the sidebar
-list's own trailing entry.
+"+ New channel" (and later, "New topic") into the global header's App
+Navigation Points Slot (Rule 2), matching Calendar's/Chat's own shape for
+"New channel" alone, and becoming the first REAL 2-item dropdown once "New
+topic" joined it — rather than leaving either as an inline entry.
 
 **A real bug shipped in the first version of this migration**, since fixed:
 the reused `mountMiniChannelSidebar()` did `root.className = '...'` — a
@@ -323,6 +359,15 @@ override**: only ever `classList.add()` your own class onto the `host`
 element you're handed — never reassign `className` wholesale, since the
 host is already carrying the shared component's own class.
 
+**"New topic" trades one step of convenience for consistency**: it used to
+be a title field right at the bottom of the open channel's topic list — type
+a title, hit enter, done, no page change. It's now a real subpage
+(`#/forum/c/<channelId>/new-topic`, reached via the header's Nav Points
+dropdown) like every other "create X" in this codebase, which costs one
+extra step (open the dropdown → New topic → the page → submit) in exchange
+for a shareable/bookmarkable creation URL and the same shape Rule 2 already
+gives every other dedicated-route action.
+
 ## What's explicitly out of scope (for now)
 
 - **Chat has no Context Switcher yet.** It has no sidebar of any kind today
@@ -331,6 +376,18 @@ host is already carrying the shared component's own class.
   the natural shape once someone picks it up is
   `mountContextSwitcher(..., variant: 'page')` (a room list can grow long —
   DMs plus groups — so `'page'`, not `'tabs'`).
+- **ToDo has no Context Switcher either** — the exact same gap as Chat's,
+  one level up: switching lists means going back to `#/todo` and picking a
+  different row, with no way to jump straight from one open list to a
+  sibling. ToDo IS on Rule 2 (`shell.headerNavPoints`, its "+ New task" icon)
+  — only Rule 3 is unbuilt. It's a strong `variant: 'page'` candidate: its
+  existing `#/todo` (list picker + create form) and `#/todo/manage`
+  (rename/share/delete/leave) pages are already almost exactly the
+  `renderSidebar`/`renderContextListPage()` shape Calendar's own calendar
+  list uses — the natural next step is consolidating those two into one
+  `renderSidebar` callback shared between a persistent sidebar (desktop,
+  alongside an open list's tasks) and the full `/manage` page (mobile),
+  the same way Calendar's migration did it.
 - **Apps with no navigation chrome of their own** — Bookmarks, Notifications,
   Pins, Reactions, Contact List, User List, App List, Search, Relay Admin —
   are unchanged. They comply automatically, by following this doc and
