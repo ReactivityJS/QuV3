@@ -84,8 +84,12 @@ every form on screen.
 An app can contribute **more than one** item — `@qu/ui`'s
 `renderNavPointsMenu()` renders exactly 1 item as a plain icon link (the
 common case: Calendar's "New event", Chat's "New chat group", ToDo's "New
-task"), or 2+ items as a small dropdown menu (Forum: "New channel" always,
-plus "New topic" once a specific channel is open). `@qu/ui`'s
+task"), or 2+ items as a small dropdown menu, with a `▾` caret next to the
+icon so it visibly reads as a MENU trigger rather than a direct-navigation
+link (Forum: "New channel" always, plus "New topic" once a specific channel
+is open). Always pass `menuLabel` for the 2+ case (Rule 4 - the trigger's
+own tooltip should say what the menu is FOR, e.g. "Create new…", not just
+repeat the icon glyph or an arbitrary item's label). `@qu/ui`'s
 `mountAppHeaderAction()` still handles the "only show while my app is
 active" boilerplate underneath it — nothing new there:
 
@@ -98,7 +102,11 @@ export function renderHeaderNavPoints(container, { getContext, onContextChange, 
     appId: 'yourapp', getContext, onContextChange,
     render: (wrap) => {
       renderNavPointsMenu(wrap, {
-        items: [{ label: 'New thing', href: '#/yourapp/new' }], // Rule 4 - `label` doubles as the tooltip AND, once 2+ items exist, the visible menu text
+        // 1 item - a plain link, `label` doubles as the tooltip:
+        items: [{ label: 'New thing', href: '#/yourapp/new' }],
+        // 2+ items - a dropdown; always pass menuLabel too:
+        // items: [{ label: 'New thing', href: '#/yourapp/new' }, { label: 'New other thing', href: '#/yourapp/new-other' }],
+        // menuLabel: 'Create new…',
       });
       // return a cleanup function here if your setup needs one (an async
       // fetch, a subscription) - see apps/calendar/client.js's real one for

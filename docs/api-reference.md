@@ -607,9 +607,13 @@ Renders however many items a `shell.headerNavPoints` contributor passes,
 inside `mountAppHeaderAction()`'s own `render(wrap)` callback: 0 → nothing;
 1 → a plain `<a class="qu-app-action-btn">` (`icon` as its glyph, `items[0]
 .label` as `title`/`aria-label`); 2+ → a `<button class="qu-app-action-btn">`
-that toggles a small dropdown menu, one link per item (`apps/forum/client.js`'s
-"New channel"/"New topic" is the real example). Also injects the shared
-`.qu-app-action-btn` icon style every contributor's own icon should use.
+with a `▾` caret next to the icon (so it reads as a menu trigger, not a
+direct link) that toggles a small dropdown menu, one link per item
+(`apps/forum/client.js`'s "New channel"/"New topic" is the real example) -
+its `title`/`aria-label` is `menuLabel` (always pass it for this case) or,
+if omitted, `items[0].label` as a fallback (never the bare `icon` glyph).
+Also injects the shared `.qu-app-action-btn` icon style every contributor's
+own icon should use.
 
 ### `mountContextSwitcher(container, options)` / `renderContextListPage(container, options)` (`context-switcher.js`)
 

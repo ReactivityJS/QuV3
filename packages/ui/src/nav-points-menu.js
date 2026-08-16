@@ -14,13 +14,18 @@
  *     shape as the shell header's own user menu
  *     (`apps/shell/src/header.js`'s `userBtn`/`menu`), just a separate
  *     component/CSS class here rather than reusing that file's private
- *     styles.
+ *     styles. Carries a small `▾` caret next to the icon so it reads as a
+ *     MENU trigger at a glance, distinct from the 1-item case's plain link
+ *     (which navigates immediately, no menu involved) - always pass
+ *     `menuLabel` for this case (Rule 4 - a menu trigger's own tooltip
+ *     should say "menu", not just repeat the glyph).
  */
 import { injectStyle } from './style.js';
 
 const STYLE_ID = 'qu-navpoints-menu-style';
 const STYLE = `
   .qu-navpoints-wrap { position: relative; display: inline-flex; }
+  .qu-navpoints-caret { font-size: 0.65em; margin-left: 0.15rem; opacity: 0.7; }
   .qu-navpoints-menu { position: absolute; top: calc(100% + 0.4rem); left: 0; min-width: 11rem; background: canvas; color: canvastext; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); box-shadow: 0 0.5rem 1.4rem rgba(0,0,0,0.2); padding: 0.35rem; display: flex; flex-direction: column; gap: 0.05rem; z-index: 500; }
   .qu-navpoints-menu[hidden] { display: none; }
   .qu-navpoints-menu a { display: flex; align-items: center; padding: 0.45rem 0.6rem; border-radius: var(--qu-radius-sm, 0.3rem); text-decoration: none; color: inherit; font: inherit; }
@@ -52,9 +57,19 @@ export function renderNavPointsMenu(wrap, { items, icon = '+', menuLabel }) {
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'qu-app-action-btn';
-  btn.textContent = icon;
-  btn.title = menuLabel ?? icon;
-  btn.setAttribute('aria-label', menuLabel ?? icon);
+  // A `▾` caret next to the icon so this reads as a MENU trigger, not a
+  // direct-navigation link like the 1-item case - see this file's own top
+  // doc comment.
+  const iconSpan = document.createElement('span');
+  iconSpan.textContent = icon;
+  const caret = document.createElement('span');
+  caret.className = 'qu-navpoints-caret';
+  caret.textContent = '▾';
+  caret.setAttribute('aria-hidden', 'true');
+  btn.append(iconSpan, caret);
+  const label = menuLabel ?? items[0].label; // always pass menuLabel in practice - see this file's own top doc comment
+  btn.title = label;
+  btn.setAttribute('aria-label', label);
   btn.setAttribute('aria-haspopup', 'true');
   btn.setAttribute('aria-expanded', 'false');
   const menu = document.createElement('div');

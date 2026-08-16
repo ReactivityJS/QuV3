@@ -61,12 +61,16 @@
  * that is making an "update available" moment observable at all - it does
  * NOT cache any app data, see `sw.js`'s own doc comment for why: Quniverse's
  * real data already lives in IndexedDB, synced over WebSocket, not a static
- * asset worth intercepting). Web Push's actual subscribe flow (permission
- * prompt + `PushManager.subscribe()` + `services.pushSubscriptions`) lives
- * in `apps/profile/client.js`'s own Settings subpage instead (identity-bound
- * device preferences, the same place every other one lives) - `sw.js`'s own
- * `push`/`notificationclick` handlers are what actually SHOW a notification
- * once a subscription exists and a push arrives.
+ * asset worth intercepting). The install/update UI itself lives inside
+ * `./src/header.js` now (an "Install app" menu entry + a small update icon,
+ * both folded into chrome that already exists) - `./src/pwa.js` is pure
+ * browser-API logic, this file doesn't call it directly. Web Push's actual
+ * subscribe flow (permission prompt + `PushManager.subscribe()` +
+ * `services.pushSubscriptions`) lives in `apps/profile/client.js`'s own
+ * Settings subpage instead (identity-bound device preferences, the same
+ * place every other one lives) - `sw.js`'s own `push`/`notificationclick`
+ * handlers are what actually SHOW a notification once a subscription exists
+ * and a push arrives.
  *
  * DELIBERATELY NOT BUILT THIS ROUND (see the README's own status entry for
  * the full account): remote-app integrity verification for `import()`
@@ -88,7 +92,6 @@ import { createClientServices } from './src/services.js';
 import { connectToRelay } from './src/sync.js';
 import { mountHeader } from './src/header.js';
 import { mountNotificationPopups } from './src/notification-popups.js';
-import { mountPwaUi } from './src/pwa.js';
 import { parseHash } from './src/router.js';
 
 const log = createLogger('shell');
@@ -215,18 +218,9 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
   }
 
   const headerRoot = document.createElement('div');
-  const pwaRoot = document.createElement('div');
   const screen = document.createElement('div');
   screen.className = 'qu-shell-screen';
-  container.append(headerRoot, pwaRoot, screen);
-
-  // Best-effort, same as everything else optional in this boot sequence -
-  // see this file's own "PWA/UPDATER" doc comment above.
-  try {
-    mountPwaUi(pwaRoot);
-  } catch (err) {
-    log.warn('PWA install/update UI unavailable in this environment:', err.message);
-  }
+  container.append(headerRoot, screen);
 
   // `adminPubs` is this relay's own operator allowlist (see
   // `@qu/relay`'s `AdminHttp#verifyAdmin()`) - fetched here only so the
