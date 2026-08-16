@@ -676,3 +676,18 @@ test('the returned stop function tears down cleanly - no error thrown', async ()
   await waitFor(() => container.querySelector('.qu-cal-empty') !== null);
   assert.doesNotThrow(() => stop());
 });
+
+test('the New Event form\'s Start/End row can actually shrink to fit a mobile width - min-width: 0 on the label and its input, so flex-wrap can stack them instead of overflowing', async () => {
+  const { qu, services } = await freshEnv();
+  const container = makeContainer();
+  const stop = mount(container, { qu, services, segments: ['calendar'], subscribe: noopSubscribe });
+  await waitFor(() => container.querySelector('.qu-cal-empty') !== null);
+  stop();
+
+  const css = document.getElementById('qu-calendar-style').textContent;
+  const labelRule = css.match(/\.qu-cal-form label\s*\{[^}]*\}/)[0];
+  assert.match(labelRule, /min-width:\s*0/, 'the label (a nested flex container) must allow itself to shrink below its content\'s natural size');
+  const inputRule = css.match(/\.qu-cal-form input,[^{]*\{[^}]*\}/)[0];
+  assert.match(inputRule, /min-width:\s*0/, 'the datetime-local input itself must allow shrinking below its native intrinsic width');
+  assert.match(inputRule, /width:\s*100%/, 'the input should fill whatever width its label actually has, not render at its own browser-default size');
+});
