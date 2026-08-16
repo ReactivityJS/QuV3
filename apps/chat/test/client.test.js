@@ -499,6 +499,40 @@ test('the room "⋮" menu\'s native "Mute notifications" item toggles this room\
   }
 });
 
+test('muting a room shows a crossed-out bell in the room header immediately, and in the room-list row on the next render - no reload/remount needed', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await ChatService.roomId([alice.myPub, bob.myPub]);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
+    assert.equal(container.querySelector('.qu-chat-header-muted').hidden, true);
+
+    const panel = await openRoomMenu(container);
+    menuItemButton(panel, 'Mute notifications').click();
+    await waitForAsync(async () => (await alice.services.notificationPrefs.getOwnPrefs()).apps?.chat?.mutedThreads?.includes(roomId));
+    assert.equal(container.querySelector('.qu-chat-header-muted').hidden, false); // updated in place, no re-mount
+  } finally {
+    stop();
+  }
+
+  // Back to the room list - the same muted thread shows a bell on its row too.
+  await alice.services.contacts.addContact(bob.myPub);
+  const listContainer = makeContainer();
+  const stopList = mount(listContainer, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat'] });
+  try {
+    await waitFor(() => listContainer.querySelector('.qu-chat-room-row') !== null);
+    const row = listContainer.querySelector('.qu-chat-room-row');
+    assert.ok(row.querySelector('.qu-chat-room-muted'));
+    assert.equal(row.querySelector('.qu-chat-room-muted').textContent, '🔕');
+  } finally {
+    stopList();
+  }
+});
+
 test('the room "⋮" menu merges native items with whatever a plugin app contributes to content.chatRoomMenu, passing contactPub for a 1:1 room and null for a group', async () => {
   const { resetSeenPayloads, getSeenPayloads } = await import('./fake-chat-room-menu-plugin.js');
   resetSeenPayloads();

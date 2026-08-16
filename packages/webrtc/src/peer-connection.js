@@ -41,12 +41,13 @@ export class PeerConnection {
    *   `localStream`: local `MediaStreamTrack`s (camera/mic) to publish to
    *   this peer, added via `pc.addTrack()` BEFORE any offer/answer is
    *   created (both here in the constructor for the initiator, and in
-   *   `handleSignal()`'s offer branch for the answerer) - track/transceiver
-   *   changes made AFTER an offer/answer is created would need a
-   *   renegotiation round trip this class deliberately doesn't implement,
-   *   so ordering is the whole story here, not a convenience. Omit entirely
-   *   for a data-channel-only peer (e.g. Geochase's mesh) - no media
-   *   `m=`-sections end up in the SDP at all.
+   *   `handleSignal()`'s offer branch for the answerer) - ordering matters
+   *   for the INITIAL negotiation. A track added LATER (after the first
+   *   offer/answer already completed) is a real, supported case too - see
+   *   `addTrack()` below, which handles the renegotiation round trip
+   *   ordinary mid-call track changes (e.g. Phone's audio-call-upgrades-to-
+   *   video) need. Omit entirely for a data-channel-only peer (e.g.
+   *   Geochase's mesh) - no media `m=`-sections end up in the SDP at all.
    *   `onTrack`: fired once per remote track received (`pc.ontrack`) -
    *   independent of the data channel, fires (or not) purely based on
    *   whether the OTHER side attached tracks of its own.
@@ -92,6 +93,26 @@ export class PeerConnection {
   /** @returns {string} The underlying `RTCPeerConnection.connectionState`. */
   get connectionState() {
     return this.#pc.connectionState;
+  }
+
+  /**
+   * Adds a track to an ALREADY-negotiated connection and renegotiates - the
+   * mid-call counterpart to the constructor's own `localStream` handling
+   * (which only covers tracks present at connection start). Real
+   * `RTCPeerConnection`s support this natively (a fresh offer while
+   * `signalingState` is `'stable'`, which it always is once connected) -
+   * `handleSignal()`'s own offer branch needs no changes at all to answer
+   * it, since it was never a one-shot-only code path to begin with.
+   *
+   * Used by e.g. `apps/phone`'s `upgradeToVideo()` (an audio-only call
+   * adding a video track once the user asks for it mid-call) - NOT for
+   * ordinary mute/video-off, which stays exactly `track.enabled = false`
+   * (no renegotiation needed for a track that's already attached).
+   * @param {MediaStreamTrack} track @param {MediaStream} stream
+   */
+  async addTrack(track, stream) {
+    this.#pc.addTrack(track, stream);
+    await this.#negotiate();
   }
 
   #wireChannel() {

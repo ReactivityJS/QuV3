@@ -7,31 +7,37 @@
  *
  * Routes:
  *   `#/phone` - call-starter, pick a contact to call.
- *   `#/phone/<remotePub>` - CALLER's active-call view (this session STARTS
- *     the call, `initiator: true`) - what the contact-list "Anrufen" icon
- *     and this app's own call-starter link to.
+ *   `#/phone/<remotePub>` - CALLER's active-call view, AUDIO-ONLY by
+ *     default (this session STARTS the call, `initiator: true`) - what the
+ *     contact-list "Anrufen" icon and this app's own call-starter link to.
+ *     Video is opt-in, not the default - see `/video` below and
+ *     `src/call.js`'s own `upgradeToVideo()` doc comment for turning it on
+ *     mid-call instead.
+ *   `#/phone/<remotePub>/video` - CALLER's active-call view, starting WITH
+ *     video from the outset (skips the extra `upgradeToVideo()` round trip)
+ *     - what this app's own `content.chatRoomMenu` contribution's
+ *     "Video-Call" item links to (`renderCallMenuItems()`, below).
  *   `#/phone/<remotePub>/accept` - CALLEE's active-call view, joining a call
  *     already in progress (`initiator: false`) - what an incoming-call
  *     notification's "Annehmen" action links to. Same URL space otherwise,
  *     an extra trailing segment (this router has no query-string support -
  *     see `apps/shell/src/router.js`'s `parseHash()`) is what distinguishes
  *     the two roles, mirroring how `apps/chat` uses trailing segments for
- *     message permalinks (`/m/<id>`).
+ *     message permalinks (`/m/<id>`). ALSO audio-only by default, same as
+ *     the caller's bare route - the two sides don't need to agree; either
+ *     can independently upgrade to video whenever they want, same as any
+ *     real video-calling app allows one side to have their camera off.
  *   `#/phone/<remotePub>/decline` - declines without ever requesting
  *     camera/mic access or mounting the active-call view - what a
  *     notification's "Ablehnen" action links to.
- *   `#/phone/<remotePub>/audio` - CALLER's active-call view, audio-only
- *     (never requests the camera at all - see `src/call.js`'s own
- *     `requestLocalMedia()` doc comment) - what this app's own
- *     `content.chatRoomMenu` contribution's "Audio-Call" item links to
- *     (`renderCallMenuItems()`, below). The CALLEE side is unaffected -
- *     `/accept` always requests full audio+video, same as ever; they just
- *     never receive a video track from an audio-only caller.
  */
 import { createI18n } from '@qu/i18n';
 import { formatActorLabel } from '@qu/services';
 import { injectStyle, ensureTheme, renderSubpage } from '@qu/ui';
+import { createLogger } from '@qu/log';
 import { createPhoneCall, declinePhoneCall } from './src/call.js';
+
+const log = createLogger('phone:client');
 
 const DICT = {
   en: {
@@ -107,7 +113,10 @@ export function mount(container, ctx) {
 
   if (!remotePub) return mountCallStarter(container, ctx);
   if (mode === 'decline') return mountDecline(container, ctx, SPACE_ID, remotePub);
-  return mountActiveCall(container, ctx, SPACE_ID, remotePub, { initiator: mode !== 'accept', callMode: mode === 'audio' ? 'audio' : 'video' });
+  // Audio is the default for BOTH roles - only an explicit `/video` segment
+  // (the caller's own choice) starts with a video track already attached.
+  // See this file's own top doc comment's "Routes" section.
+  return mountActiveCall(container, ctx, SPACE_ID, remotePub, { initiator: mode !== 'accept', callMode: mode === 'video' ? 'video' : 'audio' });
 }
 
 // ===========================================================================
@@ -178,12 +187,16 @@ function mountDecline(container, { qu, identity, iceServers }, spaceId, remotePu
 // ===========================================================================
 // Active call - #/phone/<remotePub> (caller) or #/phone/<remotePub>/accept (callee)
 // ===========================================================================
-function mountActiveCall(container, ctx, spaceId, remotePub, { initiator, callMode = 'video' }) {
+function mountActiveCall(container, ctx, spaceId, remotePub, { initiator, callMode = 'audio' }) {
   // `negotiationTimeoutMs` is test-only (real ctx never sets it - see
   // createPhoneCall()'s own doc comment on why the override exists at all)
   // - undefined here just means createPhoneCall()'s own default parameter
   // (the realistic 45s ring duration) applies, unchanged from before.
-  const { qu, identity, services, iceServers, negotiationTimeoutMs } = ctx;
+  // `subscribe`/`syncFetch` are the ordinary ones every app gets - without
+  // threading them through to createPhoneCall(), no signal this call sends
+  // ever actually reaches the other side (see WebRtcSignalService's own
+  // constructor doc comment for the full incident this fixes).
+  const { qu, identity, services, iceServers, negotiationTimeoutMs, subscribe, syncFetch } = ctx;
 
   const view = document.createElement('div');
   view.className = 'qu-phone-call-view';
@@ -211,12 +224,18 @@ function mountActiveCall(container, ctx, spaceId, remotePub, { initiator, callMo
   muteBtn.title = t('mute');
   muteBtn.setAttribute('aria-label', t('mute'));
   muteBtn.dataset.active = 'true';
+  // Reflects whether a video track exists YET, not just whether it's
+  // enabled - an audio-only call (the default) starts with `false` here,
+  // and the button's own click handler below is what turns it into a real
+  // `upgradeToVideo()` call the first time, vs. a plain on/off toggle once
+  // a track already exists (from `/video` at call start, or an earlier
+  // upgrade). See `call.js`'s own `upgradeToVideo()` doc comment.
   const videoBtn = document.createElement('button');
   videoBtn.type = 'button';
   videoBtn.textContent = '📹';
-  videoBtn.title = t('videoOff');
-  videoBtn.setAttribute('aria-label', t('videoOff'));
-  videoBtn.dataset.active = 'true';
+  videoBtn.title = callMode === 'video' ? t('videoOff') : t('videoOn');
+  videoBtn.setAttribute('aria-label', videoBtn.title);
+  videoBtn.dataset.active = String(callMode === 'video');
   const hangupBtn = document.createElement('button');
   hangupBtn.type = 'button';
   hangupBtn.className = 'qu-phone-hangup';
@@ -225,14 +244,13 @@ function mountActiveCall(container, ctx, spaceId, remotePub, { initiator, callMo
   hangupBtn.setAttribute('aria-label', t('hangUp'));
   controls.append(muteBtn, videoBtn, hangupBtn);
 
-  // An audio-only call never has a video track to toggle at all (see
-  // requestLocalMedia()'s own doc comment) - hiding both the local PiP
-  // (would just show a black box) and the now-meaningless video toggle
-  // button is clearer than leaving inert UI around.
-  if (callMode === 'audio') {
-    localVideo.hidden = true;
-    videoBtn.hidden = true;
-  }
+  // The local PiP only makes sense once there's actually a video track to
+  // show (would just be a black box otherwise) - shown from the start for
+  // a `/video` call, or once the video button's own upgrade succeeds (see
+  // its click handler below). The video toggle button itself stays
+  // visible either way now - unlike before, hiding it entirely stopped
+  // audio-only calls (the default) from ever being able to add video at all.
+  localVideo.hidden = callMode !== 'video';
 
   view.append(remoteVideo, localVideo, status, controls);
   container.appendChild(view);
@@ -240,7 +258,7 @@ function mountActiveCall(container, ctx, spaceId, remotePub, { initiator, callMo
   let call = null;
   let stopped = false;
   let audioEnabled = true;
-  let videoEnabled = true;
+  let videoEnabled = callMode === 'video';
 
   function goBack() {
     window.location.hash = '#/phone';
@@ -258,8 +276,30 @@ function mountActiveCall(container, ctx, spaceId, remotePub, { initiator, callMo
     muteBtn.title = audioEnabled ? t('mute') : t('unmute');
     muteBtn.setAttribute('aria-label', muteBtn.title);
   });
-  videoBtn.addEventListener('click', () => {
+  videoBtn.addEventListener('click', async () => {
     if (!call) return;
+    if (call.localStream.getVideoTracks().length === 0) {
+      // No video track yet (an audio-only call, the default) - a real
+      // renegotiation, not a plain toggle. See upgradeToVideo()'s own doc
+      // comment. Disabled during the async round trip so a second click
+      // can't start a second, redundant upgrade.
+      videoBtn.disabled = true;
+      try {
+        await call.upgradeToVideo();
+      } catch (err) {
+        log.warn('upgradeToVideo() failed:', err.message);
+        videoBtn.disabled = false;
+        return;
+      }
+      videoBtn.disabled = false;
+      videoEnabled = true;
+      localVideo.hidden = false;
+      localVideo.srcObject = call.localStream; // re-bind - the element may already show this same object, but this guarantees the freshly-added track is picked up
+      videoBtn.dataset.active = 'true';
+      videoBtn.title = t('videoOff');
+      videoBtn.setAttribute('aria-label', videoBtn.title);
+      return;
+    }
     videoEnabled = !videoEnabled;
     call.toggleVideo(videoEnabled);
     videoBtn.dataset.active = String(videoEnabled);
@@ -279,7 +319,7 @@ function mountActiveCall(container, ctx, spaceId, remotePub, { initiator, callMo
     let phoneCall;
     try {
       phoneCall = await createPhoneCall({
-        qu, identity, services, spaceId, remotePub, iceServers, initiator, mode: callMode, negotiationTimeoutMs,
+        qu, identity, services, spaceId, remotePub, iceServers, initiator, mode: callMode, negotiationTimeoutMs, subscribe, syncFetch,
         onTrack: (stream) => { remoteVideo.srcObject = stream; },
         onPeerConnected: () => { status.textContent = t('connected'); },
         onDeclined: () => {
@@ -331,7 +371,9 @@ function mountActiveCall(container, ctx, spaceId, remotePub, { initiator, callMo
 export function renderCallMenuItems({ contactPub }) {
   if (!contactPub) return [];
   return [
-    { id: 'videoCall', label: t('videoCall'), icon: '📹', onClick: () => { window.location.hash = `#/phone/${contactPub}`; } },
-    { id: 'audioCall', label: t('audioCall'), icon: '🎤', onClick: () => { window.location.hash = `#/phone/${contactPub}/audio`; } },
+    // Audio first/default - see this file's own top doc comment's "Routes"
+    // section on why the bare route (no `/video` segment) is audio-only.
+    { id: 'audioCall', label: t('audioCall'), icon: '🎤', onClick: () => { window.location.hash = `#/phone/${contactPub}`; } },
+    { id: 'videoCall', label: t('videoCall'), icon: '📹', onClick: () => { window.location.hash = `#/phone/${contactPub}/video`; } },
   ];
 }

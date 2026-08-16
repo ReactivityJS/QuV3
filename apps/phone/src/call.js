@@ -45,16 +45,26 @@ const NEGOTIATION_TIMEOUT_MS = 45_000;
  * that service's own doc comment) - only the ordinary `postMessage()`
  * below rides the thread's own encrypted-private-list config.
  *
- * @param {{qu: import('@qu/core').QuStore, identity: import('@qu/identity').QuIdentityEngine, services: object, spaceId: string, remotePub: string, iceServers?: Array<object>, initiator: boolean, mode?: 'audio'|'video', onTrack?: (stream: MediaStream) => void, onPeerConnected?: () => void, onDeclined?: () => void, onTimeout?: () => void, negotiationTimeoutMs?: number}} options
+ * @param {{qu: import('@qu/core').QuStore, identity: import('@qu/identity').QuIdentityEngine, services: object, spaceId: string, remotePub: string, iceServers?: Array<object>, initiator: boolean, mode?: 'audio'|'video', subscribe?: (prefix: string) => void, syncFetch?: (prefix: string) => Promise<*>, onTrack?: (stream: MediaStream) => void, onPeerConnected?: () => void, onDeclined?: () => void, onTimeout?: () => void, negotiationTimeoutMs?: number}} options
  *   `negotiationTimeoutMs` overrides the module's own realistic-ring-duration
  *   default (below) - exposed mainly for tests that need `onTimeout` to fire
  *   quickly, mirroring `WebRtcSignalService`'s own constructor option.
- *   `mode` - see `requestLocalMedia()`'s own doc comment; only meaningful
- *   for the CALLER (the callee always requests full audio+video, see
- *   `client.js`'s own router doc comment on why).
- * @returns {Promise<{selfPub: string, localStream: MediaStream, toggleAudio: (enabled: boolean) => void, toggleVideo: (enabled: boolean) => void, hangUp: () => void}>}
+ *   `mode` - see `requestLocalMedia()`'s own doc comment; defaults to
+ *   `'audio'` for BOTH roles (a call is an audio call by default, video is
+ *   opt-in either up front via `client.js`'s own `/video` route, or mid-call
+ *   via the returned `upgradeToVideo()` - see that function's own doc
+ *   comment). The two sides don't need to agree: nothing stops one side
+ *   sending video while the other stays audio-only, same as any real
+ *   video-calling app.
+ *   `subscribe`/`syncFetch` - THIS identity's own `ctx.subscribe`/
+ *   `ctx.syncFetch` (see `apps/shell/client.js`'s composition root),
+ *   threaded straight through to `WebRtcSignalService` - without these, an
+ *   offer/answer/ICE candidate this call writes never actually reaches the
+ *   OTHER side's local store at all (see that service's own constructor
+ *   doc comment for the full "signal never arrives" bug this fixes).
+ * @returns {Promise<{selfPub: string, localStream: MediaStream, toggleAudio: (enabled: boolean) => void, toggleVideo: (enabled: boolean) => void, upgradeToVideo: () => Promise<void>, hangUp: () => void}>}
  */
-export async function createPhoneCall({ qu, identity, services, spaceId, remotePub, iceServers, initiator, mode = 'video', onTrack, onPeerConnected, onDeclined, onTimeout, negotiationTimeoutMs = NEGOTIATION_TIMEOUT_MS } = {}) {
+export async function createPhoneCall({ qu, identity, services, spaceId, remotePub, iceServers, initiator, mode = 'audio', subscribe, syncFetch, onTrack, onPeerConnected, onDeclined, onTimeout, negotiationTimeoutMs = NEGOTIATION_TIMEOUT_MS } = {}) {
   const mainKey = await identity.getMainKey();
   const selfPub = QuCrypto.toBase64Url(mainKey.publicKey);
   const memberPubs = [selfPub, remotePub];
@@ -100,7 +110,7 @@ export async function createPhoneCall({ qu, identity, services, spaceId, remoteP
   }
 
   const webrtcTransport = new WebRTCTransport({ selfPeerId: selfPub, iceServers });
-  const signalService = new WebRtcSignalService(qu, identity, webrtcTransport, { negotiationTimeoutMs });
+  const signalService = new WebRtcSignalService(qu, identity, webrtcTransport, { negotiationTimeoutMs, subscribe, syncFetch });
 
   const unsubTrack = webrtcTransport.onTrack((peerId, stream) => {
     if (peerId === remotePub) onTrack?.(stream);
@@ -130,6 +140,38 @@ export async function createPhoneCall({ qu, identity, services, spaceId, remoteP
     for (const track of localStream.getVideoTracks()) track.enabled = enabled;
   }
 
+  /**
+   * Adds a video track to THIS call, mid-call, via a real WebRTC
+   * renegotiation (`WebRTCTransport.addTrackToPeer()` - see that method's
+   * own doc comment for the mechanics) - the "Video optional zuschaltbar"
+   * counterpart to `mode: 'audio'` being the default. A no-op if a video
+   * track already exists (from `mode: 'video'` at call start, or an
+   * earlier `upgradeToVideo()` call) - `toggleVideo()` is what turns an
+   * EXISTING track on/off, this is only for adding one that never existed.
+   * @throws {Error} With a `code` of `'unsupported'` or `'denied'`, same shape as `requestLocalMedia()`'s own errors.
+   */
+  async function upgradeToVideo() {
+    if (localStream.getVideoTracks().length > 0) return;
+    if (!navigator.mediaDevices?.getUserMedia) {
+      const err = new Error('getUserMedia() is not available in this browser');
+      err.code = 'unsupported';
+      throw err;
+    }
+    let videoStream;
+    try {
+      videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
+    } catch (cause) {
+      log.warn('upgradeToVideo(): getUserMedia() failed:', cause.message);
+      const err = new Error('camera access was denied or unavailable');
+      err.code = 'denied';
+      err.cause = cause;
+      throw err;
+    }
+    const [videoTrack] = videoStream.getVideoTracks();
+    localStream.addTrack(videoTrack); // mutates the SAME MediaStream object - an existing <video srcObject=localStream> picks it up automatically
+    await webrtcTransport.addTrackToPeer(remotePub, videoTrack, localStream);
+  }
+
   function hangUp() {
     for (const track of localStream.getTracks()) track.stop(); // camera light off
     webrtcTransport.removePeer(remotePub);
@@ -140,7 +182,7 @@ export async function createPhoneCall({ qu, identity, services, spaceId, remoteP
     signalService.close();
   }
 
-  return { selfPub, localStream, toggleAudio, toggleVideo, hangUp };
+  return { selfPub, localStream, toggleAudio, toggleVideo, upgradeToVideo, hangUp };
 }
 
 /**
@@ -178,7 +220,7 @@ export async function declinePhoneCall({ qu, identity, spaceId, remotePub, iceSe
  * @returns {Promise<MediaStream>}
  * @throws {Error} With a `code` of `'unsupported'` or `'denied'`.
  */
-async function requestLocalMedia(mode = 'video') {
+async function requestLocalMedia(mode = 'audio') {
   if (!navigator.mediaDevices?.getUserMedia) {
     const err = new Error('getUserMedia() is not available in this browser');
     err.code = 'unsupported';

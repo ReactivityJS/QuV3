@@ -423,7 +423,7 @@ export function mount(container, ctx) {
   async function setupLiveMesh(gameId, meta, isChased) {
     releaseWakeLock = mountWakeLock();
     const readyMesh = await createGeochaseMesh({
-      qu, identity, services, spaceId: SPACE_ID, threadId: gameThreadId(gameId), gameId, iceServers,
+      qu, identity, services, spaceId: SPACE_ID, threadId: gameThreadId(gameId), gameId, iceServers, subscribe, syncFetch,
     });
     if (stopped) { readyMesh.close(); return; }
     mesh = readyMesh;

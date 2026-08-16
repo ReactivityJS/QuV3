@@ -58,6 +58,8 @@ export class WebRtcSignalService {
   #transport;
   #cleanupDelayMs;
   #negotiationTimeoutMs;
+  #subscribe;
+  #syncFetch;
   /** @type {Map<string, {spaceId: string|number, threadId: string, remotePub: string, memberPubs: string[], selfPub: string, iceSeq: number, timeoutTimer: ReturnType<typeof setTimeout>|null}>} */
   #pairs = new Map();
   #declinedCallbacks = [];
@@ -70,14 +72,28 @@ export class WebRtcSignalService {
    * @param {import('@qu/core').QuStore} qu
    * @param {import('@qu/identity').QuIdentityEngine} identityEngine
    * @param {import('@qu/webrtc/transport').WebRTCTransport} webrtcTransport
-   * @param {{cleanupDelayMs?: number, negotiationTimeoutMs?: number}} [options]
+   * @param {{cleanupDelayMs?: number, negotiationTimeoutMs?: number, subscribe?: (prefix: string) => void, syncFetch?: (prefix: string) => Promise<*>}} [options] -
+   *   `subscribe`/`syncFetch` are the SAME two functions every app already
+   *   gets as `ctx.subscribe`/`ctx.syncFetch` (see `apps/shell/client.js`'s
+   *   own composition root) - without them, a signal this instance writes
+   *   never reaches the OTHER side's relay-backed store at all: `subscribe()`
+   *   only ever delivers FUTURE writes (see `connectPeer()`'s own doc
+   *   comment on why a one-time `syncFetch()` backfill is ALSO required, not
+   *   optional) - omitting both was a real, shipped bug (every offer/answer/
+   *   ICE write silently went nowhere for the other party - see this
+   *   package's own plan notes on "WebRTC-Signaling erreicht die Gegenseite
+   *   nie"). Optional only so existing unit tests that simulate delivery
+   *   some other way (a shared in-memory `qu`, or their own manual
+   *   `sync.subscribe()` calls) keep working unchanged.
    */
-  constructor(qu, identityEngine, webrtcTransport, { cleanupDelayMs = DEFAULT_CLEANUP_DELAY_MS, negotiationTimeoutMs = DEFAULT_NEGOTIATION_TIMEOUT_MS } = {}) {
+  constructor(qu, identityEngine, webrtcTransport, { cleanupDelayMs = DEFAULT_CLEANUP_DELAY_MS, negotiationTimeoutMs = DEFAULT_NEGOTIATION_TIMEOUT_MS, subscribe = null, syncFetch = null } = {}) {
     this.#qu = qu;
     this.#identity = identityEngine;
     this.#transport = webrtcTransport;
     this.#cleanupDelayMs = cleanupDelayMs;
     this.#negotiationTimeoutMs = negotiationTimeoutMs;
+    this.#subscribe = subscribe;
+    this.#syncFetch = syncFetch;
 
     this.#unsubscribeOutgoing = this.#transport.onOutgoingSignal((peerId, signal) => {
       this.#sendSignal(peerId, signal).catch((err) => console.error('[WebRtcSignalService] failed to send outgoing signal:', err));
@@ -116,6 +132,20 @@ export class WebRtcSignalService {
    *   `WebRTCTransport.addPeer()`. `localStream`: local camera/mic tracks
    *   for a call - see `WebRTCTransport.addPeer()`'s own doc comment for why
    *   these must be supplied here, at connection start, not attached later.
+   *
+   *   Before ever touching `transport.addPeer()`, this ALSO (a) asks the
+   *   relay to push any FUTURE write under this pair's own
+   *   `webrtc/<pairKey>/` namespace to us (`subscribe()`), and (b)
+   *   backfills anything that ALREADY exists there right now
+   *   (`syncFetch()`) - critical because the caller typically writes the
+   *   offer well before the callee ever opens this view (they're reacting
+   *   to a notification), so by the time the callee's own `subscribe()`
+   *   registers, the offer is already "in the past" and `subscribe()`
+   *   alone would never deliver it (see this class's own constructor doc
+   *   comment). `syncFetch()`'s own effect - applying each fetched QuBit
+   *   to `#qu` - fires the SAME `onStorageChange()` hook `#handleStorageChange()`
+   *   already listens on, so no separate backfill-handling code is needed
+   *   here; it's indistinguishable from a live push once applied.
    */
   async connectPeer(spaceId, threadId, remotePub, memberPubs, { initiator, localStream } = {}) {
     const selfPub = await this.#myActorPub();
@@ -123,6 +153,9 @@ export class WebRtcSignalService {
     if (!this.#pairs.has(pairKey)) {
       this.#pairs.set(pairKey, { spaceId, threadId, remotePub, memberPubs, selfPub, iceSeq: 0, timeoutTimer: null });
       this.#armTimeout(pairKey);
+      const prefix = `/store/${spaceId}/threads/${threadId}/webrtc/${pairKey}/`;
+      this.#subscribe?.(prefix);
+      await this.#syncFetch?.(prefix);
     }
     this.#transport.addPeer(remotePub, { initiator, localStream });
   }
@@ -202,7 +235,16 @@ export class WebRtcSignalService {
       if (pair.remotePub !== peerId) continue;
       if (pair.timeoutTimer) clearTimeout(pair.timeoutTimer);
       setTimeout(() => {
-        this.#cleanup(pairKey).catch((err) => console.error('[WebRtcSignalService] post-connect cleanup failed:', err));
+        // keepPair: true - unlike a timeout/decline (nothing left worth
+        // keeping), a CONNECTED pair may still need to renegotiate later
+        // (e.g. `WebRTCTransport.addTrackToPeer()` upgrading an audio-only
+        // call to add video mid-call, see that method's own doc comment) -
+        // that later offer/answer round trip reuses THIS SAME pairKey's
+        // signaling paths, and `#sendSignal()` can only address them if
+        // `#pairs` still has an entry for it. Only the QuBits themselves
+        // (offer/answer/decline/ICE) get tombstoned here, not the
+        // in-memory tracking - no storage bloat either way.
+        this.#cleanup(pairKey, { keepPair: true }).catch((err) => console.error('[WebRtcSignalService] post-connect cleanup failed:', err));
       }, this.#cleanupDelayMs);
     }
   }
@@ -255,12 +297,19 @@ export class WebRtcSignalService {
     }
   }
 
-  /** @param {string} pairKey */
-  async #cleanup(pairKey) {
+  /**
+   * @param {string} pairKey
+   * @param {{keepPair?: boolean}} [options] - `keepPair: true` (only the
+   *   post-connect call site uses this - see `#handleConnected()`'s own
+   *   comment) tombstones the signaling QuBits below same as ever, but
+   *   leaves the `#pairs` tracking entry itself alone, so a LATER
+   *   renegotiation can still address this pair's signaling paths.
+   */
+  async #cleanup(pairKey, { keepPair = false } = {}) {
     const pair = this.#pairs.get(pairKey);
     if (!pair) return;
     if (pair.timeoutTimer) clearTimeout(pair.timeoutTimer);
-    this.#pairs.delete(pairKey);
+    if (!keepPair) this.#pairs.delete(pairKey);
     const signKey = await this.#identity.getMainKey();
     const options = { signWith: signKey.privateKeyPkcs8, writerPub: signKey.publicKey };
     await this.#qu.put(webrtcOfferPath(pair.spaceId, pair.threadId, pairKey), null, options).catch(() => {});

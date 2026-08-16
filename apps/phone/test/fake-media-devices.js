@@ -10,12 +10,14 @@ function fakeTrack(kind) {
 
 /** Honors `constraints.video` (unlike a real device stub that always granted both) - lets tests confirm an audio-only request never even gets a video track, not just a video track that's later disabled. */
 function fakeMediaStream(constraints) {
-  const tracks = [fakeTrack('audio')];
+  const tracks = [];
+  if (constraints?.audio !== false) tracks.push(fakeTrack('audio'));
   if (constraints?.video !== false) tracks.push(fakeTrack('video'));
   return {
     getTracks: () => tracks,
     getAudioTracks: () => tracks.filter((t) => t.kind === 'audio'),
     getVideoTracks: () => tracks.filter((t) => t.kind === 'video'),
+    addTrack: (track) => { tracks.push(track); },
   };
 }
 
