@@ -2,6 +2,7 @@
 export { QuViewElement, QuBindElement, QuListElement, QuKeyElement, QuIfElement, findQu } from './components.js';
 export { renderSubpage } from './subpage.js';
 export { mountAppHeaderAction } from './app-header-action.js';
+export { renderNavPointsMenu } from './nav-points-menu.js';
 export { mountContextSwitcher, renderContextListPage } from './context-switcher.js';
 export { renderAvatar, renderAvatarOrAsset, ASSET_AVATAR_PREFIX } from './avatar.js';
 export { injectStyle } from './style.js';

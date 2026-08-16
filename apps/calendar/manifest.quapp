@@ -16,6 +16,6 @@
   ],
   "contributes": [
     { "point": "content.messageMenu", "export": "createEventMenuItem", "kind": "menu", "order": 40 },
-    { "point": "shell.headerAction", "export": "renderHeaderAction", "kind": "ui", "order": 10 }
+    { "point": "shell.headerNavPoints", "export": "renderHeaderNavPoints", "kind": "ui", "order": 10 }
   ]
 }

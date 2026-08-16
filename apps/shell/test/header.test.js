@@ -69,7 +69,7 @@ test('renders the Home logo, Back/Forward buttons, and the notification bell', a
   }
 });
 
-test('the App Action Slot sits right after Back/Forward, not next to the bell/avatar', async (t) => {
+test('the App Navigation Points Slot sits right after Back/Forward (left); the App Action Slot stays next to the bell/avatar (right)', async (t) => {
   const { qu, services } = await freshEnv();
   t.mock.method(globalThis, 'fetch', mockAppsFetch());
   const container = makeContainer();
@@ -77,12 +77,14 @@ test('the App Action Slot sits right after Back/Forward, not next to the bell/av
   try {
     await waitForOwnName(container);
     const classNames = [...container.querySelector('.qu-shell-header').children].map((el) => el.className);
-    const slotIndex = classNames.indexOf('qu-shell-header-slot');
+    const navSlotIndex = classNames.indexOf('qu-shell-nav-slot');
     const spacerIndex = classNames.indexOf('qu-shell-header-spacer');
+    const actionSlotIndex = classNames.indexOf('qu-shell-header-slot');
     const bellIndex = classNames.indexOf('qu-shell-bell');
-    assert.ok(slotIndex > classNames.lastIndexOf('qu-shell-histbtn'), 'the App Action Slot must come after Back/Forward');
-    assert.ok(slotIndex < spacerIndex, 'the App Action Slot must come before the spacer, so it stays left-aligned next to Back/Forward');
-    assert.ok(spacerIndex < bellIndex, 'the spacer must still separate the App Action Slot from the bell/avatar on the right');
+    assert.ok(navSlotIndex > classNames.lastIndexOf('qu-shell-histbtn'), 'the Nav Points Slot must come after Back/Forward');
+    assert.ok(navSlotIndex < spacerIndex, 'the Nav Points Slot must come before the spacer, so it stays left-aligned next to Back/Forward');
+    assert.ok(spacerIndex < actionSlotIndex, 'the App Action Slot must come after the spacer');
+    assert.ok(actionSlotIndex < bellIndex, 'the App Action Slot must stay next to the bell/avatar on the right');
   } finally {
     stop();
   }
@@ -300,6 +302,55 @@ test('shell.headerAction: the payload carries getContext/onContextChange/service
       container.querySelector('[data-test-payload-probe]').textContent,
       'getContext,onContextChange,qu,services,subscribe,syncFetch',
     );
+  } finally {
+    stop();
+  }
+});
+
+// ===== shell.headerNavPoints slot (Calendar/Chat/ToDo's "+"/Forum's dropdown) =====
+
+test('shell.headerNavPoints: a contributor mounts once, reflecting the CURRENT route context', async (t) => {
+  const { qu, services } = await freshEnv();
+  t.mock.method(globalThis, 'fetch', mockAppsFetch());
+  window.location.hash = '#/forum/t/abc123';
+  const apps = [{ name: 'search', clientMainUrl: HEADER_PLUGIN_URL, contributes: [{ point: 'shell.headerNavPoints', export: 'renderHeaderSearch' }] }];
+  const container = makeContainer();
+  const stop = mountHeader(container, { qu, services, subscribe: noopSubscribe, apps });
+  try {
+    await waitFor(() => container.querySelector('[data-test-header-action]') !== null);
+    assert.equal(container.querySelector('[data-test-header-action]').textContent, 'search:forum:forum,t,abc123');
+    // Lives in the LEFT slot (next to Back/Forward), not the right-side shell.headerAction slot.
+    assert.ok(container.querySelector('.qu-shell-nav-slot [data-test-header-action]'));
+    assert.equal(container.querySelector('.qu-shell-header-slot [data-test-header-action]'), null);
+  } finally {
+    stop();
+    window.location.hash = '';
+  }
+});
+
+test('shell.headerNavPoints: no apps catalog (default []) renders no contribution, no error', async (t) => {
+  const { qu, services } = await freshEnv();
+  t.mock.method(globalThis, 'fetch', mockAppsFetch());
+  const container = makeContainer();
+  const stop = mountHeader(container, { qu, services, subscribe: noopSubscribe });
+  try {
+    await waitForOwnName(container);
+    assert.equal(container.querySelector('[data-test-header-action]'), null);
+  } finally {
+    stop();
+  }
+});
+
+test('shell.headerAction and shell.headerNavPoints are independent - a contributor to one does not appear in the other', async (t) => {
+  const { qu, services } = await freshEnv();
+  t.mock.method(globalThis, 'fetch', mockAppsFetch());
+  const apps = [{ name: 'search', clientMainUrl: HEADER_PLUGIN_URL, contributes: [{ point: 'shell.headerAction', export: 'renderHeaderSearch' }] }];
+  const container = makeContainer();
+  const stop = mountHeader(container, { qu, services, subscribe: noopSubscribe, apps });
+  try {
+    await waitFor(() => container.querySelector('[data-test-header-action]') !== null);
+    assert.ok(container.querySelector('.qu-shell-header-slot [data-test-header-action]'));
+    assert.equal(container.querySelector('.qu-shell-nav-slot [data-test-header-action]'), null);
   } finally {
     stop();
   }

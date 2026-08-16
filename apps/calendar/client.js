@@ -66,7 +66,7 @@
 import { watch } from '@qu/reactive';
 import { paths, THREAD_PRESETS, formatActorLabel, matchesActorQuery } from '@qu/services';
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme, renderSubpage, mountContextSwitcher, renderContextListPage, mountAppHeaderAction, mountActorPicker } from '@qu/ui';
+import { injectStyle, ensureTheme, renderSubpage, mountContextSwitcher, renderContextListPage, mountAppHeaderAction, renderNavPointsMenu, mountActorPicker } from '@qu/ui';
 
 const SPACE_ID = 'ff73365b-144a-4285-8e98-ac7f9928a95f'; // this app's own manifest.spaceId - see index.js's own copy of this constant
 const PALETTE = ['#e0483e', '#3e7fe0', '#3ea05e', '#d0a02a', '#9a4fe0', '#e0648a', '#2ab3a6', '#c47a2a'];
@@ -414,7 +414,7 @@ function mountCalendarActorPicker(container, { services, subscribe, ...opts }) {
 // ===========================================================================
 
 /**
- * The `shell.headerAction` contributor (see `apps/calendar/manifest.quapp`'s
+ * The `shell.headerNavPoints` contributor (see `apps/calendar/manifest.quapp`'s
  * `contributes`) - shows a single "+" icon in the GLOBAL header, only while
  * Calendar is the active app, linking straight to the New Event page for the
  * first calendar this identity can actually edit. Replaces the old floating
@@ -424,17 +424,10 @@ function mountCalendarActorPicker(container, { services, subscribe, ...opts }) {
  * @param {HTMLElement} container
  * @param {{getContext: Function, onContextChange: Function, services: object, qu: import('@qu/core').QuStore}} payload
  */
-export function renderHeaderAction(container, { getContext, onContextChange, services, qu }) {
+export function renderHeaderNavPoints(container, { getContext, onContextChange, services, qu }) {
   mountAppHeaderAction(container, {
     appId: 'calendar', getContext, onContextChange,
     render: (wrap) => {
-      const link = document.createElement('a');
-      link.className = 'qu-app-action-btn';
-      link.textContent = '+';
-      link.title = t('newEvent');
-      link.setAttribute('aria-label', t('newEvent'));
-      wrap.appendChild(link);
-
       let stopped = false;
       (async () => {
         const myPub = await services.actors.whoAmI();
@@ -444,7 +437,7 @@ export function renderHeaderAction(container, { getContext, onContextChange, ser
           const quBit = await qu.get(paths.documentPath(SPACE_ID, metaResourceId(cal.id)));
           const role = quBit?.val?.members?.find((m) => m.actorPub === myPub)?.role;
           if (role === 'owner' || role === 'editor') {
-            link.href = newEventHash(cal.id);
+            if (!stopped) renderNavPointsMenu(wrap, { items: [{ label: t('newEvent'), href: newEventHash(cal.id) }] });
             return;
           }
         }
@@ -941,9 +934,9 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     navRow.appendChild(heading);
 
     // No in-toolbar "+ New event" link here anymore - it's the global
-    // header's App Action Slot now (see renderHeaderAction() below and
-    // docs/app-navigation-standard.md Rule 2), reachable at every width
-    // instead of only ≥720px.
+    // header's App Navigation Points Slot now (see renderHeaderNavPoints()
+    // below and docs/app-navigation-standard.md Rule 2), reachable at every
+    // width instead of only ≥720px.
     bar.appendChild(navRow);
 
     const switcher = document.createElement('div');

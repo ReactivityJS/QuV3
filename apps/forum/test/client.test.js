@@ -12,7 +12,7 @@ import { installDom, waitFor } from '@qu/ui/testing';
 import { register as registerForum } from '../index.js';
 
 installDom();
-const { mount, searchForum, renderSearchResult, renderHeaderAction } = await import('../client.js');
+const { mount, searchForum, renderSearchResult, renderHeaderNavPoints } = await import('../client.js');
 
 function createQu() {
   const qu = new QuStore();
@@ -1340,17 +1340,17 @@ test('board view: a restricted channel shows a 🔒 badge in the persistent side
   }
 });
 
-// ===== renderHeaderAction() - the shell.headerAction contributor (see docs/app-navigation-standard.md Rule 2) =====
-// "+ New channel" moved from an inline sidebar/dropdown entry into the global header's App Action Slot.
+// ===== renderHeaderNavPoints() - the shell.headerNavPoints contributor (see docs/app-navigation-standard.md Rule 2) =====
+// "+ New channel" moved from an inline sidebar/dropdown entry into the global header's App Navigation Points Slot; "New topic" (a 2nd item, only while a channel is open) replaces the old inline form.
 
-test('renderHeaderAction(): hidden while another app is active, and shows no "+" for a non-admin when channels.allowMemberCreate is false', async (t) => {
+test('renderHeaderNavPoints(): hidden while another app is active, and shows no items for a non-admin when channels.allowMemberCreate is false, on the board view', async (t) => {
   const a = await freshEnv('Ada');
   t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ adminPubs: [], settings: { channels: { allowMemberCreate: false, allowMemberRestricted: false } } }), { status: 200 }));
 
   const container = makeContainer();
   let appId = 'chat';
   const listeners = [];
-  renderHeaderAction(container, {
+  renderHeaderNavPoints(container, {
     getContext: () => ({ appId, segments: [appId] }),
     onContextChange: (cb) => listeners.push(cb),
     services: a.services,
@@ -1363,20 +1363,53 @@ test('renderHeaderAction(): hidden while another app is active, and shows no "+"
   assert.equal(wrap.hidden, false);
   await new Promise((resolve) => setTimeout(resolve, 30)); // let the /config.json fetch settle
   assert.equal(wrap.querySelector('a'), null);
+  assert.equal(wrap.querySelector('button'), null);
 });
 
-test('renderHeaderAction(): shows a "+ New channel" link for this relay\'s own admin even when channels.allowMemberCreate is false', async (t) => {
+test('renderHeaderNavPoints(): shows a single "New channel" link (no dropdown) for this relay\'s own admin on the board view, even when channels.allowMemberCreate is false', async (t) => {
   const a = await freshEnv('Ada');
   t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ adminPubs: [a.myPub], settings: { channels: { allowMemberCreate: false, allowMemberRestricted: false } } }), { status: 200 }));
 
   const container = makeContainer();
-  renderHeaderAction(container, {
+  renderHeaderNavPoints(container, {
     getContext: () => ({ appId: 'forum', segments: ['forum'] }),
     onContextChange: () => {},
     services: a.services,
   });
   await waitFor(() => container.querySelector('a') !== null);
   assert.equal(container.querySelector('a').getAttribute('href'), '#/forum/new');
+  assert.equal(container.querySelector('button'), null);
+});
+
+test('renderHeaderNavPoints(): shows a 2-item dropdown ("New channel" + "New topic") once a specific channel is open, and reacts live to switching channels', async (t) => {
+  const a = await freshEnv('Ada');
+  t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ adminPubs: [a.myPub], settings: { channels: { allowMemberCreate: true, allowMemberRestricted: false } } }), { status: 200 }));
+
+  const container = makeContainer();
+  const listeners = [];
+  const ctx = { appId: 'forum', segments: ['forum', 'c', 'chan-1'] };
+  renderHeaderNavPoints(container, {
+    getContext: () => ctx,
+    onContextChange: (cb) => listeners.push(cb),
+    services: a.services,
+  });
+  await waitFor(() => container.querySelector('button') !== null);
+  let links = [...container.querySelectorAll('.qu-navpoints-menu a')];
+  assert.deepEqual(links.map((l) => l.textContent), ['New channel', 'New topic']);
+  assert.equal(links[1].getAttribute('href'), '#/forum/c/chan-1/new-topic');
+
+  // Switching to a DIFFERENT channel updates the "New topic" href in place.
+  ctx.segments = ['forum', 'c', 'chan-2'];
+  listeners.forEach((cb) => cb());
+  await waitFor(() => container.querySelector('.qu-navpoints-menu a[href="#/forum/c/chan-2/new-topic"]') !== null);
+
+  // Back on the board view (no channel open), only "New channel" remains - a single plain link, no dropdown.
+  ctx.segments = ['forum'];
+  listeners.forEach((cb) => cb());
+  await waitFor(() => container.querySelector('button') === null);
+  links = [...container.querySelectorAll('a')];
+  assert.equal(links.length, 1);
+  assert.equal(links[0].getAttribute('href'), '#/forum/new');
 });
 
 // ===================================================================
@@ -1525,7 +1558,7 @@ test('none of the forum subpages (channel view, topic view, new-channel view) re
   }
 });
 
-test('channel view lists its topics with a live reply count, and a "new topic" form creates one', async () => {
+test('channel view lists its topics with a live reply count', async () => {
   const a = await freshEnv('Ada');
   const channel = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Announcements' });
   const topic = await a.services.channels.createTopic(FORUM_SPACE_ID, channel._id, { title: 'Welcome' });
@@ -1538,13 +1571,43 @@ test('channel view lists its topics with a live reply count, and a "new topic" f
     await waitFor(() => container.querySelector('.qu-forum-topic-row a') !== null);
     assert.match(container.querySelector('.qu-forum-topic-title').textContent, /Welcome/);
     assert.match(container.querySelector('.qu-forum-topic-meta').textContent, /1/); // reply count
+    // No more inline "new topic" form here - that's the New Topic subpage now (see below), reachable from the header's Nav Points dropdown.
+    assert.equal(container.querySelector('.qu-forum-new-topic-form'), null);
+  } finally {
+    stop();
+  }
+});
+
+// ===================================================================
+// NEW TOPIC VIEW - #/forum/c/<channelId>/new-topic
+// ===================================================================
+
+test('new topic view: submitting the form creates a topic and navigates to its own thread page', async () => {
+  const a = await freshEnv('Ada');
+  const channel = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Announcements' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', channel._id, 'new-topic'] });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-new-topic-form') !== null);
+    // No back link - Rule 1, the global header covers it.
+    assert.equal([...container.querySelectorAll('a')].some((a) => a.textContent.includes('←')), false);
 
     const titleInput = container.querySelector('.qu-forum-new-topic-form input[type="text"]');
     titleInput.value = 'Second topic';
     container.querySelector('.qu-forum-new-topic-form button').click();
-    await waitFor(() => [...container.querySelectorAll('.qu-forum-topic-title')].some((el) => el.textContent === 'Second topic'));
+    await waitFor(() => /^#\/forum\/t\//.test(window.location.hash));
   } finally {
     stop();
+    window.location.hash = '';
+  }
+
+  // The newly created topic is real, listed back on the channel view.
+  const stop2 = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', channel._id] });
+  try {
+    await waitFor(() => [...container.querySelectorAll('.qu-forum-topic-title')].some((el) => el.textContent === 'Second topic'));
+  } finally {
+    stop2();
   }
 });
 
