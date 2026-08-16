@@ -11,3 +11,4 @@ export { ensureTheme, DEFAULT_THEME, THEME_PRESETS, getStoredTheme, setStoredThe
 export { QuAssetUploadElement, QuAssetElement, findAssetService } from './asset-components.js';
 export { QuLinkPreviewElement } from './link-preview-components.js';
 export { mountActorPicker, looksLikeActorPub } from './actor-picker.js';
+export { mountToastHost } from './toast.js';

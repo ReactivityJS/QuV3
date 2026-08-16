@@ -101,3 +101,47 @@ test('shouldNotify() is false when a specific function within an app is disabled
   assert.equal(NotificationPrefsService.shouldNotify(prefs, { appId: 'chat', functionName: 'newMessage' }), false);
   assert.equal(NotificationPrefsService.shouldNotify(prefs, { appId: 'chat', functionName: 'mention' }), true);
 });
+
+test('shouldNotify() also honors the newer {enabled, popup} object form for a per-function override, not just the legacy plain boolean', () => {
+  const prefs = { enabled: true, mentions: true, apps: { phone: { functions: { incomingCall: { enabled: false, popup: true } } } } };
+  assert.equal(NotificationPrefsService.shouldNotify(prefs, { appId: 'phone', functionName: 'incomingCall' }), false);
+});
+
+test('savePrefs()/getOwnPrefs() round-trips the newer {enabled, popup} object form for a per-function override unchanged', async () => {
+  const { prefs } = await freshSetup();
+  await prefs.savePrefs({ apps: { phone: { functions: { incomingCall: { enabled: true, popup: true } } } } });
+  const result = await prefs.getOwnPrefs();
+  assert.deepEqual(result.apps, { phone: { functions: { incomingCall: { enabled: true, popup: true } } } });
+});
+
+// ===== shouldPopup() - the popup delivery-mode counterpart =========================================
+
+test('shouldPopup() is false whenever shouldNotify() itself is false, regardless of any popup override', () => {
+  const prefs = { enabled: false, mentions: true, apps: {} };
+  assert.equal(NotificationPrefsService.shouldPopup(prefs, { appId: 'phone', functionName: 'incomingCall', defaultPopup: true }), false);
+});
+
+test('shouldPopup() falls back to the caller-supplied defaultPopup when this function was never explicitly overridden', () => {
+  const prefs = { enabled: true, mentions: true, apps: {} };
+  assert.equal(NotificationPrefsService.shouldPopup(prefs, { appId: 'phone', functionName: 'incomingCall', defaultPopup: true }), true);
+  assert.equal(NotificationPrefsService.shouldPopup(prefs, { appId: 'chat', functionName: 'newMessage', defaultPopup: false }), false);
+});
+
+test('shouldPopup() is false for a LEGACY plain-boolean function override, even with a true defaultPopup - an old value never opted into popups', () => {
+  const prefs = { enabled: true, mentions: true, apps: { phone: { functions: { incomingCall: true } } } };
+  assert.equal(NotificationPrefsService.shouldPopup(prefs, { appId: 'phone', functionName: 'incomingCall', defaultPopup: true }), false);
+});
+
+test('shouldPopup() reads an explicit popup:true/false on the object form over the default', () => {
+  const prefsOn = { enabled: true, mentions: true, apps: { phone: { functions: { incomingCall: { popup: true } } } } };
+  assert.equal(NotificationPrefsService.shouldPopup(prefsOn, { appId: 'phone', functionName: 'incomingCall', defaultPopup: false }), true);
+
+  const prefsOff = { enabled: true, mentions: true, apps: { chat: { functions: { newMessage: { popup: false } } } } };
+  assert.equal(NotificationPrefsService.shouldPopup(prefsOff, { appId: 'chat', functionName: 'newMessage', defaultPopup: true }), false);
+});
+
+test('shouldPopup() with no functionName has no per-function override to read, so it falls back to defaultPopup exactly like the "never overridden" case', () => {
+  const prefs = { enabled: true, mentions: true, apps: {} };
+  assert.equal(NotificationPrefsService.shouldPopup(prefs, { appId: 'phone', defaultPopup: true }), true);
+  assert.equal(NotificationPrefsService.shouldPopup(prefs, { appId: 'phone', defaultPopup: false }), false);
+});

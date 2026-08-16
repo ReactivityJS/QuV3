@@ -426,3 +426,15 @@ export function webrtcIceCandidatePath(spaceId, threadId, pairKey, fromActorPub,
 export function webrtcIceCandidatesParentPath(spaceId, threadId, pairKey, fromActorPub) {
   return `/store/${spaceId}/threads/${threadId}/webrtc/${pairKey}/ice/${fromActorPub}`;
 }
+
+/**
+ * A sibling of `webrtcOfferPath()` a callee writes to explicitly DECLINE a
+ * call before any `RTCPeerConnection` negotiation ever starts (`@qu/services`'
+ * `WebRtcSignalService.declineCall()`) - lets the caller show "call declined"
+ * instead of silently waiting out `negotiationTimeoutMs`. Same tombstone/
+ * signed-QuBit convention as offer/answer/ICE, just a different leaf name.
+ * @param {string|number} spaceId @param {string} threadId @param {string} pairKey @returns {string}
+ */
+export function webrtcDeclinePath(spaceId, threadId, pairKey) {
+  return `/store/${spaceId}/threads/${threadId}/webrtc/${pairKey}/declined`;
+}

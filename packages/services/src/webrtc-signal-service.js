@@ -1,5 +1,5 @@
 import { QuCrypto } from '@qu/core';
-import { webrtcPairKey, webrtcOfferPath, webrtcAnswerPath, webrtcIceCandidatePath } from './paths.js';
+import { webrtcPairKey, webrtcOfferPath, webrtcAnswerPath, webrtcIceCandidatePath, webrtcDeclinePath } from './paths.js';
 
 const DEFAULT_CLEANUP_DELAY_MS = 5_000;
 const DEFAULT_NEGOTIATION_TIMEOUT_MS = 20_000;
@@ -33,7 +33,21 @@ const DEFAULT_NEGOTIATION_TIMEOUT_MS = 20_000;
  * that pair, after a short grace delay (a slow-to-apply trickled ICE
  * candidate must not be lost mid-flight). The same cleanup runs if
  * negotiation never completes within `negotiationTimeoutMs`, so a stale/
- * abandoned exchange doesn't sit in the relay's durable storage forever.
+ * abandoned exchange doesn't sit in the relay's durable storage forever -
+ * or immediately once a `declineCall()` (see below) is observed.
+ *
+ * CALLER-INITIATED CALLS (`apps/phone`): `connectPeer()`'s deterministic
+ * initiator tie-break (see `WebRTCTransport`'s own doc comment) is right for
+ * a mesh where every peer eventually connects to every other one (Geochase),
+ * but wrong for "the caller always starts the call" - the caller could just
+ * as easily land on the passive/answerer role depending on how the two
+ * pubkeys happen to compare, and then nobody would ever send an offer.
+ * `connectPeer()`'s `initiator` option overrides the tie-break explicitly
+ * for exactly this case. `declineCall()`/`onDeclined()` add a THIRD signal
+ * type (alongside offer/answer/ICE) for a callee to reject a call before any
+ * `RTCPeerConnection` activity ever starts - not a `WebRTCTransport`-level
+ * concept (it's not an SDP/ICE signal, `WebRTCTransport` never sees it),
+ * purely a `WebRtcSignalService`-level one.
  */
 export class WebRtcSignalService {
   #qu;
@@ -43,6 +57,7 @@ export class WebRtcSignalService {
   #negotiationTimeoutMs;
   /** @type {Map<string, {spaceId: string|number, threadId: string, remotePub: string, memberPubs: string[], selfPub: string, iceSeq: number, timeoutTimer: ReturnType<typeof setTimeout>|null}>} */
   #pairs = new Map();
+  #declinedCallbacks = [];
   #unsubscribeOutgoing;
   #unsubscribeConnected;
   #unsubscribeStorage;
@@ -83,21 +98,67 @@ export class WebRtcSignalService {
   /**
    * Starts (or resumes) a WebRTC handshake with `remotePub` over the given
    * Thread's signaling namespace. Safe to call from BOTH sides of a pair -
-   * only the deterministic initiator (see `WebRTCTransport`'s own doc
-   * comment) actually sends an offer; the other side just starts watching
-   * and waiting for one.
+   * by default only the deterministic initiator (see `WebRTCTransport`'s own
+   * doc comment) actually sends an offer, the other side just starts
+   * watching and waiting for one.
    * @param {string|number} spaceId @param {string} threadId @param {string} remotePub
    * @param {string[]} memberPubs - The Thread's known member list, checked
    *   against every incoming signal's own verified `pub` before it's trusted.
+   * @param {{initiator?: boolean, localStream?: MediaStream}} [options] -
+   *   `initiator`: explicit override for the deterministic tie-break - e.g.
+   *   a Phone app's caller always passes `{initiator: true}` (it started the
+   *   call, regardless of how the two pubkeys compare), the callee passes
+   *   `{initiator: false}` once it accepts. Passed straight through to
+   *   `WebRTCTransport.addPeer()`. `localStream`: local camera/mic tracks
+   *   for a call - see `WebRTCTransport.addPeer()`'s own doc comment for why
+   *   these must be supplied here, at connection start, not attached later.
    */
-  async connectPeer(spaceId, threadId, remotePub, memberPubs) {
+  async connectPeer(spaceId, threadId, remotePub, memberPubs, { initiator, localStream } = {}) {
     const selfPub = await this.#myActorPub();
     const pairKey = webrtcPairKey(selfPub, remotePub);
     if (!this.#pairs.has(pairKey)) {
       this.#pairs.set(pairKey, { spaceId, threadId, remotePub, memberPubs, selfPub, iceSeq: 0, timeoutTimer: null });
       this.#armTimeout(pairKey);
     }
-    this.#transport.addPeer(remotePub);
+    this.#transport.addPeer(remotePub, { initiator, localStream });
+  }
+
+  /**
+   * Rejects an incoming call BEFORE any `RTCPeerConnection` negotiation ever
+   * starts - deliberately does NOT require `connectPeer()` to have been
+   * called first (a callee declining straight from a push notification, per
+   * `apps/phone`'s design, may never open the app's own call view at all).
+   * Writes a signed tombstone-shaped QuBit the caller's own `onDeclined()`
+   * listener picks up via the same `#handleStorageChange()` this class
+   * already runs for offer/answer/ICE.
+   * @param {string|number} spaceId @param {string} threadId @param {string} remotePub
+   */
+  async declineCall(spaceId, threadId, remotePub) {
+    const selfPub = await this.#myActorPub();
+    const pairKey = webrtcPairKey(selfPub, remotePub);
+    const signKey = await this.#identity.getMainKey();
+    await this.#qu.put(
+      webrtcDeclinePath(spaceId, threadId, pairKey),
+      { declined: true, from: selfPub },
+      { signWith: signKey.privateKeyPkcs8, writerPub: signKey.publicKey }
+    );
+  }
+
+  /**
+   * Registers a callback fired when the OTHER side of a pair this instance
+   * called `connectPeer()` for calls `declineCall()`. Only meaningful for a
+   * pair actually registered via `connectPeer()` (the caller side) - see
+   * `declineCall()`'s own doc comment for why the callee side has no
+   * matching requirement.
+   * @param {(remotePub: string) => void} callback
+   * @returns {() => void} Unsubscribe function.
+   */
+  onDeclined(callback) {
+    this.#declinedCallbacks.push(callback);
+    return () => {
+      const idx = this.#declinedCallbacks.indexOf(callback);
+      if (idx !== -1) this.#declinedCallbacks.splice(idx, 1);
+    };
   }
 
   #armTimeout(pairKey) {
@@ -158,6 +219,9 @@ export class WebRtcSignalService {
         this.#transport.handleIncomingSignal(pair.remotePub, { type: 'answer', sdp: val.sdp });
       } else if (rel.startsWith('ice/') && val?.candidate) {
         this.#transport.handleIncomingSignal(pair.remotePub, { type: 'ice', candidate: val.candidate });
+      } else if (rel === 'declined' && val?.declined) {
+        for (const cb of this.#declinedCallbacks) cb(pair.remotePub);
+        this.#cleanup(pairKey).catch((err) => console.error('[WebRtcSignalService] cleanup after decline failed:', err));
       }
       return;
     }
@@ -173,6 +237,7 @@ export class WebRtcSignalService {
     const options = { signWith: signKey.privateKeyPkcs8, writerPub: signKey.publicKey };
     await this.#qu.put(webrtcOfferPath(pair.spaceId, pair.threadId, pairKey), null, options).catch(() => {});
     await this.#qu.put(webrtcAnswerPath(pair.spaceId, pair.threadId, pairKey), null, options).catch(() => {});
+    await this.#qu.put(webrtcDeclinePath(pair.spaceId, pair.threadId, pairKey), null, options).catch(() => {});
     for (let seq = 0; seq < pair.iceSeq; seq++) {
       await this.#qu.put(webrtcIceCandidatePath(pair.spaceId, pair.threadId, pairKey, pair.selfPub, seq), null, options).catch(() => {});
     }

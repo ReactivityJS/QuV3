@@ -1,0 +1,28 @@
+{
+  "name": "phone",
+  "version": "1.0.0",
+  "kind": "app",
+  "main": "./index.js",
+  "clientMain": "./dist/client.js",
+  "label": "Phone",
+  "icon": "📞",
+  "navOrder": 93,
+  "spaceId": "16408bfa-d065-4abb-a4ac-a5587860a1f0",
+  "requires": [],
+  "pushActions": [
+    {
+      "id": "incomingCall",
+      "label": "Eingehende Anrufe",
+      "type": "create",
+      "urlTemplate": "#/phone/{pub}/accept",
+      "bypassPresence": true,
+      "actions": [
+        { "action": "accept", "title": "Annehmen", "hrefTemplate": "#/phone/{pub}/accept" },
+        { "action": "decline", "title": "Ablehnen", "hrefTemplate": "#/phone/{pub}/decline" }
+      ]
+    }
+  ],
+  "actions": [
+    { "slot": "contact-row", "id": "phone", "label": "Anrufen", "icon": "📞", "hrefTemplate": "#/phone/{pub}" }
+  ]
+}

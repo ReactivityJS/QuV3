@@ -495,6 +495,89 @@ test('a notify.threadCandidates hook\'s functionName overrides the generic defau
   assert.equal(await inAppNotificationCount(env, recipient.pub), 1); // exactly one notification, not a duplicate
 });
 
+const PHONE_MANIFEST = {
+  name: 'phone',
+  label: 'Phone',
+  spaceId: 'phone-space-uuid',
+  pushActions: [
+    {
+      id: 'incomingCall',
+      label: 'Eingehende Anrufe',
+      type: 'create',
+      urlTemplate: '#/phone/{pub}/accept',
+      bypassPresence: true,
+      actions: [
+        { action: 'accept', title: 'Annehmen', hrefTemplate: '#/phone/{pub}/accept' },
+        { action: 'decline', title: 'Ablehnen', hrefTemplate: '#/phone/{pub}/decline' },
+      ],
+    },
+  ],
+};
+
+test('createManifestNotificationResolver(): a pushAction\'s own urlTemplate/actions/bypassPresence are used verbatim, with {pub} substituted for the authorPub (Phone\'s incoming-call action)', () => {
+  const resolve = createManifestNotificationResolver(fakeLoader([PHONE_MANIFEST]));
+  const result = resolve('phone-space-uuid', 'sometid', { authorPub: 'CallerPubCallerPub', mention: false, mentions: [] });
+
+  assert.equal(result.url, '#/phone/CallerPubCallerPub/accept');
+  assert.equal(result.bypassPresence, true);
+  assert.deepEqual(result.actions, [
+    { action: 'accept', title: 'Annehmen', url: '#/phone/CallerPubCallerPub/accept' },
+    { action: 'decline', title: 'Ablehnen', url: '#/phone/CallerPubCallerPub/decline' },
+  ]);
+});
+
+test('createManifestNotificationResolver(): a pushAction with no urlTemplate/actions/bypassPresence (every existing app) omits those keys entirely, not undefined-valued ones', () => {
+  const resolve = createManifestNotificationResolver(fakeLoader([FORUM_MANIFEST]));
+  const result = resolve('forum-space-uuid', 'general', { authorPub: 'Alice', mention: true, mentions: [] });
+
+  assert.equal('actions' in result, false);
+  assert.equal('bypassPresence' in result, false);
+  assert.equal(result.url, '#/forum');
+});
+
+test('INTEGRATION: an incomingCall notification bypasses presence suppression and carries Accept/Decline actions through to BOTH the in-app notification and the Web Push payload', async () => {
+  const env = await freshEnv();
+  const recipient = await freshRecipient(env);
+  await recipient.pushSubscriptions.subscribe({ endpoint: 'https://push.example.com/x', keys: { p256dh: 'a', auth: 'b' } });
+  const presence = new PresenceTracker();
+  presence.recordSeen(recipient.pub); // recently online - would normally suppress push
+  const send = fakeSendWebPush();
+  const resolveNotification = createManifestNotificationResolver(fakeLoader([PHONE_MANIFEST]));
+  const delivery = pushDeliveryFor(env, recipient, { presence, sendWebPush: send, resolveNotification });
+  const callerPub = QuCrypto.toBase64Url((await env.identity.getMainKey()).publicKey);
+  await env.messages.createThread('phone-space-uuid', 'call-thread', { writers: '*', readers: [callerPub, recipient.pub] });
+
+  await postAndDeliver(env, delivery, 'phone-space-uuid', 'call-thread', { body: '📞' });
+
+  // Presence bypass: a push was sent DESPITE recipient.pub being recently online.
+  assert.equal(send.calls.length, 1);
+  assert.deepEqual(send.calls[0].payload.actions, [
+    { action: 'accept', title: 'Annehmen', url: `#/phone/${callerPub}/accept` },
+    { action: 'decline', title: 'Ablehnen', url: `#/phone/${callerPub}/decline` },
+  ]);
+
+  const [notification] = await readOwnNotifications(env, recipient);
+  assert.deepEqual(notification.actions, [
+    { action: 'accept', title: 'Annehmen', url: `#/phone/${callerPub}/accept` },
+    { action: 'decline', title: 'Ablehnen', url: `#/phone/${callerPub}/decline` },
+  ]);
+});
+
+test('a notification with no resolved actions omits "actions" from both the Web Push payload and the in-app record (unaffected apps)', async () => {
+  const env = await freshEnv();
+  const recipient = await freshRecipient(env);
+  await recipient.pushSubscriptions.subscribe({ endpoint: 'https://push.example.com/x', keys: { p256dh: 'a', auth: 'b' } });
+  const send = fakeSendWebPush();
+  const delivery = pushDeliveryFor(env, recipient, { sendWebPush: send });
+  await env.messages.createThread('board', 'general', THREAD_PRESETS.forum());
+
+  await postAndDeliver(env, delivery, 'board', 'general', { body: `hi @${recipient.pub}`, extra: { mentions: [recipient.pub] } });
+
+  assert.equal('actions' in send.calls[0].payload, false);
+  const [notification] = await readOwnNotifications(env, recipient);
+  assert.equal('actions' in notification, false);
+});
+
 test('createManifestNotificationResolver(): an explicit functionName matches pushActions by id, not the coarse mention/create type', () => {
   const manifest = {
     name: 'forum', spaceId: 'forum-space-uuid', label: 'Forum',

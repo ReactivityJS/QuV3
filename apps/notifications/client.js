@@ -57,6 +57,20 @@
  * is a separate, nav-level concern this app doesn't own) and per-item
  * dismiss/delete (no primitive for it exists - `QuStore` itself has no
  * delete(), matching every other Thread in this codebase).
+ *
+ * UNREAD-ONLY DEFAULT VIEW (the "Zwischenlösung" plan's own Baustein 4):
+ * this app now defaults to showing only `message.ts > lastReadAt` items -
+ * the SAME comparison `renderItem()` already used for its own "unread"
+ * highlight, just also used as a FILTER now - with a "Show all (incl.
+ * read)" toggle above the list. Purely a client-side render-time filter,
+ * same as that highlight always was - no new storage shape, no per-item
+ * read/unread state (still just the one thread-level `lastReadAt` marker -
+ * see the "READ TRACKING" section above, unchanged). `render()`'s own
+ * `lastReadAt` snapshot (read BEFORE this render's own `markRead()` call)
+ * is what BOTH the filter and the highlight use, so a freshly-arrived
+ * notification is never invisible for one render because `markRead()`
+ * already ran - the two can never disagree about what counts as "unread"
+ * for a given render.
  */
 import { watchChildren } from '@qu/reactive';
 import { paths } from '@qu/services';
@@ -67,10 +81,16 @@ const DICT = {
   en: {
     title: 'Notifications',
     empty: 'No notifications yet.',
+    emptyUnread: 'No unread notifications.',
+    showAll: 'Show all (incl. read)',
+    showUnreadOnly: 'Show unread only',
   },
   de: {
     title: 'Benachrichtigungen',
     empty: 'Noch keine Benachrichtigungen.',
+    emptyUnread: 'Keine ungelesenen Benachrichtigungen.',
+    showAll: 'Alle anzeigen (inkl. gelesene)',
+    showUnreadOnly: 'Nur ungelesene anzeigen',
   },
 };
 const { t } = createI18n(DICT);
@@ -85,6 +105,8 @@ const STYLE = `
   .qu-notifications-item-body { opacity: 0.85; font-size: 0.9em; margin-top: 0.15rem; }
   .qu-notifications-item-ts { opacity: 0.6; font-size: 0.75em; margin-top: 0.3rem; }
   .qu-notifications-empty { padding: 1.5rem; text-align: center; opacity: 0.7; }
+  .qu-notifications-toggle { background: none; border: none; cursor: pointer; color: var(--qu-color-accent, #5b5bd6); font: inherit; font-size: 0.85em; padding: 0; margin: 0 0 0.6rem; text-decoration: underline; }
+  .qu-notifications-toggle[hidden] { display: none; }
 `;
 
 /**
@@ -103,6 +125,8 @@ export function mount(container, { qu, services, subscribe, syncFetch, extension
   let stopped = false;
   let off = null;
   let myPub = null;
+  let currentSpaceId = null;
+  let showAll = false; // default: unread-only, see this file's own "UNREAD-ONLY DEFAULT VIEW" doc comment
 
   // See apps/search/client.js's own identical line - a resolved item's own
   // `content.searchResultTemplate` rendering (this file's own "RICH
@@ -113,8 +137,16 @@ export function mount(container, { qu, services, subscribe, syncFetch, extension
 
   const heading = document.createElement('h1');
   heading.textContent = t('title');
+  const toggleBtn = document.createElement('button');
+  toggleBtn.type = 'button';
+  toggleBtn.className = 'qu-notifications-toggle';
+  toggleBtn.hidden = true; // shown once render() knows there's at least one notification at all
+  toggleBtn.addEventListener('click', () => {
+    showAll = !showAll;
+    if (currentSpaceId) render(currentSpaceId);
+  });
   const listRoot = document.createElement('div');
-  container.append(heading, listRoot);
+  container.append(heading, toggleBtn, listRoot);
 
   // `watchChildren()`'s callback can legitimately fire twice in quick
   // succession (the initial local read, then a fresher value arriving
@@ -134,11 +166,18 @@ export function mount(container, { qu, services, subscribe, syncFetch, extension
   async function render(spaceId) {
     const token = ++renderToken;
     if (stopped) return;
-    const [{ messages }, lastReadAt] = await Promise.all([
+    const [{ messages: allMessages }, lastReadAt] = await Promise.all([
       services.messages.listMessages(spaceId, paths.NOTIFICATIONS_THREAD_ID, { order: 'desc' }),
       services.messages.getLastReadAt(spaceId, paths.NOTIFICATIONS_THREAD_ID),
     ]);
     if (stopped || token !== renderToken) return;
+
+    // Same `ts > lastReadAt` comparison `renderItem()` already uses for its
+    // own "unread" highlight - see this file's own "UNREAD-ONLY DEFAULT
+    // VIEW" doc comment for why the filter and the highlight share one
+    // snapshot of `lastReadAt` instead of risking two different notions of
+    // "unread" within a single render.
+    const messages = showAll ? allMessages : allMessages.filter((m) => m.ts > lastReadAt);
 
     let items = null;
     if (messages.length > 0) {
@@ -152,11 +191,14 @@ export function mount(container, { qu, services, subscribe, syncFetch, extension
     }
     if (stopped || token !== renderToken) return;
 
+    toggleBtn.hidden = allMessages.length === 0;
+    toggleBtn.textContent = showAll ? t('showUnreadOnly') : t('showAll');
+
     listRoot.textContent = '';
     if (!items) {
       const p = document.createElement('p');
       p.className = 'qu-notifications-empty';
-      p.textContent = t('empty');
+      p.textContent = !showAll && allMessages.length > 0 ? t('emptyUnread') : t('empty');
       listRoot.appendChild(p);
     } else {
       const ul = document.createElement('ul');
@@ -175,6 +217,7 @@ export function mount(container, { qu, services, subscribe, syncFetch, extension
     myPub = await services.actors.whoAmI();
     if (stopped) return;
     const spaceId = paths.notificationsSpaceId(myPub);
+    currentSpaceId = spaceId;
 
     // Defense in depth, same reasoning apps/user-list's own subscribe?.()
     // call already documents - a future shell might already subscribe to

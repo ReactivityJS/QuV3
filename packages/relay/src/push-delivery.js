@@ -162,7 +162,7 @@ export class PushDeliveryService {
 
       try {
         const ref = messageId ? { spaceId, threadId, messageId } : undefined;
-        await this.#writeInAppNotification(actorPub, { title: resolved.title, body: resolved.body, appId, url: resolved.url, ref });
+        await this.#writeInAppNotification(actorPub, { title: resolved.title, body: resolved.body, appId, url: resolved.url, ref, actions: resolved.actions });
       } catch (err) {
         log.error(`in-app notification write failed for ~${actorPub.slice(0, 10)}…:`, err.message);
       }
@@ -171,13 +171,20 @@ export class PushDeliveryService {
       // Still visibly connected (see PresenceTracker) - the in-app
       // notification just written above already covers them (their own
       // client sees it live via subscribe(), same as the header badge), a
-      // redundant push would just be noise.
-      if (this.presence.isRecentlyOnline(actorPub)) continue;
+      // redundant push would just be noise. `resolved.bypassPresence`
+      // (set by e.g. Phone's own `incomingCall` pushAction, see
+      // `createManifestNotificationResolver()`'s own doc comment) overrides
+      // this - a call ringing in a background tab needs the OS-level push
+      // notification too, "the in-app copy already covers them" doesn't
+      // hold for something meant to be noticed immediately.
+      if (!resolved.bypassPresence && this.presence.isRecentlyOnline(actorPub)) continue;
 
       const subscriptions = await this.pushSubscriptions.listSubscriptionsFor(actorPub);
       for (const subscription of subscriptions) {
         try {
-          const result = await this.sendWebPush(subscription, { title: resolved.title, body: resolved.body, appId, url: resolved.url }, this.vapidKeys);
+          const pushPayload = { title: resolved.title, body: resolved.body, appId, url: resolved.url };
+          if (resolved.actions) pushPayload.actions = resolved.actions;
+          const result = await this.sendWebPush(subscription, pushPayload, this.vapidKeys);
           if (result.expired) {
             // Cannot clean this up ourselves - unsubscribing is a signed
             // write only the subscription's OWNER can make (see
@@ -221,15 +228,29 @@ export class PushDeliveryService {
    * unresolvable. Never sent to Web Push (see `deliverThreadMessage()`'s own
    * call site) - only the in-app copy gets it, on purpose: a lock-screen
    * push payload should stay small and never carry a raw content pointer.
+   *
+   * `actions` (additive, optional) is `apps/shell/src/notification-popups.js`'s
+   * OWN multi-button toast input - the exact shape a stored message's own
+   * `actions` field needs to already be in for that watcher to use it
+   * verbatim instead of falling back to a single generic "open" action (see
+   * that file's own doc comment). Also forwarded to the Web Push payload
+   * itself (see `deliverThreadMessage()`'s own call site) so `apps/shell/
+   * sw.js` can render the SAME Accept/Decline buttons on the OS notification.
    * @param {string} actorPub - The notification's owner/recipient.
-   * @param {{title: string, body: string, appId: string, url: string, ref?: {spaceId: string|number, threadId: string, messageId: string}}} payload
+   * @param {{title: string, body: string, appId: string, url: string, ref?: {spaceId: string|number, threadId: string, messageId: string}, actions?: Array<{action: string, title: string, url: string}>}} payload
    */
   async #writeInAppNotification(actorPub, payload) {
     const spaceId = paths.notificationsSpaceId(actorPub);
     await this.messages.createThread(spaceId, paths.NOTIFICATIONS_THREAD_ID, THREAD_PRESETS.notifications(actorPub));
     await this.messages.postMessage(spaceId, paths.NOTIFICATIONS_THREAD_ID, {
       body: payload.body,
-      extra: { title: payload.title, url: payload.url, appId: payload.appId, ...(payload.ref ? { ref: payload.ref } : {}) },
+      extra: {
+        title: payload.title,
+        url: payload.url,
+        appId: payload.appId,
+        ...(payload.ref ? { ref: payload.ref } : {}),
+        ...(payload.actions ? { actions: payload.actions } : {}),
+      },
     });
   }
 }
@@ -275,8 +296,20 @@ export class PushDeliveryService {
  * candidate today, since no hook is registered yet) falls through to the
  * ORIGINAL type-based lookup, unchanged.
  *
+ * A pushAction MAY additionally declare `urlTemplate`/`bypassPresence`/
+ * `actions` (Phone's own `incomingCall` entry is the first real user - see
+ * `apps/phone/manifest.quapp`) for a notification that needs to point at a
+ * SPECIFIC target rather than just "open the app": `urlTemplate` and each
+ * `actions[].hrefTemplate` may contain a literal `{pub}` placeholder,
+ * substituted with this event's `authorPub` (the actor who posted the
+ * message - for Phone, the caller) - e.g. `'#/phone/{pub}/accept'` becomes
+ * `'#/phone/<callerPub>/accept'`. Every other app's existing pushActions
+ * entries (no `urlTemplate`) are completely unaffected - `url` still falls
+ * back to the original flat `#/<appId>`, and `actions`/`bypassPresence` are
+ * simply omitted from the returned object, exactly as before this existed.
+ *
  * @param {import('@qu/loader').QuLoader} loader
- * @returns {(spaceId: string|number, threadId: string, context: {authorPub: string|null, mention: boolean, mentions: string[], functionName?: string|null}) => ({appId: string, functionName: string, title: string, body: string, url: string}|null)}
+ * @returns {(spaceId: string|number, threadId: string, context: {authorPub: string|null, mention: boolean, mentions: string[], functionName?: string|null}) => ({appId: string, functionName: string, title: string, body: string, url: string, actions?: Array<{action: string, title: string, url: string}>, bypassPresence?: boolean}|null)}
  */
 export function createManifestNotificationResolver(loader) {
   return function resolveNotification(spaceId, _threadId, { authorPub, mention, functionName = null }) {
@@ -288,12 +321,15 @@ export function createManifestNotificationResolver(loader) {
       if (!action) return null;
       const appLabel = manifest.label ?? manifest.name;
       const who = (authorPub ?? 'someone').slice(0, 10);
+      const substitutePub = (template) => template.replaceAll('{pub}', authorPub ?? '');
       return {
         appId: manifest.name,
         functionName: action.id,
         title: `${action.label} — ${appLabel}`,
         body: `~${who}… sent a message`,
-        url: `#/${manifest.name}`,
+        url: action.urlTemplate ? substitutePub(action.urlTemplate) : `#/${manifest.name}`,
+        ...(action.bypassPresence ? { bypassPresence: true } : {}),
+        ...(Array.isArray(action.actions) ? { actions: action.actions.map((a) => ({ action: a.action, title: a.title, url: substitutePub(a.hrefTemplate) })) } : {}),
       };
     }
     return null;

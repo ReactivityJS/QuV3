@@ -22,12 +22,25 @@
  * `push`/`notificationclick` (below): the browser decrypts a Web Push
  * message before this handler ever sees it (aes128gcm, RFC 8291) - `event.
  * data.json()` is already the plain object `@qu/relay`'s `PushDeliveryService`
- * sent (`{title, body, appId, url}`, see `packages/push/src/send.js`'s own
- * doc comment for why that's always a generic, never-the-actual-content
+ * sent (`{title, body, appId, url, actions?}`, see `packages/push/src/send.js`'s
+ * own doc comment for why that's always a generic, never-the-actual-content
  * template). `notificationclick` focuses an ALREADY-OPEN tab on this origin
  * rather than always opening a new one - a user with the app already open
  * in another tab almost certainly wants that tab brought forward, not a
  * second copy of the whole app.
+ *
+ * MULTI-BUTTON NOTIFICATIONS (`actions`, e.g. Phone's own incoming-call
+ * Accept/Decline - see `packages/relay/src/push-delivery.js`'s own doc
+ * comment): the Notification API's own `actions` option only accepts
+ * `{action, title, icon?}` - it has no notion of a per-button destination
+ * URL, so THAT part (`payload.actions[].url`) is stashed in `data.actions`
+ * (this worker's own bookkeeping, never shown to the platform) instead,
+ * alongside the existing default `data.url`. `notificationclick`'s
+ * `event.action` is the clicked button's `action` id, or `''` (empty
+ * string) when the user clicked the notification body itself rather than a
+ * button - only a non-empty `event.action` looks up a specific button's
+ * url in `data.actions`; the empty-string/body-click case falls through to
+ * `data.url` exactly as it always has.
  *
  * Bare `console.*`, not `@qu/log`: this file runs in the separate
  * ServiceWorkerGlobalScope and is served completely unbundled (no bare
@@ -66,16 +79,27 @@ self.addEventListener('push', (event) => {
     return;
   }
   if (!payload) return;
-  const { title = 'Quniverse', body = '', url = '/' } = payload;
-  // data.url (read back in notificationclick below) - showNotification()
-  // itself has no "what to do on click" concept, only whatever this worker
-  // chooses to do with the event afterward.
-  event.waitUntil(self.registration.showNotification(title, { body, data: { url } }));
+  const { title = 'Quniverse', body = '', url = '/', actions = [] } = payload;
+  // data.url/data.actions (read back in notificationclick below) -
+  // showNotification() itself has no "what to do on click" concept, only
+  // whatever this worker chooses to do with the event afterward. The
+  // platform-facing `actions` option is `{action, title}` only (see this
+  // file's own "MULTI-BUTTON NOTIFICATIONS" doc comment above) - each
+  // button's real destination stays in `data.actions`, never handed to the
+  // platform itself.
+  event.waitUntil(
+    self.registration.showNotification(title, {
+      body,
+      data: { url, actions },
+      actions: actions.map(({ action, title: buttonTitle }) => ({ action, title: buttonTitle })),
+    })
+  );
 });
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const rawUrl = event.notification.data?.url ?? '/';
+  const clickedAction = event.notification.data?.actions?.find((a) => a.action === event.action);
+  const rawUrl = clickedAction?.url ?? event.notification.data?.url ?? '/';
   // `rawUrl` is always a bare hash (`#/forum/t/<id>/m/<id>`, see
   // push-delivery.js's own `resolveNotification`/`#genericNotification()` -
   // this app is a single hash-routed page, there's no separate server-side

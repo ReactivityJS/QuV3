@@ -120,7 +120,7 @@ test('newest-first ordering', async () => {
   }
 });
 
-test('an unread notification is highlighted, and opening the feed marks it read (the highlight is gone on the next mount)', async () => {
+test('an unread notification is highlighted, and opening the feed marks it read - a fresh mount\'s default (unread-only) view then hides it entirely, "Show all" reveals it unhighlighted', async () => {
   const { qu, services, myPub } = await freshEnv();
   await seedNotification(services, myPub, { title: 'Mentions — Forum', body: 'hi' });
   const spaceId = paths.notificationsSpaceId(myPub);
@@ -146,14 +146,82 @@ test('an unread notification is highlighted, and opening the feed marks it read 
     stop();
   }
 
-  // A fresh mount, after markRead() already ran above - no longer unread.
+  // A fresh mount, after markRead() already ran above - the ONLY notification
+  // that exists is now read, so the default unread-only view hides it (see
+  // this file's own "UNREAD-ONLY DEFAULT VIEW" doc comment) rather than
+  // showing it unhighlighted.
   const container2 = makeContainer();
   const stop2 = mount(container2, { qu, services, subscribe: noopSubscribe });
   try {
+    await waitFor(() => container2.querySelector('.qu-notifications-empty') !== null);
+    assert.equal(container2.querySelector('.qu-notifications-item'), null);
+
+    // "Show all" reveals it, unhighlighted (it's read).
+    container2.querySelector('.qu-notifications-toggle').click();
     await waitFor(() => container2.querySelector('.qu-notifications-item') !== null);
     assert.equal(container2.querySelector('.qu-notifications-item').classList.contains('qu-notifications-unread'), false);
   } finally {
     stop2();
+  }
+});
+
+// ===== unread-only default view + "Show all" toggle =====
+
+test('by default, only UNREAD notifications render - a read one is hidden until "Show all" is clicked', async () => {
+  const { qu, services, myPub } = await freshEnv();
+  const spaceId = paths.notificationsSpaceId(myPub);
+  await seedNotification(services, myPub, { title: 'Old, already read', body: 'a' });
+  await services.messages.markRead(spaceId, paths.NOTIFICATIONS_THREAD_ID);
+  await seedNotification(services, myPub, { title: 'New, unread', body: 'b' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu, services, subscribe: noopSubscribe });
+  try {
+    await waitFor(() => container.querySelector('.qu-notifications-item') !== null);
+    let titles = [...container.querySelectorAll('.qu-notifications-item-title')].map((el) => el.textContent);
+    assert.deepEqual(titles, ['New, unread']);
+
+    container.querySelector('.qu-notifications-toggle').click();
+    await waitFor(() => container.querySelectorAll('.qu-notifications-item').length === 2);
+    titles = [...container.querySelectorAll('.qu-notifications-item-title')].map((el) => el.textContent);
+    assert.deepEqual(titles, ['New, unread', 'Old, already read']); // still newest-first
+  } finally {
+    stop();
+  }
+});
+
+test('the toggle is hidden when there are no notifications at all, and its label flips between the two states', async () => {
+  const { qu, services, myPub } = await freshEnv();
+  const container = makeContainer();
+  const stop = mount(container, { qu, services, subscribe: noopSubscribe });
+  try {
+    await waitFor(() => container.querySelector('.qu-notifications-empty') !== null);
+    assert.equal(container.querySelector('.qu-notifications-toggle').hidden, true);
+
+    await seedNotification(services, myPub, { title: 'Hi', body: 'a' });
+    await waitFor(() => container.querySelector('.qu-notifications-toggle').hidden === false);
+    assert.equal(container.querySelector('.qu-notifications-toggle').textContent, 'Show all (incl. read)');
+
+    container.querySelector('.qu-notifications-toggle').click();
+    await waitFor(() => container.querySelector('.qu-notifications-toggle').textContent === 'Show unread only');
+  } finally {
+    stop();
+  }
+});
+
+test('when every notification is read, the default (unread-only) view shows a distinct "no unread" empty state, not the generic empty state', async () => {
+  const { qu, services, myPub } = await freshEnv();
+  const spaceId = paths.notificationsSpaceId(myPub);
+  await seedNotification(services, myPub, { title: 'Old', body: 'a' });
+  await services.messages.markRead(spaceId, paths.NOTIFICATIONS_THREAD_ID);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu, services, subscribe: noopSubscribe });
+  try {
+    await waitFor(() => container.querySelector('.qu-notifications-empty') !== null);
+    assert.equal(container.querySelector('.qu-notifications-empty').textContent, 'No unread notifications.');
+  } finally {
+    stop();
   }
 });
 
