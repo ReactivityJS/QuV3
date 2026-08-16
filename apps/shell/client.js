@@ -87,6 +87,7 @@ import { renderOnboarding } from './src/onboarding.js';
 import { createClientServices } from './src/services.js';
 import { connectToRelay } from './src/sync.js';
 import { mountHeader } from './src/header.js';
+import { mountNotificationPopups } from './src/notification-popups.js';
 import { mountPwaUi } from './src/pwa.js';
 import { parseHash } from './src/router.js';
 
@@ -272,6 +273,17 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
     log.warn('shell header unavailable in this environment:', err.message);
   }
 
+  // Popup/toast notifications - the "Zwischenlösung" in-app half of the
+  // Phone app's incoming-call UX (see `apps/shell/src/notification-popups.js`'s
+  // own doc comment). Best-effort, same reasoning as the header/PWA UI above:
+  // a failure here just means no toasts pop this session, never a crash.
+  let stopNotificationPopups = null;
+  try {
+    stopNotificationPopups = mountNotificationPopups(container, { qu, services, subscribe, syncFetch });
+  } catch (err) {
+    log.warn('notification popups unavailable in this environment:', err.message);
+  }
+
   function renderPlaceholder(message) {
     screen.textContent = '';
     const p = document.createElement('p');
@@ -362,6 +374,7 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
     document.removeEventListener('visibilitychange', onVisibilityChange);
     stopMountedApp?.();
     stopHeader?.();
+    stopNotificationPopups?.();
     transport?.close();
   };
 }

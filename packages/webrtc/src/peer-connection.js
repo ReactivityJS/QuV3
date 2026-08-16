@@ -4,11 +4,13 @@ const log = createLogger('webrtc:peer-connection');
 
 /**
  * PEER CONNECTION — the state machine for exactly ONE remote peer: one
- * `RTCPeerConnection`, one `RTCDataChannel` ("qu-sync"), offer/answer/ICE
- * handling, and a send queue for anything written before the channel opens.
- * `WebRTCTransport` (the class apps actually see) owns a `Map<peerId,
- * PeerConnection>` of these - this class knows nothing about peerIds beyond
- * its own, and nothing about `Transport`, mounts, or signaling delivery.
+ * `RTCPeerConnection`, an optional `RTCDataChannel` ("qu-sync"), optional
+ * local `MediaStreamTrack`s (camera/mic - see `localStream`), offer/answer/
+ * ICE handling, and a send queue for anything written before the channel
+ * opens. `WebRTCTransport` (the class apps actually see) owns a
+ * `Map<peerId, PeerConnection>` of these - this class knows nothing about
+ * peerIds beyond its own, and nothing about `Transport`, mounts, or
+ * signaling delivery.
  *
  * Signaling itself (getting an offer/answer/ICE candidate to the OTHER
  * side) is entirely the caller's job via `onSignal` - this class only
@@ -24,30 +26,56 @@ export class PeerConnection {
   #onOpen;
   #onClose;
   #onFailed;
+  #onTrack;
   #closed = false;
 
   /**
    * @param {string} peerId - Only used for logging - this class never sends
    *   it anywhere itself.
-   * @param {{initiator: boolean, iceServers: Array<object>, onSignal: (signal: object) => void, onMessage: (data: object) => void, onOpen: () => void, onClose: () => void, onFailed: () => void}} options -
+   * @param {{initiator: boolean, iceServers: Array<object>, localStream?: MediaStream, onSignal: (signal: object) => void, onMessage: (data: object) => void, onOpen: () => void, onClose: () => void, onFailed: () => void, onTrack?: (stream: MediaStream, track: MediaStreamTrack) => void}} options -
    *   `initiator`: whether THIS side creates the data channel and starts the
    *   offer/answer exchange. See `WebRTCTransport`'s own doc comment for the
    *   deterministic tie-break both sides use to agree on this with no extra
-   *   message.
+   *   message - or an explicit override a caller (e.g. a Phone app's
+   *   caller-initiates-the-call flow) supplies directly.
+   *   `localStream`: local `MediaStreamTrack`s (camera/mic) to publish to
+   *   this peer, added via `pc.addTrack()` BEFORE any offer/answer is
+   *   created (both here in the constructor for the initiator, and in
+   *   `handleSignal()`'s offer branch for the answerer) - track/transceiver
+   *   changes made AFTER an offer/answer is created would need a
+   *   renegotiation round trip this class deliberately doesn't implement,
+   *   so ordering is the whole story here, not a convenience. Omit entirely
+   *   for a data-channel-only peer (e.g. Geochase's mesh) - no media
+   *   `m=`-sections end up in the SDP at all.
+   *   `onTrack`: fired once per remote track received (`pc.ontrack`) -
+   *   independent of the data channel, fires (or not) purely based on
+   *   whether the OTHER side attached tracks of its own.
    */
-  constructor(peerId, { initiator, iceServers, onSignal, onMessage, onOpen, onClose, onFailed }) {
+  constructor(peerId, { initiator, iceServers, localStream = null, onSignal, onMessage, onOpen, onClose, onFailed, onTrack = null }) {
     this.#peerId = peerId;
     this.#onSignal = onSignal;
     this.#onMessage = onMessage;
     this.#onOpen = onOpen;
     this.#onClose = onClose;
     this.#onFailed = onFailed;
+    this.#onTrack = onTrack;
 
     this.#pc = new RTCPeerConnection({ iceServers });
     this.#pc.onicecandidate = (event) => {
       if (event.candidate) this.#onSignal({ type: 'ice', candidate: event.candidate.toJSON() });
     };
     this.#pc.onconnectionstatechange = () => this.#handleConnectionStateChange();
+    if (this.#onTrack) {
+      this.#pc.ontrack = (event) => this.#onTrack(event.streams[0], event.track);
+    }
+
+    // Added BEFORE either side's first createOffer()/createAnswer() (this
+    // constructor for the initiator, handleSignal()'s offer branch below for
+    // the answerer) - see this class's own constructor doc comment on why
+    // ordering here is load-bearing, not cosmetic.
+    if (localStream) {
+      for (const track of localStream.getTracks()) this.#pc.addTrack(track, localStream);
+    }
 
     if (initiator) {
       this.#channel = this.#pc.createDataChannel('qu-sync');

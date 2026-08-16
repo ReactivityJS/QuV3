@@ -4,10 +4,45 @@ import { notificationPrefsPath } from './paths.js';
 const DEFAULTS = Object.freeze({ enabled: true, mentions: true, apps: {} });
 
 /**
+ * A per-function override is either the ORIGINAL plain boolean (just
+ * enabled/disabled, e.g. `{newMessage: false}`) or the newer
+ * `{enabled?, popup?}` object form that additionally carries the popup
+ * delivery-mode flag Phone's incoming-call toast needs (see
+ * `NotificationPrefsService.shouldPopup()`). A stored plain boolean is
+ * ALWAYS read as `{enabled: value, popup: false}` - an old preference
+ * write predates the popup concept entirely, so it can't have meant to opt
+ * into it.
+ * @param {boolean|{enabled?: boolean, popup?: boolean}|undefined} raw
+ * @returns {boolean} Whether this function is enabled at all (default true - absent means unset, not disabled).
+ */
+function functionEnabled(raw) {
+  if (raw === undefined) return true;
+  if (typeof raw === 'boolean') return raw;
+  return raw.enabled !== false;
+}
+
+/**
+ * @param {boolean|{enabled?: boolean, popup?: boolean}|undefined} raw
+ * @param {boolean} defaultPopup - Used only when `raw` is absent entirely (never overridden yet) - the CALLER's own suggested default for this function (e.g. Phone's `incomingCall` passing `true`), since this service has no notion of per-app defaults itself.
+ * @returns {boolean}
+ */
+function functionPopup(raw, defaultPopup) {
+  if (raw === undefined) return defaultPopup;
+  if (typeof raw === 'boolean') return false; // legacy value never opted into popups - see functionEnabled()'s own doc comment
+  return raw.popup ?? defaultPopup;
+}
+
+/**
  * NOTIFICATION PREFERENCES SERVICE — granular, per-identity push
  * notification settings: a global on/off, a global @mention on/off, and
  * per-app (optionally per-FUNCTION within an app, e.g. Chat's "newMessage"
- * vs. Inbox's "newMail") overrides.
+ * vs. Inbox's "newMail", or Phone's "incomingCall") overrides. A
+ * per-function override also carries an optional POPUP delivery-mode flag
+ * (`{enabled, popup}, see `shouldPopup()`) - the in-app toast "Zwischenlösung"
+ * built for Phone's incoming-call UX (`apps/shell/src/notification-popups.js`),
+ * generalized to any notification type: `enabled` still gates whether a
+ * notification happens at all (in-app record + push), `popup` is a SEPARATE,
+ * additive question of whether it should also interrupt with a toast.
  *
  * DELIBERATELY PUBLIC, not private/encrypted - this is the one piece of
  * "personal settings" data in this codebase that CAN'T be private, because
@@ -31,7 +66,7 @@ export class NotificationPrefsService {
     return QuCrypto.toBase64Url(mainKey.publicKey);
   }
 
-  /** @returns {Promise<{enabled: boolean, mentions: boolean, apps: Record<string, {enabled?: boolean, functions?: Record<string, boolean>}>}>} */
+  /** @returns {Promise<{enabled: boolean, mentions: boolean, apps: Record<string, {enabled?: boolean, functions?: Record<string, boolean|{enabled?: boolean, popup?: boolean}>}>}>} */
   async getOwnPrefs() {
     return this.getPrefsFor(await this.#myActorPub());
   }
@@ -65,7 +100,7 @@ export class NotificationPrefsService {
   }
 
   /**
-   * @param {{enabled?: boolean, mentions?: boolean, apps?: Record<string, {enabled?: boolean, functions?: Record<string, boolean>}>}} prefs
+   * @param {{enabled?: boolean, mentions?: boolean, apps?: Record<string, {enabled?: boolean, functions?: Record<string, boolean|{enabled?: boolean, popup?: boolean}>}>}} prefs
    * @returns {Promise<void>}
    */
   async savePrefs(prefs) {
@@ -92,7 +127,30 @@ export class NotificationPrefsService {
     if (mention && prefs.mentions === false) return false;
     const appPrefs = prefs.apps?.[appId];
     if (appPrefs?.enabled === false) return false;
-    if (functionName && appPrefs?.functions?.[functionName] === false) return false;
+    if (functionName && !functionEnabled(appPrefs?.functions?.[functionName])) return false;
     return true;
+  }
+
+  /**
+   * The popup-delivery-mode counterpart to `shouldNotify()` - "should a
+   * notification for this event also pop an in-app toast" (see
+   * `apps/shell/src/notification-popups.js`), a separate, ADDITIVE question
+   * from whether it should be notified/pushed at all. Always `false` when
+   * `shouldNotify()` itself is `false` - a popup for a notification that
+   * wouldn't even be recorded/pushed makes no sense.
+   * @param {object} prefs - As returned by getPrefsFor()/getOwnPrefs().
+   * @param {{appId: string, mention?: boolean, functionName?: string, defaultPopup?: boolean}} event -
+   *   `defaultPopup` is the CALLER's own suggested default for this specific
+   *   function when this identity has never explicitly set one (e.g. Phone's
+   *   own `resolveNotification` passing `true` for `incomingCall`, vs. the
+   *   overall default of `false` for an ordinary chat message) - this
+   *   service has no built-in notion of per-app defaults, so it never
+   *   invents one on its own.
+   * @returns {boolean}
+   */
+  static shouldPopup(prefs, { appId, mention = false, functionName = null, defaultPopup = false }) {
+    if (!NotificationPrefsService.shouldNotify(prefs, { appId, mention, functionName })) return false;
+    const raw = functionName ? prefs.apps?.[appId]?.functions?.[functionName] : undefined;
+    return functionPopup(raw, defaultPopup);
   }
 }

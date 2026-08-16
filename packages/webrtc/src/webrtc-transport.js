@@ -35,14 +35,21 @@ const log = createLogger('webrtc:transport');
  * `handleIncomingSignal()`. Delivering those is the caller's job (see
  * `@qu/services`' `WebRtcSignalService`, which carries them over the
  * existing relay-backed sync stack).
+ *
+ * `addPeer()`'s `localStream` option publishes local camera/mic tracks to a
+ * peer (e.g. `apps/phone`'s calling feature) - entirely independent of the
+ * data-channel-based `send`/`sendTo`/`onMessage` surface above, which stays
+ * unused/optional for a pure media call. See `onTrack()` for the remote side.
  */
 export class WebRTCTransport extends Transport {
   #selfPeerId;
   #iceServers;
   #peers = new Map();
+  #localStreams = new Map();
   #messageCallbacks = [];
   #outgoingSignalCallbacks = [];
   #peerConnectedCallbacks = [];
+  #trackCallbacks = [];
 
   /**
    * @param {{selfPeerId: string, iceServers?: Array<object>}} options -
@@ -72,18 +79,29 @@ export class WebRTCTransport extends Transport {
    * Starts (or returns the existing) connection to `peerId`. Idempotent -
    * safe to call more than once for the same peer.
    * @param {string} peerId
-   * @param {{initiator?: boolean}} [options] - Defaults to the deterministic
-   *   tie-break; only overridden internally on renegotiation-after-failure
+   * @param {{initiator?: boolean, localStream?: MediaStream}} [options] -
+   *   `initiator` defaults to the deterministic tie-break; pass it
+   *   explicitly to override that (e.g. a Phone app's caller always wants
+   *   to BE the initiator, regardless of how the two pubkeys compare - see
+   *   `@qu/services`' `WebRtcSignalService.connectPeer()`'s own `initiator`
+   *   option). Also overridden internally on renegotiation-after-failure
    *   (see `#handleFailed()`) and by `handleIncomingSignal()` for a peer
    *   this side never proactively called `addPeer()` for.
+   *   `localStream`: local camera/mic tracks to publish to this peer - see
+   *   `PeerConnection`'s own constructor doc comment for why these must be
+   *   supplied here (before negotiation), not attached afterward. Remembered
+   *   per-peer so a renegotiation after `onFailed()` re-attaches the same
+   *   tracks automatically.
    * @returns {PeerConnection}
    */
-  addPeer(peerId, { initiator = this.#isInitiator(peerId) } = {}) {
+  addPeer(peerId, { initiator = this.#isInitiator(peerId), localStream = this.#localStreams.get(peerId) ?? null } = {}) {
     const existing = this.#peers.get(peerId);
     if (existing) return existing;
+    if (localStream) this.#localStreams.set(peerId, localStream);
     const pc = new PeerConnection(peerId, {
       initiator,
       iceServers: this.#iceServers,
+      localStream,
       onSignal: (signal) => {
         for (const cb of this.#outgoingSignalCallbacks) cb(peerId, signal);
       },
@@ -97,12 +115,15 @@ export class WebRTCTransport extends Transport {
         if (this.#peers.get(peerId) === pc) this.#peers.delete(peerId);
       },
       onFailed: () => this.#handleFailed(peerId, pc),
+      onTrack: (stream, track) => {
+        for (const cb of this.#trackCallbacks) cb(peerId, stream, track);
+      },
     });
     this.#peers.set(peerId, pc);
     return pc;
   }
 
-  /** A full renegotiation (fresh `RTCPeerConnection`), not a socket-style reopen - see `PeerConnection`'s own doc comment on why only `'failed'` gets here. */
+  /** A full renegotiation (fresh `RTCPeerConnection`), not a socket-style reopen - see `PeerConnection`'s own doc comment on why only `'failed'` gets here. Re-attaches the same `localStream` (if any) this peer was originally connected with. */
   #handleFailed(peerId, pc) {
     log.warn(`connection to "${peerId}" failed - renegotiating`);
     pc.close();
@@ -176,9 +197,27 @@ export class WebRTCTransport extends Transport {
   /** @param {string} peerId */
   removePeer(peerId) {
     const pc = this.#peers.get(peerId);
+    this.#localStreams.delete(peerId);
     if (!pc) return;
     pc.close();
     this.#peers.delete(peerId);
+  }
+
+  /**
+   * Registers a callback fired once per remote `MediaStreamTrack` received
+   * from ANY peer (`pc.ontrack`, see `PeerConnection`'s own doc comment) -
+   * independent of the data channel, fires only for peers connected WITH a
+   * `localStream` on at least one side (an audio/video call), never for a
+   * plain data-only mesh like Geochase's.
+   * @param {(peerId: string, stream: MediaStream, track: MediaStreamTrack) => void} callback
+   * @returns {() => void} Unsubscribe function.
+   */
+  onTrack(callback) {
+    this.#trackCallbacks.push(callback);
+    return () => {
+      const idx = this.#trackCallbacks.indexOf(callback);
+      if (idx !== -1) this.#trackCallbacks.splice(idx, 1);
+    };
   }
 
   /** @param {object} data - Broadcast: reaches every peer whose data channel is currently open (or about to be, via its own queue - see `PeerConnection.send()`). */

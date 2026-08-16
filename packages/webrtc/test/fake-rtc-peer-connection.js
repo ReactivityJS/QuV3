@@ -48,10 +48,14 @@ export class FakeRTCPeerConnection {
   #tag = `conn-${connCounter++}`;
   #remote = null;
   #localChannel = null;
+  #localTracks = []; // {track, stream} pairs added via addTrack()
+  /** Test-only: records call ORDER (not just occurrence) of the methods a reliability test cares about - see `getCallLog()`. */
+  #callLog = [];
   connectionState = 'new';
   onicecandidate = null;
   onconnectionstatechange = null;
   ondatachannel = null;
+  ontrack = null;
 
   constructor(_config) {
     registry.set(this.#tag, this);
@@ -62,12 +66,26 @@ export class FakeRTCPeerConnection {
     return this.#localChannel;
   }
 
+  /** Records the track for delivery to the remote side's `ontrack` once connected - see `#markConnected()`. Returns a minimal fake `RTCRtpSender` (unused by production code today). */
+  addTrack(track, stream) {
+    this.#callLog.push('addTrack');
+    this.#localTracks.push({ track, stream });
+    return { track };
+  }
+
   async createOffer() {
+    this.#callLog.push('createOffer');
     return { type: 'offer', sdp: `offer:${this.#tag}` };
   }
 
   async createAnswer() {
+    this.#callLog.push('createAnswer');
     return { type: 'answer', sdp: `answer:${this.#remote.#tag}:${this.#tag}` };
+  }
+
+  /** Test-only: the order `addTrack`/`createOffer`/`createAnswer` were actually called in - proves tracks were attached BEFORE negotiation, not just that both happened. */
+  getCallLog() {
+    return [...this.#callLog];
   }
 
   async setLocalDescription(_desc) {}
@@ -94,9 +112,11 @@ export class FakeRTCPeerConnection {
 
   #markConnected() {
     this.connectionState = 'connected';
+    const remoteTracks = this.#remote?.#localTracks ?? [];
     queueMicrotask(() => {
       this.onconnectionstatechange?.();
       this.#localChannel?._open();
+      for (const { track, stream } of remoteTracks) this.ontrack?.({ streams: [stream], track });
     });
   }
 
