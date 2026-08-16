@@ -121,14 +121,18 @@ export class PresenceService {
   /**
    * @param {string|number} spaceId @param {string} threadId
    * @param {string[]} memberPubs - Same fixed-member-list reasoning as `getPresence()`.
-   * @returns {Promise<Record<string, number>>} `{ actorPub: uptoTs }` - a
-   *   member absent from the result has never published a read receipt here.
+   * @returns {Promise<Record<string, {upto: number, readAt: number}>>}
+   *   `upto` is the newest message ts the member had read as of that publish;
+   *   `readAt` is the wall-clock moment they actually published it - the
+   *   QuBit's own signed write `ts` (see `packages/core/src/qubit.js`), not
+   *   a second field this service has to maintain itself. A member absent
+   *   from the result has never published a read receipt here.
    */
   async getReadReceipts(spaceId, threadId, memberPubs) {
     const result = {};
     await Promise.all(memberPubs.map(async (pub) => {
       const quBit = await this.qu.get(threadReadReceiptPath(spaceId, threadId, pub));
-      if (typeof quBit?.val?.upto === 'number') result[pub] = quBit.val.upto;
+      if (typeof quBit?.val?.upto === 'number') result[pub] = { upto: quBit.val.upto, readAt: quBit.ts };
     }));
     return result;
   }
