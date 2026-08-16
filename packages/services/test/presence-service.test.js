@@ -56,9 +56,14 @@ test('startHeartbeat() publishes online immediately, then offline once stopped',
 test('publishReadReceipt()/getReadReceipts() round-trip', async () => {
   const { presence, identity } = await freshSetup();
   const myPub = QuCrypto.toBase64Url((await identity.getMainKey()).publicKey);
+  const before = Date.now();
   await presence.publishReadReceipt('board', 'general', 12345);
 
-  assert.deepEqual(await presence.getReadReceipts('board', 'general', [myPub]), { [myPub]: 12345 });
+  const result = await presence.getReadReceipts('board', 'general', [myPub]);
+  assert.equal(result[myPub].upto, 12345);
+  // readAt is the QuBit's own write ts (when it was actually published),
+  // independent of upto (which message ts it claims to have read up to).
+  assert.ok(result[myPub].readAt >= before);
 });
 
 test('getReadReceipts() for a member who never published a receipt omits them from the result', async () => {
@@ -72,5 +77,6 @@ test('read receipts are PUBLIC (visible via a fresh PresenceService instance on 
   await presence.publishReadReceipt('board', 'general', 999);
 
   const otherViewer = new PresenceService(qu, identity);
-  assert.deepEqual(await otherViewer.getReadReceipts('board', 'general', [myPub]), { [myPub]: 999 });
+  const result = await otherViewer.getReadReceipts('board', 'general', [myPub]);
+  assert.equal(result[myPub].upto, 999);
 });

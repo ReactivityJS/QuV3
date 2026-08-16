@@ -22,16 +22,24 @@ export const DEFAULT_RELAY_SETTINGS = Object.freeze({
   disabledApps: Object.freeze([]),
   // Apps still fully enabled (loaded, reachable at #/<name>, its
   // contributions still active) but hidden from apps/app-list's own browse
-  // page - for an app with no genuine standalone page of its own (a plugin
-  // that only ever renders through another app's extension point, e.g.
-  // apps/pins - it declares a `clientMain` because ExtensionPointHost needs
-  // one to dynamically import it as a CONTRIBUTOR, not because it has
-  // anything useful to show if a user actually navigates to `#/pins`
-  // directly - no `mount()` export at all, in fact). Distinct from
-  // `disabledApps`: hiding is purely a discoverability/declutter concern
-  // (still fully functional wherever it's actually used), disabling turns
-  // the app off entirely.
-  hiddenFromAppList: Object.freeze([]),
+  // page. Distinct from `disabledApps`: hiding is purely a discoverability/
+  // declutter concern (still fully functional wherever it's actually used),
+  // disabling turns the app off entirely. Two reasons an app ends up here by
+  // DEFAULT (an admin can still edit this list via `POST /admin/settings` -
+  // these are a starting point, not a hardcoded rule):
+  //   - No genuine standalone page of its own - a plugin that only ever
+  //     renders through another app's extension point (`pins`, `reactions`
+  //     - each declares a `clientMain` because ExtensionPointHost needs one
+  //     to dynamically import it as a CONTRIBUTOR, not because it has
+  //     anything useful to show if a user actually navigates to `#/pins`
+  //     directly - no `mount()` export at all, in fact).
+  //   - Already reachable from a fixed spot in the shell's own default UI,
+  //     so listing it again here is pure redundancy: `notifications` (the
+  //     header's bell), `profile` (the avatar menu's own Profile/Settings
+  //     links), `app-list` (itself - listing itself inside itself is
+  //     circular), `search` (the header's always-visible search icon),
+  //     `relay-admin` (the avatar menu's own Relay Admin link, admin-only).
+  hiddenFromAppList: Object.freeze(['pins', 'reactions', 'notifications', 'profile', 'app-list', 'search', 'relay-admin']),
   // Admin-editable Flag TYPE catalog - what a "flag" even IS is data, not
   // code, same reasoning as `disabledApps`. Shipped with a sane starter set
   // so liking/favoriting works out of the box with zero admin action; the

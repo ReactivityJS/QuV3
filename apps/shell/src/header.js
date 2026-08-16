@@ -44,7 +44,32 @@
  *      itself isn't built yet (see `apps/shell/client.js`'s own top doc
  *      comment's "DELIBERATELY NOT BUILT" list) - the link degrades to the
  *      same graceful "app not found" placeholder every other not-yet-loaded
- *      catalog entry already does.
+ *      catalog entry already does. A final group, separated by its OWN
+ *      divider and only rendered at all once at least one of its two
+ *      entries applies - "Apply update" (text, only while an update is
+ *      actually pending) and "Install app" (only once the browser has
+ *      actually offered an install prompt) - see "PWA INSTALL/UPDATE" below.
+ *
+ * PWA INSTALL/UPDATE: `deps.pwa` (see `mountHeader()`'s own JSDoc) carries
+ * the live state/callbacks `apps/shell/client.js` already set up by calling
+ * `./pwa.js`'s `registerServiceWorker()`/`captureInstallPrompt()` as early
+ * as possible in ITS OWN boot sequence (see that file's own doc comment on
+ * why timing matters here) - this file only RENDERS that state, it never
+ * calls `./pwa.js` itself. Two affordances, doubled for discoverability
+ * (the user specifically asked for the update one to exist in both places,
+ * not just the icon):
+ *   - A small, otherwise-`hidden` icon button (🔄, right of the App Action
+ *     Slot) that appears once an update is available - clicking it applies
+ *     it directly from the header.
+ *   - The SAME "apply update" action, in text form, as a menu entry (see
+ *     "MAIN MENU" above) - easier to notice/explain than an icon alone,
+ *     redundant on purpose.
+ *   - "Install app" - menu-only (no header icon - installing is a one-time
+ *     action, not something that needs a permanent header slot the way a
+ *     recurring "check for updates" glance does).
+ * All three replace what used to be a single, separate, always-in-the-DOM
+ * bar under the header (`mountPwaUi()`, removed) - folded into chrome that
+ * already exists instead of a permanent extra row.
  *
  * TWO HEADER EXTENSION POINTS (see `docs/app-navigation-standard.md` for the
  * full standard these are Rules 2): the header defines two separate
@@ -93,11 +118,13 @@ const DICT = {
     home: 'Home', back: 'Back', forward: 'Forward', notifications: 'Notifications',
     menu: 'Main menu', noFavorites: 'No favorite apps yet.',
     profile: 'Profile', settings: 'Settings', appList: 'App List', relayAdmin: 'Relay Admin',
+    installApp: 'Install app', updateAvailable: 'Update available — click to reload', applyUpdate: 'Apply update',
   },
   de: {
     home: 'Start', back: 'Zurück', forward: 'Vor', notifications: 'Benachrichtigungen',
     menu: 'Hauptmenü', noFavorites: 'Noch keine favorisierten Apps.',
     profile: 'Profil', settings: 'Einstellungen', appList: 'App-Liste', relayAdmin: 'Relay-Admin',
+    installApp: 'App installieren', updateAvailable: 'Update verfügbar — zum Neuladen klicken', applyUpdate: 'Update durchführen',
   },
 };
 const { t } = createI18n(DICT);
@@ -114,6 +141,10 @@ const STYLE = `
   .qu-shell-nav-slot { display: flex; align-items: center; }
   .qu-shell-header-spacer { flex: 1; }
   .qu-shell-header-slot { display: flex; align-items: center; }
+  .qu-shell-update-btn { display: inline-flex; background: none; border: none; cursor: pointer; font-size: 1.1em; line-height: 1; padding: 0.35rem 0.5rem; border-radius: var(--qu-radius-sm, 0.3rem); color: inherit; }
+  .qu-shell-update-btn:hover { background: var(--qu-color-surface, #8882); }
+  .qu-shell-update-btn[hidden] { display: none; }
+  .qu-shell-update-btn:disabled { opacity: 0.6; cursor: default; }
   .qu-shell-bell { position: relative; display: inline-flex; background: none; border: none; cursor: pointer; text-decoration: none; color: inherit; font-size: 1.2em; padding: 0.35rem 0.55rem; border-radius: var(--qu-radius-sm, 0.3rem); }
   .qu-shell-bell:hover { background: var(--qu-color-surface, #8882); }
   .qu-shell-badge { position: absolute; top: 0.05rem; right: 0.05rem; min-width: 1rem; height: 1rem; padding: 0 0.2rem; border-radius: 999px; background: var(--qu-color-danger, #c00); color: #fff; font-size: 0.62rem; font-weight: 700; line-height: 1rem; text-align: center; }
@@ -136,15 +167,28 @@ const STYLE = `
 
 /**
  * @param {HTMLElement} container
- * @param {{qu: import('@qu/core').QuStore, services: object, adminPubs?: string[], subscribe?: (prefix: string) => void, syncFetch?: (prefix: string) => Promise<*>, apps?: object[]}} deps -
+ * @param {{qu: import('@qu/core').QuStore, services: object, adminPubs?: string[], subscribe?: (prefix: string) => void, syncFetch?: (prefix: string) => Promise<*>, apps?: object[], pwa?: {getUpdateAvailable?: () => boolean, onUpdateAvailable?: (cb: () => void) => void, applyUpdate?: () => void, getInstallable?: () => boolean, onInstallable?: (cb: () => void) => void, installApp?: () => Promise<boolean>}}} deps -
  *   `apps` is the SAME manifest catalog every routed app already receives as
  *   `ctx.apps` (see this file's own "TWO HEADER EXTENSION POINTS" doc
  *   comment) - defaults to `[]` so an existing caller that doesn't pass it
  *   yet just renders no `shell.headerAction`/`shell.headerNavPoints`
- *   contributors, never throws.
+ *   contributors, never throws. `pwa` is `apps/shell/client.js`'s own
+ *   already-listening `registerServiceWorker()`/`captureInstallPrompt()`
+ *   state (see this file's own "PWA INSTALL/UPDATE" doc comment for why
+ *   THAT file calls them, not this one) - every field defaults to an inert
+ *   no-op/`false` so a caller that doesn't pass it (any existing test) just
+ *   renders neither affordance, never throws.
  * @returns {() => void} A stop function.
  */
-export function mountHeader(container, { qu, services, adminPubs = [], subscribe, syncFetch, apps = [] }) {
+export function mountHeader(container, { qu, services, adminPubs = [], subscribe, syncFetch, apps = [], pwa = {} }) {
+  const {
+    getUpdateAvailable = () => false,
+    onUpdateAvailable = () => {},
+    applyUpdate: doApplyUpdate = () => {},
+    getInstallable = () => false,
+    onInstallable = () => {},
+    installApp = async () => false,
+  } = pwa;
   ensureTheme();
   injectStyle(STYLE_ID, STYLE);
   let stopped = false;
@@ -187,6 +231,18 @@ export function mountHeader(container, { qu, services, adminPubs = [], subscribe
   const headerSlot = document.createElement('div');
   headerSlot.className = 'qu-shell-header-slot';
 
+  // Hidden until a genuine update is actually available (see this file's
+  // own "PWA INSTALL/UPDATE" doc comment below) - a small icon instead of a
+  // permanent extra row, and never shown for the routine "first ever
+  // install" case, only a real code update sitting behind a reload.
+  const updateBtn = document.createElement('button');
+  updateBtn.type = 'button';
+  updateBtn.className = 'qu-shell-update-btn';
+  updateBtn.textContent = '🔄';
+  updateBtn.title = t('updateAvailable');
+  updateBtn.setAttribute('aria-label', t('updateAvailable'));
+  updateBtn.hidden = true;
+
   const bell = document.createElement('a');
   bell.className = 'qu-shell-bell';
   bell.href = '#/notifications';
@@ -221,7 +277,7 @@ export function mountHeader(container, { qu, services, adminPubs = [], subscribe
   menu.hidden = true;
 
   userWrap.append(userBtn, menu);
-  header.append(home, backBtn, forwardBtn, navPointsSlot, spacer, headerSlot, bell, userWrap);
+  header.append(home, backBtn, forwardBtn, navPointsSlot, spacer, headerSlot, updateBtn, bell, userWrap);
   container.appendChild(header);
 
   // See this file's own "SEARCH SLOT" doc comment above - one
@@ -260,6 +316,34 @@ export function mountHeader(container, { qu, services, adminPubs = [], subscribe
   // many items it contributes (1 = plain link, 2+ = a dropdown).
   extensionPoints.renderSlot('shell.headerNavPoints', navPointsSlot, { getContext, onContextChange, services, qu, subscribe, syncFetch });
 
+  // PWA UPDATE/INSTALL - see this file's own "PWA INSTALL/UPDATE" doc
+  // comment: `deps.pwa` is `apps/shell/client.js`'s already-listening state,
+  // this only renders it. `getUpdateAvailable()`/`getInstallable()` are
+  // checked immediately (in case either already fired before this header
+  // even mounted, e.g. a fast beforeinstallprompt on a repeat visit) AND
+  // subscribed to for whatever fires later - both cases matter, since which
+  // one applies depends purely on timing this file has no control over.
+  function showUpdateAvailable() {
+    updateBtn.hidden = false;
+    if (!menu.hidden) renderMenu();
+  }
+  if (getUpdateAvailable()) updateBtn.hidden = false; // no menu to re-render yet at this point in mountHeader() - the icon alone is enough here
+  onUpdateAvailable(showUpdateAvailable);
+  updateBtn.addEventListener('click', () => {
+    updateBtn.disabled = true;
+    doApplyUpdate();
+  });
+
+  // `installable` is read by renderMenu() below (rebuilt from scratch on
+  // every open, see its own doc comment) - if installability changes while
+  // the menu already happens to be open, re-render it in place so the entry
+  // doesn't wait for a close/reopen to show up.
+  let installable = getInstallable();
+  onInstallable(() => {
+    installable = true;
+    if (!menu.hidden) renderMenu();
+  });
+
   function closeMenu() {
     menu.hidden = true;
     userBtn.setAttribute('aria-expanded', 'false');
@@ -272,11 +356,12 @@ export function mountHeader(container, { qu, services, adminPubs = [], subscribe
   }
   document.addEventListener('click', onDocClick);
   document.addEventListener('keydown', onKeydown);
-  // Any link click inside the menu should close it - simplest is a single
-  // delegated listener rather than one per rendered link (the menu's own
-  // content is rebuilt from scratch on every open, see renderMenu() below).
+  // Any link OR action button (e.g. "Install app") click inside the menu
+  // should close it - simplest is a single delegated listener rather than
+  // one per rendered item (the menu's own content is rebuilt from scratch
+  // on every open, see renderMenu() below).
   menu.addEventListener('click', (e) => {
-    if (e.target.closest('a')) closeMenu();
+    if (e.target.closest('a, .qu-shell-menu-item')) closeMenu();
   });
 
   // A promise, not a plain resolved-later variable: `renderMenu()` can run
@@ -345,6 +430,41 @@ export function mountHeader(container, { qu, services, adminPubs = [], subscribe
       adminLink.href = '#/relay-admin';
       adminLink.textContent = `🛡️ ${t('relayAdmin')}`;
       menu.appendChild(adminLink);
+    }
+
+    // A final group, own divider, rendered only once at least one of its
+    // two entries actually applies - never a permanently-visible disabled
+    // one. "Apply update" is the SAME action the header's own update icon
+    // performs, offered again here in text form since an icon alone is easy
+    // to miss - deliberately redundant, not a replacement for it.
+    const updateAvailableNow = getUpdateAvailable();
+    if (updateAvailableNow || installable) {
+      const pwaDivider = document.createElement('div');
+      pwaDivider.className = 'qu-shell-menu-divider';
+      menu.appendChild(pwaDivider);
+    }
+    if (updateAvailableNow) {
+      const applyUpdateBtn = document.createElement('button');
+      applyUpdateBtn.type = 'button';
+      applyUpdateBtn.className = 'qu-shell-menu-item';
+      applyUpdateBtn.textContent = `🔄 ${t('applyUpdate')}`;
+      applyUpdateBtn.addEventListener('click', () => {
+        applyUpdateBtn.disabled = true;
+        doApplyUpdate();
+      });
+      menu.appendChild(applyUpdateBtn);
+    }
+    if (installable) {
+      const installBtn = document.createElement('button');
+      installBtn.type = 'button';
+      installBtn.className = 'qu-shell-menu-item';
+      installBtn.textContent = `⬇️ ${t('installApp')}`;
+      installBtn.addEventListener('click', async () => {
+        installBtn.disabled = true;
+        await installApp(); // one-shot regardless of outcome - the native prompt won't fire again either way
+        installable = false;
+      });
+      menu.appendChild(installBtn);
     }
   }
 

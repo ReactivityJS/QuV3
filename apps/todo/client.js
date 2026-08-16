@@ -57,7 +57,8 @@
 import { watch } from '@qu/reactive';
 import { paths, THREAD_PRESETS, formatActorLabel, matchesActorQuery } from '@qu/services';
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme, renderSubpage, mountAppHeaderAction, renderNavPointsMenu, mountActorPicker } from '@qu/ui';
+import { injectStyle, ensureTheme, renderSubpage, mountAppHeaderAction, renderNavPointsMenu, mountActorPicker, mountContextSwitcher } from '@qu/ui';
+import { copyToClipboard } from '@qu/thread-ui';
 
 const SPACE_ID = '63f5cc6f-62f6-4a43-a889-33900138f8b0'; // this app's own manifest.spaceId - see index.js's own copy of this constant
 
@@ -66,10 +67,13 @@ const DICT = {
     title: 'ToDo', myTasks: 'Assigned to me', noAssignedTasks: 'Nothing assigned to you right now.',
     newListPlaceholder: 'New list name…', create: 'Create', noLists: 'No lists yet — create one below, or wait for an invite.',
     untitled: 'Untitled list', sharedBadge: 'Shared', manageLists: 'Manage lists',
+    newList: 'New list', newActions: 'Create new…', listsMenu: 'Lists',
+    copyLink: 'Copy link', linkCopied: 'Link copied',
     share: 'Share', delete: 'Delete', leave: 'Leave',
     deleteListConfirm: 'Delete "{title}"? This removes it for everyone and cannot be undone.',
     leaveConfirm: 'Leave "{title}"? You will lose access unless invited again, and the owner will be notified.',
     newTask: 'New task', noTasks: 'No tasks yet.',
+    listLabel: 'List', sharedListOption: '{title} (shared by {owner})',
     taskTitle: 'Title', taskContent: 'Notes (optional)', dueDate: 'Due date (optional)',
     attachment: 'Attachment (optional)', attachRemove: 'Remove',
     assignee: 'Assignee', unassigned: 'Unassigned', youSuffix: '{name} (you)',
@@ -89,10 +93,13 @@ const DICT = {
     title: 'ToDo', myTasks: 'Mir zugewiesen', noAssignedTasks: 'Dir ist gerade nichts zugewiesen.',
     newListPlaceholder: 'Name der neuen Liste…', create: 'Erstellen', noLists: 'Noch keine Listen — unten eine anlegen oder auf eine Einladung warten.',
     untitled: 'Unbenannte Liste', sharedBadge: 'Geteilt', manageLists: 'Listen verwalten',
+    newList: 'Neue Liste', newActions: 'Neu erstellen…', listsMenu: 'Listen',
+    copyLink: 'Link kopieren', linkCopied: 'Link kopiert',
     share: 'Teilen', delete: 'Löschen', leave: 'Verlassen',
     deleteListConfirm: '"{title}" löschen? Dies entfernt sie für alle und kann nicht rückgängig gemacht werden.',
     leaveConfirm: '"{title}" verlassen? Du verlierst den Zugriff, bis du erneut eingeladen wirst, der Eigentümer wird benachrichtigt.',
     newTask: 'Neue Aufgabe', noTasks: 'Noch keine Aufgaben.',
+    listLabel: 'Liste', sharedListOption: '{title} (geteilt von {owner})',
     taskTitle: 'Titel', taskContent: 'Notiz (optional)', dueDate: 'Fälligkeitsdatum (optional)',
     attachment: 'Anhang (optional)', attachRemove: 'Entfernen',
     assignee: 'Bearbeiter', unassigned: 'Nicht zugewiesen', youSuffix: '{name} (du)',
@@ -134,6 +141,9 @@ const STYLE = `
   .qu-todo-task-title { flex: 1; text-decoration: none; color: inherit; }
   .qu-todo-task-done { text-decoration: line-through; opacity: 0.6; }
   .qu-todo-task-assignee, .qu-todo-task-due { font-size: 0.8em; opacity: 0.7; white-space: nowrap; }
+  .qu-todo-task-list-link { font-size: 0.8em; opacity: 0.7; white-space: nowrap; border: 1px solid var(--qu-color-border, #8884); border-radius: 999px; padding: 0.1rem 0.55rem; text-decoration: none; color: inherit; }
+  .qu-todo-task-list-link:hover { opacity: 1; background: var(--qu-color-border, #8884); }
+  .qu-todo-copy-link { background: none; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); padding: 0.4rem 0.8rem; cursor: pointer; font: inherit; color: inherit; }
   .qu-todo-form { display: flex; flex-direction: column; gap: 0.7rem; margin-bottom: 1rem; }
   .qu-todo-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.9em; }
   .qu-todo-form input, .qu-todo-form select, .qu-todo-form textarea { padding: 0.55rem; font: inherit; font-size: 1rem; box-sizing: border-box; border-radius: var(--qu-radius-sm, 0.3rem); border: 1px solid var(--qu-color-border, #8884); }
@@ -158,6 +168,9 @@ function listHash(listId) { return `#/todo/${listId}`; }
 function shareHash(listId) { return `#/todo/${listId}/share`; }
 function newTaskHash(listId, parentId) { return parentId ? `#/todo/${listId}/new/${parentId}` : `#/todo/${listId}/new`; }
 function taskHash(listId, taskId) { return `#/todo/${listId}/${taskId}`; }
+const mineHash = '#/todo/mine';
+/** Resolved against the full current URL (not just origin), same reasoning apps/forum's/apps/chat's own absoluteMessagePermalink() give - survives being pasted elsewhere or subpath deployments. */
+function absoluteHash(hash) { return new URL(hash, window.location.href).href; }
 
 function shortPerson(actorPub, profile) {
   return formatActorLabel(actorPub, profile) || t('unknownPerson', { pub: actorPub.slice(0, 10) });
@@ -175,22 +188,57 @@ function formatDueDate(ms) {
   return new Date(ms).toLocaleDateString();
 }
 
+/** A small "🔗 Copy link" button - same copyToClipboard()+absolute-URL pattern apps/forum's/apps/chat's own permalink "Copy link" menu item use, for a list/mine page's own direct/shareable link. */
+function copyLinkButton(hash) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'qu-todo-copy-link';
+  const defaultLabel = `🔗 ${t('copyLink')}`;
+  btn.textContent = defaultLabel;
+  btn.addEventListener('click', async () => {
+    await copyToClipboard(absoluteHash(hash));
+    btn.textContent = `✓ ${t('linkCopied')}`;
+    setTimeout(() => { btn.textContent = defaultLabel; }, 1500);
+  });
+  return btn;
+}
+
 // ===========================================================================
-// Header nav points - "+ New task" (see docs/app-navigation-standard.md Rule 2)
+// Header nav points - "New list"/"New task" (see docs/app-navigation-standard.md
+// Rule 2). Always 2 items while ToDo is active - unlike Forum's "New topic"
+// (only meaningful once a channel is open), BOTH of ToDo's own actions are
+// always reachable, so this is a real, always-present dropdown (the "▾"
+// caret + menuLabel tooltip renderNavPointsMenu() already draws once there
+// are 2+ items - see that file's own doc comment) rather than a bare "+"
+// that only sometimes turns into a menu. List creation moving here (out of
+// the old inline "+ New list" form at the bottom of #/todo/#/todo/manage -
+// see renderNewListPage() below) is the direct fix for that anti-pattern,
+// same move Forum already made for "+ New channel".
 // ===========================================================================
 export function renderHeaderNavPoints(container, { getContext, onContextChange, services, qu }) {
   mountAppHeaderAction(container, {
     appId: 'todo', getContext, onContextChange,
     render: (wrap) => {
-      // Shown immediately, pointing at the list picker (#/todo) - unlike
+      let stopped = false;
+      // "New task" starts pointing at the list picker (#/todo) - unlike
       // Calendar's "+ New event" (which needs an editable CALENDAR to exist
       // first), a user with no editable list yet can still use this to reach
-      // the page where they create one. Upgraded in place to the resolved
-      // list's own new-task route once/if an editable list is found.
-      renderNavPointsMenu(wrap, { items: [{ label: t('newTask'), href: '#/todo' }] });
-      const link = wrap.querySelector('a');
+      // the page where they create one - then upgrades in place to the
+      // resolved list's own new-task route once/if an editable list is found.
+      let newTaskHref = '#/todo';
+      function update() {
+        if (stopped) return;
+        wrap.textContent = '';
+        renderNavPointsMenu(wrap, {
+          items: [
+            { label: t('newList'), href: '#/todo/new' },
+            { label: t('newTask'), href: newTaskHref },
+          ],
+          menuLabel: t('newActions'),
+        });
+      }
+      update();
 
-      let stopped = false;
       (async () => {
         const myPub = await services.actors.whoAmI();
         const mine = await services.sharing.listMine('todo', 'list');
@@ -199,7 +247,8 @@ export function renderHeaderNavPoints(container, { getContext, onContextChange, 
           const quBit = await qu.get(paths.documentPath(SPACE_ID, metaResourceId(l.id)));
           const role = quBit?.val?.members?.find((m) => m.actorPub === myPub)?.role;
           if (role === 'owner' || role === 'editor') {
-            link.href = newTaskHash(l.id, null);
+            newTaskHref = newTaskHash(l.id, null);
+            update();
             return;
           }
         }
@@ -222,7 +271,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
   let myActorPub = null;
   let pendingInvitesChecked = false; // discoverPendingInvites() - runs once per mount, mirrors apps/calendar's own guard
 
-  const seg1 = segments[1] ?? null; // listId | 'mine' | 'manage' | null
+  const seg1 = segments[1] ?? null; // listId | 'mine' | 'manage' | 'new' | null
   const sub = segments[2] ?? null; // null | 'share' | 'new' | <taskId>
   const extra = segments[3] ?? null; // 'new'-only: an optional parent task id (subtask creation)
 
@@ -231,6 +280,11 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     if (stopped) return;
     if (seg1 === 'manage') { await renderManagePage(); return; }
     if (seg1 === 'mine') { await renderMyTasksPage(); return; }
+    // 'new' (a fixed literal - crypto.randomUUID() never produces it, same
+    // reasoning apps/geochase's own 'all'-sentinel comment gives) is the
+    // dedicated "create a list" page (see renderHeaderNavPoints()'s own doc
+    // comment), never a listId.
+    if (seg1 === 'new') { await renderNewListPage(); return; }
     if (!seg1) { await renderMain(); return; }
     if (!sub) { await renderListPage(seg1); return; }
     if (sub === 'share') { await renderSharePage(seg1); return; }
@@ -295,6 +349,47 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     return infos;
   }
 
+  /**
+   * The Lists <-> "Mir zugewiesen" switcher's own sidebar items - "Mir
+   * zugewiesen" first, then every list this identity is a member of. Used
+   * by both renderListPage() and renderMyTasksPage() (see their own
+   * mountContextSwitcher() calls) so a mobile user viewing one list, or
+   * their assigned-to-me aggregate, has a direct way to jump to another one
+   * - the same "esoTalk-style persistent switcher" idiom apps/forum's own
+   * channel sidebar and apps/calendar's own calendars sidebar already use
+   * (see docs/app-navigation-standard.md Rule 3). Deliberately a plain,
+   * unwatched read (unlike loadListInfos() above) - it must NOT call
+   * clearWatches() itself, which would wipe out whichever page-specific
+   * watch(es) the caller already pushed for ITS OWN list/task data.
+   */
+  async function fetchSwitcherItems() {
+    const mine = await listMine();
+    const items = [{ id: 'mine', label: t('myTasks'), href: mineHash }];
+    for (const l of mine) {
+      const meta = await fetchMeta(l.id);
+      if (!meta) continue;
+      items.push({
+        id: l.id,
+        label: meta.title || t('untitled'),
+        href: listHash(l.id),
+        badge: roleOf(meta, myActorPub) !== 'owner' ? t('sharedBadge') : undefined,
+      });
+    }
+    return items;
+  }
+
+  /**
+   * The "create a list" form itself - shared by the dedicated `#/todo/new`
+   * page below (reachable from the shell header's App Navigation Points
+   * Slot - see renderHeaderNavPoints()'s own doc comment, the SAME "Rule 2"
+   * move apps/forum/client.js's own "+ New channel" already made) AND the
+   * inline copy still sitting at the bottom of `#/todo`/`#/todo/manage` -
+   * list creation was deliberately made reachable from BOTH places rather
+   * than moved wholesale, unlike Forum's channel creation, since a list
+   * (unlike a channel) is something users create far more casually/often
+   * while already looking at their list picker.
+   * @param {(listId: string) => Promise<void>} onCreated
+   */
   function newListForm(onCreated) {
     const form = document.createElement('form');
     form.className = 'qu-todo-new';
@@ -312,13 +407,32 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
       if (!title) return;
       btn.disabled = true;
       try {
-        await createList(title);
-        await onCreated();
+        const listId = await createList(title);
+        await onCreated(listId);
       } finally {
         btn.disabled = false;
       }
     });
     return form;
+  }
+
+  // ---------------------------------------------------------------------
+  // New list - #/todo/new - the dedicated-page half of newListForm() above.
+  // ---------------------------------------------------------------------
+  async function renderNewListPage() {
+    if (stopped) return;
+    renderSubpage(container, {
+      showBackLink: false,
+      render: (content) => {
+        const page = document.createElement('div');
+        page.className = 'qu-todo-page';
+        const h1 = document.createElement('h1');
+        h1.textContent = t('newList');
+        page.appendChild(h1);
+        page.appendChild(newListForm(async (listId) => { window.location.hash = listHash(listId); }));
+        content.appendChild(page);
+      },
+    });
   }
 
   async function renderMain() {
@@ -366,7 +480,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
           page.appendChild(ul);
         }
 
-        page.appendChild(newListForm(renderMain));
+        page.appendChild(newListForm(async () => { await renderMain(); }));
         content.appendChild(page);
       },
     });
@@ -428,7 +542,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
           }
           page.appendChild(row);
         }
-        page.appendChild(newListForm(renderManagePage));
+        page.appendChild(newListForm(async () => { await renderManagePage(); }));
         content.appendChild(page);
       },
     });
@@ -439,31 +553,47 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
   // ---------------------------------------------------------------------
   async function renderMyTasksPage() {
     if (stopped) return;
+    clearWatches();
     subscribe?.(paths.spacePath(SPACE_ID));
     const mine = await listMine();
     if (stopped) return;
 
     const assigned = [];
     for (const l of mine) {
+      // Live - a task assigned/unassigned/completed/renamed elsewhere (this
+      // identity's own change from the list page itself, or a co-editor's)
+      // updates this aggregate without a manual reload, same as every other
+      // watched view in this file.
+      unwatches.push(watch(qu, paths.documentPath(SPACE_ID, itemsResourceId(l.id)), () => renderMyTasksPage(), { initial: false, syncFetch }));
       const meta = await fetchMeta(l.id);
       const doc = await fetchItems(l.id);
+      const editable = canEdit(roleOf(meta, myActorPub));
       for (const task of doc.items ?? []) {
         if (task.assigneePub === myActorPub && !task.done) {
-          assigned.push({ ...task, listId: l.id, listTitle: meta?.title || t('untitled') });
+          assigned.push({ ...task, listId: l.id, listTitle: meta?.title || t('untitled'), editable });
         }
       }
     }
     assigned.sort((a, b) => (a.dueDate ?? Infinity) - (b.dueDate ?? Infinity));
     if (stopped) return;
+    const switcherItems = await fetchSwitcherItems();
+    if (stopped) return;
 
-    renderSubpage(container, {
-      showBackLink: false,
+    mountContextSwitcher(container, {
+      items: switcherItems,
+      activeId: 'mine',
+      heading: t('listsMenu'),
+      variant: 'page',
+      switchHref: '#/todo',
+      activeLabel: t('myTasks'),
+      newItem: { label: `+ ${t('newList')}`, href: '#/todo/new' },
       render: (content) => {
         const page = document.createElement('div');
         page.className = 'qu-todo-page';
         const h1 = document.createElement('h1');
         h1.textContent = t('myTasks');
         page.appendChild(h1);
+        page.appendChild(copyLinkButton(mineHash));
 
         if (assigned.length === 0) {
           const empty = document.createElement('p');
@@ -476,20 +606,10 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
         const ul = document.createElement('ul');
         ul.className = 'qu-todo-tasks';
         for (const task of assigned) {
-          const li = document.createElement('li');
-          li.className = 'qu-todo-task-row';
-          const a = document.createElement('a');
-          a.className = 'qu-todo-task-title';
-          a.href = taskHash(task.listId, task.id);
-          a.textContent = `${task.title} — ${task.listTitle}`;
-          li.appendChild(a);
-          if (task.dueDate) {
-            const due = document.createElement('span');
-            due.className = 'qu-todo-task-due';
-            due.textContent = formatDueDate(task.dueDate);
-            li.appendChild(due);
-          }
-          ul.appendChild(li);
+          ul.appendChild(renderTaskRow(task.listId, task, task.editable, {
+            listLabel: task.listTitle,
+            onToggled: renderMyTasksPage, // a just-completed task must drop out of THIS (not-done-only) aggregate immediately
+          }));
         }
         page.appendChild(ul);
         content.appendChild(page);
@@ -500,7 +620,20 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
   // ---------------------------------------------------------------------
   // List page - #/todo/<listId>
   // ---------------------------------------------------------------------
-  function renderTaskRow(listId, item, editable) {
+  /**
+   * @param {string} listId @param {object} item @param {boolean} editable
+   * @param {{listLabel?: string, onToggled?: () => Promise<void>}} [options]
+   *   `listLabel` - shown as a small "jump to this list" link when set (the
+   *   "Mir zugewiesen" aggregate spans multiple lists, so each row needs to
+   *   say/link WHICH one - see renderMyTasksPage()'s own call site; the
+   *   single-list page never passes it, since that context is already the
+   *   page's own <h1>). `onToggled` - called after a checkbox toggle lands;
+   *   renderMyTasksPage() uses this to re-run itself, since that aggregate
+   *   only ever shows NOT-done tasks, so a just-completed one must drop out
+   *   of the list immediately, not just gain a strikethrough in place (what
+   *   the plain list page's own checkbox already does with no callback).
+   */
+  function renderTaskRow(listId, item, editable, { listLabel, onToggled } = {}) {
     const li = document.createElement('li');
     li.className = item.parentId ? 'qu-todo-task-row qu-todo-task-indent' : 'qu-todo-task-row';
 
@@ -510,6 +643,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     checkbox.disabled = !editable;
     checkbox.addEventListener('change', async () => {
       await toggleDone(listId, item.id, checkbox.checked);
+      await onToggled?.();
     });
     li.appendChild(checkbox);
 
@@ -518,6 +652,14 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     a.className = item.done ? 'qu-todo-task-title qu-todo-task-done' : 'qu-todo-task-title';
     a.textContent = item.title;
     li.appendChild(a);
+
+    if (listLabel) {
+      const listLink = document.createElement('a');
+      listLink.className = 'qu-todo-task-list-link';
+      listLink.href = listHash(listId);
+      listLink.textContent = listLabel;
+      li.appendChild(listLink);
+    }
 
     if (item.assigneePub) {
       const assignee = document.createElement('span');
@@ -592,9 +734,17 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     const doc = await fetchItems(id);
     const items = doc.items ?? [];
     const editable = canEdit(role);
+    const switcherItems = await fetchSwitcherItems();
+    if (stopped) return;
 
-    renderSubpage(container, {
-      showBackLink: false,
+    mountContextSwitcher(container, {
+      items: switcherItems,
+      activeId: id,
+      heading: t('listsMenu'),
+      variant: 'page',
+      switchHref: '#/todo',
+      activeLabel: meta.title || t('untitled'),
+      newItem: { label: `+ ${t('newList')}`, href: '#/todo/new' },
       render: (content) => {
         const page = document.createElement('div');
         page.className = 'qu-todo-page';
@@ -616,6 +766,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
           shareLink.textContent = t('share');
           actions.appendChild(shareLink);
         }
+        actions.appendChild(copyLinkButton(listHash(id)));
         page.appendChild(actions);
 
         if (items.length === 0) {
@@ -634,9 +785,41 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
   // ---------------------------------------------------------------------
   // Task form - shared by New Task and Edit Task
   // ---------------------------------------------------------------------
-  function buildTaskForm({ existing, meta, onSubmit, onCancel }) {
+  /**
+   * @param {{existing: object|null, meta: object, myEditableLists?: Array<{id: string, title: string, role: string, ownerPub: string}>,
+   *   selectedListId?: string, lockList?: boolean, onSubmit: Function, onCancel: Function}} opts
+   *   `myEditableLists` is only ever passed for the NEW-task flow (never
+   *   when editing - a task never moves between lists after creation, see
+   *   this file's own top doc comment) - its presence is what turns on the
+   *   "which list" picker at all. `lockList` disables it (still shown, for
+   *   context) when creating a SUBTASK, which must stay in its parent's list.
+   */
+  function buildTaskForm({ existing, meta, myEditableLists, selectedListId, lockList, onSubmit, onCancel }) {
     const form = document.createElement('form');
     form.className = 'qu-todo-form';
+    let currentMeta = meta; // swapped out on listSelect's own 'change' - see below
+
+    let listSelect = null;
+    if (myEditableLists) {
+      listSelect = document.createElement('select');
+      listSelect.className = 'qu-todo-list-select';
+      listSelect.disabled = !!lockList;
+      for (const l of myEditableLists) {
+        const opt = document.createElement('option');
+        opt.value = l.id;
+        opt.textContent = l.role === 'owner' ? l.title : t('sharedListOption', { title: l.title, owner: shortPerson(l.ownerPub, null) });
+        if (l.role !== 'owner') {
+          services.profile.getPublicProfile(l.ownerPub).then((profile) => {
+            if (profile?.alias) opt.textContent = t('sharedListOption', { title: l.title, owner: profile.alias });
+          });
+        }
+        listSelect.appendChild(opt);
+      }
+      listSelect.value = selectedListId;
+      const listLabel = document.createElement('label');
+      listLabel.append(t('listLabel'), listSelect);
+      form.appendChild(listLabel);
+    }
 
     const titleInput = document.createElement('input');
     titleInput.type = 'text';
@@ -657,24 +840,45 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     const dueLabel = document.createElement('label');
     dueLabel.append(t('dueDate'), dueInput);
 
+    // Default assignee is always ME - assigning it to someone else is an
+    // active choice, not the starting state (per this app's own design
+    // discussion). Only applies to a NEW task; editing an existing one keeps
+    // showing whatever is already stored, including an explicit "Unassigned".
     const assigneeSelect = document.createElement('select');
-    const noneOpt = document.createElement('option');
-    noneOpt.value = '';
-    noneOpt.textContent = t('unassigned');
-    assigneeSelect.appendChild(noneOpt);
-    for (const member of meta.members) {
-      const opt = document.createElement('option');
-      opt.value = member.actorPub;
-      opt.textContent = member.actorPub === myActorPub ? t('youSuffix', { name: shortPerson(member.actorPub, null) }) : shortPerson(member.actorPub, null);
-      services.profile.getPublicProfile(member.actorPub).then((profile) => {
-        if (!profile?.alias) return;
-        opt.textContent = member.actorPub === myActorPub ? t('youSuffix', { name: profile.alias }) : profile.alias;
-      });
-      if (existing?.assigneePub === member.actorPub) opt.selected = true;
-      assigneeSelect.appendChild(opt);
+    assigneeSelect.className = 'qu-todo-assignee-select';
+    function renderAssigneeOptions(forMeta) {
+      assigneeSelect.textContent = '';
+      const noneOpt = document.createElement('option');
+      noneOpt.value = '';
+      noneOpt.textContent = t('unassigned');
+      assigneeSelect.appendChild(noneOpt);
+      for (const member of forMeta.members) {
+        const opt = document.createElement('option');
+        opt.value = member.actorPub;
+        opt.textContent = member.actorPub === myActorPub ? t('youSuffix', { name: shortPerson(member.actorPub, null) }) : shortPerson(member.actorPub, null);
+        services.profile.getPublicProfile(member.actorPub).then((profile) => {
+          if (!profile?.alias) return;
+          opt.textContent = member.actorPub === myActorPub ? t('youSuffix', { name: profile.alias }) : profile.alias;
+        });
+        assigneeSelect.appendChild(opt);
+      }
+      assigneeSelect.value = existing ? (existing.assigneePub ?? '') : myActorPub;
     }
+    renderAssigneeOptions(currentMeta);
     const assigneeLabel = document.createElement('label');
     assigneeLabel.append(t('assignee'), assigneeSelect);
+
+    if (listSelect) {
+      // Switching lists changes who's even assignable - re-fetch that
+      // list's own members instead of leaving stale options from the
+      // PREVIOUS list's meta showing.
+      listSelect.addEventListener('change', async () => {
+        const newMeta = await fetchMeta(listSelect.value);
+        if (!newMeta) return;
+        currentMeta = newMeta;
+        renderAssigneeOptions(currentMeta);
+      });
+    }
 
     let pendingAttachment = existing?.attachment ?? null;
     const attachWrap = document.createElement('div');
@@ -721,13 +925,15 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const wasUploadedFresh = pendingAttachment && pendingAttachment.assetId !== existing?.attachment?.assetId;
-      await onSubmit({
+      const values = {
         title: titleInput.value.trim(),
         content: contentInput.value.trim(),
         dueDate: dueInput.value ? fromDateInputValue(dueInput.value) : null,
         assigneePub: assigneeSelect.value || null,
         attachment: pendingAttachment,
-      });
+      };
+      if (listSelect) values.listId = listSelect.value;
+      await onSubmit(values);
       // Only now, once the attachment is genuinely part of a saved task, does
       // the deferred sync-out verification phase start - see
       // <qu-asset-upload>'s own doc comment on confirmSent() for why.
@@ -760,6 +966,24 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
       parentTitle = (doc.items ?? []).find((it) => it.id === parentId)?.title ?? null;
     }
 
+    // Which list this new task can land in - locked to the current one for
+    // a subtask (it must stay in its parent's own list), otherwise every
+    // list this identity can currently add tasks to, shared ones clearly
+    // marked with their owner's alias/pub.
+    let editableLists;
+    if (parentId) {
+      editableLists = [{ id: listId, title: meta.title || t('untitled'), role: roleOf(meta, myActorPub), ownerPub: meta.ownerPub }];
+    } else {
+      const mine = await listMine();
+      editableLists = [];
+      for (const l of mine) {
+        const m = await fetchMeta(l.id);
+        const role = roleOf(m, myActorPub);
+        if (m && canEdit(role)) editableLists.push({ id: l.id, title: m.title || t('untitled'), role, ownerPub: m.ownerPub });
+      }
+    }
+    if (stopped) return;
+
     renderSubpage(container, {
       showBackLink: false,
       render: (content) => {
@@ -769,12 +993,13 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
         h1.textContent = parentTitle ? t('newSubtask', { title: parentTitle }) : t('newTask');
         page.appendChild(h1);
         page.appendChild(buildTaskForm({
-          existing: null, meta,
-          onSubmit: async (values) => {
+          existing: null, meta, myEditableLists: editableLists, selectedListId: listId, lockList: !!parentId,
+          onSubmit: async ({ listId: targetListId, ...values }) => {
+            const finalListId = targetListId || listId;
             const payload = { id: crypto.randomUUID(), parentId: parentId || null, ...values, done: false, createdAt: Date.now(), createdBy: myActorPub, updatedAt: Date.now() };
-            await upsertTask(listId, payload, { isNew: true });
-            if (payload.assigneePub) await notifyAssignment(listId, payload);
-            window.location.hash = listHash(listId);
+            await upsertTask(finalListId, payload, { isNew: true });
+            if (payload.assigneePub && payload.assigneePub !== myActorPub) await notifyAssignment(finalListId, payload);
+            window.location.hash = listHash(finalListId);
           },
           onCancel: () => { window.location.hash = listHash(listId); },
         }));
@@ -838,7 +1063,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
             const prevAssignee = task.assigneePub;
             const payload = { ...task, ...values, updatedAt: Date.now() };
             await upsertTask(listId, payload, { isNew: false });
-            if (payload.assigneePub && payload.assigneePub !== prevAssignee) await notifyAssignment(listId, payload);
+            if (payload.assigneePub && payload.assigneePub !== prevAssignee && payload.assigneePub !== myActorPub) await notifyAssignment(listId, payload);
             window.location.hash = listHash(listId);
           },
           onCancel: () => { window.location.hash = listHash(listId); },

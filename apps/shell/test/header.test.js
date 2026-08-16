@@ -8,6 +8,7 @@ import { installDom, waitFor } from '@qu/ui/testing';
 
 installDom();
 const { mountHeader } = await import('../src/header.js');
+const { registerServiceWorker, applyUpdate, captureInstallPrompt } = await import('../src/pwa.js');
 
 async function freshEnv() {
   const qu = new QuStore();
@@ -50,6 +51,67 @@ function mockAppsFetch(apps = []) {
 
 async function waitForOwnName(container) {
   await waitFor(() => (container.querySelector('.qu-shell-user-name')?.textContent ?? '') !== '');
+}
+
+// ===== fakes for ./pwa.js's registerServiceWorker() - mirrors apps/shell/test/pwa.test.js's own =====
+class FakeRegistration extends EventTarget {
+  constructor() {
+    super();
+    this.installing = null;
+    this.waiting = null;
+  }
+}
+class FakeWorker extends EventTarget {
+  constructor() {
+    super();
+    this.state = 'installing';
+    this.posted = [];
+  }
+  postMessage(msg) { this.posted.push(msg); }
+}
+class FakeServiceWorkerContainer extends EventTarget {
+  constructor(registration) {
+    super();
+    this.controller = {}; // a genuine update, not a first install - see registerServiceWorker()'s own doc comment
+    this._registration = registration;
+  }
+  register() { return Promise.resolve(this._registration); }
+}
+function installFakeServiceWorker() {
+  const registration = new FakeRegistration();
+  const container = new FakeServiceWorkerContainer(registration);
+  navigator.serviceWorker = container;
+  return { registration, container };
+}
+
+/** Mirrors apps/shell/client.js's own wiring - registers BOTH pwa.js browser APIs and returns the `pwa` object mountHeader() expects, so tests can drive the exact same shape production code passes. */
+function makePwa() {
+  let updateRegistration = null;
+  let updateAvailable = false;
+  const updateListeners = new Set();
+  registerServiceWorker({
+    onUpdateAvailable: (registration) => {
+      updateRegistration = registration;
+      updateAvailable = true;
+      for (const cb of updateListeners) cb();
+    },
+  });
+  let installable = false;
+  const installListeners = new Set();
+  const { installApp } = captureInstallPrompt({
+    onInstallable: () => {
+      installable = true;
+      for (const cb of installListeners) cb();
+    },
+  });
+  return {
+    getUpdateAvailable: () => updateAvailable,
+    onUpdateAvailable: (cb) => updateListeners.add(cb),
+    applyUpdate: () => applyUpdate(updateRegistration),
+    getInstallable: () => installable,
+    onInstallable: (cb) => installListeners.add(cb),
+    installApp,
+  };
 }
 
 test('renders the Home logo, Back/Forward buttons, and the notification bell', async (t) => {
@@ -366,6 +428,156 @@ test('.qu-shell-user has min-width: 0 so it can shrink/ellipsis instead of pushi
     const css = document.getElementById('qu-shell-header-style').textContent;
     const rule = css.match(/\.qu-shell-user\s*\{[^}]*\}/)[0];
     assert.match(rule, /min-width:\s*0/, 'the .qu-shell-user flex item must set min-width: 0 to allow it to shrink below its content size');
+  } finally {
+    stop();
+  }
+});
+
+// ===== PWA update icon + menu entries (./pwa.js, folded into the header instead of a separate bar) =====
+// `mountHeader()` no longer calls ./pwa.js itself - it renders whatever `pwa` (built the SAME way
+// apps/shell/client.js builds it, see makePwa() above) tells it, so every test here builds one explicitly.
+
+test('the update icon stays hidden until a genuine update is available, then clicking it applies it', async (t) => {
+  const { registration } = installFakeServiceWorker();
+  t.after(() => { delete navigator.serviceWorker; });
+  const { qu, services } = await freshEnv();
+  t.mock.method(globalThis, 'fetch', mockAppsFetch());
+  const container = makeContainer();
+  const stop = mountHeader(container, { qu, services, subscribe: noopSubscribe, pwa: makePwa() });
+  try {
+    await waitForOwnName(container);
+    const updateBtn = container.querySelector('.qu-shell-update-btn');
+    assert.equal(updateBtn.hidden, true);
+
+    const worker = new FakeWorker();
+    registration.installing = worker;
+    registration.dispatchEvent(new Event('updatefound'));
+    worker.state = 'installed';
+    registration.waiting = worker; // a real browser promotes an installed worker to .waiting itself
+    worker.dispatchEvent(new Event('statechange'));
+    await waitFor(() => updateBtn.hidden === false);
+    assert.match(updateBtn.title, /update/i);
+
+    updateBtn.click();
+    assert.deepEqual(worker.posted, [{ type: 'SKIP_WAITING' }]);
+  } finally {
+    stop();
+  }
+});
+
+test('the update icon never appears for the very first service worker install (no controller yet) - only a genuine update', async (t) => {
+  const registration = new FakeRegistration();
+  const container2 = new FakeServiceWorkerContainer(registration);
+  container2.controller = null; // no controller at boot - a first install, not an update
+  navigator.serviceWorker = container2;
+  t.after(() => { delete navigator.serviceWorker; });
+  const { qu, services } = await freshEnv();
+  t.mock.method(globalThis, 'fetch', mockAppsFetch());
+  const container = makeContainer();
+  const stop = mountHeader(container, { qu, services, subscribe: noopSubscribe, pwa: makePwa() });
+  try {
+    await waitForOwnName(container);
+    const worker = new FakeWorker();
+    registration.installing = worker;
+    registration.dispatchEvent(new Event('updatefound'));
+    worker.state = 'installed';
+    worker.dispatchEvent(new Event('statechange'));
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(container.querySelector('.qu-shell-update-btn').hidden, true);
+  } finally {
+    stop();
+  }
+});
+
+test('an update already available BEFORE the header mounts still shows the icon immediately (no missed event)', async (t) => {
+  const { registration } = installFakeServiceWorker();
+  t.after(() => { delete navigator.serviceWorker; });
+  const pwa = makePwa(); // registers + starts listening, same as apps/shell/client.js does before mountHeader() ever runs
+  const worker = new FakeWorker();
+  registration.installing = worker;
+  registration.dispatchEvent(new Event('updatefound'));
+  worker.state = 'installed';
+  registration.waiting = worker;
+  worker.dispatchEvent(new Event('statechange'));
+  await waitFor(() => pwa.getUpdateAvailable() === true);
+
+  const { qu, services } = await freshEnv();
+  t.mock.method(globalThis, 'fetch', mockAppsFetch());
+  const container = makeContainer();
+  const stop = mountHeader(container, { qu, services, subscribe: noopSubscribe, pwa });
+  try {
+    await waitForOwnName(container);
+    assert.equal(container.querySelector('.qu-shell-update-btn').hidden, false);
+  } finally {
+    stop();
+  }
+});
+
+test('no pwa option at all - update icon and install menu entry both stay absent/hidden, no throw', async (t) => {
+  const { qu, services } = await freshEnv();
+  t.mock.method(globalThis, 'fetch', mockAppsFetch());
+  const container = makeContainer();
+  const stop = mountHeader(container, { qu, services, subscribe: noopSubscribe });
+  try {
+    await waitForOwnName(container);
+    assert.equal(container.querySelector('.qu-shell-update-btn').hidden, true);
+  } finally {
+    stop();
+  }
+});
+
+test('the "Install app" and "Apply update" menu entries are absent until applicable, appear under their own divider, and work', async (t) => {
+  const { registration } = installFakeServiceWorker();
+  t.after(() => { delete navigator.serviceWorker; });
+  const { qu, services } = await freshEnv();
+  t.mock.method(globalThis, 'fetch', mockAppsFetch());
+  const container = makeContainer();
+  const pwa = makePwa();
+  const stop = mountHeader(container, { qu, services, subscribe: noopSubscribe, pwa });
+  try {
+    await waitForOwnName(container);
+    container.querySelector('.qu-shell-user-btn').click();
+    await waitFor(() => container.querySelector('.qu-shell-menu a') !== null);
+    assert.equal([...container.querySelectorAll('.qu-shell-menu-item')].length, 0, 'neither entry, nor their divider, should exist yet');
+    container.querySelector('.qu-shell-user-btn').click(); // close
+
+    const event = new window.Event('beforeinstallprompt', { cancelable: true });
+    let prompted = false;
+    event.prompt = () => { prompted = true; };
+    event.userChoice = Promise.resolve({ outcome: 'accepted' });
+    window.dispatchEvent(event);
+
+    const worker = new FakeWorker();
+    registration.installing = worker;
+    registration.dispatchEvent(new Event('updatefound'));
+    worker.state = 'installed';
+    registration.waiting = worker;
+    worker.dispatchEvent(new Event('statechange'));
+    await waitFor(() => pwa.getInstallable() === true && pwa.getUpdateAvailable() === true);
+
+    container.querySelector('.qu-shell-user-btn').click(); // reopen
+    await waitFor(() => container.querySelector('.qu-shell-menu a') !== null);
+    const items = [...container.querySelectorAll('.qu-shell-menu-item')];
+    const installBtn = items.find((b) => /install/i.test(b.textContent));
+    const applyUpdateBtn = items.find((b) => b !== installBtn);
+    assert.ok(installBtn, 'expected an "Install app" entry once installable');
+    assert.ok(applyUpdateBtn, 'expected an "Apply update" entry once an update is pending');
+    // Both sit after a divider that separates them from Profile/Settings/App List.
+    const dividers = [...container.querySelectorAll('.qu-shell-menu-divider')];
+    assert.equal(dividers.length, 2, 'expected the usual favorites divider PLUS a second one before this group');
+
+    applyUpdateBtn.click();
+    assert.deepEqual(worker.posted, [{ type: 'SKIP_WAITING' }]);
+
+    installBtn.click();
+    await waitFor(() => prompted === true);
+    // Install is one-shot - gone on the next open; the update entry stays (still pending).
+    container.querySelector('.qu-shell-user-btn').click();
+    container.querySelector('.qu-shell-user-btn').click();
+    await waitFor(() => container.querySelector('.qu-shell-menu a') !== null);
+    const itemsAfter = [...container.querySelectorAll('.qu-shell-menu-item')];
+    assert.equal(itemsAfter.some((b) => /install/i.test(b.textContent)), false);
+    assert.equal(itemsAfter.some((b) => b.textContent.includes(applyUpdateBtn.textContent)), true);
   } finally {
     stop();
   }

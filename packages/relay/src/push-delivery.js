@@ -1,4 +1,4 @@
-import { QuCrypto } from '@qu/core';
+import { QuCrypto, isEncryptedEnvelope } from '@qu/core';
 import { sendWebPush as defaultSendWebPush } from '@qu/push';
 import { THREAD_PRESETS, NotificationPrefsService, paths } from '@qu/services';
 import { createLogger } from '@qu/log';
@@ -63,13 +63,16 @@ export class PushDeliveryService {
    * @param {{publicKey: string, privateKey: string, subject: string}|null} deps.vapidKeys -
    *   `null` disables actual Web Push sends (in-app notifications still
    *   happen) - e.g. a relay that hasn't configured/generated VAPID keys yet.
-   * @param {(spaceId: string|number, threadId: string, context: {authorPub: string|null, mention: boolean, mentions: string[], functionName: string|null}) => ({appId?: string, functionName?: string, title: string, body: string, url: string}|null|undefined)} [deps.resolveNotification]
+   * @param {(spaceId: string|number, threadId: string, context: {authorPub: string|null, mention: boolean, mentions: string[], functionName: string|null, extra: object}) => ({appId?: string, functionName?: string, title: string, body: string, url: string}|null|undefined)} [deps.resolveNotification]
    *   See class doc comment. Called once per NOTIFIED candidate (not once
    *   per message) - `mention` varies per candidate, so the resolved
    *   title/functionName legitimately can too. `context.functionName` is
    *   set when a `notify.threadCandidates` hook already decided this
    *   candidate's function (see class doc comment) - `null` for a plain
-   *   generic (readers/mentions) candidate.
+   *   generic (readers/mentions) candidate. `context.extra` is the
+   *   message's own plain fields (e.g. `{gameId: '...'}`) when it wasn't
+   *   E2E encrypted, `{}` otherwise (private-thread content stays opaque
+   *   to this relay - see `deliverThreadMessage()`'s own doc comment).
    * @param {import('@qu/foundation').Registry} [deps.registry] - Optional -
    *   see class doc comment's "WHO GETS NOTIFIED IS ALSO EXTENSIBLE"
    *   section. Omitted (or no handler registered), `notify.threadCandidates`
@@ -107,6 +110,20 @@ export class PushDeliveryService {
     // base64url, so this MUST be converted, not compared/looked-up as-is.
     const authorPub = quBit.pub ? QuCrypto.toBase64Url(QuCrypto.fromBase64(quBit.pub)) : null;
     const mentions = Array.isArray(quBit.val?.mentions) ? quBit.val.mentions : [];
+    // A restricted/private thread's message body is E2E encrypted - this
+    // relay never has the reader's private key, so `quBit.val` there is
+    // opaque ciphertext (`{iv, ct, to}`), not real content (see this
+    // class's own "content-blind by design" doc comment). For a PUBLIC
+    // message (`isEncryptedEnvelope()` false - the common case for e.g. a
+    // deliberately-unencrypted invite notice, see apps/geochase's own
+    // `notifyChaserInvite()`), the plain fields ARE genuinely visible here
+    // already (this relay is physically storing the plaintext either way),
+    // so handing them to `resolveNotification()` as `extra` costs nothing
+    // privacy-wise beyond what's already true, and is what lets a
+    // manifest's own `urlTemplate` reference a real field from the message
+    // (e.g. `{gameId}`) instead of only ever `{pub}` - see
+    // `createManifestNotificationResolver()`'s own doc comment.
+    const extra = quBit.val && !isEncryptedEnvelope(quBit.val) ? quBit.val : {};
     // `_id` and the path's own messageId segment are guaranteed identical
     // (see `MessageService.postMessage()`'s own doc comment) - reading it
     // off the QuBit here avoids a relay.js regex change just to thread it
@@ -153,7 +170,7 @@ export class PushDeliveryService {
 
     for (const { actorPub, mention } of candidates) {
       const hookFunctionName = hookFunctionNameByActor.get(actorPub) ?? null;
-      const resolved = this.resolveNotification?.(spaceId, threadId, { authorPub, mention, mentions, functionName: hookFunctionName }) ?? this.#genericNotification(spaceId, authorPub, mention);
+      const resolved = this.resolveNotification?.(spaceId, threadId, { authorPub, mention, mentions, functionName: hookFunctionName, extra }) ?? this.#genericNotification(spaceId, authorPub, mention);
       const appId = resolved.appId ?? String(spaceId);
       const functionName = resolved.functionName ?? hookFunctionName ?? (mention ? 'mention' : 'newMessage');
 
@@ -308,16 +325,26 @@ export class PushDeliveryService {
  * `actions[].hrefTemplate` may contain a literal `{pub}` placeholder,
  * substituted with this event's `authorPub` (the actor who posted the
  * message - for Phone, the caller) - e.g. `'#/phone/{pub}/accept'` becomes
- * `'#/phone/<callerPub>/accept'`. Every other app's existing pushActions
- * entries (no `urlTemplate`) are completely unaffected - `url` still falls
- * back to the original flat `#/<appId>`, and `actions`/`bypassPresence` are
- * simply omitted from the returned object, exactly as before this existed.
+ * `'#/phone/<callerPub>/accept'`. ANY OTHER `{fieldName}` placeholder is
+ * substituted from `context.extra` instead (`apps/geochase/manifest.quapp`'s
+ * own `geochase-invite` action is the first real user of this -
+ * `'#/geochase/{gameId}'` becomes `'#/geochase/<the real gameId>'`, read off
+ * the notifying message's own (deliberately unencrypted, see
+ * apps/geochase/src/game-service.js's own `notifyChaserInvite()`) `gameId`
+ * field) - left as the LITERAL placeholder text when `extra` doesn't have a
+ * matching field (e.g. a private/encrypted thread, where `extra` is always
+ * `{}` - see `PushDeliveryService.deliverThreadMessage()`'s own doc comment),
+ * so a misconfigured template fails loudly/visibly rather than resolving to
+ * a silently broken URL. Every other app's existing pushActions entries (no
+ * `urlTemplate`) are completely unaffected - `url` still falls back to the
+ * original flat `#/<appId>`, and `actions`/`bypassPresence` are simply
+ * omitted from the returned object, exactly as before this existed.
  *
  * @param {import('@qu/loader').QuLoader} loader
- * @returns {(spaceId: string|number, threadId: string, context: {authorPub: string|null, mention: boolean, mentions: string[], functionName?: string|null}) => ({appId: string, functionName: string, title: string, body: string, url: string, actions?: Array<{action: string, title: string, url: string}>, bypassPresence?: boolean}|null)}
+ * @returns {(spaceId: string|number, threadId: string, context: {authorPub: string|null, mention: boolean, mentions: string[], functionName?: string|null, extra?: object}) => ({appId: string, functionName: string, title: string, body: string, url: string, actions?: Array<{action: string, title: string, url: string}>, bypassPresence?: boolean}|null)}
  */
 export function createManifestNotificationResolver(loader) {
-  return function resolveNotification(spaceId, _threadId, { authorPub, mention, functionName = null }) {
+  return function resolveNotification(spaceId, _threadId, { authorPub, mention, functionName = null, extra = {} }) {
     for (const { manifest } of loader.listManifests()) {
       if (manifest.spaceId !== spaceId) continue;
       const action = functionName
@@ -326,7 +353,10 @@ export function createManifestNotificationResolver(loader) {
       if (!action) return null;
       const appLabel = manifest.label ?? manifest.name;
       const who = (authorPub ?? 'someone').slice(0, 10);
-      const substitutePub = (template) => template.replaceAll('{pub}', authorPub ?? '');
+      const substitutePub = (template) => template.replace(/\{(\w+)\}/g, (whole, key) => {
+        if (key === 'pub') return authorPub ?? '';
+        return extra?.[key] != null ? String(extra[key]) : whole;
+      });
       return {
         appId: manifest.name,
         functionName: action.id,

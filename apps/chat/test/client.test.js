@@ -676,6 +676,53 @@ test('the read-tick updates to "Read" (✓✓) LIVE when the peer\'s receipt arr
   }
 });
 
+test('clicking the read (✓✓) tick reveals a popover with WHEN it was read, and clicking again hides it', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'when did you read this' });
+
+  await bob.services.presence.publishReadReceipt(CHAT_SPACE_ID, roomId, Date.now() + 1000);
+  const receiptPath = paths.threadReadReceiptPath(CHAT_SPACE_ID, roomId, bob.myPub);
+  await alice.qu.putSealed(receiptPath, await bob.qu.get(receiptPath));
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('[data-segment="core.readReceipt"]')?.textContent.includes('✓✓'));
+    const tick = container.querySelector('[data-segment="core.readReceipt"]');
+    assert.equal(container.querySelector('.qu-chat-bubble-tick-popover'), null);
+
+    tick.click();
+    await waitFor(() => container.querySelector('.qu-chat-bubble-tick-popover'));
+    assert.ok(container.querySelector('.qu-chat-bubble-tick-popover').textContent.length > 0);
+
+    tick.click(); // same tick again - toggles the popover closed
+    assert.equal(container.querySelector('.qu-chat-bubble-tick-popover'), null);
+  } finally {
+    stop();
+  }
+});
+
+test('clicking the sent-only (✓) tick does nothing - no read time to reveal yet', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'not read yet' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('[data-segment="core.readReceipt"]')?.textContent.includes('✓'));
+    container.querySelector('[data-segment="core.readReceipt"]').click();
+    assert.equal(container.querySelector('.qu-chat-bubble-tick-popover'), null);
+  } finally {
+    stop();
+  }
+});
+
 test('a message with no reply banner active posts with replyTo: null (not "undefined")', async () => {
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');

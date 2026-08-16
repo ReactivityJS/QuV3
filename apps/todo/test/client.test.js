@@ -114,12 +114,16 @@ async function waitForAsync(check, { timeout = 1000, interval = 5 } = {}) {
   }
 }
 
-async function createListViaForm(container) {
+async function createListViaForm(container, title = 'Groceries') {
   await waitFor(() => container.querySelector('.qu-todo-new input') !== null);
+  const before = container.querySelectorAll('.qu-todo-row-title').length;
   const input = container.querySelector('.qu-todo-new input');
-  input.value = 'Groceries';
+  input.value = title;
   container.querySelector('form.qu-todo-new').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-  await waitFor(() => container.querySelector('.qu-todo-row-title') !== null);
+  // Count-based (not existence-based): a SECOND call in the same container
+  // would otherwise resolve instantly against the FIRST list's already-
+  // present row, racing ahead of this call's own (still in-flight) qu.put().
+  await waitFor(() => container.querySelectorAll('.qu-todo-row-title').length > before);
 }
 
 // ===== mount() - main view =================================================
@@ -284,6 +288,67 @@ test('a subtask renders indented under its parent, and deleting the parent also 
   stop();
 });
 
+test('the New Task page offers a list picker (defaulting to the list navigated from) so a task can be created directly into any other editable list, and the assignee defaults to the creator themself', async () => {
+  const { qu, services, myPub } = await freshEnv();
+  const container = makeContainer();
+  let stop = mount(container, { qu, services, segments: ['todo'], subscribe: noopSubscribe });
+  await createListViaForm(container, 'List A');
+  await createListViaForm(container, 'List B');
+  const mine = await services.sharing.listMine('todo', 'list');
+  assert.equal(mine.length, 2);
+  const [listA, listB] = mine.map((l) => l.id);
+  stop();
+
+  stop = mount(container, { qu, services, segments: segmentsFor(`#/todo/${listA}/new`), subscribe: noopSubscribe });
+  await waitFor(() => container.querySelector('.qu-todo-list-select') !== null);
+  const listSelect = container.querySelector('.qu-todo-list-select');
+  assert.equal(listSelect.disabled, false);
+  assert.deepEqual([...listSelect.options].map((o) => o.value).sort(), [listA, listB].sort());
+  assert.equal(listSelect.value, listA); // defaults to the list navigated from
+
+  assert.equal(container.querySelector('.qu-todo-assignee-select').value, myPub, 'assignee must default to the creator themself, not "Unassigned"');
+
+  container.querySelector('.qu-todo-form input[type="text"]').value = 'Landed in list B';
+  listSelect.value = listB;
+  listSelect.dispatchEvent(new window.Event('change', { bubbles: true }));
+  window.location.hash = ''; // see createTaskViaForm()'s own comment on why this reset matters
+  container.querySelector('.qu-todo-form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+  await waitFor(() => window.location.hash === `#/todo/${listB}`);
+
+  const docA = await qu.get(paths.documentPath(TODO_SPACE_ID, `todo-${listA}-items`));
+  assert.deepEqual(docA.val.items, []);
+  const docB = await qu.get(paths.documentPath(TODO_SPACE_ID, `todo-${listB}-items`));
+  assert.equal(docB.val.items[0]?.title, 'Landed in list B');
+  stop();
+});
+
+test('a subtask\'s New Task page locks the list picker to its parent\'s own list, showing it disabled rather than offering other lists', async () => {
+  const { qu, services } = await freshEnv();
+  const container = makeContainer();
+  let stop = mount(container, { qu, services, segments: ['todo'], subscribe: noopSubscribe });
+  await createListViaForm(container);
+  const [{ id: listId }] = await services.sharing.listMine('todo', 'list');
+  stop();
+
+  stop = mount(container, { qu, services, segments: segmentsFor(`#/todo/${listId}/new`), subscribe: noopSubscribe });
+  await createTaskViaForm(container, { title: 'Plan trip' });
+  stop();
+  const parentId = (await qu.get(paths.documentPath(TODO_SPACE_ID, `todo-${listId}-items`))).val.items[0].id;
+
+  stop = mount(container, { qu, services, segments: segmentsFor(`#/todo/${listId}/new/${parentId}`), subscribe: noopSubscribe });
+  // Checked on `.disabled` itself (not mere presence): the PREVIOUS mount's
+  // own (non-subtask, unlocked) `.qu-todo-list-select` is still sitting in
+  // this same, reused `container` - `stop()` halts reactivity, it doesn't
+  // clear the DOM - so a presence-only wait would resolve against that
+  // stale element instead of this mount's actual (locked) one.
+  await waitFor(() => container.querySelector('.qu-todo-list-select')?.disabled === true);
+  const listSelect = container.querySelector('.qu-todo-list-select');
+  assert.equal(listSelect.disabled, true);
+  assert.equal(listSelect.options.length, 1);
+  assert.equal(listSelect.value, listId);
+  stop();
+});
+
 // ===== Sharing (contacts-only invite by pub, autocomplete) ==================
 
 test('the share picker only offers Contacts - a non-contact with a published profile is never suggested, and there is no "paste a raw pub" fallback', async () => {
@@ -355,7 +420,7 @@ test('inviteMember flow: inviting a contact grants them editor by default, grows
 });
 
 test('an invited member sees the shared list (and can only be assigned tasks - not an arbitrary actor), and assigning a task to them makes it show up on their own "Assigned to me" page', async () => {
-  const { qu: ownerQu, services: ownerServices } = await freshEnv();
+  const { qu: ownerQu, services: ownerServices, myPub: ownerPub } = await freshEnv();
   const { qu: guestQu, services: guestServices, myPub: guestPub } = await createPeer(ownerQu, { alias: 'Ada' });
   await ownerServices.contacts.addContact(guestPub, {});
 
@@ -380,12 +445,13 @@ test('an invited member sees the shared list (and can only be assigned tasks - n
   // from the list's OWN members, so this exercises "only a current member is
   // assignable" for free (there is no free-text actor field on the task form).
   stop = mount(ownerContainer, { qu: ownerQu, services: ownerServices, segments: segmentsFor(`#/todo/${listId}/new`), subscribe: noopSubscribe });
-  await waitFor(() => ownerContainer.querySelector('.qu-todo-form select') !== null);
+  await waitFor(() => ownerContainer.querySelector('.qu-todo-assignee-select') !== null);
   ownerContainer.querySelector('.qu-todo-form input[type="text"]').value = 'Book venue';
-  const assigneeOptions = [...ownerContainer.querySelectorAll('.qu-todo-form select option')];
+  const assigneeOptions = [...ownerContainer.querySelectorAll('.qu-todo-assignee-select option')];
   const guestOption = assigneeOptions.find((o) => o.value === guestPub);
   assert.ok(guestOption, 'the invited guest must be a selectable assignee');
-  ownerContainer.querySelector('.qu-todo-form select').value = guestPub;
+  assert.equal(ownerContainer.querySelector('.qu-todo-assignee-select').value, ownerPub, 'assignee must default to the creator themself');
+  ownerContainer.querySelector('.qu-todo-assignee-select').value = guestPub;
   window.location.hash = ''; // see createTaskViaForm()'s own comment on why this reset matters
   ownerContainer.querySelector('.qu-todo-form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
   await waitFor(() => /^#\/todo\/[^/]+$/.test(window.location.hash));
@@ -393,7 +459,6 @@ test('an invited member sees the shared list (and can only be assigned tasks - n
 
   // Simulate sync: mirror exactly what a real relay connection would
   // deliver to the guest's own client (same technique apps/calendar/test uses).
-  const ownerPub = await ownerServices.actors.whoAmI();
   await mirrorPaths(ownerQu, guestQu, [
     actorPath(ownerPub, 'profile'),
     paths.documentPath(TODO_SPACE_ID, `todo-${listId}-meta`),
@@ -439,7 +504,11 @@ test('the returned stop function tears down cleanly - no error thrown', async ()
   assert.doesNotThrow(() => stop());
 });
 
-test('renderHeaderNavPoints(): hidden while another app is active, shown immediately (pointing at #/todo) then upgraded to the first editable list\'s New Task page once ToDo becomes active', async () => {
+function navPointLink(wrap, label) {
+  return [...wrap.querySelectorAll('a')].find((a) => a.textContent === label);
+}
+
+test('renderHeaderNavPoints(): hidden while another app is active; shown as a "New list"/"New task" dropdown once ToDo becomes active, "New task" upgraded to the first editable list\'s New Task page', async () => {
   const { qu, services } = await freshEnv();
   const container = makeContainer();
   const stopMain = mount(makeContainer(), { qu, services, segments: ['todo'], subscribe: noopSubscribe });
@@ -460,6 +529,103 @@ test('renderHeaderNavPoints(): hidden while another app is active, shown immedia
   appId = 'todo';
   listeners.forEach((cb) => cb());
   assert.equal(wrap.hidden, false);
-  assert.equal(wrap.querySelector('a')?.getAttribute('href'), '#/todo');
-  await waitFor(() => wrap.querySelector('a')?.getAttribute('href') === `#/todo/${listId}/new`);
+  // 2 always-present items (see renderHeaderNavPoints()'s own doc comment) -
+  // renderNavPointsMenu() renders these as a real dropdown, not a plain link.
+  assert.equal(navPointLink(wrap, 'New list')?.getAttribute('href'), '#/todo/new');
+  assert.equal(navPointLink(wrap, 'New task')?.getAttribute('href'), '#/todo');
+  await waitFor(() => navPointLink(wrap, 'New task')?.getAttribute('href') === `#/todo/${listId}/new`);
+});
+
+test('"Mir zugewiesen"/Assigned-to-me: each row can be checked off directly (dropping out immediately, since this view is not-done-only) and links back to its own list', async () => {
+  const { qu, services, myPub } = await freshEnv();
+  const container = makeContainer();
+  let stop = mount(container, { qu, services, segments: ['todo'], subscribe: noopSubscribe });
+  await createListViaForm(container);
+  const [{ id: listId }] = await services.sharing.listMine('todo', 'list');
+  stop();
+
+  stop = mount(container, { qu, services, segments: segmentsFor(`#/todo/${listId}/new`), subscribe: noopSubscribe });
+  await waitFor(() => container.querySelector('.qu-todo-form select') !== null);
+  container.querySelector('.qu-todo-form select').value = myPub; // self-assign
+  await createTaskViaForm(container, { title: 'Buy milk' });
+  stop();
+
+  stop = mount(container, { qu, services, segments: ['todo', 'mine'], subscribe: noopSubscribe });
+  await waitFor(() => container.querySelector('.qu-todo-task-title') !== null);
+  assert.equal(container.querySelector('.qu-todo-task-title').textContent, 'Buy milk');
+
+  const listLink = container.querySelector('.qu-todo-task-list-link');
+  assert.ok(listLink, 'expected a link back to the task\'s own list');
+  assert.equal(listLink.getAttribute('href'), `#/todo/${listId}`);
+  assert.equal(listLink.textContent, 'Groceries');
+
+  const checkbox = container.querySelector('.qu-todo-task-row input[type="checkbox"]');
+  assert.equal(checkbox.disabled, false, 'the owner can edit their own list, so the checkbox must be enabled here too');
+  checkbox.checked = true;
+  checkbox.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await waitFor(() => container.querySelector('.qu-todo-empty') !== null);
+  assert.match(container.querySelector('.qu-todo-empty').textContent, /Nothing assigned/);
+
+  // The task itself is DONE now, not deleted - still reachable/editable from the list page.
+  const itemsDoc = await qu.get(paths.documentPath(TODO_SPACE_ID, `todo-${listId}-items`));
+  assert.equal(itemsDoc.val.items[0].done, true);
+  stop();
+});
+
+test('list page and "Mir zugewiesen" both render a Lists <-> Mir-zugewiesen switcher (sidebar items + a mobile switch link) and a "Copy link" button for an absolute, shareable URL', async () => {
+  const { qu, services } = await freshEnv();
+  const container = makeContainer();
+  let stop = mount(container, { qu, services, segments: ['todo'], subscribe: noopSubscribe });
+  await createListViaForm(container);
+  const [{ id: listId }] = await services.sharing.listMine('todo', 'list');
+  stop();
+
+  const written = [];
+  const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', { value: { clipboard: { writeText: async (text) => { written.push(text); } } }, configurable: true });
+  try {
+    stop = mount(container, { qu, services, segments: segmentsFor(`#/todo/${listId}`), subscribe: noopSubscribe });
+    await waitFor(() => container.querySelector('.qu-ctxswitch-sidebar') !== null);
+    const sidebarLinks = [...container.querySelectorAll('.qu-ctxswitch-sidebar a')].map((a) => a.textContent);
+    assert.ok(sidebarLinks.includes('Assigned to me'), 'expected "Mir zugewiesen" in the switcher sidebar');
+    assert.ok(sidebarLinks.includes('Groceries'), 'expected the list itself in the switcher sidebar');
+    assert.equal(container.querySelector('.qu-ctxswitch-title-link')?.getAttribute('href'), '#/todo', 'the mobile "{list} ›" link must point at the shared #/todo picker page');
+
+    container.querySelector('.qu-todo-copy-link').click();
+    await waitFor(() => written.length === 1);
+    assert.equal(written[0], `http://localhost/#/todo/${listId}`);
+    stop();
+
+    // A fresh container (not a re-mount over the same one) - stop() tears
+    // down watches/timers but never blanks the DOM itself (nothing in this
+    // app needs it to), so reusing `container` here would leave the list
+    // page's own stale nodes satisfying the very next waitFor() instantly,
+    // racing ahead of the mine page's real (still in-flight) render.
+    const mineContainer = makeContainer();
+    stop = mount(mineContainer, { qu, services, segments: ['todo', 'mine'], subscribe: noopSubscribe });
+    await waitFor(() => mineContainer.querySelector('.qu-ctxswitch-sidebar') !== null);
+    mineContainer.querySelector('.qu-todo-copy-link').click();
+    await waitFor(() => written.length === 2);
+    assert.equal(written[1], 'http://localhost/#/todo/mine');
+  } finally {
+    stop();
+    Object.defineProperty(globalThis, 'navigator', originalDescriptor);
+  }
+});
+
+test('#/todo/new creates a list and redirects straight to it', async () => {
+  const { qu, services } = await freshEnv();
+  const container = makeContainer();
+  const stop = mount(container, { qu, services, segments: ['todo', 'new'], subscribe: noopSubscribe });
+  try {
+    await waitFor(() => container.querySelector('.qu-todo-new input') !== null);
+    container.querySelector('.qu-todo-new input').value = 'Packing list';
+    window.location.hash = '';
+    container.querySelector('form.qu-todo-new').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+    await waitFor(() => /^#\/todo\/[^/]+$/.test(window.location.hash));
+    const [{ id: listId }] = await services.sharing.listMine('todo', 'list');
+    assert.equal(window.location.hash, `#/todo/${listId}`);
+  } finally {
+    stop();
+  }
 });

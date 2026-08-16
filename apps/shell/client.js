@@ -61,9 +61,17 @@
  * that is making an "update available" moment observable at all - it does
  * NOT cache any app data, see `sw.js`'s own doc comment for why: Quniverse's
  * real data already lives in IndexedDB, synced over WebSocket, not a static
- * asset worth intercepting). Web Push's actual subscribe flow (permission
- * prompt + `PushManager.subscribe()` + `services.pushSubscriptions`) lives
- * in `apps/profile/client.js`'s own Settings subpage instead (identity-bound
+ * asset worth intercepting). `registerServiceWorker()`/`captureInstallPrompt()`
+ * are called at the very TOP of `mount()` below, before any other boot
+ * work - see that call site's own doc comment for why timing matters here.
+ * The install/update UI itself (an "Install app" menu entry + a small
+ * update icon, both folded into chrome that already exists, plus a text
+ * "Apply update" entry alongside Install at the bottom of the menu) lives
+ * inside `./src/header.js`, which receives the resulting state/callbacks as
+ * this function's own `pwa` object rather than calling `./src/pwa.js`
+ * itself. Web Push's actual subscribe flow (permission prompt +
+ * `PushManager.subscribe()` + `services.pushSubscriptions`) lives in
+ * `apps/profile/client.js`'s own Settings subpage instead (identity-bound
  * device preferences, the same place every other one lives) - `sw.js`'s own
  * `push`/`notificationclick` handlers are what actually SHOW a notification
  * once a subscription exists and a push arrives.
@@ -88,7 +96,7 @@ import { createClientServices } from './src/services.js';
 import { connectToRelay } from './src/sync.js';
 import { mountHeader } from './src/header.js';
 import { mountNotificationPopups } from './src/notification-popups.js';
-import { mountPwaUi } from './src/pwa.js';
+import { registerServiceWorker, applyUpdate, captureInstallPrompt } from './src/pwa.js';
 import { parseHash } from './src/router.js';
 
 const log = createLogger('shell');
@@ -137,6 +145,45 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
   // stale and bail out instead of racing the newer one for control of
   // `screen`/`stopMountedApp`.
   let navToken = 0;
+
+  // PWA install/update - registered HERE, before any other boot work (not
+  // inside mountHeader() below, which only runs after onboarding/profile/
+  // sync/prefs/admin+apps fetches complete): `beforeinstallprompt` and a
+  // service worker `updatefound` can both fire within moments of page load,
+  // and a browser event listener attached late simply never sees an event
+  // that already happened (see `./src/pwa.js`'s own doc comment) -
+  // confirmed live, a prior version of this that called
+  // `captureInstallPrompt()`/`registerServiceWorker()` from inside
+  // `mountHeader()` sometimes missed both entirely. The resulting state and
+  // callbacks are threaded into `mountHeader()` as `pwa` below, which
+  // renders them whenever it itself eventually mounts - "when do we start
+  // listening" and "when do we render" are deliberately decoupled.
+  let updateRegistration = null;
+  let updateAvailable = false;
+  const updateListeners = new Set();
+  registerServiceWorker({
+    onUpdateAvailable: (registration) => {
+      updateRegistration = registration;
+      updateAvailable = true;
+      for (const cb of updateListeners) cb();
+    },
+  });
+  let installable = false;
+  const installListeners = new Set();
+  const { installApp } = captureInstallPrompt({
+    onInstallable: () => {
+      installable = true;
+      for (const cb of installListeners) cb();
+    },
+  });
+  const pwa = {
+    getUpdateAvailable: () => updateAvailable,
+    onUpdateAvailable: (cb) => updateListeners.add(cb),
+    applyUpdate: () => applyUpdate(updateRegistration),
+    getInstallable: () => installable,
+    onInstallable: (cb) => installListeners.add(cb),
+    installApp,
+  };
 
   if (!(await identity.hasIdentity())) {
     const onboardRoot = document.createElement('div');
@@ -215,18 +262,9 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
   }
 
   const headerRoot = document.createElement('div');
-  const pwaRoot = document.createElement('div');
   const screen = document.createElement('div');
   screen.className = 'qu-shell-screen';
-  container.append(headerRoot, pwaRoot, screen);
-
-  // Best-effort, same as everything else optional in this boot sequence -
-  // see this file's own "PWA/UPDATER" doc comment above.
-  try {
-    mountPwaUi(pwaRoot);
-  } catch (err) {
-    log.warn('PWA install/update UI unavailable in this environment:', err.message);
-  }
+  container.append(headerRoot, screen);
 
   // `adminPubs` is this relay's own operator allowlist (see
   // `@qu/relay`'s `AdminHttp#verifyAdmin()`) - fetched here only so the
@@ -268,7 +306,7 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
   } catch { /* offline/unreachable - header renders no shell.headerAction contributors, everything else still works */ }
   let stopHeader = null;
   try {
-    stopHeader = mountHeader(headerRoot, { qu, services, adminPubs, subscribe, syncFetch, apps: bootApps });
+    stopHeader = mountHeader(headerRoot, { qu, services, adminPubs, subscribe, syncFetch, apps: bootApps, pwa });
   } catch (err) {
     log.warn('shell header unavailable in this environment:', err.message);
   }

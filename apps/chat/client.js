@@ -170,7 +170,7 @@ import { createI18n } from '@qu/i18n';
 import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage, mountAppHeaderAction, renderNavPointsMenu } from '@qu/ui';
 import {
   renderEmojiPicker, renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, insertAtCursor, copyToClipboard,
-  mountComposerAutogrow, COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS,
+  mountComposerAutogrow, COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS, flipUpIfNeeded,
 } from '@qu/thread-ui';
 
 // See this file's own top doc comment's "MESSAGE CHROME" section - the
@@ -397,11 +397,26 @@ const STYLE = `
      (admin-configurable, see this file's own top doc comment and
      FOOTER_ORDER_DEFAULT above). Each segment renders into its own <span>
      child, laid out by this one flex rule - mirrors
-     apps/forum/client.js's own .qu-forum-message-footer exactly. */
-  .qu-chat-bubble-footer { display: flex; align-items: center; gap: 0.4rem; margin-top: 0.3rem; font-size: 0.7em; opacity: 0.75; flex-wrap: wrap; }
-  .qu-chat-bubble-timestamp-link { color: inherit; text-decoration: none; }
+     apps/forum/client.js's own .qu-forum-message-footer exactly: NO
+     font-size/opacity here, only on the timestamp text itself (below).
+     Shrinking the whole row (a previous version of this rule did) also
+     shrinks the "+" reaction/"⋮" menu triggers it contains, since
+     @qu/thread-ui's own CSS sizes both in em units - well under a
+     comfortable touch target. Forum never had that bug (its own message
+     footer rule never set font-size), which is why its message row always
+     felt more touch-friendly than Chat's despite both rendering the exact
+     same @qu/thread-ui components (renderContextMenu()/renderEmojiPicker())
+     into content.messageMenu/content.messageFooter. */
+  .qu-chat-bubble-footer { display: flex; align-items: center; gap: 0.4rem; margin-top: 0.3rem; flex-wrap: wrap; }
+  .qu-chat-bubble-timestamp-link { font-size: 0.75em; opacity: 0.6; color: inherit; text-decoration: none; }
   .qu-chat-bubble-timestamp-link:hover { text-decoration: underline; }
-  .qu-chat-bubble-tick-read { color: var(--qu-color-accent, #5b5bd6); opacity: 1; }
+  /* The read-tick segment is its own tap target (see buildMessageFooter()'s
+     own doc comment on the read-time popover) - position: relative so the
+     popover it opens can anchor to it via position: absolute. */
+  .qu-chat-bubble-footer [data-segment="core.readReceipt"] { position: relative; font-size: 0.85em; opacity: 0.6; }
+  .qu-chat-bubble-tick-read { color: var(--qu-color-accent, #5b5bd6); opacity: 1; cursor: pointer; }
+  .qu-chat-bubble-tick-popover { position: absolute; z-index: 20; bottom: 100%; right: 0; margin-bottom: 0.3rem; padding: 0.3rem 0.6rem; border-radius: var(--qu-radius-sm, 0.3rem); background: var(--qu-color-surface, #ffffff); border: 1px solid var(--qu-color-border, #8884); box-shadow: 0 0.3rem 0.8rem rgba(0,0,0,0.2); font-size: 0.85em; white-space: nowrap; }
+  .qu-chat-bubble-tick-popover-flip-up { bottom: 100%; }
   .qu-chat-bubble-attachment { margin-top: 0.4rem; max-width: 16rem; }
   .qu-chat-edit-row { display: flex; flex-direction: column; gap: 0.3rem; position: relative; }
   .qu-chat-edit-row textarea { font: inherit; padding: 0.35rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); resize: vertical; }
@@ -1919,11 +1934,107 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
       if (!tickEl) continue; // not one of THIS identity's own messages - no tick segment was rendered for it at all
       const message = renderedMessagesById.get(row.dataset.messageId);
       if (!message) continue;
-      const isRead = Object.values(readReceipts).some((upto) => upto >= message.ts);
-      tickEl.textContent = isRead ? '✓✓' : '✓';
-      tickEl.title = isRead ? t('read') : t('sent');
-      tickEl.classList.toggle('qu-chat-bubble-tick-read', isRead);
+      renderReadReceiptTick(tickEl, message, readReceipts);
     }
+  }
+
+  // Closes whichever read-time popover (see renderReadReceiptTick() below)
+  // is currently open, if any - at most one open at a time, same shape as
+  // @qu/thread-ui's own renderContextMenu()/renderEmojiPicker() single-panel
+  // convention, just hand-rolled here since this popover is chat-specific
+  // (a shared component wasn't worth it for one tap target).
+  let closeReadTimePopover = null;
+
+  /**
+   * Renders (or, called again from refreshReadTicks(), updates in place) the
+   * `core.readReceipt` footer segment: the ✓/✓✓ tick, PLUS - once read - a
+   * click/tap handler that briefly reveals WHEN it was read, via
+   * `PresenceService.getReadReceipts()`'s own `readAt` (the receipt QuBit's
+   * real write timestamp, distinct from `upto`, which is only WHICH message
+   * was read up to - see that method's own doc comment).
+   * @param {HTMLElement} el @param {object} message @param {Record<string, {upto: number, readAt: number}>} readReceipts
+   */
+  function renderReadReceiptTick(el, message, readReceipts) {
+    const readers = Object.entries(readReceipts).filter(([, r]) => r.upto >= message.ts);
+    const isRead = readers.length > 0;
+    // The glyph lives in its OWN child span, never directly in `el.textContent`
+    // - refreshReadTicks() calls this again on every read-receipts watch
+    // notification (including harmless duplicate/echo ones - see
+    // refreshReadTicks()'s own doc comment), and a plain `el.textContent =`
+    // there would silently wipe out an open read-time popover (also a
+    // child of `el` - see toggleReadTimePopover() below) out from under
+    // the person who just tapped it open.
+    let glyph = el.querySelector('.qu-chat-bubble-tick-glyph');
+    if (!glyph) {
+      glyph = document.createElement('span');
+      glyph.className = 'qu-chat-bubble-tick-glyph';
+      el.appendChild(glyph);
+    }
+    glyph.textContent = isRead ? '✓✓' : '✓';
+    el.title = isRead ? t('read') : t('sent');
+    el.classList.toggle('qu-chat-bubble-tick-read', isRead);
+    // Rebinding onclick (not addEventListener) on every render/refresh is
+    // deliberate - it always closes over the CURRENT `readers`, and never
+    // accumulates duplicate listeners across refreshReadTicks() calls the
+    // way addEventListener would.
+    el.onclick = isRead ? (e) => { e.stopPropagation(); toggleReadTimePopover(el, message, readers); } : null;
+  }
+
+  /**
+   * Toggles a small popover anchored to the tick showing exactly when each
+   * reader read this message (one line per reader in a group; a single
+   * time in a 1:1, where there's only ever one other reader). Clicking the
+   * SAME tick again closes it - same "tap to reveal, tap to dismiss" shape
+   * WhatsApp/Telegram use for their own read-time popovers.
+   */
+  async function toggleReadTimePopover(el, message, readers) {
+    const wasOpenForThisTick = el.dataset.popoverOpen === '1';
+    closeReadTimePopover?.();
+    if (wasOpenForThisTick) return;
+
+    const lines = await Promise.all(
+      readers
+        .sort((a, b) => a[1].readAt - b[1].readAt)
+        .map(async ([pub, { readAt }]) => {
+          if (target.kind !== 'group') return formatTs(readAt);
+          const label = formatActorLabel(pub, await resolveAuthor(pub));
+          return `${label}: ${formatTs(readAt)}`;
+        })
+    );
+    if (stopped || el.dataset.popoverOpen === '1') return; // closed again while resolving author labels
+
+    const panel = document.createElement('div');
+    panel.className = 'qu-chat-bubble-tick-popover';
+    for (const line of lines) {
+      const row = document.createElement('div');
+      row.textContent = line;
+      panel.appendChild(row);
+    }
+    el.appendChild(panel);
+    flipUpIfNeeded(panel, el, 'qu-chat-bubble-tick-popover-flip-up');
+    el.dataset.popoverOpen = '1';
+
+    function onDocClick(e) {
+      if (!panel.contains(e.target) && e.target !== el) close();
+    }
+    function onKeydown(e) {
+      if (e.key === 'Escape') close();
+    }
+    function close() {
+      panel.remove();
+      delete el.dataset.popoverOpen;
+      document.removeEventListener('click', onDocClick, true);
+      document.removeEventListener('keydown', onKeydown);
+      closeReadTimePopover = null;
+    }
+    closeReadTimePopover = close;
+    // Deferred one tick - same reasoning as renderContextMenu()'s own
+    // openPanel(): without it, THIS click would immediately bubble into
+    // onDocClick and close the popover it just opened.
+    setTimeout(() => {
+      document.addEventListener('click', onDocClick, true);
+      document.addEventListener('keydown', onKeydown);
+    }, 0);
   }
 
   async function renderMessage(message, byId, readReceipts) {
@@ -1987,7 +2098,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
    * two differences: a native "Reply" menu item (any message, not just
    * `mine`), and a native `core.readReceipt` footer segment (own messages
    * only - the ✓/✓✓ tick, see `renderMessages()`'s own `readReceipts` lookup).
-   * @param {object} message @param {boolean} mine @param {Record<string, number>} readReceipts
+   * @param {object} message @param {boolean} mine @param {Record<string, {upto: number, readAt: number}>} readReceipts
    * @param {HTMLElement} textWrap - re-rendered in place by the native "Edit" menu item.
    * @returns {Promise<HTMLElement>}
    */
@@ -2049,12 +2160,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     if (mine) {
       segments.push({
         id: 'core.readReceipt',
-        render: (el) => {
-          const isRead = Object.values(readReceipts).some((upto) => upto >= message.ts);
-          el.textContent = isRead ? '✓✓' : '✓';
-          el.title = isRead ? t('read') : t('sent');
-          if (isRead) el.classList.add('qu-chat-bubble-tick-read');
-        },
+        render: (el) => renderReadReceiptTick(el, message, readReceipts),
       });
     }
 
