@@ -1,0 +1,173 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { QuStore, MemoryStoreAdapter } from '@qu/core';
+import { QuIdentityEngine, actorPath } from '@qu/identity';
+import { AccessEngine, ThreadEngine } from '@qu/engines';
+import { ListService, AccessService, SharingService, MessageService, FlagService, ActorService, paths } from '@qu/services';
+import { createGame, readGame, inviteChaser, updateGame, listMyGames, discoverInvites, gameThreadId, DEFAULT_SETTINGS } from '../src/game-service.js';
+
+const SPACE_ID = 'test-geochase-space';
+
+async function freshEnv() {
+  const qu = new QuStore();
+  qu.mount('store', new MemoryStoreAdapter());
+  new AccessEngine(qu);
+  new ThreadEngine(qu);
+  const identity = new QuIdentityEngine(qu);
+  await identity.importMnemonic(identity.generateMnemonic());
+  await identity.publishMainProfile({ alias: 'Me' });
+
+  const list = new ListService(qu);
+  const access = new AccessService(qu, identity);
+  const messages = new MessageService(qu, identity, list, access);
+  const flags = new FlagService(qu, identity, list);
+  const services = {
+    actors: new ActorService(identity),
+    access,
+    messages,
+    flags,
+    sharing: new SharingService(qu, identity, access, messages, flags),
+  };
+  const myPub = await services.actors.whoAmI();
+  return { qu, identity, services, myPub };
+}
+
+/** A full second, independent identity+services bundle sharing the SAME store - mirrors apps/todo/test's own createPeer(). */
+async function createPeer(ownerQu, { alias } = {}) {
+  const peerQu = new QuStore();
+  peerQu.mount('store', new MemoryStoreAdapter());
+  new AccessEngine(peerQu);
+  new ThreadEngine(peerQu);
+  const identity = new QuIdentityEngine(peerQu);
+  await identity.importMnemonic(identity.generateMnemonic());
+  await identity.publishMainProfile({ alias });
+  const list = new ListService(peerQu);
+  const access = new AccessService(peerQu, identity);
+  const messages = new MessageService(peerQu, identity, list, access);
+  const flags = new FlagService(peerQu, identity, list);
+  const services = {
+    actors: new ActorService(identity), access, messages, flags,
+    sharing: new SharingService(peerQu, identity, access, messages, flags),
+  };
+  const myPub = await services.actors.whoAmI();
+  await ownerQu.putSealed(actorPath(myPub, 'profile'), await peerQu.get(actorPath(myPub, 'profile')));
+  return { qu: peerQu, identity, services, myPub };
+}
+
+async function mirrorPaths(fromQu, toQu, paths_) {
+  for (const p of paths_) {
+    const bit = await fromQu.get(p);
+    if (bit) await toQu.putSealed(p, bit);
+  }
+}
+async function mirrorChildren(fromQu, toQu, parentPath) {
+  const entries = await new ListService(fromQu).listDerived(parentPath);
+  for (const { path, quBit } of entries) await toQu.putSealed(path, quBit);
+}
+
+test('createGame(): writes a pending game with the creator as "chased", default settings, and stars it into listMyGames()', async () => {
+  const { services, myPub } = await freshEnv();
+  const config = await createGame(services, SPACE_ID, 'g1');
+  assert.equal(config.chasedPub, myPub);
+  assert.equal(config.status, 'pending');
+  assert.deepEqual(config.settings, DEFAULT_SETTINGS);
+  assert.deepEqual(config.members, [{ actorPub: myPub, role: 'chased', addedAt: config.members[0].addedAt }]);
+
+  const mine = await listMyGames(services);
+  assert.deepEqual(mine.map((g) => g.id), ['g1']);
+});
+
+test('createGame(): a settings override shallow-merges over the defaults', async () => {
+  const { services } = await freshEnv();
+  const config = await createGame(services, SPACE_ID, 'g1', { mapMode: 'osm' });
+  assert.equal(config.settings.mapMode, 'osm');
+  assert.equal(config.settings.chasedIntervalMs, DEFAULT_SETTINGS.chasedIntervalMs); // untouched
+});
+
+test('inviteChaser(): grows members+readers and is idempotent for an already-invited chaser', async () => {
+  const { qu, identity, services, myPub } = await freshEnv();
+  const { myPub: chaserPub } = await createPeer(qu);
+  await createGame(services, SPACE_ID, 'g1');
+
+  const updated = await inviteChaser(qu, identity, services, SPACE_ID, 'g1', chaserPub);
+  assert.deepEqual(updated.members.map((m) => m.actorPub), [myPub, chaserPub]);
+  assert.equal(updated.members[1].role, 'chaser');
+  assert.deepEqual(updated.readers, [myPub, chaserPub]);
+
+  // The invite notification itself lands in the CHASER's own mailbox thread
+  // (readers: [chaserPub] only - see THREAD_PRESETS.mail()) - its content
+  // isn't decryptable from the inviter's own side, so (same as apps/todo's
+  // own inviteMember test) this only asserts the mailbox thread's own
+  // (unencrypted) config, not the message body.
+  const inviteConfig = await services.messages.getConfig(SPACE_ID, `invite-${chaserPub}`);
+  assert.deepEqual(inviteConfig.readers, [chaserPub]);
+
+  // Idempotent - inviting the same chaser again is a no-op, not a duplicate member.
+  const again = await inviteChaser(qu, identity, services, SPACE_ID, 'g1', chaserPub);
+  assert.equal(again.members.length, 2);
+});
+
+test('inviteChaser(): the ACL itself is chased-only writers - AccessEngine rejects a write signed by anyone else, not just this file\'s own logic', async () => {
+  const { qu: ownerQu, identity: ownerIdentity, services: ownerServices } = await freshEnv();
+  const { qu: chaserQu, identity: chaserIdentity, services: chaserServices, myPub: chaserPub } = await createPeer(ownerQu, { alias: 'Chaser' });
+  await createGame(ownerServices, SPACE_ID, 'g1');
+  await inviteChaser(ownerQu, ownerIdentity, ownerServices, SPACE_ID, 'g1', chaserPub);
+
+  // Mirror the game thread (meta + ACL) into the chaser's own store, as a real relay sync would.
+  await mirrorPaths(ownerQu, chaserQu, [
+    paths.threadMetaPath(SPACE_ID, gameThreadId('g1')),
+    paths.aclPath(SPACE_ID, 'threads', gameThreadId('g1')),
+  ]);
+
+  await assert.rejects(updateGame(chaserQu, chaserIdentity, chaserServices, SPACE_ID, 'g1', { status: 'active' }));
+});
+
+test('updateGame(): patches status and shallow-merges settings without clobbering untouched fields', async () => {
+  const { qu, identity, services } = await freshEnv();
+  await createGame(services, SPACE_ID, 'g1');
+
+  const started = await updateGame(qu, identity, services, SPACE_ID, 'g1', { status: 'active' });
+  assert.equal(started.status, 'active');
+  assert.deepEqual(started.settings, DEFAULT_SETTINGS);
+
+  const tuned = await updateGame(qu, identity, services, SPACE_ID, 'g1', { settings: { chaserIntervalMs: 1000 } });
+  assert.equal(tuned.status, 'active'); // untouched by this second call
+  assert.equal(tuned.settings.chaserIntervalMs, 1000);
+  assert.equal(tuned.settings.mapMode, DEFAULT_SETTINGS.mapMode); // untouched
+
+  // The re-read config off the store must be a plain object, not a
+  // `{iv, ct, to}` encrypted envelope - see writeThreadMeta()'s own doc
+  // comment for why thread meta is signed-only, never encrypted.
+  const reread = await readGame(services, SPACE_ID, 'g1');
+  assert.equal(reread.status, 'active');
+});
+
+test('discoverInvites(): a chaser who never opened the invite mailbox still gets starred once they call it - showing up in their own listMyGames()', async () => {
+  const { qu: ownerQu, identity: ownerIdentity, services: ownerServices, myPub: chasedPub } = await freshEnv();
+  const { qu: chaserQu, services: chaserServices, myPub: chaserPub } = await createPeer(ownerQu, { alias: 'Chaser' });
+  // createPeer() already mirrors the CHASER's own profile into ownerQu (so
+  // the owner can resolve their X25519 key to encrypt the invite) - the
+  // chaser needs the reverse for decryption: the CHASED's own profile,
+  // mirrored into the chaser's store, to resolve the sender's key.
+  await chaserQu.putSealed(actorPath(chasedPub, 'profile'), await ownerQu.get(actorPath(chasedPub, 'profile')));
+
+  await createGame(ownerServices, SPACE_ID, 'g1');
+  await inviteChaser(ownerQu, ownerIdentity, ownerServices, SPACE_ID, 'g1', chaserPub);
+
+  // Real sync: mirror the game thread + the invite mailbox message into the chaser's own store.
+  await mirrorPaths(ownerQu, chaserQu, [
+    paths.threadMetaPath(SPACE_ID, gameThreadId('g1')),
+    paths.threadMetaPath(SPACE_ID, `invite-${chaserPub}`),
+  ]);
+  await mirrorChildren(ownerQu, chaserQu, paths.threadMessagesParentPath(SPACE_ID, `invite-${chaserPub}`));
+
+  assert.deepEqual(await listMyGames(chaserServices), []); // not starred yet - discoverInvites() hasn't run
+  await discoverInvites(chaserServices, SPACE_ID);
+  const mine = await listMyGames(chaserServices);
+  assert.deepEqual(mine.map((g) => g.id), ['g1']);
+});
+
+test('readGame(): returns null for a game that was never created', async () => {
+  const { services } = await freshEnv();
+  assert.equal(await readGame(services, SPACE_ID, 'nope'), null);
+});
