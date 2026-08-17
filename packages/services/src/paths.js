@@ -438,3 +438,19 @@ export function webrtcIceCandidatesParentPath(spaceId, threadId, pairKey, fromAc
 export function webrtcDeclinePath(spaceId, threadId, pairKey) {
   return `/store/${spaceId}/threads/${threadId}/webrtc/${pairKey}/declined`;
 }
+
+/**
+ * A sibling of `webrtcDeclinePath()` for the OPPOSITE end of a call's
+ * lifecycle: one side explicitly hanging up an ALREADY-connected call
+ * (`WebRtcSignalService.hangupCall()`/`onHangup()`). Real `RTCPeerConnection`s
+ * have no built-in "graceful bye" signal - closing one side's connection
+ * doesn't promptly tell the other side anything (ICE just eventually times
+ * out, `'disconnected'`, which `PeerConnection` deliberately treats as
+ * self-recovering, not a failure - see that class's own doc comment) - this
+ * is what lets the OTHER side learn "the call ended" immediately and
+ * reliably instead of being left looking connected indefinitely.
+ * @param {string|number} spaceId @param {string} threadId @param {string} pairKey @returns {string}
+ */
+export function webrtcHangupPath(spaceId, threadId, pairKey) {
+  return `/store/${spaceId}/threads/${threadId}/webrtc/${pairKey}/hungup`;
+}

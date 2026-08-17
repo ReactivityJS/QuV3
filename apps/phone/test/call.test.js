@@ -198,6 +198,77 @@ test('caller and callee complete a call handshake, exchange tracks, and can hang
   calleeCall.hangUp();
 });
 
+test('REGRESSION: when ONE side hangs up a connected call, the OTHER side\'s onHungUp() fires - without it, that side was left looking connected forever (a plain RTCPeerConnection close doesn\'t tell the other side anything reliably/promptly)', async () => {
+  const network = new TestNetwork();
+  const relayQu = new QuStore();
+  relayQu.mount('store', new MemoryStoreAdapter());
+  new SyncEngine(relayQu, new RelayTransport(network));
+
+  const caller = await freshParticipant('client-caller-hangup', network);
+  const callee = await freshParticipant('client-callee-hangup', network);
+  await mirrorProfiles(caller, callee);
+
+  const spaceId = 'phone-test-space-hangup';
+  caller.sync.subscribe(paths.spacePath(spaceId));
+  callee.sync.subscribe(paths.spacePath(spaceId));
+
+  let callerConnected = false;
+  let calleeConnected = false;
+  let calleeHungUp = false;
+
+  const callerCall = await createPhoneCall({
+    qu: caller.qu, identity: caller.identity, services: caller.services, spaceId, remotePub: callee.pub,
+    initiator: true,
+    onPeerConnected: () => { callerConnected = true; },
+  });
+  const calleeCall = await createPhoneCall({
+    qu: callee.qu, identity: callee.identity, services: callee.services, spaceId, remotePub: caller.pub,
+    initiator: false,
+    onPeerConnected: () => { calleeConnected = true; },
+    onHungUp: () => { calleeHungUp = true; },
+  });
+
+  await waitUntil(() => callerConnected && calleeConnected);
+  assert.equal(calleeHungUp, false); // not yet - only after the caller actually hangs up
+
+  callerCall.hangUp();
+  await waitUntil(() => calleeHungUp);
+
+  calleeCall.hangUp(); // callee's own cleanup - harmless even though the caller's side is already gone
+});
+
+test('hanging up BEFORE ever connecting does NOT fire the other side\'s onHungUp() - that call never had anything to "end", declineCall()/onTimeout() already cover it', async () => {
+  const network = new TestNetwork();
+  const relayQu = new QuStore();
+  relayQu.mount('store', new MemoryStoreAdapter());
+  new SyncEngine(relayQu, new RelayTransport(network));
+
+  const caller = await freshParticipant('client-caller-nohangup', network);
+  const callee = await freshParticipant('client-callee-nohangup', network);
+  await mirrorProfiles(caller, callee);
+
+  const spaceId = 'phone-test-space-nohangup';
+  caller.sync.subscribe(paths.spacePath(spaceId));
+  callee.sync.subscribe(paths.spacePath(spaceId));
+
+  let calleeHungUp = false;
+  const calleeCall = await createPhoneCall({
+    qu: callee.qu, identity: callee.identity, services: callee.services, spaceId, remotePub: caller.pub,
+    initiator: false,
+    onHungUp: () => { calleeHungUp = true; },
+  });
+
+  const callerCall = await createPhoneCall({
+    qu: caller.qu, identity: caller.identity, services: caller.services, spaceId, remotePub: callee.pub,
+    initiator: true,
+  });
+  callerCall.hangUp(); // hung up immediately, before any onPeerConnected() ever fired on either side
+
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(calleeHungUp, false);
+  calleeCall.hangUp();
+});
+
 test('upgradeToVideo() adds a video track to an already-connected audio-only call, and the callee receives it via onTrack() without a fresh onPeerConnected()', async () => {
   const network = new TestNetwork();
   const relayQu = new QuStore();

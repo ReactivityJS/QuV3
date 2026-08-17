@@ -213,6 +213,84 @@ test('hanging up AFTER connecting shows a summary (contact, date, duration, back
   }
 });
 
+test('the end-of-call screen links BOTH the alias and the raw pub to the profile route (#/~<pub>)', async () => {
+  const env = await freshEnv();
+  const contactPub = await publishedContact(env, 'Erin Contact');
+  const container = makeContainer();
+  // A timed-out active call drives the same showEndScreen() the "declined"/
+  // self-hangup/peer-hangup cases all share - negotiationTimeoutMs: 30 makes
+  // it fire fast without a real peer.
+  const stop = mount(container, { qu: env.qu, identity: env.identity, services: env.services, apps: env.apps, segments: ['phone', contactPub], negotiationTimeoutMs: 30 });
+  try {
+    await waitFor(() => container.querySelector('.qu-phone-summary-name') !== null);
+    const nameLink = container.querySelector('.qu-phone-summary-name');
+    const pubLink = container.querySelector('.qu-phone-summary-pub');
+    assert.equal(nameLink.tagName, 'A');
+    assert.equal(nameLink.getAttribute('href'), `#/~${contactPub}`);
+    assert.equal(nameLink.textContent, 'Erin Contact');
+    assert.equal(pubLink.tagName, 'A');
+    assert.equal(pubLink.getAttribute('href'), `#/~${contactPub}`);
+    assert.equal(pubLink.textContent, contactPub);
+  } finally {
+    stop();
+  }
+});
+
+test('goBack() uses ctx.goBack when the shell provides it, instead of a hardcoded #/phone hash assignment', async () => {
+  const { qu, identity, services, apps } = await freshEnv();
+  const container = makeContainer();
+  const goBackCalls = [];
+  const fakeGoBack = (fallback) => { goBackCalls.push(fallback); };
+  const stop = mount(container, { qu, identity, services, apps, segments: ['phone', 'remote-pub-never-answers'], goBack: fakeGoBack });
+  try {
+    await waitFor(() => container.querySelector('.qu-phone-controls') !== null);
+    const [, , hangupBtn] = container.querySelectorAll('.qu-phone-controls button');
+    hangupBtn.click();
+    assert.deepEqual(goBackCalls, ['#/phone']);
+  } finally {
+    stop();
+  }
+});
+
+test('REGRESSION: E2E - when the OTHER side hangs up a connected call, THIS side shows the "call ended" summary automatically, without clicking anything - the reported one-sided-hangup gap', async () => {
+  const network = new TestNetwork();
+  const relayQu = new QuStore();
+  relayQu.mount('store', new MemoryStoreAdapter());
+  new SyncEngine(relayQu, new RelayTransport(network));
+
+  const caller = await freshParticipant('hangup-caller', network);
+  const callee = await freshParticipant('hangup-callee', network);
+
+  const callerContainer = makeContainer();
+  const calleeContainer = makeContainer();
+  const stopCaller = mount(callerContainer, {
+    qu: caller.qu, identity: caller.identity, services: caller.services, apps: caller.apps,
+    segments: ['phone', callee.pub], subscribe: caller.subscribe, syncFetch: caller.syncFetch,
+  });
+  const stopCallee = mount(calleeContainer, {
+    qu: callee.qu, identity: callee.identity, services: callee.services, apps: callee.apps,
+    segments: ['phone', caller.pub, 'accept'], subscribe: callee.subscribe, syncFetch: callee.syncFetch,
+  });
+
+  try {
+    await waitFor(() => callerContainer.querySelector('.qu-phone-status').textContent.match(/connected|verbunden/i) !== null);
+    await waitFor(() => calleeContainer.querySelector('.qu-phone-status').textContent.match(/connected|verbunden/i) !== null);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    // Only the CALLER hangs up - the callee never clicks anything.
+    const [, , callerHangupBtn] = callerContainer.querySelectorAll('.qu-phone-controls button');
+    callerHangupBtn.click();
+
+    await waitFor(() => calleeContainer.querySelector('.qu-phone-summary') !== null);
+    assert.match(calleeContainer.querySelector('.qu-phone-summary-title').textContent, /ended|beendet/i);
+    assert.match(calleeContainer.querySelector('.qu-phone-summary-meta').textContent, /\d+:\d{2}/); // real duration, not a "declined"/"missed" reason
+    assert.equal(calleeContainer.querySelector('.qu-phone-controls'), null); // callee's own controls are gone too - local cleanup already ran
+  } finally {
+    stopCaller();
+    stopCallee();
+  }
+});
+
 test('hanging up BEFORE ever connecting still navigates back immediately - nothing to summarize', async () => {
   const { qu, identity, services, apps } = await freshEnv();
   const container = makeContainer();
@@ -318,7 +396,7 @@ test('mute/video toggle buttons flip data-active after a click, once the call is
   }
 });
 
-test('a call that never connects shows a distinct "could not connect" error after negotiationTimeoutMs, instead of hanging on "Calling…" forever', async () => {
+test('a call that never connects shows a distinct "could not connect" end screen (no auto-navigate, a Zurück link instead) after negotiationTimeoutMs, instead of hanging on "Calling…" forever', async () => {
   const { qu, identity, services, apps } = await freshEnv();
   const container = makeContainer();
   // Short override (see mountActiveCall()'s own doc comment) - remote-pub-f
@@ -327,7 +405,12 @@ test('a call that never connects shows a distinct "could not connect" error afte
   // Verbindung..." section).
   const stop = mount(container, { qu, identity, services, apps, segments: ['phone', 'remote-pub-f'], negotiationTimeoutMs: 30 });
   try {
-    await waitFor(() => container.querySelector('.qu-phone-status').textContent.match(/could not connect|nicht verbunden werden/i));
+    await waitFor(() => container.querySelector('.qu-phone-summary-title')?.textContent.match(/could not connect|nicht verbunden werden/i));
+    // No auto-navigate - the screen stays up until the user clicks back themselves.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.ok(container.querySelector('.qu-phone-summary-title'));
+    assert.equal(container.querySelector('.qu-phone-summary-meta'), null); // never connected - nothing to show a duration for
+    assert.ok(container.querySelector('.qu-phone-summary-back'));
   } finally {
     stop();
   }
