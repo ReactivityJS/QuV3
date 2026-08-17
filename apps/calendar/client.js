@@ -200,13 +200,13 @@ const STYLE = `
   .qu-cal-event-row { border-left: 4px solid #888; border-radius: 0.3rem; padding: 0.5rem 0.6rem; background: #8881; cursor: pointer; text-decoration: none; color: inherit; display: block; }
   .qu-cal-event-row * { display: block; }
   .qu-cal-event-time { font-size: 0.8em; opacity: 0.7; }
-  .qu-cal-allday-wrap { display: flex; margin: 0.4rem 0 0.6rem; }
+  .qu-cal-allday-wrap { display: flex; margin: 0.4rem 0 0.6rem; overflow-x: auto; -webkit-overflow-scrolling: touch; max-width: 100%; }
   .qu-cal-allday-gutter { width: 3rem; flex-shrink: 0; }
   .qu-cal-allday-grid { flex: 1; min-width: 0; display: grid; grid-auto-rows: 1.6rem; gap: 0.2rem; }
   .qu-cal-allday-bar { grid-row: 1; min-width: 0; display: flex; align-items: center; border-radius: 0.25rem; padding: 0 0.4rem; color: #fff; font-size: 0.78em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; text-decoration: none; box-sizing: border-box; }
   .qu-cal-allday-bar[data-continues-from="true"] { border-top-left-radius: 0; border-bottom-left-radius: 0; }
   .qu-cal-allday-bar[data-continues-to="true"] { border-top-right-radius: 0; border-bottom-right-radius: 0; }
-  .qu-cal-timegrid-wrap { display: flex; border-top: 1px solid var(--qu-color-border, #8884); overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .qu-cal-timegrid-wrap { display: flex; max-width: 100%; border-top: 1px solid var(--qu-color-border, #8884); overflow-x: auto; -webkit-overflow-scrolling: touch; }
   .qu-cal-hours { width: 2.7rem; flex-shrink: 0; }
   .qu-cal-hour-label { height: ${HOUR_PX}px; box-sizing: border-box; font-size: 0.7em; opacity: 0.6; transform: translateY(-0.6em); text-align: right; padding-right: 0.35rem; }
   .qu-cal-daycols { flex: 1; display: flex; }
