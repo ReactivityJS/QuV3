@@ -57,10 +57,12 @@ test('a notification posted AFTER mount pops a toast with a generic "open" actio
   }
 });
 
-test('an explicit "actions" array on the notification is used verbatim instead of the generic "open" fallback', async () => {
+test('an explicit "actions" array uses the REAL push-delivery.js shape ({action, title, url}) - accept stays a link, decline becomes a signaling button, not a second link', async () => {
   const { qu, services, myPub } = await freshEnv();
   const container = makeContainer();
-  const stop = mountNotificationPopups(container, { qu, services, subscribe: noopSubscribe });
+  const collectCalls = [];
+  const extensionPoints = { collect: async (point, payload) => { collectCalls.push({ point, payload }); return []; } };
+  const stop = mountNotificationPopups(container, { qu, services, extensionPoints, subscribe: noopSubscribe });
   try {
     const spaceId = paths.notificationsSpaceId(myPub);
     await services.messages.createThread(spaceId, paths.NOTIFICATIONS_THREAD_ID, THREAD_PRESETS.notifications(myPub));
@@ -69,17 +71,58 @@ test('an explicit "actions" array on the notification is used verbatim instead o
       extra: {
         title: 'Incoming call',
         url: '#/phone',
+        // Exactly what createManifestNotificationResolver() (packages/relay/
+        // src/push-delivery.js) actually produces - the shape mismatch
+        // between THIS and toast.js's own {label, href} contract was the
+        // real, shipped bug (see notification-popups.js's own doc comment).
         actions: [
-          { label: 'Annehmen', href: '#/phone/peer-a/accept' },
-          { label: 'Ablehnen', href: '#/phone/peer-a/decline', primary: false },
+          { action: 'accept', title: 'Annehmen', url: '#/phone/peer-a/accept' },
+          { action: 'decline', title: 'Ablehnen', url: '#/phone/peer-a/decline' },
         ],
       },
     });
 
     await waitFor(() => container.querySelector('.qu-toast') !== null);
-    const links = [...container.querySelectorAll('.qu-toast-actions a')];
-    assert.deepEqual(links.map((a) => a.textContent), ['Annehmen', 'Ablehnen']);
-    assert.deepEqual(links.map((a) => a.getAttribute('href')), ['#/phone/peer-a/accept', '#/phone/peer-a/decline']);
+    const toast = container.querySelector('.qu-toast');
+    const [acceptEl, declineEl] = toast.querySelectorAll('.qu-toast-actions > *');
+
+    assert.equal(acceptEl.tagName, 'A');
+    assert.equal(acceptEl.getAttribute('href'), '#/phone/peer-a/accept');
+    assert.equal(acceptEl.textContent, '📞 Annehmen');
+    assert.ok(acceptEl.classList.contains('qu-toast-action-positive'));
+
+    assert.equal(declineEl.tagName, 'BUTTON'); // no href - clicking must never navigate
+    assert.equal(declineEl.textContent, '📵 Ablehnen');
+    assert.ok(declineEl.classList.contains('qu-toast-action-danger'));
+
+    declineEl.click();
+    assert.equal(collectCalls.length, 1);
+    assert.equal(collectCalls[0].point, 'content.notificationAction');
+    assert.equal(collectCalls[0].payload.actionId, 'decline');
+    assert.equal(collectCalls[0].payload.url, '#/phone/peer-a/decline');
+    assert.equal(container.querySelector('.qu-toast'), null); // the click also closes the toast, same as any other action
+  } finally {
+    stop();
+  }
+});
+
+test('an unknown action id (neither accept nor decline) falls back to a plain href link, same as the generic "open" fallback', async () => {
+  const { qu, services, myPub } = await freshEnv();
+  const container = makeContainer();
+  const stop = mountNotificationPopups(container, { qu, services, subscribe: noopSubscribe });
+  try {
+    const spaceId = paths.notificationsSpaceId(myPub);
+    await services.messages.createThread(spaceId, paths.NOTIFICATIONS_THREAD_ID, THREAD_PRESETS.notifications(myPub));
+    await services.messages.postMessage(spaceId, paths.NOTIFICATIONS_THREAD_ID, {
+      body: 'x',
+      extra: { title: 'Future notification', url: '#/somewhere', actions: [{ action: 'snooze', title: 'Snooze', url: '#/somewhere/snooze' }] },
+    });
+
+    await waitFor(() => container.querySelector('.qu-toast') !== null);
+    const el = container.querySelector('.qu-toast-actions > *');
+    assert.equal(el.tagName, 'A');
+    assert.equal(el.getAttribute('href'), '#/somewhere/snooze');
+    assert.equal(el.textContent, 'Snooze');
   } finally {
     stop();
   }

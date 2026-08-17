@@ -49,6 +49,12 @@ const NEGOTIATION_TIMEOUT_MS = 45_000;
  *   `negotiationTimeoutMs` overrides the module's own realistic-ring-duration
  *   default (below) - exposed mainly for tests that need `onTimeout` to fire
  *   quickly, mirroring `WebRtcSignalService`'s own constructor option.
+ *   `cleanupDelayMs` - same idea, passed straight through to
+ *   `WebRtcSignalService`'s own constructor option of the same name - test-only,
+ *   lets a test prove `upgradeToVideo()` still works AFTER the post-connect
+ *   signaling-path tombstone has already run (the real-world timing every
+ *   actual call hits, since nobody upgrades to video within the default 5s),
+ *   without a slow real-time wait.
  *   `mode` - see `requestLocalMedia()`'s own doc comment; defaults to
  *   `'audio'` for BOTH roles (a call is an audio call by default, video is
  *   opt-in either up front via `client.js`'s own `/video` route, or mid-call
@@ -62,9 +68,14 @@ const NEGOTIATION_TIMEOUT_MS = 45_000;
  *   offer/answer/ICE candidate this call writes never actually reaches the
  *   OTHER side's local store at all (see that service's own constructor
  *   doc comment for the full "signal never arrives" bug this fixes).
- * @returns {Promise<{selfPub: string, localStream: MediaStream, toggleAudio: (enabled: boolean) => void, toggleVideo: (enabled: boolean) => void, upgradeToVideo: () => Promise<void>, hangUp: () => void}>}
+ * @returns {Promise<{selfPub: string, localStream: MediaStream, toggleAudio: (enabled: boolean) => void, toggleVideo: (enabled: boolean) => void, upgradeToVideo: () => Promise<void>, hangUp: () => void, getConnectedAt: () => number|null}>}
+ *   `getConnectedAt()` - the `Date.now()` timestamp this pair FIRST
+ *   connected (`null` if it never did) - what `client.js`'s own post-call
+ *   summary screen (Gesprächspartner/Datum/Uhrzeit/Dauer) uses to decide
+ *   whether to show a summary at all (never for a call that was hung up
+ *   before connecting) and to compute the call's duration.
  */
-export async function createPhoneCall({ qu, identity, services, spaceId, remotePub, iceServers, initiator, mode = 'audio', subscribe, syncFetch, onTrack, onPeerConnected, onDeclined, onTimeout, negotiationTimeoutMs = NEGOTIATION_TIMEOUT_MS } = {}) {
+export async function createPhoneCall({ qu, identity, services, spaceId, remotePub, iceServers, initiator, mode = 'audio', subscribe, syncFetch, onTrack, onPeerConnected, onDeclined, onTimeout, negotiationTimeoutMs = NEGOTIATION_TIMEOUT_MS, cleanupDelayMs } = {}) {
   const mainKey = await identity.getMainKey();
   const selfPub = QuCrypto.toBase64Url(mainKey.publicKey);
   const memberPubs = [selfPub, remotePub];
@@ -110,13 +121,21 @@ export async function createPhoneCall({ qu, identity, services, spaceId, remoteP
   }
 
   const webrtcTransport = new WebRTCTransport({ selfPeerId: selfPub, iceServers });
-  const signalService = new WebRtcSignalService(qu, identity, webrtcTransport, { negotiationTimeoutMs, subscribe, syncFetch });
+  const signalService = new WebRtcSignalService(qu, identity, webrtcTransport, { negotiationTimeoutMs, cleanupDelayMs, subscribe, syncFetch });
 
+  // Set once, the FIRST time this pair connects - a later renegotiation
+  // (upgradeToVideo()) fires onPeerConnected-shaped events through neither
+  // this nor onPeerConnected itself (see WebRTCTransport's own onTrack/
+  // addTrackToPeer doc comments: renegotiation reuses the same connection,
+  // it never re-fires onPeerConnected), so this is never overwritten mid-call.
+  let connectedAt = null;
   const unsubTrack = webrtcTransport.onTrack((peerId, stream) => {
     if (peerId === remotePub) onTrack?.(stream);
   });
   const unsubConnected = webrtcTransport.onPeerConnected((peerId) => {
-    if (peerId === remotePub) onPeerConnected?.();
+    if (peerId !== remotePub) return;
+    connectedAt ??= Date.now();
+    onPeerConnected?.();
   });
   const unsubDeclined = signalService.onDeclined((peerId) => {
     if (peerId === remotePub) onDeclined?.();
@@ -182,7 +201,10 @@ export async function createPhoneCall({ qu, identity, services, spaceId, remoteP
     signalService.close();
   }
 
-  return { selfPub, localStream, toggleAudio, toggleVideo, upgradeToVideo, hangUp };
+  // A getter, not a plain field - `createPhoneCall()` itself resolves right
+  // after connectPeer() starts negotiating, well before the connection
+  // actually completes, so a snapshot taken here would always be `null`.
+  return { selfPub, localStream, toggleAudio, toggleVideo, upgradeToVideo, hangUp, getConnectedAt: () => connectedAt };
 }
 
 /**

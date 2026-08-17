@@ -46,6 +46,36 @@ test('actions render as links (href) or buttons (onClick), both dismiss on click
   assert.equal(document.querySelector('.qu-toast'), null);
 });
 
+test('actions support an optional tone (positive/danger) for color, and an icon prepended to the label', () => {
+  const container = makeContainer();
+  const { show } = mountToastHost(container);
+  const dismiss = show({
+    title: 'Incoming call',
+    actions: [
+      { label: 'Accept', href: '#/phone/peer-a/accept', tone: 'positive', icon: '📞' },
+      { label: 'Decline', onClick: () => {}, tone: 'danger', icon: '📵' },
+    ],
+  });
+
+  const [acceptEl, declineEl] = container.querySelectorAll('.qu-toast-actions > *');
+  assert.ok(acceptEl.classList.contains('qu-toast-action-positive'));
+  assert.equal(acceptEl.textContent, '📞 Accept');
+  assert.ok(declineEl.classList.contains('qu-toast-action-danger'));
+  assert.equal(declineEl.textContent, '📵 Decline');
+  dismiss(); // other tests in this file query the shared global `document`, not just this test's own container
+});
+
+test('an action with neither tone nor icon renders exactly as before (plain label, no extra class)', () => {
+  const container = makeContainer();
+  const { show } = mountToastHost(container);
+  const dismiss = show({ title: 'x', actions: [{ label: 'Open', href: '#/somewhere' }] });
+  const el = container.querySelector('.qu-toast-actions > *');
+  assert.equal(el.textContent, 'Open');
+  assert.equal(el.classList.contains('qu-toast-action-positive'), false);
+  assert.equal(el.classList.contains('qu-toast-action-danger'), false);
+  dismiss();
+});
+
 test('durationMs auto-dismisses the toast without a click', async () => {
   const { show } = mountToastHost(makeContainer());
   show({ title: 'Auto-dismiss', durationMs: 5 });
