@@ -229,6 +229,50 @@ this repo uses — call it with `showBackLink: false`, per
 the shell header's own Back/Forward already covers "return to where you
 came from", so a subpage should not also render its own back link).
 
+### 4.3 A recurring CSS gotcha: flex/grid children silently overflowing on mobile
+
+`packages/ui` and `apps/_template/` cover navigation CHROME (back button,
+header action, context switcher — see
+[`docs/app-navigation-standard.md`](./app-navigation-standard.md)) — they
+have no visibility into, and can't prevent bugs in, your own app's bespoke
+CONTENT (a calendar grid, a form layout, a message list). One specific CSS
+pitfall is worth calling out explicitly here because it has already caused
+three separate real bugs in this exact codebase (the shell header's own
+avatar/name button, Calendar's New Event Start/End row, Calendar's week/day
+time grid) — easy to introduce, easy to miss until someone tests a narrow
+phone:
+
+**A flex (or grid) item's AUTOMATIC minimum size equals its content's
+natural, unwrapped size — not `0` — unless that item's own `overflow` is
+non-`visible`, or it has an explicit `min-width` (grid: `minmax(0, ...)`).**
+Concretely: a flex row containing a label with a long name, or a native
+`<input>`/`<select>`, will refuse to shrink below that content's full
+natural width, EVEN IF a sibling `flex: 1` should let it — the row (and
+everything containing it) gets pushed wider than the viewport instead,
+rather than the text ellipsizing or the layout wrapping the way it visually
+looks like it should.
+
+**The fix** is almost always one of:
+```css
+.your-flex-item { min-width: 0; }             /* let it actually shrink */
+.your-scrollable-wrap { overflow-x: auto; max-width: 100%; }  /* or: let IT scroll instead, contained */
+```
+Apply `min-width: 0` at EVERY level of nesting between the flex/grid
+container and the element with the wide content — a single missing spot
+anywhere in that chain re-introduces the bug (this is exactly why the
+Calendar time-grid bug and its all-day-banner sibling needed the fix in two
+different places, one level of nesting apart). If the content is
+GENUINELY supposed to be wider than the viewport (e.g. a 7-day time grid
+that needs real width per column to stay legible), give ITS OWN wrapper
+`overflow-x: auto` (plus `max-width: 100%` as a second line of defense)
+instead of trying to force it to shrink — a contained horizontal scroll
+region, not a shrunk-into-illegibility layout or a page that scrolls
+sideways as a whole.
+
+There's no shared component or lint rule that catches this automatically —
+test your app's own layouts at a narrow width (~320–375px) before calling
+a feature done, the same way you'd test any other real device constraint.
+
 ## 5. Appearing in the nav — nothing to register
 
 Once your manifest declares `clientMain` + `label`/`icon`/`navOrder`, you are

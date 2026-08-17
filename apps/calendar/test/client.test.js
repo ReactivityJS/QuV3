@@ -691,3 +691,27 @@ test('the New Event form\'s Start/End row can actually shrink to fit a mobile wi
   assert.match(inputRule, /min-width:\s*0/, 'the datetime-local input itself must allow shrinking below its native intrinsic width');
   assert.match(inputRule, /width:\s*100%/, 'the input should fill whatever width its label actually has, not render at its own browser-default size');
 });
+
+test('the Week/Day view\'s time grid AND its multi-day/all-day banner both contain their own horizontal overflow instead of leaking into the page', async () => {
+  const { qu, services } = await freshEnv();
+  const container = makeContainer();
+  const stop = mount(container, { qu, services, segments: ['calendar'], subscribe: noopSubscribe });
+  await waitFor(() => container.querySelector('.qu-cal-empty') !== null);
+  stop();
+
+  const css = document.getElementById('qu-calendar-style').textContent;
+  // The time grid (day-of-week headers + hour rows together, one scroll
+  // unit) has a deliberately wide minimum (30rem, so 7 day columns stay
+  // legible) - overflow-x: auto + max-width: 100% is what keeps that
+  // width CONTAINED (an internal scrollbar) instead of pushing the whole
+  // page wider.
+  const timegridRule = css.match(/\.qu-cal-timegrid-wrap\s*\{[^}]*\}/)[0];
+  assert.match(timegridRule, /overflow-x:\s*auto/);
+  assert.match(timegridRule, /max-width:\s*100%/);
+  // The multi-day/all-day event banner sits ABOVE the time grid as a
+  // separate sibling element - it needs the SAME containment, or a wide
+  // spanning-event layout there leaks past the grid's own scroll region.
+  const alldayRule = css.match(/\.qu-cal-allday-wrap\s*\{[^}]*\}/)[0];
+  assert.match(alldayRule, /overflow-x:\s*auto/);
+  assert.match(alldayRule, /max-width:\s*100%/);
+});
