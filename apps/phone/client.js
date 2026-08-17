@@ -28,8 +28,11 @@
  *     can independently upgrade to video whenever they want, same as any
  *     real video-calling app allows one side to have their camera off.
  *   `#/phone/<remotePub>/decline` - declines without ever requesting
- *     camera/mic access or mounting the active-call view - what a
- *     notification's "Ablehnen" action links to.
+ *     camera/mic access or mounting the active-call view - what the OS-level
+ *     Web Push notification's "Ablehnen" action links to (a service worker
+ *     can only ever open a URL - see `apps/shell/sw.js`'s own
+ *     `notificationclick` handler). The IN-APP toast's own "Ablehnen" button
+ *     does NOT use this route - see `handleNotificationAction()` below.
  */
 import { createI18n } from '@qu/i18n';
 import { formatActorLabel } from '@qu/services';
@@ -59,6 +62,9 @@ const DICT = {
     videoOn: 'Turn video on',
     hangUp: 'Hang up',
     you: 'You',
+    callEnded: 'Call ended',
+    duration: 'Duration',
+    back: 'Back',
   },
   de: {
     title: 'Telefon',
@@ -79,6 +85,9 @@ const DICT = {
     videoOn: 'Video einschalten',
     hangUp: 'Auflegen',
     you: 'Du',
+    callEnded: 'Anruf beendet',
+    duration: 'Dauer',
+    back: 'Zurück',
   },
 };
 const { t } = createI18n(DICT);
@@ -94,12 +103,18 @@ const STYLE = `
   .qu-phone-call-view { position: fixed; top: 3.25rem; right: 0; bottom: 0; left: 0; display: flex; flex-direction: column; background: #000; z-index: 10; }
   .qu-phone-remote-video { flex: 1; width: 100%; height: 100%; object-fit: cover; background: #111; }
   .qu-phone-local-video { position: absolute; top: 0.75rem; right: 0.75rem; width: 28vw; max-width: 9rem; aspect-ratio: 3 / 4; object-fit: cover; border-radius: var(--qu-radius-md, 0.4rem); border: 2px solid #fff4; background: #222; }
-  .qu-phone-status { position: absolute; top: 0.75rem; left: 0.75rem; color: #fff; background: #0007; padding: 0.3rem 0.6rem; border-radius: var(--qu-radius-sm, 0.3rem); font-size: 0.9em; }
+  .qu-phone-peer-name { position: absolute; top: 0.75rem; left: 0.75rem; color: #fff; font-weight: 700; font-size: 1.05em; text-shadow: 0 1px 3px #000a; max-width: 65%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .qu-phone-status { position: absolute; top: 2.15rem; left: 0.75rem; color: #fff; background: #0007; padding: 0.3rem 0.6rem; border-radius: var(--qu-radius-sm, 0.3rem); font-size: 0.9em; }
   .qu-phone-error { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #fff; background: #0009; padding: 0.8rem 1.2rem; border-radius: var(--qu-radius-md, 0.4rem); text-align: center; max-width: 80%; }
   .qu-phone-controls { position: absolute; bottom: 1.25rem; left: 50%; transform: translateX(-50%); display: flex; gap: 1rem; }
   .qu-phone-controls button { width: 3.2rem; height: 3.2rem; border-radius: 50%; border: none; font-size: 1.3em; cursor: pointer; background: #333c; color: #fff; }
   .qu-phone-controls button[data-active="false"] { background: #fff3; }
   .qu-phone-controls .qu-phone-hangup { background: #d32f2f; }
+  .qu-phone-summary { margin: auto; text-align: center; color: #fff; display: flex; flex-direction: column; align-items: center; gap: 0.6rem; padding: 1.5rem; }
+  .qu-phone-summary-title { font-size: 1.2em; opacity: 0.75; }
+  .qu-phone-summary-name { font-size: 1.6em; font-weight: 700; }
+  .qu-phone-summary-meta { opacity: 0.8; }
+  .qu-phone-summary-back { margin-top: 0.8rem; padding: 0.5rem 1.4rem; border-radius: var(--qu-radius-md, 0.4rem); border: 1px solid #fff4; background: transparent; color: #fff; cursor: pointer; font: inherit; }
 `;
 
 export function mount(container, ctx) {
@@ -168,7 +183,7 @@ function mountCallStarter(container, { services }) {
 // ===========================================================================
 // Decline - #/phone/<remotePub>/decline - no camera/mic, no active-call UI.
 // ===========================================================================
-function mountDecline(container, { qu, identity, iceServers }, spaceId, remotePub) {
+function mountDecline(container, { qu, identity, services, iceServers }, spaceId, remotePub) {
   const view = document.createElement('div');
   view.className = 'qu-phone-call-view';
   const status = document.createElement('div');
@@ -177,8 +192,16 @@ function mountDecline(container, { qu, identity, iceServers }, spaceId, remotePu
   view.appendChild(status);
   container.appendChild(view);
 
-  declinePhoneCall({ qu, identity, spaceId, remotePub, iceServers })
-    .then(() => { status.textContent = t('declined'); })
+  // Alias-first, same as mountActiveCall()'s own peerName - "declined" alone
+  // doesn't say WHO was declined, and a raw pub is unhelpful. Resolved
+  // alongside (not after) declinePhoneCall() itself - neither should wait
+  // on the other.
+  const peerLabelPromise = services.profile?.getPublicProfile(remotePub)
+    .then((profile) => formatActorLabel(remotePub, profile))
+    .catch(() => formatActorLabel(remotePub, null)) ?? Promise.resolve(formatActorLabel(remotePub, null));
+
+  Promise.all([declinePhoneCall({ qu, identity, spaceId, remotePub, iceServers }), peerLabelPromise])
+    .then(([, peerLabel]) => { status.textContent = `${t('declined')} (${peerLabel})`; })
     .catch((err) => { status.textContent = err.message; });
 
   return () => {};
@@ -211,6 +234,15 @@ function mountActiveCall(container, ctx, spaceId, remotePub, { initiator, callMo
   localVideo.autoplay = true;
   localVideo.playsInline = true;
   localVideo.muted = true; // never play back our own mic through our own speakers
+
+  // Alias-first, same convention formatActorLabel() already gives every
+  // other place in the app (mountCallStarter()'s own contact list, apps/chat)
+  // - shows the truncated pub immediately (formatActorLabel()'s own no-
+  // profile-yet fallback), then upgrades to the real alias once
+  // services.profile.getPublicProfile() resolves, below.
+  const peerName = document.createElement('div');
+  peerName.className = 'qu-phone-peer-name';
+  peerName.textContent = formatActorLabel(remotePub, null);
 
   const status = document.createElement('div');
   status.className = 'qu-phone-status';
@@ -252,11 +284,17 @@ function mountActiveCall(container, ctx, spaceId, remotePub, { initiator, callMo
   // audio-only calls (the default) from ever being able to add video at all.
   localVideo.hidden = callMode !== 'video';
 
-  view.append(remoteVideo, localVideo, status, controls);
+  view.append(remoteVideo, localVideo, peerName, status, controls);
   container.appendChild(view);
 
   let call = null;
   let stopped = false;
+
+  // Fired in parallel with the call setup below, not awaited before it -
+  // resolving a profile must never delay actually placing the call.
+  services.profile?.getPublicProfile(remotePub).then((profile) => {
+    if (!stopped) peerName.textContent = formatActorLabel(remotePub, profile);
+  }).catch(() => { /* stays on the truncated-pub fallback already showing */ });
   let audioEnabled = true;
   let videoEnabled = callMode === 'video';
 
@@ -264,9 +302,56 @@ function mountActiveCall(container, ctx, spaceId, remotePub, { initiator, callMo
     window.location.hash = '#/phone';
   }
 
+  /**
+   * `m:ss`, matching this app's own already-terse UI language (no i18n
+   * needed - digits/colons read the same in every locale, same reasoning
+   * `formatTs()`-style helpers elsewhere in this codebase use raw digits).
+   * @param {number} ms
+   */
+  function formatDuration(ms) {
+    const totalSeconds = Math.max(0, Math.round(ms / 1000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${String(seconds).padStart(2, '0')}`;
+  }
+
+  /**
+   * Replaces the call view's own content with a post-call summary
+   * (Gesprächspartner/Datum/Uhrzeit/Dauer/Zurück) - only ever shown for a
+   * call that actually connected (see the hangupBtn handler below); a call
+   * hung up while still "Rufe an…"/"Klingelt…" has nothing worth
+   * summarizing and keeps the old immediate goBack() behavior.
+   * @param {number} connectedAt
+   */
+  function showCallSummary(connectedAt) {
+    view.textContent = '';
+    const summary = document.createElement('div');
+    summary.className = 'qu-phone-summary';
+    const title = document.createElement('div');
+    title.className = 'qu-phone-summary-title';
+    title.textContent = t('callEnded');
+    const nameEl = document.createElement('div');
+    nameEl.className = 'qu-phone-summary-name';
+    nameEl.textContent = peerName.textContent; // already alias-resolved, see the profile lookup above
+    const meta = document.createElement('div');
+    meta.className = 'qu-phone-summary-meta';
+    const connectedDate = new Date(connectedAt);
+    meta.textContent = `${connectedDate.toLocaleDateString()} ${connectedDate.toLocaleTimeString()} · ${t('duration')}: ${formatDuration(Date.now() - connectedAt)}`;
+    const backBtn = document.createElement('button');
+    backBtn.type = 'button';
+    backBtn.className = 'qu-phone-summary-back';
+    backBtn.textContent = t('back');
+    backBtn.addEventListener('click', goBack);
+    summary.append(title, nameEl, meta, backBtn);
+    view.appendChild(summary);
+  }
+
   hangupBtn.addEventListener('click', () => {
+    const connectedAt = call?.getConnectedAt() ?? null;
     call?.hangUp();
-    goBack();
+    call = null; // already hung up - the view's own teardown (fires once the summary's "Zurück" navigates away) must not call hangUp() a second time
+    if (connectedAt == null) { goBack(); return; }
+    showCallSummary(connectedAt);
   });
   muteBtn.addEventListener('click', () => {
     if (!call) return;
@@ -376,4 +461,37 @@ export function renderCallMenuItems({ contactPub }) {
     { id: 'audioCall', label: t('audioCall'), icon: '🎤', onClick: () => { window.location.hash = `#/phone/${contactPub}`; } },
     { id: 'videoCall', label: t('videoCall'), icon: '📹', onClick: () => { window.location.hash = `#/phone/${contactPub}/video`; } },
   ];
+}
+
+/**
+ * The `content.notificationAction` contributor (see
+ * `apps/shell/src/notification-popups.js`'s own doc comment) - lets the
+ * IN-APP toast's "Ablehnen" button signal a decline directly, WITHOUT
+ * navigating to the `/decline` route (unlike the OS Web Push notification's
+ * own decline action, which has no choice but to open a URL - see this
+ * file's own top doc comment's "Routes" section). "Annehmen" needs no
+ * contributor here at all - it stays a plain `href` to `#/phone/<pub>/accept`
+ * in the toast, since switching into the call UI is exactly what accepting
+ * should do.
+ *
+ * A no-op for any `actionId` other than `'decline'`, or a `url` that doesn't
+ * match this app's own `/decline` route shape - `notification-popups.js`
+ * calls EVERY app's contributor for EVERY action id via `collect()`, so this
+ * must ignore whatever isn't its own (same "return early if this payload
+ * isn't for me" discipline `renderCallMenuItems()` above already follows for
+ * `contactPub`).
+ * @param {{actionId: string, url: string, qu: import('@qu/core').QuStore, identity: import('@qu/identity').QuIdentityEngine, apps: Array<object>, iceServers?: Array<object>}} payload
+ */
+export async function handleNotificationAction({ actionId, url, qu, identity, apps, iceServers }) {
+  if (actionId !== 'decline') return;
+  const match = /^#\/phone\/([^/]+)\/decline$/.exec(url ?? '');
+  if (!match) return;
+  const remotePub = match[1];
+  const spaceId = apps?.find((a) => a.name === 'phone')?.spaceId;
+  if (!spaceId) return;
+  try {
+    await declinePhoneCall({ qu, identity, spaceId, remotePub, iceServers });
+  } catch (err) {
+    log.warn('handleNotificationAction(): declinePhoneCall() failed:', err.message);
+  }
 }

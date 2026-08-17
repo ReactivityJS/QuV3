@@ -8,8 +8,14 @@ import { readFileSync } from 'node:fs';
 import { ListService, AccessService, MessageService, ChatService, NotificationPrefsService, PushSubscriptionService, paths } from '@qu/services';
 import { installFakeRTCPeerConnection } from '../../../packages/webrtc/test/fake-rtc-peer-connection.js';
 import { installFakeMediaDevices } from './fake-media-devices.js';
+import { installDom } from '@qu/ui/testing';
 import { PushDeliveryService, createManifestNotificationResolver } from '../../../packages/relay/src/push-delivery.js';
 import { PresenceTracker } from '../../../packages/relay/src/presence-tracker.js';
+
+// `../client.js` (imported below, for handleNotificationAction()) transitively
+// pulls in `@qu/ui`'s DOM-backed components - needed even though this file's
+// own tests never touch the DOM themselves.
+installDom();
 
 // The REAL apps/phone/manifest.quapp (not a synthetic stand-in) - the whole
 // point of the regression tests below is proving call.js's actual thread
@@ -24,6 +30,7 @@ installFakeRTCPeerConnection();
 installFakeMediaDevices();
 
 const { createPhoneCall, declinePhoneCall } = await import('../src/call.js');
+const { handleNotificationAction } = await import('../client.js');
 
 // Same in-memory client-relay star used by apps/geochase/test/mesh.test.js -
 // proves the plan's central claim again here: Phone's signaling rides the
@@ -237,6 +244,55 @@ test('upgradeToVideo() adds a video track to an already-connected audio-only cal
   calleeCall.hangUp();
 });
 
+test('REGRESSION: upgradeToVideo() still works AFTER the post-connect signaling-path cleanup has already run - the realistic case, since nobody upgrades to video within the default 5s post-connect window', async () => {
+  const network = new TestNetwork();
+  const relayQu = new QuStore();
+  relayQu.mount('store', new MemoryStoreAdapter());
+  new SyncEngine(relayQu, new RelayTransport(network));
+
+  const caller = await freshParticipant('client-caller9b', network);
+  const callee = await freshParticipant('client-callee9b', network);
+  await mirrorProfiles(caller, callee);
+
+  const spaceId = 'phone-test-space-9b';
+  caller.sync.subscribe(paths.spacePath(spaceId));
+  callee.sync.subscribe(paths.spacePath(spaceId));
+
+  const calleeStreams = [];
+  let callerConnectedCount = 0;
+  let calleeConnectedCount = 0;
+
+  // A short cleanupDelayMs (test-only override, see createPhoneCall()'s own
+  // doc comment) so this test can actually wait PAST the tombstone without a
+  // slow multi-second real-time sleep - proves WebRtcSignalService's
+  // `keepPair` (the offer/answer QuBits get tombstoned, but the in-memory
+  // pair tracking survives) is what makes a LATE renegotiation still reach
+  // the other side, not just an immediate one (already covered by the
+  // preceding test).
+  const callerCall = await createPhoneCall({
+    qu: caller.qu, identity: caller.identity, services: caller.services, spaceId, remotePub: callee.pub,
+    initiator: true, mode: 'audio', cleanupDelayMs: 20,
+    onPeerConnected: () => { callerConnectedCount++; },
+  });
+  const calleeCall = await createPhoneCall({
+    qu: callee.qu, identity: callee.identity, services: callee.services, spaceId, remotePub: caller.pub,
+    initiator: false, mode: 'audio', cleanupDelayMs: 20,
+    onTrack: (stream) => calleeStreams.push(stream),
+    onPeerConnected: () => { calleeConnectedCount++; },
+  });
+
+  await waitUntil(() => callerConnectedCount === 1 && calleeConnectedCount === 1);
+  await new Promise((resolve) => setTimeout(resolve, 100)); // well past cleanupDelayMs=20 - the offer/answer paths are now tombstoned
+
+  await callerCall.upgradeToVideo();
+
+  assert.equal(callerCall.localStream.getVideoTracks().length, 1);
+  await waitUntil(() => calleeStreams.some((s) => s.getVideoTracks().length > 0));
+
+  callerCall.hangUp();
+  calleeCall.hangUp();
+});
+
 test('REGRESSION: with NO manual sync.subscribe() at the test level at all, and a REALISTIC delay before the callee even starts - createPhoneCall()\'s own subscribe/syncFetch wiring is what makes the handshake reach the other side', async () => {
   const network = new TestNetwork();
   const relayQu = new QuStore();
@@ -370,6 +426,50 @@ test('declinePhoneCall() before the callee ever creates a PhoneCall reaches the 
 
   await waitUntil(() => declined);
   callerCall.hangUp();
+});
+
+test('handleNotificationAction() (the content.notificationAction contributor the in-app toast\'s "Ablehnen" button calls) reaches the caller\'s onDeclined() from just a {actionId, url} payload - no navigation, no /decline route involved', async () => {
+  const network = new TestNetwork();
+  const relayQu = new QuStore();
+  relayQu.mount('store', new MemoryStoreAdapter());
+  new SyncEngine(relayQu, new RelayTransport(network));
+
+  const caller = await freshParticipant('client-caller3c', network);
+  const callee = await freshParticipant('client-callee3c', network);
+  await mirrorProfiles(caller, callee);
+  const spaceId = 'phone-test-space-3c';
+  caller.sync.subscribe(paths.spacePath(spaceId));
+  callee.sync.subscribe(paths.spacePath(spaceId));
+
+  let declined = false;
+  const callerCall = await createPhoneCall({
+    qu: caller.qu, identity: caller.identity, services: caller.services, spaceId, remotePub: callee.pub,
+    initiator: true,
+    onDeclined: () => { declined = true; },
+  });
+
+  await handleNotificationAction({
+    actionId: 'decline', url: `#/phone/${caller.pub}/decline`,
+    qu: callee.qu, identity: callee.identity, apps: [{ name: 'phone', spaceId }],
+  });
+
+  await waitUntil(() => declined);
+  callerCall.hangUp();
+});
+
+test('handleNotificationAction() is a no-op for "accept" (a plain href navigation instead, see notification-popups.js) and for a URL it doesn\'t own', async () => {
+  const network = new TestNetwork();
+  const relayQu = new QuStore();
+  relayQu.mount('store', new MemoryStoreAdapter());
+  new SyncEngine(relayQu, new RelayTransport(network));
+
+  const callee = await freshParticipant('client-callee3d', network);
+  const apps = [{ name: 'phone', spaceId: 'phone-test-space-3d' }];
+
+  // None of these should throw, touch the network, or need a caller at all.
+  await handleNotificationAction({ actionId: 'accept', url: '#/phone/someone/accept', qu: callee.qu, identity: callee.identity, apps });
+  await handleNotificationAction({ actionId: 'decline', url: '#/not-a-phone-url', qu: callee.qu, identity: callee.identity, apps });
+  await handleNotificationAction({ actionId: 'decline', url: `#/phone/someone/decline`, qu: callee.qu, identity: callee.identity, apps: [] });
 });
 
 test('onTimeout() fires when the callee never answers at all - the "stuck on Calling… forever" gap this Bugfix closes', async () => {

@@ -315,9 +315,18 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
   // Phone app's incoming-call UX (see `apps/shell/src/notification-popups.js`'s
   // own doc comment). Best-effort, same reasoning as the header/PWA UI above:
   // a failure here just means no toasts pop this session, never a crash.
+  // Its own boot-time `ExtensionPointHost` (same construction as
+  // `renderRoute()`'s own per-route instance below, just built once here
+  // since this watcher itself only ever mounts once per session, same as
+  // the header) is what lets a "decline" toast action signal directly via
+  // `content.notificationAction` instead of navigating - see
+  // `notification-popups.js`'s own doc comment.
   let stopNotificationPopups = null;
   try {
-    stopNotificationPopups = mountNotificationPopups(container, { qu, services, subscribe, syncFetch });
+    const notificationExtensionPoints = new ExtensionPointHost(bootApps, { extensionOrder });
+    stopNotificationPopups = mountNotificationPopups(container, {
+      qu, identity, services, apps: bootApps, extensionPoints: notificationExtensionPoints, subscribe, syncFetch,
+    });
   } catch (err) {
     log.warn('notification popups unavailable in this environment:', err.message);
   }

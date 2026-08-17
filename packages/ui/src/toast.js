@@ -21,14 +21,21 @@ const STYLE = `
   .qu-toast-actions { display: flex; gap: 0.5rem; }
   .qu-toast-actions a, .qu-toast-actions button { padding: 0.35rem 0.7rem; border-radius: var(--qu-radius-sm, 0.3rem); border: 1px solid var(--qu-color-border, #8884); background: var(--qu-color-accent, #5b5bd6); color: #fff; text-decoration: none; font: inherit; cursor: pointer; text-align: center; }
   .qu-toast-actions .qu-toast-action-secondary { background: none; color: inherit; }
+  .qu-toast-actions .qu-toast-action-positive { background: #1a7f37; border-color: #1a7f37; }
+  .qu-toast-actions .qu-toast-action-danger { background: #cf222e; border-color: #cf222e; }
 `;
 
 /**
  * @param {HTMLElement} container - Where the toast stack mounts (e.g. `document.body`).
  * @returns {{
- *   show: (toast: {title?: string, body?: string, actions?: Array<{label: string, href?: string, onClick?: () => void, primary?: boolean}>, durationMs?: number, onDismiss?: () => void}) => (() => void),
+ *   show: (toast: {title?: string, body?: string, actions?: Array<{label: string, href?: string, onClick?: () => void, primary?: boolean, tone?: 'positive'|'danger', icon?: string}>, durationMs?: number, onDismiss?: () => void}) => (() => void),
  *   destroy: () => void
  * }}
+ *   An action's `tone` (optional, independent of `primary`) tints it green
+ *   (`'positive'`) or red (`'danger'`) - e.g. an incoming call's Accept/
+ *   Decline pair, where "which button does what" needs to be readable at a
+ *   glance, not just by its text. `icon` (optional) is a short string
+ *   (typically one emoji) rendered before `label`.
  *   `show()` returns its own `dismiss` function, so a caller can close a
  *   specific toast early (e.g. a call that was answered elsewhere).
  */
@@ -82,7 +89,9 @@ export function mountToastHost(container) {
         if (action.href) el.href = action.href;
         else el.type = 'button';
         if (action.primary === false) el.classList.add('qu-toast-action-secondary');
-        el.textContent = action.label;
+        if (action.tone === 'positive') el.classList.add('qu-toast-action-positive');
+        else if (action.tone === 'danger') el.classList.add('qu-toast-action-danger');
+        el.textContent = action.icon ? `${action.icon} ${action.label}` : action.label;
         el.addEventListener('click', () => {
           action.onClick?.();
           dismiss();
