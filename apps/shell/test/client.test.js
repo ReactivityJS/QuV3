@@ -157,7 +157,7 @@ test('navigating to a known route dynamically imports and mounts the target app 
     await waitFor(() => container.querySelector('.qu-shell-screen')?.textContent.startsWith('MOUNTED'));
 
     const text = container.querySelector('.qu-shell-screen').textContent;
-    for (const key of ['qu', 'identity', 'services', 'apps', 'segments', 'subscribe', 'syncFetch', 'extensionPoints']) {
+    for (const key of ['qu', 'identity', 'services', 'apps', 'segments', 'subscribe', 'syncFetch', 'extensionPoints', 'goBack']) {
       assert.ok(text.includes(key), `expected context key "${key}" in ${text}`);
     }
   } finally {
@@ -365,6 +365,74 @@ test('an unknown appId renders a graceful "not found" placeholder, not a crash',
     await waitFor(() => container.querySelector('.qu-shell-placeholder') !== null);
     assert.match(container.querySelector('.qu-shell-placeholder').textContent, /not found/i);
   } finally {
+    stop();
+  }
+});
+
+// ===== ctx.goBack() - real history when there is one, a fallback otherwise =====
+
+test('ctx.goBack() uses real browser history.back() once there IS a prior in-app route (the normal case: navigating from A to B)', async (t) => {
+  const qu = freshQu();
+  const identity = new QuIdentityEngine(qu);
+  await identity.importMnemonic(identity.generateMnemonic());
+  const clientMainUrl = dataUrlModule(`
+    export function mount(container, ctx) {
+      window.__testGoBack = ctx.goBack;
+      container.textContent = 'MOUNTED';
+      return () => {};
+    }
+  `);
+  t.mock.method(globalThis, 'fetch', mockFetch({ apps: [{ name: 'testapp', clientMainUrl }] }));
+  const historyBackCalls = t.mock.method(window.history, 'back', () => {});
+
+  const container = makeContainer();
+  // The boot-time renderRoute() (routeCount=1, whatever hash was set before
+  // mount() - the home placeholder here) is itself the "prior route" this
+  // test needs; THIS navigation to #/testapp is the second one.
+  const stop = await mount(container, { qu, identity });
+  try {
+    window.location.hash = '#/testapp';
+    window.dispatchEvent(new window.Event('hashchange'));
+    await waitFor(() => container.querySelector('.qu-shell-screen')?.textContent === 'MOUNTED');
+
+    const hashBefore = window.location.hash;
+    window.__testGoBack('#/fallback-should-not-be-used');
+    assert.equal(historyBackCalls.mock.callCount(), 1);
+    assert.equal(window.location.hash, hashBefore); // goBack() itself never touches the hash directly when using real history
+  } finally {
+    delete window.__testGoBack;
+    stop();
+  }
+});
+
+test('ctx.goBack() falls back to the given hash (no history.back()) when THIS is the very first route this session ever rendered - e.g. a fresh tab opened directly at an OS push notification\'s Accept link', async (t) => {
+  const qu = freshQu();
+  const identity = new QuIdentityEngine(qu);
+  await identity.importMnemonic(identity.generateMnemonic());
+  const clientMainUrl = dataUrlModule(`
+    export function mount(container, ctx) {
+      window.__testGoBack = ctx.goBack;
+      container.textContent = 'MOUNTED';
+      return () => {};
+    }
+  `);
+  t.mock.method(globalThis, 'fetch', mockFetch({ apps: [{ name: 'testapp', clientMainUrl }] }));
+  const historyBackCalls = t.mock.method(window.history, 'back', () => {});
+
+  // Set the hash BEFORE mount() - the app mounts as part of the very first
+  // (boot-time) renderRoute() call, with nothing rendered before it this
+  // session (simulates a brand new window/tab whose history starts here).
+  window.location.hash = '#/testapp';
+  const container = makeContainer();
+  const stop = await mount(container, { qu, identity });
+  try {
+    await waitFor(() => container.querySelector('.qu-shell-screen')?.textContent === 'MOUNTED');
+
+    window.__testGoBack('#/fallback-route');
+    assert.equal(historyBackCalls.mock.callCount(), 0);
+    assert.equal(window.location.hash, '#/fallback-route');
+  } finally {
+    delete window.__testGoBack;
     stop();
   }
 });

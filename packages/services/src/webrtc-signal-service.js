@@ -1,5 +1,5 @@
 import { QuCrypto } from '@qu/core';
-import { webrtcPairKey, webrtcOfferPath, webrtcAnswerPath, webrtcIceCandidatePath, webrtcDeclinePath } from './paths.js';
+import { webrtcPairKey, webrtcOfferPath, webrtcAnswerPath, webrtcIceCandidatePath, webrtcDeclinePath, webrtcHangupPath } from './paths.js';
 
 const DEFAULT_CLEANUP_DELAY_MS = 5_000;
 const DEFAULT_NEGOTIATION_TIMEOUT_MS = 20_000;
@@ -50,7 +50,12 @@ const DEFAULT_NEGOTIATION_TIMEOUT_MS = 20_000;
  * type (alongside offer/answer/ICE) for a callee to reject a call before any
  * `RTCPeerConnection` activity ever starts - not a `WebRTCTransport`-level
  * concept (it's not an SDP/ICE signal, `WebRTCTransport` never sees it),
- * purely a `WebRtcSignalService`-level one.
+ * purely a `WebRtcSignalService`-level one. `hangupCall()`/`onHangup()` add a
+ * FOURTH, for the opposite end of a call's lifecycle: one side explicitly
+ * ending an ALREADY-CONNECTED call - see `webrtcHangupPath()`'s own doc
+ * comment for why a plain `RTCPeerConnection.close()` isn't enough on its
+ * own to tell the other side promptly (a real, reported gap: hanging up
+ * left the OTHER side's call view looking connected indefinitely).
  */
 export class WebRtcSignalService {
   #qu;
@@ -63,6 +68,7 @@ export class WebRtcSignalService {
   /** @type {Map<string, {spaceId: string|number, threadId: string, remotePub: string, memberPubs: string[], selfPub: string, iceSeq: number, timeoutTimer: ReturnType<typeof setTimeout>|null}>} */
   #pairs = new Map();
   #declinedCallbacks = [];
+  #hangupCallbacks = [];
   #timeoutCallbacks = [];
   #unsubscribeOutgoing;
   #unsubscribeConnected;
@@ -199,6 +205,47 @@ export class WebRtcSignalService {
   }
 
   /**
+   * Tells the OTHER side of an ALREADY-CONNECTED call that THIS side is
+   * hanging up - see `webrtcHangupPath()`'s own doc comment for why this is
+   * needed at all (a plain `RTCPeerConnection.close()` doesn't reliably or
+   * promptly tell the other side anything). Safe to call even if
+   * `connectPeer()` was never called for this pair (mirrors `declineCall()`'s
+   * own "works standalone" design) - `apps/phone`'s `hangUp()` always has a
+   * `spaceId`/`threadId`/`remotePub` on hand regardless.
+   * @param {string|number} spaceId @param {string} threadId @param {string} remotePub
+   */
+  async hangupCall(spaceId, threadId, remotePub) {
+    const selfPub = await this.#myActorPub();
+    const pairKey = webrtcPairKey(selfPub, remotePub);
+    const signKey = await this.#identity.getMainKey();
+    await this.#qu.put(
+      webrtcHangupPath(spaceId, threadId, pairKey),
+      { hungUp: true, from: selfPub },
+      { signWith: signKey.privateKeyPkcs8, writerPub: signKey.publicKey }
+    );
+  }
+
+  /**
+   * Registers a callback fired when the OTHER side of a pair this instance
+   * called `connectPeer()` for calls `hangupCall()` - the reliable
+   * "the call just ended, on their end" notice `hangupCall()`'s own doc
+   * comment describes. Only meaningful for a pair that actually connected
+   * (a call that never connected ends via `onDeclined()`/`onTimeout()`
+   * instead), but nothing here enforces that - a stray hangup signal for a
+   * pair this side never even tried connecting to is simply ignored, same
+   * membership-check discipline every other signal here already has.
+   * @param {(remotePub: string) => void} callback
+   * @returns {() => void} Unsubscribe function.
+   */
+  onHangup(callback) {
+    this.#hangupCallbacks.push(callback);
+    return () => {
+      const idx = this.#hangupCallbacks.indexOf(callback);
+      if (idx !== -1) this.#hangupCallbacks.splice(idx, 1);
+    };
+  }
+
+  /**
    * Registers a callback fired when a pair this instance called
    * `connectPeer()` for never reaches `onPeerConnected` within
    * `negotiationTimeoutMs` - e.g. no usable ICE candidate pair exists at all
@@ -292,6 +339,9 @@ export class WebRtcSignalService {
       } else if (rel === 'declined' && val?.declined) {
         for (const cb of this.#declinedCallbacks) cb(pair.remotePub);
         this.#cleanup(pairKey).catch((err) => console.error('[WebRtcSignalService] cleanup after decline failed:', err));
+      } else if (rel === 'hungup' && val?.hungUp) {
+        for (const cb of this.#hangupCallbacks) cb(pair.remotePub);
+        this.#cleanup(pairKey).catch((err) => console.error('[WebRtcSignalService] cleanup after hangup failed:', err));
       }
       return;
     }
@@ -315,6 +365,7 @@ export class WebRtcSignalService {
     await this.#qu.put(webrtcOfferPath(pair.spaceId, pair.threadId, pairKey), null, options).catch(() => {});
     await this.#qu.put(webrtcAnswerPath(pair.spaceId, pair.threadId, pairKey), null, options).catch(() => {});
     await this.#qu.put(webrtcDeclinePath(pair.spaceId, pair.threadId, pairKey), null, options).catch(() => {});
+    await this.#qu.put(webrtcHangupPath(pair.spaceId, pair.threadId, pairKey), null, options).catch(() => {});
     for (let seq = 0; seq < pair.iceSeq; seq++) {
       await this.#qu.put(webrtcIceCandidatePath(pair.spaceId, pair.threadId, pairKey, pair.selfPub, seq), null, options).catch(() => {});
     }

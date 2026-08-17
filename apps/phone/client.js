@@ -112,7 +112,10 @@ const STYLE = `
   .qu-phone-controls .qu-phone-hangup { background: #d32f2f; }
   .qu-phone-summary { margin: auto; text-align: center; color: #fff; display: flex; flex-direction: column; align-items: center; gap: 0.6rem; padding: 1.5rem; }
   .qu-phone-summary-title { font-size: 1.2em; opacity: 0.75; }
-  .qu-phone-summary-name { font-size: 1.6em; font-weight: 700; }
+  .qu-phone-summary-name { font-size: 1.6em; font-weight: 700; color: inherit; text-decoration: none; }
+  .qu-phone-summary-name:hover { text-decoration: underline; }
+  .qu-phone-summary-pub { font-family: var(--qu-font-mono, ui-monospace, monospace); font-size: 0.8em; opacity: 0.65; color: inherit; text-decoration: none; word-break: break-all; max-width: 90vw; }
+  .qu-phone-summary-pub:hover { text-decoration: underline; opacity: 0.9; }
   .qu-phone-summary-meta { opacity: 0.8; }
   .qu-phone-summary-back { margin-top: 0.8rem; padding: 0.5rem 1.4rem; border-radius: var(--qu-radius-md, 0.4rem); border: 1px solid #fff4; background: transparent; color: #fff; cursor: pointer; font: inherit; }
 `;
@@ -219,7 +222,12 @@ function mountActiveCall(container, ctx, spaceId, remotePub, { initiator, callMo
   // threading them through to createPhoneCall(), no signal this call sends
   // ever actually reaches the other side (see WebRtcSignalService's own
   // constructor doc comment for the full incident this fixes).
-  const { qu, identity, services, iceServers, negotiationTimeoutMs, subscribe, syncFetch } = ctx;
+  // `goBack` is the shell's own ctx.goBack (see apps/shell/client.js's own
+  // doc comment) - real browser history back to wherever the user actually
+  // came from (a Forum thread, a Chat room, wherever a toast's "Annehmen"
+  // was clicked from) when there is one, `#/phone` otherwise. Falls back to
+  // a plain hash assignment if an older/test ctx doesn't provide it.
+  const { qu, identity, services, iceServers, negotiationTimeoutMs, subscribe, syncFetch, goBack: ctxGoBack } = ctx;
 
   const view = document.createElement('div');
   view.className = 'qu-phone-call-view';
@@ -299,7 +307,8 @@ function mountActiveCall(container, ctx, spaceId, remotePub, { initiator, callMo
   let videoEnabled = callMode === 'video';
 
   function goBack() {
-    window.location.hash = '#/phone';
+    if (typeof ctxGoBack === 'function') ctxGoBack('#/phone');
+    else window.location.hash = '#/phone'; // defensive fallback - real ctx always has goBack, see apps/shell/client.js
   }
 
   /**
@@ -316,33 +325,52 @@ function mountActiveCall(container, ctx, spaceId, remotePub, { initiator, callMo
   }
 
   /**
-   * Replaces the call view's own content with a post-call summary
-   * (Gesprächspartner/Datum/Uhrzeit/Dauer/Zurück) - only ever shown for a
-   * call that actually connected (see the hangupBtn handler below); a call
-   * hung up while still "Rufe an…"/"Klingelt…" has nothing worth
-   * summarizing and keeps the old immediate goBack() behavior.
-   * @param {number} connectedAt
+   * Replaces the call view's own content with an end-of-call screen -
+   * contact (alias + full pub, both linking to their profile), a reason
+   * line, and a "Zurück" link. Covers every terminal state that's worth
+   * showing something for:
+   *   - `connectedAt` given (this side hung up, OR the other side did - see
+   *     `onHungUp` below) → `title` is `t('callEnded')`, meta is date/time
+   *     + duration.
+   *   - `connectedAt` omitted (declined, or timed out/never connected) →
+   *     `title` is the reason (`t('declined')`/`t('callTimeout')`), no meta
+   *     line (there's no duration to show).
+   * Never shown for a call hung up while still "Rufe an…"/"Klingelt…" by
+   * THIS side - see the hangupBtn handler below, which goes straight back
+   * instead (nothing connected, nothing worth summarizing).
+   * @param {{title: string, connectedAt?: number|null}} options
    */
-  function showCallSummary(connectedAt) {
+  function showEndScreen({ title, connectedAt = null }) {
     view.textContent = '';
     const summary = document.createElement('div');
     summary.className = 'qu-phone-summary';
-    const title = document.createElement('div');
-    title.className = 'qu-phone-summary-title';
-    title.textContent = t('callEnded');
-    const nameEl = document.createElement('div');
-    nameEl.className = 'qu-phone-summary-name';
-    nameEl.textContent = peerName.textContent; // already alias-resolved, see the profile lookup above
-    const meta = document.createElement('div');
-    meta.className = 'qu-phone-summary-meta';
-    const connectedDate = new Date(connectedAt);
-    meta.textContent = `${connectedDate.toLocaleDateString()} ${connectedDate.toLocaleTimeString()} · ${t('duration')}: ${formatDuration(Date.now() - connectedAt)}`;
+    const titleEl = document.createElement('div');
+    titleEl.className = 'qu-phone-summary-title';
+    titleEl.textContent = title;
+    // Alias/pub both link to the profile (#/~<pub>, the shell's own reserved
+    // profile-link sigil - see apps/shell/client.js's own doc comment on it).
+    const nameLink = document.createElement('a');
+    nameLink.className = 'qu-phone-summary-name';
+    nameLink.href = `#/~${remotePub}`;
+    nameLink.textContent = peerName.textContent; // already alias-resolved, see the profile lookup above
+    const pubLink = document.createElement('a');
+    pubLink.className = 'qu-phone-summary-pub';
+    pubLink.href = `#/~${remotePub}`;
+    pubLink.textContent = remotePub;
+    summary.append(titleEl, nameLink, pubLink);
+    if (connectedAt != null) {
+      const meta = document.createElement('div');
+      meta.className = 'qu-phone-summary-meta';
+      const connectedDate = new Date(connectedAt);
+      meta.textContent = `${connectedDate.toLocaleDateString()} ${connectedDate.toLocaleTimeString()} · ${t('duration')}: ${formatDuration(Date.now() - connectedAt)}`;
+      summary.appendChild(meta);
+    }
     const backBtn = document.createElement('button');
     backBtn.type = 'button';
     backBtn.className = 'qu-phone-summary-back';
     backBtn.textContent = t('back');
     backBtn.addEventListener('click', goBack);
-    summary.append(title, nameEl, meta, backBtn);
+    summary.appendChild(backBtn);
     view.appendChild(summary);
   }
 
@@ -351,7 +379,7 @@ function mountActiveCall(container, ctx, spaceId, remotePub, { initiator, callMo
     call?.hangUp();
     call = null; // already hung up - the view's own teardown (fires once the summary's "Zurück" navigates away) must not call hangUp() a second time
     if (connectedAt == null) { goBack(); return; }
-    showCallSummary(connectedAt);
+    showEndScreen({ title: t('callEnded'), connectedAt });
   });
   muteBtn.addEventListener('click', () => {
     if (!call) return;
@@ -407,20 +435,36 @@ function mountActiveCall(container, ctx, spaceId, remotePub, { initiator, callMo
         qu, identity, services, spaceId, remotePub, iceServers, initiator, mode: callMode, negotiationTimeoutMs, subscribe, syncFetch,
         onTrack: (stream) => { remoteVideo.srcObject = stream; },
         onPeerConnected: () => { status.textContent = t('connected'); },
+        // Local resources (mic/camera) are already torn down by the time
+        // this fires - see call.js's own cleanupLocal() doc comment. Shows
+        // the SAME end-of-call screen a self-initiated hangup does, minus a
+        // duration (this call never connected) - no auto-navigate timeout
+        // anymore, so the user actually has time to read it before "Zurück".
         onDeclined: () => {
-          status.textContent = t('declined');
-          setTimeout(goBack, 1500);
+          call = null;
+          showEndScreen({ title: t('declined') });
         },
         // See WebRtcSignalService.onTimeout()'s own doc comment - fires
         // when the connection never establishes at all (classic symmetric-
         // NAT/no-TURN failure, see this plan's own "Bugfix: Keine WebRTC-
         // Verbindung..." section). Without this, "Calling…"/"Ringing…"
-        // used to hang forever with no feedback - unmounting via goBack()
-        // still runs this view's own cleanup (call?.hangUp()), same as the
-        // onDeclined() case above.
+        // used to hang forever with no feedback.
         onTimeout: () => {
-          status.textContent = t('callTimeout');
-          setTimeout(goBack, 2500);
+          call = null;
+          showEndScreen({ title: t('callTimeout') });
+        },
+        // The OTHER side explicitly hung up an ALREADY-connected call - the
+        // reliable notice `WebRtcSignalService.hangupCall()` exists for (a
+        // plain RTCPeerConnection close doesn't tell this side anything
+        // promptly - see that method's own doc comment). Without this, a
+        // call the other party ended stayed looking "Connected" forever on
+        // THIS side - a real, reported gap. Treated exactly like this side
+        // hanging up itself: same end screen, with the real duration.
+        onHungUp: () => {
+          const connectedAt = call?.getConnectedAt() ?? null;
+          call?.hangUp(); // local cleanup only - the OTHER side already knows the call ended, that's what triggered this
+          call = null;
+          showEndScreen({ title: t('callEnded'), connectedAt });
         },
       });
     } catch (err) {

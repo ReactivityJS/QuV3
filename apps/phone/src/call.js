@@ -45,7 +45,13 @@ const NEGOTIATION_TIMEOUT_MS = 45_000;
  * that service's own doc comment) - only the ordinary `postMessage()`
  * below rides the thread's own encrypted-private-list config.
  *
- * @param {{qu: import('@qu/core').QuStore, identity: import('@qu/identity').QuIdentityEngine, services: object, spaceId: string, remotePub: string, iceServers?: Array<object>, initiator: boolean, mode?: 'audio'|'video', subscribe?: (prefix: string) => void, syncFetch?: (prefix: string) => Promise<*>, onTrack?: (stream: MediaStream) => void, onPeerConnected?: () => void, onDeclined?: () => void, onTimeout?: () => void, negotiationTimeoutMs?: number}} options
+ * @param {{qu: import('@qu/core').QuStore, identity: import('@qu/identity').QuIdentityEngine, services: object, spaceId: string, remotePub: string, iceServers?: Array<object>, initiator: boolean, mode?: 'audio'|'video', subscribe?: (prefix: string) => void, syncFetch?: (prefix: string) => Promise<*>, onTrack?: (stream: MediaStream) => void, onPeerConnected?: () => void, onDeclined?: () => void, onHungUp?: () => void, onTimeout?: () => void, negotiationTimeoutMs?: number}} options
+ *   `onHungUp` - fires when the OTHER side explicitly ends an already-
+ *   connected call (`WebRtcSignalService.onHangup()`) - the reliable "call
+ *   ended" notice a plain `RTCPeerConnection` close doesn't provide on its
+ *   own (see that service's own `hangupCall()` doc comment). Never fires for
+ *   a call that never connected in the first place - that's `onDeclined()`/
+ *   `onTimeout()`'s job.
  *   `negotiationTimeoutMs` overrides the module's own realistic-ring-duration
  *   default (below) - exposed mainly for tests that need `onTimeout` to fire
  *   quickly, mirroring `WebRtcSignalService`'s own constructor option.
@@ -75,7 +81,7 @@ const NEGOTIATION_TIMEOUT_MS = 45_000;
  *   whether to show a summary at all (never for a call that was hung up
  *   before connecting) and to compute the call's duration.
  */
-export async function createPhoneCall({ qu, identity, services, spaceId, remotePub, iceServers, initiator, mode = 'audio', subscribe, syncFetch, onTrack, onPeerConnected, onDeclined, onTimeout, negotiationTimeoutMs = NEGOTIATION_TIMEOUT_MS, cleanupDelayMs } = {}) {
+export async function createPhoneCall({ qu, identity, services, spaceId, remotePub, iceServers, initiator, mode = 'audio', subscribe, syncFetch, onTrack, onPeerConnected, onDeclined, onHungUp, onTimeout, negotiationTimeoutMs = NEGOTIATION_TIMEOUT_MS, cleanupDelayMs } = {}) {
   const mainKey = await identity.getMainKey();
   const selfPub = QuCrypto.toBase64Url(mainKey.publicKey);
   const memberPubs = [selfPub, remotePub];
@@ -137,8 +143,28 @@ export async function createPhoneCall({ qu, identity, services, spaceId, remoteP
     connectedAt ??= Date.now();
     onPeerConnected?.();
   });
+  // Declined/timed-out both mean "this call never connected, and never
+  // will" - local resources (mic/camera, the half-open RTCPeerConnection)
+  // are torn down HERE, immediately, rather than left for `client.js` to
+  // notice and call `hangUp()` on its own: `onDeclined`/`onTimeout` can fire
+  // WHILE `connectPeer()` above is still being awaited (a decline/timeout
+  // arriving via syncFetch()'s own backfill mid-connectPeer()) - i.e.
+  // possibly BEFORE this function has even returned its own result object
+  // to the caller, so `client.js` may have no `call` reference to call
+  // `.hangUp()` on yet. `cleanupLocal()` is safe to run twice (`hangUp()`
+  // below calls it too, for the ordinary "I hung up" path) - every step it
+  // takes is itself idempotent (stopping an already-stopped track, closing
+  // an already-closed connection, unsubscribing an already-unsubscribed
+  // listener).
   const unsubDeclined = signalService.onDeclined((peerId) => {
-    if (peerId === remotePub) onDeclined?.();
+    if (peerId !== remotePub) return;
+    cleanupLocal();
+    onDeclined?.();
+  });
+  const unsubHangup = signalService.onHangup((peerId) => {
+    if (peerId !== remotePub) return;
+    cleanupLocal();
+    onHungUp?.();
   });
   // See WebRtcSignalService.onTimeout()'s own doc comment - fires when this
   // pair never connects within NEGOTIATION_TIMEOUT_MS (e.g. no usable ICE
@@ -146,8 +172,22 @@ export async function createPhoneCall({ qu, identity, services, spaceId, remoteP
   // this, `client.js` had no way to ever leave its "Calling…"/"Ringing…"
   // state - see this plan's own "Bugfix: Keine WebRTC-Verbindung..." section.
   const unsubTimeout = signalService.onTimeout((peerId) => {
-    if (peerId === remotePub) onTimeout?.();
+    if (peerId !== remotePub) return;
+    cleanupLocal();
+    onTimeout?.();
   });
+
+  /** Local teardown only - no signaling. Safe to call more than once. */
+  function cleanupLocal() {
+    for (const track of localStream.getTracks()) track.stop(); // camera light off
+    webrtcTransport.removePeer(remotePub);
+    unsubTrack();
+    unsubConnected();
+    unsubDeclined();
+    unsubHangup();
+    unsubTimeout();
+    signalService.close();
+  }
 
   await signalService.connectPeer(spaceId, threadId, remotePub, memberPubs, { initiator, localStream });
 
@@ -192,13 +232,20 @@ export async function createPhoneCall({ qu, identity, services, spaceId, remoteP
   }
 
   function hangUp() {
-    for (const track of localStream.getTracks()) track.stop(); // camera light off
-    webrtcTransport.removePeer(remotePub);
-    unsubTrack();
-    unsubConnected();
-    unsubDeclined();
-    unsubTimeout();
-    signalService.close();
+    // Only meaningful for a call that actually connected - one hung up
+    // while still "Rufe an…"/"Klingelt…" is already covered by
+    // declineCall()/the negotiation timeout, and the other side may not
+    // even have a signaling pair registered yet to receive this against.
+    // Fire-and-forget (not awaited - hangUp() itself stays synchronous, same
+    // "local teardown must never wait on a network write" reasoning as the
+    // announcement postMessage() above) - a failed write here just means the
+    // other side falls back to noticing via the ICE connection eventually
+    // going stale, same as before this signal existed.
+    if (connectedAt != null) {
+      signalService.hangupCall(spaceId, threadId, remotePub)
+        .catch((err) => log.warn('hangupCall() failed (other side may not learn the call ended):', err.message));
+    }
+    cleanupLocal();
   }
 
   // A getter, not a plain field - `createPhoneCall()` itself resolves right

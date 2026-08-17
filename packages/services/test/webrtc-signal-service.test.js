@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { QuStore, MemoryStoreAdapter, QuCrypto } from '@qu/core';
 import { WebRtcSignalService } from '../src/webrtc-signal-service.js';
-import { webrtcPairKey, webrtcOfferPath, webrtcIceCandidatePath, webrtcDeclinePath } from '../src/paths.js';
+import { webrtcPairKey, webrtcOfferPath, webrtcIceCandidatePath, webrtcDeclinePath, webrtcHangupPath } from '../src/paths.js';
 
 /**
  * A minimal `@qu/webrtc` `WebRTCTransport` double - `WebRtcSignalService`
@@ -496,4 +496,74 @@ test('a decline signed by a non-member is ignored', async () => {
 
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal(declined.length, 0);
+});
+
+// ===== hangupCall()/onHangup() =====
+
+test('hangupCall() writes a signed hangup QuBit without requiring connectPeer() to have been called first', async () => {
+  const qu = freshQu();
+  const { identity: identityB, pub: pubB } = await freshIdentity();
+  const { pub: pubA } = await freshIdentity();
+  const transportB = new FakeWebRTCTransport();
+  const serviceB = new WebRtcSignalService(qu, identityB, transportB);
+
+  await serviceB.hangupCall('space1', 'thread1', pubA);
+
+  const pairKey = webrtcPairKey(pubA, pubB);
+  const written = await qu.get(webrtcHangupPath('space1', 'thread1', pairKey));
+  assert.equal(written.val.hungUp, true);
+  assert.equal(written.val.from, pubB);
+  assert.ok(written.sig);
+});
+
+test('the surviving side\'s onHangup() fires when the other side hangs up, and the pair is cleaned up - the reliable "call ended" notice a plain RTCPeerConnection.close() can\'t provide', async () => {
+  const qu = freshQu();
+  const { identity: identityA, pub: pubA } = await freshIdentity();
+  const { identity: identityB, pub: pubB } = await freshIdentity();
+  const transportA = new FakeWebRTCTransport();
+  const serviceA = new WebRtcSignalService(qu, identityA, transportA, { cleanupDelayMs: 10, negotiationTimeoutMs: 100_000 });
+  await serviceA.connectPeer('space1', 'thread1', pubB, [pubA, pubB], { initiator: true });
+  transportA.emitPeerConnected(pubB); // this pair is now CONNECTED - hangupCall() (unlike declineCall()) only ever makes sense post-connect
+
+  const hungUp = [];
+  serviceA.onHangup((remotePub) => hungUp.push(remotePub));
+
+  // Stands in for "B's own hangupCall() write already arrived via relay sync".
+  const signKeyB = await identityB.getMainKey();
+  const pairKey = webrtcPairKey(pubA, pubB);
+  await qu.put(
+    webrtcHangupPath('space1', 'thread1', pairKey),
+    { hungUp: true, from: pubB },
+    { signWith: signKeyB.privateKeyPkcs8, writerPub: signKeyB.publicKey }
+  );
+
+  await waitUntil(() => hungUp.length > 0);
+  assert.equal(hungUp[0], pubB);
+
+  // #cleanup() runs right after notifying onHangup() - the hangup QuBit itself gets tombstoned too.
+  await waitUntil(async () => (await qu.get(webrtcHangupPath('space1', 'thread1', pairKey)))?.val === null, 500);
+});
+
+test('a hangup signed by a non-member is ignored', async () => {
+  const qu = freshQu();
+  const { identity: identityA, pub: pubA } = await freshIdentity();
+  const { pub: pubB } = await freshIdentity();
+  const { identity: identityStranger } = await freshIdentity();
+  const transportA = new FakeWebRTCTransport();
+  const serviceA = new WebRtcSignalService(qu, identityA, transportA);
+  await serviceA.connectPeer('space1', 'thread1', pubB, [pubA, pubB], { initiator: true });
+
+  const hungUp = [];
+  serviceA.onHangup((remotePub) => hungUp.push(remotePub));
+
+  const signKeyStranger = await identityStranger.getMainKey();
+  const pairKey = webrtcPairKey(pubA, pubB);
+  await qu.put(
+    webrtcHangupPath('space1', 'thread1', pairKey),
+    { hungUp: true, from: 'someone-else' },
+    { signWith: signKeyStranger.privateKeyPkcs8, writerPub: signKeyStranger.publicKey }
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(hungUp.length, 0);
 });

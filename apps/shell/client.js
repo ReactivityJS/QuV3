@@ -6,8 +6,12 @@
  * file IS that something else - the one composition root that constructs
  * `QuStore`/`QuIdentityEngine`/the client Services/the sync connection from
  * scratch, then hands the resulting `{qu, identity, services, apps, segments,
- * subscribe, syncFetch, extensionPoints}` context to whichever app the
- * current route selects. `extensionPoints` (`@qu/foundation`'s
+ * subscribe, syncFetch, extensionPoints, goBack}` context to whichever app
+ * the current route selects. `goBack()` (see its own doc comment) lets a
+ * mounted app return the user to wherever they actually came from - real
+ * browser history when there is one, a given fallback route otherwise -
+ * instead of every app hardcoding its own "always go to my own home route".
+ * `extensionPoints` (`@qu/foundation`'s
  * `ExtensionPointHost`, see that file's own doc comment) is rebuilt fresh
  * every route dispatch from the SAME `apps` catalog fetch already happening
  * here - cheap (it does no work itself until a mounted app actually asks for
@@ -145,6 +149,12 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
   // stale and bail out instead of racing the newer one for control of
   // `screen`/`stopMountedApp`.
   let navToken = 0;
+  // How many routes THIS session has ever rendered (boot counts as one) -
+  // what goBack() (below) uses to tell "there's a real in-app page behind
+  // us" from "this tab/window started right here" (e.g. an OS push
+  // notification's Accept action opens a BRAND NEW window with only that
+  // one URL in its history - see goBack()'s own doc comment).
+  let routeCount = 0;
 
   // PWA install/update - registered HERE, before any other boot work (not
   // inside mountHeader() below, which only runs after onboarding/profile/
@@ -340,6 +350,30 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
   }
 
   /**
+   * "Go back to wherever the user actually came from" - real browser
+   * history when there IS a real prior in-app page (`routeCount > 1`,
+   * see its own doc comment), a given fallback route otherwise. Handed to
+   * every mounted app as `ctx.goBack` - built here, in the ONE place that
+   * already tracks navigation, rather than each app inventing its own
+   * "always go to my own home route" `goBack()` (apps/phone's old
+   * behavior: hanging up always landed on `#/phone`, even if the call was
+   * accepted from a toast while the user was reading a Forum thread or a
+   * Chat room - see this plan's own "Zurück zur ursprünglichen Seite"
+   * feedback). Hash routing pushes a real history entry on every change
+   * (browser-native, nothing this app does explicitly), and this app's own
+   * `hashchange` listener already re-renders whatever route `history.back()`
+   * lands on - no new plumbing needed beyond counting how many routes this
+   * session has rendered.
+   * @param {string} [fallbackHash] - Used when there's no real in-app
+   *   history to go back to (e.g. an OS push notification's "Accept" action
+   *   opened a BRAND NEW window/tab whose history starts right at the call).
+   */
+  function goBack(fallbackHash = '#/') {
+    if (routeCount > 1) window.history.back();
+    else window.location.hash = fallbackHash;
+  }
+
+  /**
    * The `hashchange` handler - has TWO `await` points (the `/apps.json`
    * fetch, then the dynamic `import()`) before it ever touches `screen` or
    * calls `mod.mount()`. Nothing stops a SECOND `hashchange` firing while a
@@ -361,6 +395,7 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
    */
   async function renderRoute() {
     const token = ++navToken;
+    routeCount++;
     stopMountedApp?.();
     stopMountedApp = null;
     screen.textContent = '';
@@ -401,7 +436,7 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
     // placeholder rather than throwing on `mod.mount is not a function`.
     if (typeof mod.mount !== 'function') { renderPlaceholder(t('appNotFound')); return; }
     const extensionPoints = new ExtensionPointHost(apps, { extensionOrder });
-    const stopFn = (await mod.mount(screen, { qu, identity, services, apps, segments, subscribe, syncFetch, extensionPoints, iceServers })) ?? null;
+    const stopFn = (await mod.mount(screen, { qu, identity, services, apps, segments, subscribe, syncFetch, extensionPoints, iceServers, goBack })) ?? null;
     if (stopped || token !== navToken) {
       // A newer navigation already won control of `screen` while this
       // mount() call was itself in flight - never leave this one mounted
