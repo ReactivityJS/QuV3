@@ -326,7 +326,34 @@ be a "real page" in this sense. The call view's own full-bleed, fixed-position
 styling (`.qu-phone-call-view`) is untouched by the wrap — a chrome-less
 `mountAppTemplate()` call adds no visible sidebar/footer, so a
 `position: fixed` overlay inside its `content` element behaves exactly as
-before.
+before. (Phone's own hand-rolled `position: fixed` predates the `fullHeight`
+option below — `apps/chat/client.js` is the app that actually needed it,
+since its room view ALSO needs a `navigation` sidebar alongside the fixed
+box, which Phone's call view never does; migrating Phone's own CSS onto
+`fullHeight: true` too is a reasonable follow-up, not required.)
+
+**`fullHeight: true`** binds `content` (and the sidebar, if any) to exactly
+the remaining VIEWPORT height below the shell header, real `position: fixed`
+under the hood (see `@qu/ui`'s `app-template.js` own "FULL HEIGHT MODE" doc
+comment for the full "why fixed, not `calc(100vh - ...)`" reasoning) — for a
+messenger-style view with its own internal header/scroll-region/composer
+structure. `apps/chat/client.js`'s `mountRoomView()` is the real example:
+an open room mounts with `fullHeight: true` AND a `navigation` section
+listing every room (1:1 + group), the current one active — a genuine
+room-switcher sidebar on wide screens, a pill+popup in the mobile footer, so
+switching rooms no longer means going back to `#/chat` first (this used to
+be an explicitly out-of-scope gap in this doc). Both `navigation` and
+`primaryAction` ("+ New group") depend on an async fetch (contacts/groups,
+a policy check) that isn't ready at the one synchronous `mountAppTemplate()`
+call every app makes — **`stopTemplate.update(partialConfig)`** (the
+function `mountAppTemplate()` returns also carries this property — see that
+function's own "LATE-ARRIVING CHROME DATA" doc comment) fills chrome in once
+that resolves, without re-calling `render()` or disturbing the app's own
+already-mounted content. `apps/chat/client.js`'s `listRooms()` is the one
+place that computes "what rooms exist, in what order, with what unread/muted
+state", shared by both the rich room-list view and the lightweight
+`navigation` items its own room view builds from the same data via
+`roomsToNavItems()`.
 
 ## Building a new app? A checklist
 
@@ -508,25 +535,22 @@ gives every other dedicated-route action.
 
 ## What's explicitly out of scope (for now)
 
-- **Chat has no Context Switcher yet.** It has no sidebar of any kind today
-  — switching rooms means going back to `#/chat` and picking a different
-  row. Building one is new functionality, not cleanup of existing chrome;
-  the natural shape once someone picks it up is
-  `mountContextSwitcher(..., variant: 'page')` (a room list can grow long —
-  DMs plus groups — so `'page'`, not `'tabs'`).
-- **ToDo has no Context Switcher either** — the exact same gap as Chat's,
-  one level up: switching lists means going back to `#/todo` and picking a
-  different row, with no way to jump straight from one open list to a
-  sibling. ToDo IS on Rule 2 (`shell.headerNavPoints`, its "+ New task" icon)
-  — only Rule 3 is unbuilt. It's a strong `variant: 'page'` candidate: its
-  existing `#/todo` (list picker + create form) and `#/todo/manage`
-  (rename/share/delete/leave) pages are already almost exactly the
-  `renderSidebar`/`renderContextListPage()` shape Calendar's own calendar
-  list uses — the natural next step is consolidating those two into one
-  `renderSidebar` callback shared between a persistent sidebar (desktop,
-  alongside an open list's tasks) and the full `/manage` page (mobile),
-  the same way Calendar's migration did it.
-- **Apps with no navigation chrome of their own** — Bookmarks, Notifications,
-  Pins, Reactions, Contact List, User List, App List, Search, Relay Admin —
-  are unchanged. They comply automatically, by following this doc and
-  `apps/_template/`, whenever they grow a subpage or a create action.
+- **ToDo has no room/list switcher yet** — the same gap Chat used to have:
+  switching lists means going back to `#/todo` and picking a different row,
+  with no way to jump straight from one open list to a sibling. ToDo still
+  contributes its "+ New task" action via the older `shell.headerNavPoints`
+  slot (Rule 2) rather than `mountAppTemplate()`'s `primaryAction` (Rule 5)
+  — migrating it is the natural next candidate, following `apps/chat/
+  client.js`'s own `mountRoomView()` as the working reference: a
+  `navigation` section built from the same list-fetching logic its `#/todo`
+  (list picker + create form) and `#/todo/manage` (rename/share/delete/
+  leave) pages already need, `stopTemplate.update(...)` once that async
+  fetch resolves (see `@qu/ui`'s `app-template.js` own "LATE-ARRIVING CHROME
+  DATA" doc comment), and `fullHeight: true` only if ToDo's own task view
+  ever grows a messenger-style fixed layout of its own (it doesn't today).
+- **Pins, Reactions, Search, Relay Admin** are unchanged. Pins/Reactions
+  contribute to other apps' extension points and have no `mount()` UI of
+  their own; Search's own `mount()` view and Relay Admin (a single settings
+  form with no natural `navigation`/`views`/`primaryAction`) haven't been
+  migrated yet — both are candidates whenever someone picks them up,
+  following this doc and `apps/_template/`.
