@@ -6,8 +6,5 @@
   "label": "Template",
   "icon": "🧩",
   "navOrder": 0,
-  "requires": [],
-  "contributes": [
-    { "point": "shell.headerNavPoints", "export": "renderHeaderNavPoints", "kind": "ui", "order": 10 }
-  ]
+  "requires": []
 }

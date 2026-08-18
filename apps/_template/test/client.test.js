@@ -6,7 +6,7 @@ import { ActorService } from '@qu/services';
 import { installDom, waitFor } from '@qu/ui/testing';
 
 installDom();
-const { mount, renderHeaderNavPoints } = await import('../client.js');
+const { mount } = await import('../client.js');
 
 async function freshEnv() {
   const qu = new QuStore();
@@ -24,18 +24,26 @@ function makeContainer() {
   return el;
 }
 
-// ===== Folder view (Rule 3 - Context Switcher) =============================
+// ===== Folder view (Rule 5 - App Template navigation + primaryAction) ======
 
-test('#/template defaults to the first folder (Inbox), listing its notes and the folder switcher', async () => {
+test('#/template defaults to the first folder (Inbox), listing its notes and the folder navigation', async () => {
   const { services } = await freshEnv();
   const container = makeContainer();
   const stop = mount(container, { services, segments: ['template'] });
   try {
     await waitFor(() => container.querySelector('.qu-template-notes a') !== null);
     assert.equal(container.querySelector('.qu-template-notes a').textContent, 'Welcome');
-    const items = [...container.querySelectorAll('.qu-ctxswitch-list a')].map((a) => a.textContent);
+    const items = [...container.querySelectorAll('.qu-apptpl-list a')].map((a) => a.textContent);
     assert.deepEqual(items, ['Inbox', 'Ideas', 'Archive']);
-    assert.ok(container.querySelector('.qu-ctxswitch-list a.qu-ctxswitch-item-active').textContent, 'Inbox');
+    assert.ok(container.querySelector('.qu-apptpl-list a.qu-apptpl-item-active').textContent, 'Inbox');
+
+    // Rule 5's primaryAction - "+ New note" - a prominent sidebar button and,
+    // for narrow screens, a circular button at the end of the fixed footer.
+    const desktopPrimary = container.querySelector('a.qu-apptpl-primary-desktop');
+    assert.equal(desktopPrimary.getAttribute('href'), '#/template/new');
+    const fab = container.querySelector('a.qu-apptpl-fab');
+    assert.equal(fab.getAttribute('href'), '#/template/new');
+    assert.equal(fab.title, 'New note');
   } finally {
     stop();
   }
@@ -93,26 +101,4 @@ test('creating a note via #/template/new navigates to its own detail page', asyn
     stop();
     window.location.hash = '';
   }
-});
-
-// ===== renderHeaderNavPoints() - the shell.headerNavPoints contributor (Rule 2) ==
-
-test('renderHeaderNavPoints(): hidden while another app is active, shows a "New note" link once this app becomes active', () => {
-  const container = makeContainer();
-  let appId = 'chat';
-  const listeners = [];
-  renderHeaderNavPoints(container, {
-    getContext: () => ({ appId, segments: [appId] }),
-    onContextChange: (cb) => listeners.push(cb),
-  });
-  const wrap = container.querySelector('.qu-app-header-action');
-  assert.equal(wrap.hidden, true);
-
-  appId = 'template';
-  listeners.forEach((cb) => cb());
-  assert.equal(wrap.hidden, false);
-  const link = wrap.querySelector('a');
-  assert.equal(link.getAttribute('href'), '#/template/new');
-  assert.equal(link.title, 'New note');
-  assert.equal(link.getAttribute('aria-label'), 'New note');
 });

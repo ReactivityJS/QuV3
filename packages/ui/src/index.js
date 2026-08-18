@@ -4,6 +4,7 @@ export { renderSubpage } from './subpage.js';
 export { mountAppHeaderAction } from './app-header-action.js';
 export { renderNavPointsMenu } from './nav-points-menu.js';
 export { mountContextSwitcher, renderContextListPage } from './context-switcher.js';
+export { mountAppTemplate, normalizeAppConfig } from './app-template.js';
 export { renderAvatar, renderAvatarOrAsset, ASSET_AVATAR_PREFIX } from './avatar.js';
 export { injectStyle } from './style.js';
 export { renderFlagToggle } from './flag-toggle.js';

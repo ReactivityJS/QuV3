@@ -22,7 +22,7 @@ answer for "how do I get back," "where does 'create new X' live," and "how
 do I see/reach the other channels-or-calendars-or-conversations," so every
 app (old and new) looks and behaves the same way.
 
-## The four rules
+## The five rules
 
 ### Rule 1 — Global chrome owns Back/Forward
 
@@ -207,21 +207,119 @@ header's own Back/Forward/bell, `apps/search`'s icon, every icon-only row
 button in Calendar/Chat/Forum); it's now a hard requirement for any new
 icon-only control, not optional polish.
 
+### Rule 5 — The App Template / Footer-Sidebar Chrome
+
+Beyond the global header (Rules 1-2) and the Context Switcher (Rule 3), most
+apps eventually need some version of four more things: a way to switch
+between "places" that's reachable without going through a header slot, a way
+to switch how the current place is *displayed* (day/week/month, list/grid,
+latest/top), one obvious spot to create something new, and a spot for
+app-level settings. Building each of those by hand, per app, is exactly the
+kind of drift this whole document exists to prevent — so `@qu/ui`'s
+`mountAppTemplate()` does it once, as a second, **optional**, per-app-owned
+chrome region: a left sidebar on wide screens, a fixed bottom bar on narrow
+ones. An app hands it a plain data object (`AppConfig`) — navigation items, a
+"views" list, a primary action, settings entries, plus a `render(content)`
+callback for its own UI — and never writes footer/sidebar layout code
+itself. The Core decides placement and sizing; the content element handed to
+`render()` is already constrained to exactly the remaining space.
+
+```js
+import { mountAppTemplate } from '@qu/ui';
+
+mountAppTemplate(container, {
+  navigation: {
+    items: channels.map((c) => ({ id: c.id, label: c.label, href: `#/yourapp/c/${c.id}` })),
+    activeId: currentChannelId,
+    heading: 'Channels',
+  },
+  views: {
+    items: [{ id: 'latest', label: 'Latest', href: '#/yourapp/v/latest' }, { id: 'top', label: 'Top', href: '#/yourapp/v/top' }],
+    activeId: currentView,
+  },
+  primaryAction: { label: 'New topic', href: '#/yourapp/new', icon: '✏️' },
+  settings: { items: [{ label: 'Manage channels', href: '#/yourapp/manage' }] },
+  render: (content) => { /* your app's own main view, full-width/full-height */ },
+});
+```
+
+**Every section is optional, and an empty section renders nothing.** An app
+that passes only `render` gets zero chrome — the content area is exactly
+100% of the container. An app that passes only `primaryAction` gets a single
+floating action button in the bottom-right corner instead of a full-width
+bar, since there's no bar content to build one around.
+
+**Why a FAB is fine here, when this document used to reject one outright:**
+Calendar's *old* FAB (see the Before/After diagrams above) was a floating
+button with no system behind it — every app that wanted one built its own,
+inconsistently, and it could sit wherever it liked on top of content. This
+FAB is different in kind: it's one field (`primaryAction`) in a single,
+Core-owned, data-driven template that every app renders identically, exactly
+the same reasoning that already justifies the App Navigation Points Slot
+(Rule 2) existing as a fixed, predictable location. The two aren't
+competing — `shell.headerNavPoints` remains valid for apps that already use
+it (Calendar, Chat, ToDo, Forum are not required to migrate), but **new**
+apps should reach for `mountAppTemplate()`'s `primaryAction` first: it keeps
+the "create X" action next to the rest of that app's own chrome
+(navigation/views/settings) instead of splitting it across the global header
+and the app's own UI.
+
+**No bottom sheet, no drawer/scrim** — same reasoning as Rule 3's rejection
+of a JS-toggled overlay for the Context Switcher (no route, no Back/Forward
+support of its own). A `navigation`/`views` pill with more than one item, and
+the settings gear, open a small, anchored popup of real `<a href>` links —
+the exact same shape `renderNavPointsMenu()`'s 2+-item dropdown and the shell
+header's own user menu already use, not a full-screen overlay.
+
+```
+Mobile (<720px), fixed footer:
+┌──────────────────────────────────────────────────┐
+│ [💬 #general ▾]   [👁️ Latest ▾]        ⚙️   (✏️) │
+└──────────────────────────────────────────────────┘
+  navigation pill      views pill          settings  primaryAction
+  (popup of real       (popup of real      gear      (a real link,
+   links)                links)            (popup)    styled as a FAB)
+
+Desktop (≥720px), left sidebar (content sits to its right, flex: 1):
+┌────────────────────────┐
+│ [ ✏️ New topic       ] │  <- primaryAction, prominent, top
+├────────────────────────┤
+│ CHANNELS                │
+│  • # general             │  <- navigation
+│  • # random            3 │
+├────────────────────────┤
+│ latest   top             │  <- views
+├────────────────────────┤
+│                          │
+│ ⚙ Manage channels        │  <- settings, pinned to the bottom
+└────────────────────────┘
+```
+
+See `apps/_template/`'s `renderFolderView()` for a complete, tested, working
+example (`navigation` + `primaryAction`).
+
 ## Building a new app? A checklist
 
-1. Copy `apps/_template/` — it implements all four rules above, working and
+1. Copy `apps/_template/` — it implements every rule above, working and
    tested. Rename the directory, `manifest.quapp`'s `name`/`label`/`icon`,
    and restore `"clientMain": "./dist/client.js"` (the template omits it on
    purpose, so it's never itself bundled/catalog-listed).
 2. No custom back link, anywhere. `renderSubpage({ showBackLink: false })`
    for every subpage.
-3. One `shell.headerNavPoints` contribution if you have one or more "create
-   new X" actions that navigate to their own route (`renderNavPointsMenu()`
-   renders 1 as a plain link, 2+ as a dropdown). Nothing if every create
-   action is composed inline (a form at the bottom of a list, a composer).
-4. `mountContextSwitcher()` if you have more than one sibling place to be —
-   `variant: 'tabs'` for a short/stable list, `variant: 'page'` for a longer
-   one or one with its own management UI.
+3. Use `mountAppTemplate()` (Rule 5) instead of hand-rolled footer/sidebar
+   code once your app has any of: a "create new X" action, more than one
+   sibling place to switch between, more than one way to view the current
+   place, or app-level settings — pass whichever of `primaryAction`/
+   `navigation`/`views`/`settings` you actually need, omit the rest. This is
+   now the recommended home for a NEW app's "create new X" action; a plain
+   `shell.headerNavPoints` contribution (`renderNavPointsMenu()` renders 1
+   item as a plain link, 2+ as a dropdown) is still valid for apps that
+   already use it.
+4. `mountContextSwitcher()` if you need a channel/calendar-style switcher
+   OUTSIDE of `mountAppTemplate()`'s own `navigation` section (e.g. a
+   dedicated `variant: 'page'` management page) — `variant: 'tabs'` for a
+   short/stable list, `variant: 'page'` for a longer one or one with its own
+   management UI.
 5. Every icon-only control gets a `title` + `aria-label`.
 6. Read [`docs/building-an-app.md`](./building-an-app.md) for everything
    else — the `mount(container, ctx)` contract, Services, extension points,
