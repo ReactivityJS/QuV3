@@ -36,7 +36,7 @@
  */
 import { createI18n } from '@qu/i18n';
 import { formatActorLabel } from '@qu/services';
-import { injectStyle, ensureTheme, renderSubpage } from '@qu/ui';
+import { injectStyle, ensureTheme, mountAppTemplate } from '@qu/ui';
 import { createLogger } from '@qu/log';
 import { createPhoneCall, declinePhoneCall } from './src/call.js';
 
@@ -142,8 +142,7 @@ export function mount(container, ctx) {
 // ===========================================================================
 function mountCallStarter(container, { services }) {
   let stopped = false;
-  const stop = renderSubpage(container, {
-    showBackLink: false,
+  const stopTemplate = mountAppTemplate(container, {
     render: (content) => {
       const h1 = document.createElement('h1');
       h1.textContent = t('title');
@@ -179,7 +178,7 @@ function mountCallStarter(container, { services }) {
   });
   return () => {
     stopped = true;
-    stop?.();
+    stopTemplate();
   };
 }
 
@@ -193,7 +192,7 @@ function mountDecline(container, { qu, identity, services, iceServers }, spaceId
   status.className = 'qu-phone-error';
   status.textContent = '…';
   view.appendChild(status);
-  container.appendChild(view);
+  mountAppTemplate(container, { render: (content) => content.appendChild(view) });
 
   // Alias-first, same as mountActiveCall()'s own peerName - "declined" alone
   // doesn't say WHO was declined, and a raw pub is unhelpful. Resolved
@@ -293,7 +292,7 @@ function mountActiveCall(container, ctx, spaceId, remotePub, { initiator, callMo
   localVideo.hidden = callMode !== 'video';
 
   view.append(remoteVideo, localVideo, peerName, status, controls);
-  container.appendChild(view);
+  mountAppTemplate(container, { render: (content) => content.appendChild(view) });
 
   let call = null;
   let stopped = false;

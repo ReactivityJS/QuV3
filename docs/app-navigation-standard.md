@@ -314,6 +314,20 @@ already wired into the one Core-owned chrome entry point — adding
 `primaryAction`/`navigation`/`views`/`settings` later is a config change, not
 a rewrite of how the app boots.
 
+`apps/phone/client.js` is the example for a MULTI-ROUTE app where none of
+the four chrome fields fit any route: each of its 5 routes (call-starter,
+caller/audio, caller/video, callee, decline) is still its own
+chrome-less `mountAppTemplate(container, { render })` call — a real page with
+a real route, exactly per this rule — but none contributes a `navigation`
+item. `accept`/`decline` in particular are never reached through any menu at
+all (only via a notification click, an in-app toast action, or another app's
+`content.chatRoomMenu` contribution) — a route doesn't need a nav entry to
+be a "real page" in this sense. The call view's own full-bleed, fixed-position
+styling (`.qu-phone-call-view`) is untouched by the wrap — a chrome-less
+`mountAppTemplate()` call adds no visible sidebar/footer, so a
+`position: fixed` overlay inside its `content` element behaves exactly as
+before.
+
 ## Building a new app? A checklist
 
 1. Copy `apps/_template/` — it implements every rule above, working and
