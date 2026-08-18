@@ -337,23 +337,40 @@ the remaining VIEWPORT height below the shell header, real `position: fixed`
 under the hood (see `@qu/ui`'s `app-template.js` own "FULL HEIGHT MODE" doc
 comment for the full "why fixed, not `calc(100vh - ...)`" reasoning) — for a
 messenger-style view with its own internal header/scroll-region/composer
-structure. `apps/chat/client.js`'s `mountRoomView()` is the real example:
-an open room mounts with `fullHeight: true` AND a `navigation` section
-listing every room (1:1 + group), the current one active — a genuine
-room-switcher sidebar on wide screens, a pill+popup in the mobile footer, so
-switching rooms no longer means going back to `#/chat` first (this used to
-be an explicitly out-of-scope gap in this doc). Both `navigation` and
-`primaryAction` ("+ New group") depend on an async fetch (contacts/groups,
-a policy check) that isn't ready at the one synchronous `mountAppTemplate()`
-call every app makes — **`stopTemplate.update(partialConfig)`** (the
-function `mountAppTemplate()` returns also carries this property — see that
-function's own "LATE-ARRIVING CHROME DATA" doc comment) fills chrome in once
-that resolves, without re-calling `render()` or disturbing the app's own
-already-mounted content. `apps/chat/client.js`'s `listRooms()` is the one
-place that computes "what rooms exist, in what order, with what unread/muted
-state", shared by both the rich room-list view and the lightweight
-`navigation` items its own room view builds from the same data via
-`roomsToNavItems()`.
+structure. `apps/chat/client.js`'s `mountRoomView()` is the real example: an
+open room mounts with `fullHeight: true` AND a `navigation` section listing
+every room (1:1 + group), the current one active — a genuine room-switcher
+sidebar on wide screens, so switching rooms no longer means going back to
+`#/chat` first (this used to be an explicitly out-of-scope gap in this doc).
+
+**`navigation`/`views`/`settings`' `desktopOnly: true`** keeps a section OUT
+of the mobile footer entirely — no pill, and it doesn't count towards
+deciding whether a footer bar exists at all — while it still shows normally
+in the desktop sidebar. Two real uses in `apps/chat/client.js`, from actual
+usability feedback on the first version of this migration: the room LIST
+(`mountRoomListView()`) now also passes its own room list as a `desktopOnly`
+`navigation` section, so the desktop sidebar matches an open room's (it felt
+inconsistent that only an open room got one) — `desktopOnly` because the
+room list is ALREADY that same list, full-width, as the page's own content
+on narrow screens, so a mobile pill duplicating it would be pointless. An
+open room (`mountRoomView()`) has NO `primaryAction` at all anymore ("+ New
+group" lives on the room list only — rarely needed once already inside a
+room) and its own `navigation` is `desktopOnly` too — with nothing left for
+the mobile footer to show, `mountAppTemplate()` renders no footer there at
+all, so the room's own composer bar is the only bottom bar on a phone,
+instead of a second, duplicate-looking one sitting right above it.
+
+Both views' `navigation` depends on an async fetch (contacts/groups, and -
+room list only - a group-creation policy check) that isn't ready at the one
+synchronous `mountAppTemplate()` call every app makes —
+**`stopTemplate.update(partialConfig)`** (the function `mountAppTemplate()`
+returns also carries this property — see that function's own "LATE-ARRIVING
+CHROME DATA" doc comment) fills chrome in once that resolves, without
+re-calling `render()` or disturbing the app's own already-mounted content.
+`apps/chat/client.js`'s `listRooms()` is the one place that computes "what
+rooms exist, in what order, with what unread/muted state", shared by both
+the rich room-list view and the lightweight `navigation` items either view
+builds from the same data via `roomsToNavItems()`.
 
 ## Building a new app? A checklist
 

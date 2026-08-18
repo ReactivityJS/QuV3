@@ -1533,10 +1533,14 @@ test('the new-group form has no bespoke back link either - just the shell header
 
 // ===== mountAppTemplate() chrome (see docs/app-navigation-standard.md Rule 5) =====
 
-test('the room list\'s primaryAction ("+ New group") links to #/chat/new-group, added once the group-creation policy check resolves', async () => {
-  const { qu, services } = await freshEnv('Alice');
+test('the room list\'s primaryAction ("+ New group") links to #/chat/new-group, and the desktop sidebar ALSO gets a (desktop-only) room list, while the mobile footer stays fab-only', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  await alice.services.contacts.addContact(bob.myPub);
+
   const container = makeContainer();
-  const stop = mount(container, { qu, services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat'] });
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat'] });
   try {
     await waitFor(() => container.querySelector('a.qu-apptpl-fab') !== null);
     const fab = container.querySelector('a.qu-apptpl-fab');
@@ -1544,12 +1548,26 @@ test('the room list\'s primaryAction ("+ New group") links to #/chat/new-group, 
     assert.equal(fab.title, 'New chat group');
     const desktopPrimary = container.querySelector('a.qu-apptpl-primary-desktop');
     assert.equal(desktopPrimary.getAttribute('href'), '#/chat/new-group');
+
+    // The desktop sidebar ALSO shows the room list now (feedback: it felt
+    // inconsistent that only an open room got one) - none marked active,
+    // since no specific room is open here.
+    await waitFor(() => container.querySelector('.qu-apptpl-sidebar .qu-apptpl-list a') !== null);
+    assert.equal(container.querySelector('.qu-apptpl-sidebar .qu-apptpl-list a').textContent, '👤Bob');
+    assert.equal(container.querySelector('.qu-apptpl-sidebar .qu-apptpl-item-active'), null);
+
+    // But the mobile footer stays fab-only - the room list is ALREADY the
+    // page's own full-width content there, so a pill duplicating it would
+    // be pointless (feedback: "keep rooms on the start page, not a pill").
+    const footer = container.querySelector('.qu-apptpl-footer');
+    assert.equal(footer.classList.contains('qu-apptpl-footer--fab-only'), true);
+    assert.equal(footer.querySelector('.qu-apptpl-pill'), null);
   } finally {
     stop();
   }
 });
 
-test('an open room\'s navigation sidebar lists every room (1:1 + group), the current one active, and also carries the "+ New group" primaryAction', async () => {
+test('an open room\'s navigation sidebar lists every room (1:1 + group), the current one active, on desktop only - no primaryAction and no mobile footer at all', async () => {
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');
   await mirrorProfileInto(bob, alice.qu);
@@ -1575,7 +1593,15 @@ test('an open room\'s navigation sidebar lists every room (1:1 + group), the cur
     const activeLink = container.querySelector('.qu-apptpl-sidebar .qu-apptpl-item-active');
     assert.equal(activeLink.getAttribute('href'), `#/chat/g/${groupId}`); // the currently open room, not the DM
 
-    assert.ok(container.querySelector('a.qu-apptpl-primary-desktop'));
+    // No "+ New group" anywhere inside an open room (feedback: rarely
+    // needed once already inside a room) - neither the desktop sidebar
+    // button nor a mobile FAB.
+    assert.equal(container.querySelector('.qu-apptpl-primary-desktop'), null);
+    assert.equal(container.querySelector('a.qu-apptpl-fab'), null);
+    // And with no primaryAction AND a desktop-only navigation, there's
+    // nothing left for the mobile footer to show at all (feedback: it
+    // duplicated the room's own composer bar right above it).
+    assert.equal(container.querySelector('.qu-apptpl-footer'), null);
   } finally {
     stop();
   }
@@ -1593,6 +1619,7 @@ test('the room view\'s navigation still populates (for switching AWAY) even when
     await waitFor(() => container.textContent.includes('This group doesn\'t exist, or you\'re not a member.'));
     await waitFor(() => container.querySelector('.qu-apptpl-sidebar .qu-apptpl-list a') !== null);
     assert.equal(container.querySelector('.qu-apptpl-sidebar .qu-apptpl-list a').getAttribute('href'), `#/chat/${bob.myPub}`);
+    assert.equal(container.querySelector('.qu-apptpl-footer'), null); // still no mobile footer, even in this edge case
   } finally {
     stop();
   }
