@@ -296,7 +296,23 @@ Desktop (≥720px), left sidebar (content sits to its right, flex: 1):
 ```
 
 See `apps/_template/`'s `renderFolderView()` for a complete, tested, working
-example (`navigation` + `primaryAction`).
+example (`navigation` + `primaryAction`). `apps/notifications/client.js` is a
+second real example, of `views` specifically: its old "Show all (incl. read)"
+button (in-place JS state) is now two real routes, `#/notifications`
+(unread-only, the default) and `#/notifications/all`, decided once at mount
+time from `segments[1]` and rendered as the `views` pill — the exact "real
+route instead of a toggle" trade-off Rule 2's own "New topic" migration
+already made, applied here to a view switch instead of a create action.
+
+Every app's MAIN view — even one with none of `navigation`/`views`/
+`primaryAction`/`settings` today — should still go through
+`mountAppTemplate()`, passing only `render`. `apps/app-list`,
+`apps/contact-list`, `apps/user-list`, and `apps/bookmarks` do exactly this:
+zero visible change today (an empty config renders zero chrome, content gets
+100% of the container, same as calling `render()` directly), but the app is
+already wired into the one Core-owned chrome entry point — adding
+`primaryAction`/`navigation`/`views`/`settings` later is a config change, not
+a rewrite of how the app boots.
 
 ## Building a new app? A checklist
 
@@ -306,12 +322,14 @@ example (`navigation` + `primaryAction`).
    purpose, so it's never itself bundled/catalog-listed).
 2. No custom back link, anywhere. `renderSubpage({ showBackLink: false })`
    for every subpage.
-3. Use `mountAppTemplate()` (Rule 5) instead of hand-rolled footer/sidebar
-   code once your app has any of: a "create new X" action, more than one
-   sibling place to switch between, more than one way to view the current
-   place, or app-level settings — pass whichever of `primaryAction`/
-   `navigation`/`views`/`settings` you actually need, omit the rest. This is
-   now the recommended home for a NEW app's "create new X" action; a plain
+3. Route your app's MAIN view through `mountAppTemplate()` (Rule 5), even if
+   you pass only `render` — that's the standard entry point now, chrome-less
+   by default. Add `primaryAction`/`navigation`/`views`/`settings` (any
+   combination, omit the rest) the moment your app actually has a "create new
+   X" action, more than one sibling place to switch between, more than one
+   way to view the current place, or app-level settings — never build that
+   chrome by hand. `mountAppTemplate()`'s `primaryAction` is now the
+   recommended home for a NEW app's "create new X" action; a plain
    `shell.headerNavPoints` contribution (`renderNavPointsMenu()` renders 1
    item as a plain link, 2+ as a dropdown) is still valid for apps that
    already use it.
