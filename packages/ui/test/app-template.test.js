@@ -277,3 +277,62 @@ test('stop() after an update() still tears down the CURRENT footer\'s listeners'
   stop();
   assert.doesNotThrow(() => document.body.click());
 });
+
+// ===== desktopOnly =====
+
+test('normalizeAppConfig defaults a section\'s desktopOnly to false', () => {
+  const cfg = normalizeAppConfig({ navigation: NAV, render: () => {} });
+  assert.equal(cfg.navigation.desktopOnly, false);
+});
+
+test('desktopOnly: true still shows the section in the desktop sidebar', () => {
+  const container = makeContainer();
+  mountAppTemplate(container, { navigation: { ...NAV, desktopOnly: true }, render: () => {} });
+  const links = [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')];
+  assert.deepEqual(links.map((a) => a.textContent), ['💬General', 'Random3']);
+});
+
+test('desktopOnly: true excludes the section from the mobile footer entirely - no pill, and (with nothing else set) no footer at all', () => {
+  const container = makeContainer();
+  mountAppTemplate(container, { navigation: { ...NAV, desktopOnly: true }, render: () => {} });
+  assert.equal(container.querySelector('.qu-apptpl-footer'), null);
+  // The desktop sidebar still exists (hasChrome is true from navigation alone).
+  assert.ok(container.querySelector('.qu-apptpl-sidebar'));
+});
+
+test('desktopOnly navigation + a primaryAction: mobile footer is fab-only (the nav pill is excluded, not just hidden)', () => {
+  const container = makeContainer();
+  mountAppTemplate(container, {
+    navigation: { ...NAV, desktopOnly: true }, primaryAction: PRIMARY, render: () => {},
+  });
+  const footer = container.querySelector('.qu-apptpl-footer');
+  assert.ok(footer);
+  assert.equal(footer.classList.contains('qu-apptpl-footer--fab-only'), true);
+  assert.equal(footer.querySelector('.qu-apptpl-pill'), null);
+  assert.ok(footer.querySelector('a.qu-apptpl-fab'));
+  // Desktop sidebar shows both the primaryAction button AND the nav section.
+  assert.ok(container.querySelector('.qu-apptpl-sidebar .qu-apptpl-primary-desktop'));
+  assert.ok(container.querySelector('.qu-apptpl-sidebar .qu-apptpl-list'));
+});
+
+test('desktopOnly navigation alongside a NON-desktopOnly views section: the footer shows only the views pill', () => {
+  const container = makeContainer();
+  mountAppTemplate(container, {
+    navigation: { ...NAV, desktopOnly: true }, views: VIEWS, render: () => {},
+  });
+  const footer = container.querySelector('.qu-apptpl-footer');
+  assert.equal(footer.classList.contains('qu-apptpl-footer--fab-only'), false);
+  const pills = footer.querySelectorAll('.qu-apptpl-pill');
+  assert.equal(pills.length, 1);
+  assert.ok(pills[0].textContent.includes('Latest')); // the views pill, not navigation
+});
+
+test('stop.update() can flip a section to desktopOnly later, removing it from an already-built footer', () => {
+  const container = makeContainer();
+  const stop = mountAppTemplate(container, { navigation: NAV, render: () => {} });
+  assert.ok(container.querySelector('.qu-apptpl-footer .qu-apptpl-pill'));
+
+  stop.update({ navigation: { ...NAV, desktopOnly: true } });
+  assert.equal(container.querySelector('.qu-apptpl-footer'), null);
+  assert.ok(container.querySelector('.qu-apptpl-sidebar .qu-apptpl-list')); // still in the sidebar
+});

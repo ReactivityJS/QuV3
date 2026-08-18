@@ -85,20 +85,31 @@
  *
  * NAVIGATION (`docs/app-navigation-standard.md` Rule 5): both the room list
  * (`mountRoomListView()`) and an open room (`mountRoomView()`) mount through
- * `@qu/ui`'s `mountAppTemplate()` - `primaryAction` is "+ New group" (the
- * global header's `shell.headerNavPoints` contributor this app used to
- * ship is gone, superseded by this), and an open room ALSO gets
- * `navigation`: every room (1:1 + group), the current one marked active - a
- * real room-switcher sidebar on wide screens, a pill+popup in the mobile
- * footer, so switching rooms no longer means going back to `#/chat` first.
- * Both fields depend on an async fetch (contacts/groups, and the
- * group-creation policy check `fetchChatPolicy()` already did) that isn't
- * ready at the one synchronous `mountAppTemplate()` call - `stopTemplate.
- * update({...})` (see that function's own "LATE-ARRIVING CHROME DATA" doc
- * comment) fills them in once resolved, same "build immediately, fill in via
- * your own async IIFE" shape every other async render in this file already
- * follows. `listRooms()` (shared by both views) is the one place that
- * computes "what rooms exist, in what order, with what unread/muted state".
+ * `@qu/ui`'s `mountAppTemplate()`. "+ New group" (`primaryAction`) lives on
+ * the room list ONLY - the global header's `shell.headerNavPoints`
+ * contributor this app used to ship is gone, superseded by this, but an
+ * open room does NOT also get it (feedback: rarely needed once already
+ * inside a room, and a mobile FAB there had nothing to pair with). Both
+ * views also get `navigation`: every room (1:1 + group), the current one
+ * marked active on the room list (none active) or the open room (itself
+ * active) - a real room-switcher sidebar on wide screens either way. On
+ * NARROW screens, `desktopOnly: true` on both views' `navigation` keeps it
+ * OUT of the mobile footer entirely: the room list already shows this same
+ * list as its own full-width content (a pill would just duplicate it,
+ * feedback: "keep rooms on the start page, not a sidebar/pill on mobile"),
+ * and an open room drops the mobile footer bar altogether once
+ * `primaryAction` is also absent (feedback: it read as a second, duplicate
+ * footer sitting right above the room's own composer bar) - Back to the
+ * room list is the shell header's own Back button either way (Rule 1).
+ * Both fields depend on an async fetch (contacts/groups, and - room list
+ * only - the group-creation policy check `fetchChatPolicy()` does) that
+ * isn't ready at the one synchronous `mountAppTemplate()` call -
+ * `stopTemplate.update({...})` (see that function's own "LATE-ARRIVING
+ * CHROME DATA" doc comment) fills them in once resolved, same "build
+ * immediately, fill in via your own async IIFE" shape every other async
+ * render in this file already follows. `listRooms()` (shared by both views)
+ * is the one place that computes "what rooms exist, in what order, with
+ * what unread/muted state".
  *
  * PERMALINKS + SCROLL-FOLLOW: a message's timestamp (see
  * `buildMessageFooter()`) IS its permalink - clicking it (or landing on one
@@ -745,6 +756,12 @@ function mountRoomListView(container, { qu, services, subscribe, syncFetch, SPAC
       getPrivateChildren(qu, identity, paths.privateFlagParentPath(myPub, 'dismissed', 'chat-request')),
     ]);
     if (stopped || token !== renderToken) return;
+
+    // Desktop-only - see this file's own top doc comment's "NAVIGATION"
+    // section: this same room list already fills `content` below, so a
+    // mobile pill duplicating it would be pointless; the desktop sidebar
+    // gets it anyway, matching an open room's own sidebar.
+    stopTemplate.update({ navigation: { items: roomsToNavItems(rooms), desktopOnly: true, heading: t('title') } });
 
     // MESSAGE REQUESTS - see ChatService's own "1:1 DISCOVERY" doc comment.
     // A request is worth SHOWING only while it's neither already accepted
@@ -2374,26 +2391,24 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     renderMessages();
   })();
 
-  // Room-switcher `navigation` + "+ New group" `primaryAction` - see this
-  // file's own top doc comment's "NAVIGATION" section. Independent of the
-  // main setup IIFE above (its own `services.actors.whoAmI()` call, not a
-  // shared await) so a group-not-found early return up there still leaves
-  // the sidebar/footer usable to get to a DIFFERENT room. `roomId` (read
-  // once this resolves) is set synchronously at the very top of both
-  // branches up there, well before either can bail out.
+  // Room-switcher `navigation` (desktop-sidebar-only - see this file's own
+  // top doc comment's "NAVIGATION" section: "+ New group" lives ONLY on the
+  // room list now, an open room has no `primaryAction` at all, and the
+  // mobile footer this used to add here is gone entirely - the room's own
+  // composer is already a bottom bar, a second one right above it read as
+  // duplicated chrome). Independent of the main setup IIFE above (its own
+  // `services.actors.whoAmI()` call, not a shared await) so a
+  // group-not-found early return up there still leaves the sidebar usable
+  // to get to a DIFFERENT room. `roomId` (read once this resolves) is set
+  // synchronously at the very top of both branches up there, well before
+  // either can bail out.
   (async () => {
     const myPubForNav = await services.actors.whoAmI();
     if (stopped) return;
-    const [rooms, { allowMemberCreateGroup, isAdmin }] = await Promise.all([
-      listRooms({ services, SPACE_ID, myPub: myPubForNav }),
-      fetchChatPolicy(services),
-    ]);
+    const rooms = await listRooms({ services, SPACE_ID, myPub: myPubForNav });
     if (stopped) return;
     stopTemplate.update({
-      navigation: { items: roomsToNavItems(rooms), activeId: roomId, heading: t('title') },
-      primaryAction: (isAdmin || allowMemberCreateGroup)
-        ? { label: t('newChatGroup'), href: '#/chat/new-group', icon: '✏️' }
-        : undefined,
+      navigation: { items: roomsToNavItems(rooms), activeId: roomId, heading: t('title'), desktopOnly: true },
     });
   })();
 

@@ -75,13 +75,23 @@ import { injectStyle } from './style.js';
  *   an `onClick`). Rendered as a prominent button: top of the sidebar on
  *   wide screens, a circular button at the end of the footer (or floating
  *   alone, if nothing else is present) on narrow ones.
- * @property {{items: AppTemplateLinkItem[], activeId?: string|null, heading?: string}} [navigation] -
+ * @property {{items: AppTemplateLinkItem[], activeId?: string|null, heading?: string, desktopOnly?: boolean}} [navigation] -
  *   "Where am I / where can I go" - a channel, a calendar, a folder. Omit
  *   (or pass an empty `items`) if your app has nothing to switch between.
- * @property {{items: AppTemplateLinkItem[], activeId?: string|null, heading?: string}} [views] -
+ *   `desktopOnly: true` (default `false`) keeps this section OUT of the
+ *   mobile footer entirely (no pill, and it doesn't count towards deciding
+ *   whether a footer bar exists at all) while still showing normally in the
+ *   desktop sidebar - for a section that's redundant with a page's own
+ *   content on narrow screens (e.g. `apps/chat/client.js`'s room list
+ *   passing its own room list as `navigation` too, so the desktop sidebar
+ *   matches an open room's, without also duplicating that same list as a
+ *   pointless mobile pill on top of the full list already on screen).
+ * @property {{items: AppTemplateLinkItem[], activeId?: string|null, heading?: string, desktopOnly?: boolean}} [views] -
  *   "How do I want to see this" - day/week/month, list/grid, latest/top.
- * @property {{items: AppTemplateSettingsItem[], heading?: string}} [settings] -
+ *   `desktopOnly` - see `navigation`'s own doc above.
+ * @property {{items: AppTemplateSettingsItem[], heading?: string, desktopOnly?: boolean}} [settings] -
  *   App-level settings/management links, reached via a gear icon.
+ *   `desktopOnly` - see `navigation`'s own doc above.
  * @property {string} [breakpoint='720px'] - Same meaning as
  *   `mountContextSwitcher()`'s own `breakpoint` option.
  * @property {boolean} [fullHeight=false] - Opt-in: `content` (and the
@@ -192,7 +202,7 @@ function ensureStyle(breakpoint) {
 
 function normalizeLinkSection(section) {
   if (!section || !Array.isArray(section.items) || section.items.length === 0) return null;
-  return { items: section.items, activeId: section.activeId ?? null, heading: section.heading ?? null };
+  return { items: section.items, activeId: section.activeId ?? null, heading: section.heading ?? null, desktopOnly: !!section.desktopOnly };
 }
 
 /**
@@ -376,7 +386,7 @@ function buildPill(section) {
   return btn;
 }
 
-function buildMobileFooter(cfg, { fabOnly }) {
+function buildMobileFooter(cfg, { fabOnly, mobileNav, mobileViews, mobileSettings }) {
   const footer = document.createElement('div');
   footer.className = fabOnly ? 'qu-apptpl-footer qu-apptpl-footer--fab-only' : 'qu-apptpl-footer';
   const cleanupFns = [];
@@ -390,27 +400,27 @@ function buildMobileFooter(cfg, { fabOnly }) {
 
   const start = document.createElement('div');
   start.className = 'qu-apptpl-footer-start';
-  if (cfg.navigation) {
-    const { el, cleanup } = buildPopupTrigger({ triggerEl: buildPill(cfg.navigation), items: cfg.navigation.items });
+  if (mobileNav) {
+    const { el, cleanup } = buildPopupTrigger({ triggerEl: buildPill(mobileNav), items: mobileNav.items });
     start.appendChild(el);
     cleanupFns.push(cleanup);
   }
-  if (cfg.views) {
-    const { el, cleanup } = buildPopupTrigger({ triggerEl: buildPill(cfg.views), items: cfg.views.items });
+  if (mobileViews) {
+    const { el, cleanup } = buildPopupTrigger({ triggerEl: buildPill(mobileViews), items: mobileViews.items });
     start.appendChild(el);
     cleanupFns.push(cleanup);
   }
 
   const end = document.createElement('div');
   end.className = 'qu-apptpl-footer-end';
-  if (cfg.settings) {
+  if (mobileSettings) {
     const gearBtn = document.createElement('button');
     gearBtn.type = 'button';
     gearBtn.className = 'qu-apptpl-gear';
     gearBtn.textContent = '⚙️';
-    gearBtn.title = cfg.settings.heading ?? 'Settings';
-    gearBtn.setAttribute('aria-label', cfg.settings.heading ?? 'Settings');
-    const { el, cleanup } = buildPopupTrigger({ triggerEl: gearBtn, items: cfg.settings.items, popupPosition: 'right' });
+    gearBtn.title = mobileSettings.heading ?? 'Settings';
+    gearBtn.setAttribute('aria-label', mobileSettings.heading ?? 'Settings');
+    const { el, cleanup } = buildPopupTrigger({ triggerEl: gearBtn, items: mobileSettings.items, popupPosition: 'right' });
     end.appendChild(el);
     cleanupFns.push(cleanup);
   }
@@ -471,23 +481,31 @@ export function mountAppTemplate(container, config) {
     sidebarEl?.remove();
     footerEl?.remove();
 
+    // `hasChrome` decides the DESKTOP sidebar - every section counts,
+    // `desktopOnly` or not. The mobile footer only cares about sections
+    // that AREN'T `desktopOnly` - see this file's own `navigation` doc
+    // comment above for why a section opts out of the footer entirely.
     const hasChrome = !!(cfg.primaryAction || cfg.navigation || cfg.views || cfg.settings);
-    const fabOnly = hasChrome && !cfg.navigation && !cfg.views && !cfg.settings && !!cfg.primaryAction;
+    const mobileNav = cfg.navigation && !cfg.navigation.desktopOnly ? cfg.navigation : null;
+    const mobileViews = cfg.views && !cfg.views.desktopOnly ? cfg.views : null;
+    const mobileSettings = cfg.settings && !cfg.settings.desktopOnly ? cfg.settings : null;
+    const hasMobileFooterContent = !!(cfg.primaryAction || mobileNav || mobileViews || mobileSettings);
+    const fabOnly = hasMobileFooterContent && !mobileNav && !mobileViews && !mobileSettings && !!cfg.primaryAction;
 
     root.className = cfg.fullHeight ? 'qu-apptpl-root qu-apptpl-root--full-height' : 'qu-apptpl-root';
-    if (cfg.fullHeight && hasChrome && !fabOnly) root.classList.add('qu-apptpl-root--has-footer-bar');
+    if (cfg.fullHeight && hasMobileFooterContent && !fabOnly) root.classList.add('qu-apptpl-root--has-footer-bar');
 
     // In full-height mode, the fixed root's own bottom inset already makes
     // room for the footer bar (`.qu-apptpl-root--has-footer-bar`) - adding
     // this padding TOO would double-reserve that space, since content isn't
     // the thing scrolling the page anymore. See the `fullHeight` doc comment.
-    content.classList.toggle('qu-apptpl-content--with-bar', hasChrome && !fabOnly && !cfg.fullHeight);
+    content.classList.toggle('qu-apptpl-content--with-bar', hasMobileFooterContent && !fabOnly && !cfg.fullHeight);
 
     sidebarEl = hasChrome ? buildDesktopSidebar(cfg) : null;
     if (sidebarEl) layout.insertBefore(sidebarEl, content);
 
-    if (hasChrome) {
-      const { el, cleanup } = buildMobileFooter(cfg, { fabOnly });
+    if (hasMobileFooterContent) {
+      const { el, cleanup } = buildMobileFooter(cfg, { fabOnly, mobileNav, mobileViews, mobileSettings });
       footerEl = el;
       root.appendChild(footerEl);
       cleanupFooter = cleanup;
