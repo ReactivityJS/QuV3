@@ -23,7 +23,6 @@
     { "point": "userSettings.contributions", "export": "renderChatSettings", "kind": "ui", "order": 20 },
     { "point": "content.search", "export": "searchChat", "kind": "query" },
     { "point": "content.searchResultTemplate", "export": "renderSearchResult", "kind": "ui" },
-    { "point": "content.resolveReference", "export": "resolveChatReference", "kind": "query" },
-    { "point": "shell.headerNavPoints", "export": "renderHeaderNavPoints", "kind": "ui", "order": 10 }
+    { "point": "content.resolveReference", "export": "resolveChatReference", "kind": "query" }
   ]
 }

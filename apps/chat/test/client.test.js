@@ -11,7 +11,7 @@ import { ExtensionPointHost } from '@qu/foundation';
 import { installDom, waitFor } from '@qu/ui/testing';
 
 installDom();
-const { mount, renderChatSettings, renderHeaderNavPoints, searchChat, resolveChatReference, renderSearchResult } = await import('../client.js');
+const { mount, renderChatSettings, searchChat, resolveChatReference, renderSearchResult } = await import('../client.js');
 
 /** A minimal MediaRecorder test double - start()/pause()/resume()/stop(), stop() synchronously fires ondataavailable then onstop, matching real MediaRecorder's own event order closely enough for startRecording()'s own handler. pause()/resume() just track state (this file's own tests only assert on the DOM state the client itself derives, not on MediaRecorder.state). */
 class FakeMediaRecorder {
@@ -1531,27 +1531,69 @@ test('the new-group form has no bespoke back link either - just the shell header
   }
 });
 
-// ===== renderHeaderNavPoints() - the shell.headerNavPoints contributor (see docs/app-navigation-standard.md Rule 2) =====
+// ===== mountAppTemplate() chrome (see docs/app-navigation-standard.md Rule 5) =====
 
-test('renderHeaderNavPoints(): hidden while another app is active, shows a "New chat group" link once Chat becomes active', async () => {
-  const { services } = await freshEnv('Alice');
+test('the room list\'s primaryAction ("+ New group") links to #/chat/new-group, added once the group-creation policy check resolves', async () => {
+  const { qu, services } = await freshEnv('Alice');
   const container = makeContainer();
+  const stop = mount(container, { qu, services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat'] });
+  try {
+    await waitFor(() => container.querySelector('a.qu-apptpl-fab') !== null);
+    const fab = container.querySelector('a.qu-apptpl-fab');
+    assert.equal(fab.getAttribute('href'), '#/chat/new-group');
+    assert.equal(fab.title, 'New chat group');
+    const desktopPrimary = container.querySelector('a.qu-apptpl-primary-desktop');
+    assert.equal(desktopPrimary.getAttribute('href'), '#/chat/new-group');
+  } finally {
+    stop();
+  }
+});
 
-  let appId = 'calendar';
-  const listeners = [];
-  renderHeaderNavPoints(container, {
-    getContext: () => ({ appId, segments: [appId] }),
-    onContextChange: (cb) => listeners.push(cb),
-    services,
-  });
-  const wrap = container.querySelector('.qu-app-header-action');
-  assert.equal(wrap.hidden, true);
-  assert.equal(wrap.querySelector('a'), null);
+test('an open room\'s navigation sidebar lists every room (1:1 + group), the current one active, and also carries the "+ New group" primaryAction', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  await mirrorProfileInto(alice, bob.qu);
+  // Bob's own DM-with-Alice room (ChatService's own "creator never sees
+  // their own created group" quirk - see the "createGroup() + posting..."
+  // test above - means BOB, the invited member, is the side whose room
+  // list can show both a 1:1 AND a group at once here, not Alice).
+  await bob.services.contacts.addContact(alice.myPub);
+  const { groupId } = await alice.services.chat.createGroup(CHAT_SPACE_ID, { name: 'Team Rocket', memberPubs: [bob.myPub] });
+  const inviteSpace = await bob.services.chat.myInviteSpace();
+  await mirrorThreadInto(alice, bob.qu, inviteSpace, 'groups');
+  await mirrorThreadInto(alice, bob.qu, CHAT_SPACE_ID, groupId);
 
-  appId = 'chat';
-  listeners.forEach((cb) => cb());
-  assert.equal(wrap.hidden, false);
-  await waitFor(() => wrap.querySelector('a') !== null);
-  assert.equal(wrap.querySelector('a').getAttribute('href'), '#/chat/new-group');
-  assert.equal(wrap.querySelector('a').title, 'New chat group');
+  const container = makeContainer();
+  const stop = mount(container, { qu: bob.qu, services: bob.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', 'g', groupId] });
+  try {
+    await waitFor(() => container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a').length === 2);
+    const links = [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')];
+    assert.deepEqual(links.map((a) => a.textContent).sort(), ['👤Alice', '👥Team Rocket']);
+    assert.equal(links.map((a) => a.getAttribute('href')).includes(`#/chat/${alice.myPub}`), true);
+    assert.equal(links.map((a) => a.getAttribute('href')).includes(`#/chat/g/${groupId}`), true);
+    const activeLink = container.querySelector('.qu-apptpl-sidebar .qu-apptpl-item-active');
+    assert.equal(activeLink.getAttribute('href'), `#/chat/g/${groupId}`); // the currently open room, not the DM
+
+    assert.ok(container.querySelector('a.qu-apptpl-primary-desktop'));
+  } finally {
+    stop();
+  }
+});
+
+test('the room view\'s navigation still populates (for switching AWAY) even when the current group no longer resolves', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  await alice.services.contacts.addContact(bob.myPub);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', 'g', 'does-not-exist'] });
+  try {
+    await waitFor(() => container.textContent.includes('This group doesn\'t exist, or you\'re not a member.'));
+    await waitFor(() => container.querySelector('.qu-apptpl-sidebar .qu-apptpl-list a') !== null);
+    assert.equal(container.querySelector('.qu-apptpl-sidebar .qu-apptpl-list a').getAttribute('href'), `#/chat/${bob.myPub}`);
+  } finally {
+    stop();
+  }
 });

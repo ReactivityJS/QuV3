@@ -173,3 +173,107 @@ test('the returned cleanup removes document-level popup listeners', () => {
   // listener attached to `document` for this instance.
   assert.equal(popup.hidden, false);
 });
+
+// ===== fullHeight =====
+
+test('normalizeAppConfig defaults fullHeight to false', () => {
+  const cfg = normalizeAppConfig({ render: () => {} });
+  assert.equal(cfg.fullHeight, false);
+});
+
+test('fullHeight: false (default) never adds the full-height root/content classes', () => {
+  const container = makeContainer();
+  mountAppTemplate(container, { navigation: NAV, render: () => {} });
+  const root = container.querySelector('.qu-apptpl-root');
+  assert.equal(root.classList.contains('qu-apptpl-root--full-height'), false);
+  assert.equal(root.classList.contains('qu-apptpl-root--has-footer-bar'), false);
+  assert.equal(container.querySelector('.qu-apptpl-content').classList.contains('qu-apptpl-content--with-bar'), true);
+});
+
+test('fullHeight: true with chrome adds the full-height root class and the has-footer-bar modifier (not the with-bar padding class, to avoid double-reserving the footer space)', () => {
+  const container = makeContainer();
+  mountAppTemplate(container, { fullHeight: true, navigation: NAV, render: () => {} });
+  const root = container.querySelector('.qu-apptpl-root');
+  assert.equal(root.classList.contains('qu-apptpl-root--full-height'), true);
+  assert.equal(root.classList.contains('qu-apptpl-root--has-footer-bar'), true);
+  assert.equal(container.querySelector('.qu-apptpl-content').classList.contains('qu-apptpl-content--with-bar'), false);
+});
+
+test('fullHeight: true with only a primaryAction (fab-only footer) does not add has-footer-bar - the fab floats over content, nothing to reserve', () => {
+  const container = makeContainer();
+  mountAppTemplate(container, { fullHeight: true, primaryAction: PRIMARY, render: () => {} });
+  const root = container.querySelector('.qu-apptpl-root');
+  assert.equal(root.classList.contains('qu-apptpl-root--full-height'), true);
+  assert.equal(root.classList.contains('qu-apptpl-root--has-footer-bar'), false);
+});
+
+test('fullHeight: true with no chrome at all still gets the full-height root class, just no sidebar/footer', () => {
+  const container = makeContainer();
+  mountAppTemplate(container, { fullHeight: true, render: () => {} });
+  const root = container.querySelector('.qu-apptpl-root');
+  assert.equal(root.classList.contains('qu-apptpl-root--full-height'), true);
+  assert.equal(root.classList.contains('qu-apptpl-root--has-footer-bar'), false);
+  assert.equal(container.querySelector('.qu-apptpl-sidebar'), null);
+  assert.equal(container.querySelector('.qu-apptpl-footer'), null);
+});
+
+// ===== stop.update() - late-arriving chrome data =====
+
+test('stop.update() adds chrome that was absent at mount time, without re-calling render()', () => {
+  const container = makeContainer();
+  let renderCalls = 0;
+  let renderedContent = null;
+  const stop = mountAppTemplate(container, {
+    primaryAction: PRIMARY,
+    render: (content) => { renderCalls++; renderedContent = content; content.textContent = 'app content'; },
+  });
+  assert.equal(renderCalls, 1);
+  assert.equal(container.querySelector('.qu-apptpl-list'), null); // no navigation yet
+
+  stop.update({ navigation: NAV });
+
+  assert.equal(renderCalls, 1); // render() never called again
+  assert.equal(container.querySelector('.qu-apptpl-content'), renderedContent); // same content node, untouched
+  assert.equal(renderedContent.textContent, 'app content'); // app's own DOM survives the chrome rebuild
+  const navLinks = [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')];
+  assert.deepEqual(navLinks.map((a) => a.textContent), ['💬General', 'Random3']);
+  // The footer switches from fab-only (floating) to a real bar now that
+  // there's navigation content to show alongside the primary action.
+  assert.equal(container.querySelector('.qu-apptpl-footer').classList.contains('qu-apptpl-footer--fab-only'), false);
+  assert.ok(container.querySelector('.qu-apptpl-footer .qu-apptpl-pill'));
+});
+
+test('stop.update() replaces previously-set chrome (a second update overrides, not merges, a given section)', () => {
+  const container = makeContainer();
+  const stop = mountAppTemplate(container, { navigation: NAV, render: () => {} });
+  stop.update({ navigation: { items: [{ id: 'x', label: 'X', href: '#/x' }] } });
+  const navLinks = [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')];
+  assert.deepEqual(navLinks.map((a) => a.textContent), ['X']);
+});
+
+test('stop.update() cleans up the previous footer\'s popup listeners before rebuilding (no leak across rebuilds)', () => {
+  const container = makeContainer();
+  const stop = mountAppTemplate(container, { navigation: NAV, render: () => {} });
+  const firstPill = container.querySelector('.qu-apptpl-pill');
+  firstPill.click();
+  assert.equal(container.querySelector('.qu-apptpl-popup').hidden, false);
+
+  stop.update({ navigation: { items: [{ id: 'x', label: 'X', href: '#/x' }] } });
+  // The OLD popup/listener is gone - clicking the document doesn't touch a
+  // dangling reference to it (would throw/leak if the old cleanup wasn't run).
+  assert.doesNotThrow(() => document.body.click());
+  const newPopup = container.querySelector('.qu-apptpl-popup');
+  assert.equal(newPopup.hidden, true);
+});
+
+test('stop() after an update() still tears down the CURRENT footer\'s listeners', () => {
+  const container = makeContainer();
+  const stop = mountAppTemplate(container, { render: () => {} });
+  stop.update({ navigation: NAV });
+  const pill = container.querySelector('.qu-apptpl-pill');
+  pill.click();
+  assert.equal(container.querySelector('.qu-apptpl-popup').hidden, false);
+
+  stop();
+  assert.doesNotThrow(() => document.body.click());
+});

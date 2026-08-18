@@ -23,7 +23,7 @@
  *     `<qu-bind attr="checked">` has no way to express correctly.
  */
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme, renderFlagToggle } from '@qu/ui';
+import { injectStyle, ensureTheme, renderFlagToggle, mountAppTemplate } from '@qu/ui';
 import { paths, createTrustedCatalogStore } from '@qu/services';
 
 const DICT = {
@@ -58,7 +58,7 @@ export function mount(container, { qu, services, syncFetch }) {
   const heading = document.createElement('h1');
   heading.textContent = t('title');
   const listRoot = document.createElement('div');
-  container.append(heading, listRoot);
+  mountAppTemplate(container, { render: (content) => content.append(heading, listRoot) });
 
   (async () => {
     const res = await fetch('/config.json');

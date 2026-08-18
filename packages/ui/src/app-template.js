@@ -84,9 +84,42 @@ import { injectStyle } from './style.js';
  *   App-level settings/management links, reached via a gear icon.
  * @property {string} [breakpoint='720px'] - Same meaning as
  *   `mountContextSwitcher()`'s own `breakpoint` option.
+ * @property {boolean} [fullHeight=false] - Opt-in: `content` (and the
+ *   sidebar, if any) is bound to exactly the remaining VIEWPORT height below
+ *   the shell header (and above the mobile footer bar, if one renders),
+ *   instead of the default "grows with its own content, page scrolls"
+ *   behavior. For a messenger-style view with its OWN internal
+ *   header/scroll-region/composer structure (a room list next to an open
+ *   chat room, e.g. `apps/chat`) - see this file's own "FULL HEIGHT MODE"
+ *   doc comment below for why this has to be real `position: fixed`, not a
+ *   `calc(100vh - ...)` height. Leave `false` (the default) for an ordinary
+ *   page that should simply scroll with the rest of the document - true for
+ *   almost every app.
  * @property {(content: HTMLElement) => void} render - Required. Builds the
  *   app's own UI into `content`, an element the Core has already constrained
  *   to exactly the remaining space (see this file's own top doc comment).
+ */
+
+/**
+ * FULL HEIGHT MODE (`fullHeight: true`) - genuine `position: fixed`
+ * (viewport-relative), NOT a `calc(100vh - ...)` height computed against
+ * `.qu-shell-screen`'s own padding/box model. `apps/chat/client.js`'s
+ * now-superseded `.qu-chat-room-view` rule (this mode's direct ancestor -
+ * copy its own doc comment's full reasoning if you need the "why" in more
+ * detail) already worked this out the hard way: a computed-height approach
+ * is fragile by construction (any drift in an ancestor's padding, an extra
+ * wrapping element, or accumulated sub-pixel rounding makes the computed box
+ * even slightly TALLER than the real remaining viewport) and produced a
+ * DOUBLE scrollbar in production - the inner content AND the outer page both
+ * scrolling, with the last bit of content pushed below the visible area.
+ * Fixed positioning sidesteps all of that: its containing block is the
+ * VIEWPORT itself, independent of any ancestor's box model, and removes the
+ * element from the page's normal flow entirely, so it can't contribute to
+ * (or be pushed around by) the page's own scroll height. Top AND bottom
+ * BOTH set (never top plus an explicit height) is deliberate too - the
+ * browser derives the box's real height from the two insets live, on every
+ * reflow, including a mobile browser's collapsing/expanding address bar
+ * changing the actual visible height, with no `vh`/`dvh` calc() needed.
  */
 
 const STYLE_ID_PREFIX = 'qu-apptpl-style';
@@ -128,12 +161,26 @@ function styleFor(breakpoint) {
 
     .qu-apptpl-fab { display: inline-flex; align-items: center; justify-content: center; width: 3.2rem; height: 3.2rem; flex-shrink: 0; border-radius: 999px; background: var(--qu-color-accent, #5b5bd6); color: #fff; text-decoration: none; font-size: 1.4em; box-shadow: 0 0.3rem 0.9rem rgba(0,0,0,0.25); pointer-events: auto; }
 
+    /* FULL HEIGHT MODE - see this file's own top "FULL HEIGHT MODE" doc
+       comment for the full "why fixed, not calc(100vh)" reasoning. */
+    .qu-apptpl-root--full-height { position: fixed; top: 3.25rem; right: 0; bottom: 0; left: 0; z-index: 10; }
+    .qu-apptpl-root--full-height .qu-apptpl-layout { flex: 1; min-height: 0; align-items: stretch; }
+    .qu-apptpl-root--full-height .qu-apptpl-sidebar { position: static; overflow-y: auto; }
+    .qu-apptpl-root--full-height .qu-apptpl-content { display: flex; flex-direction: column; min-height: 0; }
+
     @media (min-width: calc(${breakpoint} + 1px)) {
       .qu-apptpl-sidebar { display: flex; }
     }
     @media (max-width: ${breakpoint}) {
       .qu-apptpl-footer { display: flex; }
       .qu-apptpl-content--with-bar { padding-bottom: calc(4.4rem + env(safe-area-inset-bottom, 0px)); }
+      /* full-height mode has no scrolling page to pad - the fixed root's
+         own bottom inset is what has to make room for the footer bar
+         instead (fab-only footers float OVER content on purpose - see
+         .qu-apptpl-footer--fab-only's own pointer-events: none rule - so
+         this is scoped to the real-bar case only, same condition
+         .qu-apptpl-content--with-bar above already uses). */
+      .qu-apptpl-root--full-height.qu-apptpl-root--has-footer-bar { bottom: calc(4.4rem + env(safe-area-inset-bottom, 0px)); }
     }
   `;
 }
@@ -166,6 +213,7 @@ export function normalizeAppConfig(config) {
   }
   return {
     breakpoint: config.breakpoint ?? '720px',
+    fullHeight: config.fullHeight ?? false,
     primaryAction: config.primaryAction ?? null,
     navigation: normalizeLinkSection(config.navigation),
     views: normalizeLinkSection(config.views),
@@ -389,43 +437,95 @@ function buildFab(primaryAction) {
 /**
  * @param {HTMLElement} container - cleared and (re)populated in place.
  * @param {AppConfig} config
- * @returns {() => void} destroy
+ * @returns {(() => void) & {update: (partial: Partial<AppConfig>) => void}} destroy -
+ *   also carries an `update(partial)` property (see this file's own "LATE-
+ *   ARRIVING CHROME DATA" doc comment) - a plain function object, so every
+ *   existing caller's `const stop = mountAppTemplate(...); stop();` keeps
+ *   working completely unchanged; `update` is just an extra property on
+ *   that same function.
  */
 export function mountAppTemplate(container, config) {
-  const cfg = normalizeAppConfig(config);
+  let cfg = normalizeAppConfig(config);
   ensureStyle(cfg.breakpoint);
   container.textContent = '';
 
-  const hasChrome = !!(cfg.primaryAction || cfg.navigation || cfg.views || cfg.settings);
-  const fabOnly = hasChrome && !cfg.navigation && !cfg.views && !cfg.settings && !!cfg.primaryAction;
-
   const root = document.createElement('div');
-  root.className = 'qu-apptpl-root';
-
   const layout = document.createElement('div');
   layout.className = 'qu-apptpl-layout';
-
   const content = document.createElement('div');
   content.className = 'qu-apptpl-content';
-  if (hasChrome && !fabOnly) content.classList.add('qu-apptpl-content--with-bar');
 
+  let sidebarEl = null;
+  let footerEl = null;
   let cleanupFooter = () => {};
-  if (hasChrome) {
-    layout.appendChild(buildDesktopSidebar(cfg));
+
+  /**
+   * (Re)builds everything EXCEPT `content`'s own children - `render()` is
+   * only ever called once, by `mountAppTemplate()` itself below; an
+   * `update()` call only ever touches the chrome around it. Safe to call
+   * more than once - always tears its own previous chrome down first (the
+   * initial build is just "the first call", not a separate code path).
+   */
+  function rebuildChrome() {
+    cleanupFooter();
+    sidebarEl?.remove();
+    footerEl?.remove();
+
+    const hasChrome = !!(cfg.primaryAction || cfg.navigation || cfg.views || cfg.settings);
+    const fabOnly = hasChrome && !cfg.navigation && !cfg.views && !cfg.settings && !!cfg.primaryAction;
+
+    root.className = cfg.fullHeight ? 'qu-apptpl-root qu-apptpl-root--full-height' : 'qu-apptpl-root';
+    if (cfg.fullHeight && hasChrome && !fabOnly) root.classList.add('qu-apptpl-root--has-footer-bar');
+
+    // In full-height mode, the fixed root's own bottom inset already makes
+    // room for the footer bar (`.qu-apptpl-root--has-footer-bar`) - adding
+    // this padding TOO would double-reserve that space, since content isn't
+    // the thing scrolling the page anymore. See the `fullHeight` doc comment.
+    content.classList.toggle('qu-apptpl-content--with-bar', hasChrome && !fabOnly && !cfg.fullHeight);
+
+    sidebarEl = hasChrome ? buildDesktopSidebar(cfg) : null;
+    if (sidebarEl) layout.insertBefore(sidebarEl, content);
+
+    if (hasChrome) {
+      const { el, cleanup } = buildMobileFooter(cfg, { fabOnly });
+      footerEl = el;
+      root.appendChild(footerEl);
+      cleanupFooter = cleanup;
+    } else {
+      footerEl = null;
+      cleanupFooter = () => {};
+    }
   }
+
+  // `content` must already be `layout`'s child BEFORE the first
+  // `rebuildChrome()` call - `insertBefore(sidebarEl, content)` requires
+  // `content` to already be a real sibling reference, not a detached node.
   layout.appendChild(content);
   root.appendChild(layout);
-
-  if (hasChrome) {
-    const { el, cleanup } = buildMobileFooter(cfg, { fabOnly });
-    root.appendChild(el);
-    cleanupFooter = cleanup;
-  }
-
+  rebuildChrome();
   container.appendChild(root);
   cfg.render(content);
 
-  return () => {
-    cleanupFooter();
+  const stop = () => cleanupFooter();
+  /**
+   * LATE-ARRIVING CHROME DATA: an app whose `navigation`/`views`/`settings`
+   * items depend on an async fetch (contacts + group memberships for a
+   * room-switcher sidebar, e.g. `apps/chat/client.js`'s `mountRoomView()`)
+   * can't have that data ready at the ONE synchronous `mountAppTemplate()`
+   * call every other app makes - `render()` itself follows the same
+   * "build immediately, fill in via your own async IIFE" convention every
+   * app in this codebase already uses (see `docs/building-an-app.md`), and
+   * chrome should be no different. `update(partial)` merges `partial` onto
+   * the current config (same shape as the original `config`, any subset of
+   * `primaryAction`/`navigation`/`views`/`settings`/`fullHeight`/
+   * `breakpoint`) and rebuilds ONLY the chrome - `render()` is never called
+   * again, so the app's own already-mounted content (and whatever
+   * live-reactive setup it did inside `render()`) is completely undisturbed.
+   * @param {Partial<AppConfig>} partial
+   */
+  stop.update = (partial) => {
+    cfg = normalizeAppConfig({ ...cfg, ...partial });
+    rebuildChrome();
   };
+  return stop;
 }

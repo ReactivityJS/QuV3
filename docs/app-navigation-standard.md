@@ -296,7 +296,64 @@ Desktop (≥720px), left sidebar (content sits to its right, flex: 1):
 ```
 
 See `apps/_template/`'s `renderFolderView()` for a complete, tested, working
-example (`navigation` + `primaryAction`).
+example (`navigation` + `primaryAction`). `apps/notifications/client.js` is a
+second real example, of `views` specifically: its old "Show all (incl. read)"
+button (in-place JS state) is now two real routes, `#/notifications`
+(unread-only, the default) and `#/notifications/all`, decided once at mount
+time from `segments[1]` and rendered as the `views` pill — the exact "real
+route instead of a toggle" trade-off Rule 2's own "New topic" migration
+already made, applied here to a view switch instead of a create action.
+
+Every app's MAIN view — even one with none of `navigation`/`views`/
+`primaryAction`/`settings` today — should still go through
+`mountAppTemplate()`, passing only `render`. `apps/app-list`,
+`apps/contact-list`, `apps/user-list`, and `apps/bookmarks` do exactly this:
+zero visible change today (an empty config renders zero chrome, content gets
+100% of the container, same as calling `render()` directly), but the app is
+already wired into the one Core-owned chrome entry point — adding
+`primaryAction`/`navigation`/`views`/`settings` later is a config change, not
+a rewrite of how the app boots.
+
+`apps/phone/client.js` is the example for a MULTI-ROUTE app where none of
+the four chrome fields fit any route: each of its 5 routes (call-starter,
+caller/audio, caller/video, callee, decline) is still its own
+chrome-less `mountAppTemplate(container, { render })` call — a real page with
+a real route, exactly per this rule — but none contributes a `navigation`
+item. `accept`/`decline` in particular are never reached through any menu at
+all (only via a notification click, an in-app toast action, or another app's
+`content.chatRoomMenu` contribution) — a route doesn't need a nav entry to
+be a "real page" in this sense. The call view's own full-bleed, fixed-position
+styling (`.qu-phone-call-view`) is untouched by the wrap — a chrome-less
+`mountAppTemplate()` call adds no visible sidebar/footer, so a
+`position: fixed` overlay inside its `content` element behaves exactly as
+before. (Phone's own hand-rolled `position: fixed` predates the `fullHeight`
+option below — `apps/chat/client.js` is the app that actually needed it,
+since its room view ALSO needs a `navigation` sidebar alongside the fixed
+box, which Phone's call view never does; migrating Phone's own CSS onto
+`fullHeight: true` too is a reasonable follow-up, not required.)
+
+**`fullHeight: true`** binds `content` (and the sidebar, if any) to exactly
+the remaining VIEWPORT height below the shell header, real `position: fixed`
+under the hood (see `@qu/ui`'s `app-template.js` own "FULL HEIGHT MODE" doc
+comment for the full "why fixed, not `calc(100vh - ...)`" reasoning) — for a
+messenger-style view with its own internal header/scroll-region/composer
+structure. `apps/chat/client.js`'s `mountRoomView()` is the real example:
+an open room mounts with `fullHeight: true` AND a `navigation` section
+listing every room (1:1 + group), the current one active — a genuine
+room-switcher sidebar on wide screens, a pill+popup in the mobile footer, so
+switching rooms no longer means going back to `#/chat` first (this used to
+be an explicitly out-of-scope gap in this doc). Both `navigation` and
+`primaryAction` ("+ New group") depend on an async fetch (contacts/groups,
+a policy check) that isn't ready at the one synchronous `mountAppTemplate()`
+call every app makes — **`stopTemplate.update(partialConfig)`** (the
+function `mountAppTemplate()` returns also carries this property — see that
+function's own "LATE-ARRIVING CHROME DATA" doc comment) fills chrome in once
+that resolves, without re-calling `render()` or disturbing the app's own
+already-mounted content. `apps/chat/client.js`'s `listRooms()` is the one
+place that computes "what rooms exist, in what order, with what unread/muted
+state", shared by both the rich room-list view and the lightweight
+`navigation` items its own room view builds from the same data via
+`roomsToNavItems()`.
 
 ## Building a new app? A checklist
 
@@ -306,12 +363,14 @@ example (`navigation` + `primaryAction`).
    purpose, so it's never itself bundled/catalog-listed).
 2. No custom back link, anywhere. `renderSubpage({ showBackLink: false })`
    for every subpage.
-3. Use `mountAppTemplate()` (Rule 5) instead of hand-rolled footer/sidebar
-   code once your app has any of: a "create new X" action, more than one
-   sibling place to switch between, more than one way to view the current
-   place, or app-level settings — pass whichever of `primaryAction`/
-   `navigation`/`views`/`settings` you actually need, omit the rest. This is
-   now the recommended home for a NEW app's "create new X" action; a plain
+3. Route your app's MAIN view through `mountAppTemplate()` (Rule 5), even if
+   you pass only `render` — that's the standard entry point now, chrome-less
+   by default. Add `primaryAction`/`navigation`/`views`/`settings` (any
+   combination, omit the rest) the moment your app actually has a "create new
+   X" action, more than one sibling place to switch between, more than one
+   way to view the current place, or app-level settings — never build that
+   chrome by hand. `mountAppTemplate()`'s `primaryAction` is now the
+   recommended home for a NEW app's "create new X" action; a plain
    `shell.headerNavPoints` contribution (`renderNavPointsMenu()` renders 1
    item as a plain link, 2+ as a dropdown) is still valid for apps that
    already use it.
@@ -476,25 +535,22 @@ gives every other dedicated-route action.
 
 ## What's explicitly out of scope (for now)
 
-- **Chat has no Context Switcher yet.** It has no sidebar of any kind today
-  — switching rooms means going back to `#/chat` and picking a different
-  row. Building one is new functionality, not cleanup of existing chrome;
-  the natural shape once someone picks it up is
-  `mountContextSwitcher(..., variant: 'page')` (a room list can grow long —
-  DMs plus groups — so `'page'`, not `'tabs'`).
-- **ToDo has no Context Switcher either** — the exact same gap as Chat's,
-  one level up: switching lists means going back to `#/todo` and picking a
-  different row, with no way to jump straight from one open list to a
-  sibling. ToDo IS on Rule 2 (`shell.headerNavPoints`, its "+ New task" icon)
-  — only Rule 3 is unbuilt. It's a strong `variant: 'page'` candidate: its
-  existing `#/todo` (list picker + create form) and `#/todo/manage`
-  (rename/share/delete/leave) pages are already almost exactly the
-  `renderSidebar`/`renderContextListPage()` shape Calendar's own calendar
-  list uses — the natural next step is consolidating those two into one
-  `renderSidebar` callback shared between a persistent sidebar (desktop,
-  alongside an open list's tasks) and the full `/manage` page (mobile),
-  the same way Calendar's migration did it.
-- **Apps with no navigation chrome of their own** — Bookmarks, Notifications,
-  Pins, Reactions, Contact List, User List, App List, Search, Relay Admin —
-  are unchanged. They comply automatically, by following this doc and
-  `apps/_template/`, whenever they grow a subpage or a create action.
+- **ToDo has no room/list switcher yet** — the same gap Chat used to have:
+  switching lists means going back to `#/todo` and picking a different row,
+  with no way to jump straight from one open list to a sibling. ToDo still
+  contributes its "+ New task" action via the older `shell.headerNavPoints`
+  slot (Rule 2) rather than `mountAppTemplate()`'s `primaryAction` (Rule 5)
+  — migrating it is the natural next candidate, following `apps/chat/
+  client.js`'s own `mountRoomView()` as the working reference: a
+  `navigation` section built from the same list-fetching logic its `#/todo`
+  (list picker + create form) and `#/todo/manage` (rename/share/delete/
+  leave) pages already need, `stopTemplate.update(...)` once that async
+  fetch resolves (see `@qu/ui`'s `app-template.js` own "LATE-ARRIVING CHROME
+  DATA" doc comment), and `fullHeight: true` only if ToDo's own task view
+  ever grows a messenger-style fixed layout of its own (it doesn't today).
+- **Pins, Reactions, Search, Relay Admin** are unchanged. Pins/Reactions
+  contribute to other apps' extension points and have no `mount()` UI of
+  their own; Search's own `mount()` view and Relay Admin (a single settings
+  form with no natural `navigation`/`views`/`primaryAction`) haven't been
+  migrated yet — both are candidates whenever someone picks them up,
+  following this doc and `apps/_template/`.
