@@ -25,9 +25,15 @@ import { projectLocal, fitScaleMetersPerPixel } from './geometry.js';
  *   selfPub: string,
  *   radiusMeters?: number,
  *   labelFor?: (actorPub: string) => string,
- * }} options
+ *   extraCircles?: Array<{radiusMeters: number, color: string}>,
+ *   tracks?: Map<string, Array<{lat: number, lng: number}>>,
+ * }} options - `extraCircles` (req. 8) draws additional dashed rings around
+ *   the chased player (e.g. the proximity-alert/catch-range thresholds),
+ *   alongside the existing speed-based "possible radius" one. `tracks`
+ *   (req. 5/6) draws each player's own persisted route history
+ *   (`track-service.js`'s `listTrackPoints()`) as a faint trailing line.
  */
-export function renderPlaneMap(canvas, { players, chasedPub, selfPub, radiusMeters = 0, labelFor = (pub) => pub.slice(0, 6) }) {
+export function renderPlaneMap(canvas, { players, chasedPub, selfPub, radiusMeters = 0, labelFor = (pub) => pub.slice(0, 6), extraCircles = [], tracks = null }) {
   const ctx = canvas.getContext && canvas.getContext('2d');
   if (!ctx) return;
 
@@ -40,26 +46,51 @@ export function renderPlaneMap(canvas, { players, chasedPub, selfPub, radiusMete
   if (!ref) return; // nothing known yet - an empty canvas is the correct state
 
   const offsets = players.map((p) => ({ ...projectLocal(p.position, ref), player: p }));
-  const radiusExtent = radiusMeters > 0
-    ? [{ xMeters: radiusMeters, yMeters: 0 }, { xMeters: -radiusMeters, yMeters: 0 }, { xMeters: 0, yMeters: radiusMeters }, { xMeters: 0, yMeters: -radiusMeters }]
+  const allRadii = [radiusMeters, ...extraCircles.map((c) => c.radiusMeters)].filter((r) => r > 0);
+  const maxRadius = allRadii.length ? Math.max(...allRadii) : 0;
+  const radiusExtent = maxRadius > 0
+    ? [{ xMeters: maxRadius, yMeters: 0 }, { xMeters: -maxRadius, yMeters: 0 }, { xMeters: 0, yMeters: maxRadius }, { xMeters: 0, yMeters: -maxRadius }]
     : [];
-  const scale = fitScaleMetersPerPixel([...offsets, ...radiusExtent], Math.min(w, h));
+  const trackOffsets = tracks
+    ? [...tracks.values()].flat().map((pt) => projectLocal(pt, ref))
+    : [];
+  const scale = fitScaleMetersPerPixel([...offsets, ...radiusExtent, ...trackOffsets], Math.min(w, h));
   const toPx = (m) => ({ x: w / 2 + m.xMeters / scale, y: h / 2 + m.yMeters / scale });
 
   ctx.fillStyle = '#f4f4f5';
   ctx.fillRect(0, 0, w, h);
 
-  if (radiusMeters > 0) {
+  if (tracks) {
+    ctx.save();
+    ctx.lineWidth = 2;
+    ctx.setLineDash([2, 3]);
+    ctx.globalAlpha = 0.45;
+    for (const [actorPub, points] of tracks) {
+      if (points.length < 2) continue;
+      ctx.strokeStyle = actorPub === chasedPub ? '#e5484d' : (actorPub === selfPub ? '#12a594' : '#5b5bd6');
+      ctx.beginPath();
+      points.forEach((pt, i) => {
+        const { x, y } = toPx(projectLocal(pt, ref));
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  const circles = [...extraCircles, ...(radiusMeters > 0 ? [{ radiusMeters, color: '#e5484d' }] : [])];
+  for (const circle of circles) {
+    if (!(circle.radiusMeters > 0)) continue;
     const center = toPx({ xMeters: 0, yMeters: 0 });
     ctx.save();
     ctx.beginPath();
-    ctx.arc(center.x, center.y, radiusMeters / scale, 0, Math.PI * 2);
+    ctx.arc(center.x, center.y, circle.radiusMeters / scale, 0, Math.PI * 2);
     ctx.setLineDash([6, 4]);
-    ctx.strokeStyle = '#e5484d';
+    ctx.strokeStyle = circle.color;
     ctx.globalAlpha = 0.55;
     ctx.lineWidth = 2;
     ctx.stroke();
-    ctx.fillStyle = '#e5484d';
+    ctx.fillStyle = circle.color;
     ctx.globalAlpha = 0.08;
     ctx.fill();
     ctx.restore();
