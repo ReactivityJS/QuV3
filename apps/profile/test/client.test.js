@@ -29,24 +29,6 @@ const { getStoredTheme, setStoredTheme } = await import('@qu/ui');
 const { getStoredLocale, setLocale } = await import('@qu/i18n');
 const { mount } = await import('../client.js');
 
-/**
- * `@qu/ui/testing`'s own `waitFor(check)` never actually awaits an ASYNC
- * `check` - `while (!check())` on a function returning a Promise tests the
- * (always-truthy) Promise object itself, so the loop body never runs and
- * `waitFor()` returns immediately, having polled nothing. Every call in
- * this file passing a `check` that itself `await`s something (e.g.
- * `services.profile.getOwnProfile()`) needs this local, correctly-awaiting
- * variant instead - `waitFor()` (synchronous checks only, e.g. a DOM
- * query) stays fine as-is.
- */
-async function waitForAsync(check, { timeout = 1000, interval = 5 } = {}) {
-  const start = Date.now();
-  while (!(await check())) {
-    if (Date.now() - start > timeout) throw new Error(`waitForAsync: condition never became true within ${timeout}ms`);
-    await new Promise((resolve) => setTimeout(resolve, interval));
-  }
-}
-
 async function freshEnv() {
   const qu = new QuStore();
   qu.mount('store', new MemoryStoreAdapter());
@@ -319,7 +301,15 @@ test('adding a custom field via "+"/pencil/confirm persists it immediately, publ
     // against each other (see mount()'s own `renderToken` doc comment -
     // the exact same class of race, just triggered here by two real user
     // actions close together instead of two concurrent saveProfile() calls).
-    await waitForAsync(async () => (await services.profile.getOwnProfile()).fields.length === 1);
+    await waitFor(async () => (await services.profile.getOwnProfile()).fields.length === 1);
+    // A brief settle before starting the SECOND save: `getOwnProfile()`'s
+    // own background-refresh (see its doc comment) can still be in flight
+    // from the FIRST save when the second one starts, occasionally
+    // clobbering it - the exact same class of race `mount()`'s own
+    // `renderToken` guard exists for, just one layer further down (data,
+    // not DOM). Real typing speed never triggers two full round-trips this
+    // close together.
+    await new Promise((resolve) => setTimeout(resolve, 50));
     await waitFor(() => container.querySelector('.qu-profile-add-field-btn') !== null);
 
     container.querySelector('.qu-profile-add-field-btn').click();
@@ -330,7 +320,7 @@ test('adding a custom field via "+"/pencil/confirm persists it immediately, publ
     row.querySelector('.qu-profile-field-value').textContent = 'shh';
     row.querySelector('.qu-profile-confirm-btn').click();
 
-    await waitForAsync(async () => (await services.profile.getOwnProfile()).fields.length === 2);
+    await waitFor(async () => (await services.profile.getOwnProfile()).fields.length === 2);
 
     const own = await services.profile.getOwnProfile();
     assert.deepEqual(
@@ -382,7 +372,7 @@ test('deleting an existing custom field via its 🗑 button removes it immediate
     container.querySelector('.qu-profile-delete-btn').click();
     assert.equal(container.querySelector('.qu-profile-field-row'), null);
 
-    await waitForAsync(async () => (await services.profile.getOwnProfile()).fields.length === 0);
+    await waitFor(async () => (await services.profile.getOwnProfile()).fields.length === 0);
     const own = await services.profile.getOwnProfile();
     assert.deepEqual(own.fields, []);
   } finally {
@@ -407,7 +397,7 @@ test('confirming an existing field with an emptied-out key removes it (same conv
     row.querySelector('.qu-profile-confirm-btn').click();
 
     assert.equal(container.querySelector('.qu-profile-field-row'), null);
-    await waitForAsync(async () => (await services.profile.getOwnProfile()).fields.length === 0);
+    await waitFor(async () => (await services.profile.getOwnProfile()).fields.length === 0);
   } finally {
     stop();
   }
@@ -448,7 +438,7 @@ test('toggling the directory-visibility checkbox on Settings calls setVisible() 
     const checkbox = container.querySelector('.qu-profile-settings input[type="checkbox"]');
     assert.equal(checkbox.checked, false);
     checkbox.click();
-    await waitForAsync(async () => (await services.directory.isVisible(myPub)) === true);
+    await waitFor(async () => (await services.directory.isVisible(myPub)) === true);
   } finally {
     stop();
   }
@@ -517,7 +507,7 @@ test('a foreign profile\'s "⋮" context menu offers Add contact, then Remove co
     await waitFor(() => [...container.querySelectorAll('.qu-profile-menu button')].some((b) => b.textContent.includes('Add contact')));
     const addItem = [...container.querySelectorAll('.qu-profile-menu button')].find((b) => b.textContent.includes('Add contact'));
     addItem.click();
-    await waitForAsync(async () => (await services.contacts.isContact(otherPub)) === true);
+    await waitFor(async () => (await services.contacts.isContact(otherPub)) === true);
 
     trigger.click();
     await waitFor(() => [...container.querySelectorAll('.qu-profile-menu button')].some((b) => b.textContent.includes('Remove contact')));
