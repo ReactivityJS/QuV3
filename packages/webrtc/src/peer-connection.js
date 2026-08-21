@@ -28,6 +28,23 @@ export class PeerConnection {
   #onFailed;
   #onTrack;
   #closed = false;
+  /**
+   * ICE candidates that arrived (via `handleSignal()`) before
+   * `setRemoteDescription()` had run - trickled candidates and the offer/
+   * answer that unlocks them travel as independent signaling writes (see
+   * `WebRtcSignalService`'s own doc comment: `onOutgoingSignal()` sends each
+   * one fire-and-forget, no ordering between them), so on a real network
+   * with real jitter the other side's ICE candidates routinely land before
+   * its offer/answer does - `addIceCandidate()` throws
+   * "The remote description was null" for exactly that, silently dropping
+   * the candidate (a real, reported failure: reliably reproduced on real
+   * cross-device Wi-Fi calls, essentially never on a same-machine test
+   * where signaling has no network jitter to reorder). Queued here instead,
+   * flushed by `#flushPendingCandidates()` the moment a remote description
+   * lands from either the offer or the answer branch below.
+   * @type {object[]}
+   */
+  #pendingCandidates = [];
 
   /**
    * @param {string} peerId - Only used for logging - this class never sends
@@ -149,13 +166,27 @@ export class PeerConnection {
   async handleSignal(signal) {
     if (signal.type === 'offer') {
       await this.#pc.setRemoteDescription({ type: 'offer', sdp: signal.sdp });
+      await this.#flushPendingCandidates();
       const answer = await this.#pc.createAnswer();
       await this.#pc.setLocalDescription(answer);
       this.#onSignal({ type: 'answer', sdp: answer.sdp });
     } else if (signal.type === 'answer') {
       await this.#pc.setRemoteDescription({ type: 'answer', sdp: signal.sdp });
+      await this.#flushPendingCandidates();
     } else if (signal.type === 'ice') {
+      if (!this.#pc.remoteDescription) {
+        this.#pendingCandidates.push(signal.candidate);
+        return;
+      }
       await this.#pc.addIceCandidate(signal.candidate).catch((err) => log.warn(`addIceCandidate failed for "${this.#peerId}":`, err.message));
+    }
+  }
+
+  /** Applies every candidate `handleSignal()` queued while `remoteDescription` was still null - see `#pendingCandidates`'s own doc comment. */
+  async #flushPendingCandidates() {
+    const candidates = this.#pendingCandidates.splice(0);
+    for (const candidate of candidates) {
+      await this.#pc.addIceCandidate(candidate).catch((err) => log.warn(`addIceCandidate (queued) failed for "${this.#peerId}":`, err.message));
     }
   }
 
