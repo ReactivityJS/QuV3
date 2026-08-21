@@ -155,11 +155,17 @@ export class AccessService {
    * GOTCHA for `docs`/`lists`: setting a restricted `readers` list via
    * `protect()` makes this method return real `encryptWith` options, and the
    * resulting value will genuinely be ciphertext once written - but nothing
-   * in this package decrypts a plain Document or curated List read back
+   * HERE decrypts a plain Document or curated List read back generically
    * (unlike `MessageService.listMessages()`, which is decrypt-aware). Only
-   * restrict `writers` for `docs`/`lists` until a decrypt-aware Entity API
-   * exists for those two kinds; `readers` restriction is safe today only for
-   * `threads` (via `MessageService`).
+   * restrict `writers` for `docs`/`lists` unless YOUR OWN Service is itself
+   * decrypt-aware for the specific doc shape it reads back - `ChannelService`
+   * (`channel-service.js`'s own "RESTRICTED CHANNELS" doc comment) is the
+   * first such example: it calls `writeOptionsFor()` here for its own
+   * restricted channel/topic Documents AND implements its own `#decrypt()`
+   * (the same `isEncryptedEnvelope()`/`decryptEnvelope()` pair
+   * `MessageService`/`AssetService` already use) on the read side - a
+   * precedent for a scoped, per-Service fix, not (yet) a generic
+   * decrypt-aware Entity API for every `docs`/`lists` consumer.
    *
    * @param {string|number} spaceId
    * @param {'docs'|'lists'|'assets'|'threads'} kind

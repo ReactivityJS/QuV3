@@ -36,6 +36,23 @@ async function copyQuBit(fromQu, toQu, path) {
   return quBit;
 }
 
+/**
+ * Copies the RAW stored QuBit for a curated LIST document, bypassing
+ * `@qu/engines`' `CollectionEngine`'s read-time `$list` resolution - see
+ * the "listChannels()/listTopics() backfill..." test's own doc comment
+ * below for exactly why `copyQuBit()` (which goes through `qu.get()`, and
+ * so hands back the list's `$list` entries already expanded into full
+ * QuBits) is the wrong tool for a LIST path specifically; `listCuratedRawPaths()`
+ * (which every privacy test below relies on, via `listChannels()`/
+ * `listTopics()`) parses the unresolved `{$list: [...]}` shape only.
+ */
+async function rawCopy(fromQu, toQu, path) {
+  const { adapter, rel } = fromQu.resolveMount(path);
+  const quBit = await adapter.get(rel);
+  if (quBit) await toQu.putSealed(path, quBit);
+  return quBit ?? null;
+}
+
 const SPACE = 'forum-space';
 
 test('createChannel() creates an open channel; listChannels() returns it', async () => {
@@ -205,6 +222,21 @@ test('addChannelMember(): one topic failing to grow does not stop the OTHERS fro
   const ada = await freshSetup();
   await ada.identity.publishMainProfile({ alias: 'Ada' });
 
+  // A real identity with a published profile - re-encrypting the channel
+  // (and each topic) document for a new reader (see channel-service.js's
+  // own "RESTRICTED CHANNELS" doc comment) needs a resolvable X key,
+  // `resolveReaderXKeys()`'s own fail-closed contract - a bare made-up
+  // pubkey with no profile can no longer stand in for "a new member" here.
+  const newMemberQu = new QuStore();
+  newMemberQu.mount('store', new MemoryStoreAdapter());
+  new AccessEngine(newMemberQu);
+  new ThreadEngine(newMemberQu);
+  new CollectionEngine(newMemberQu);
+  const newMemberIdentity = await freshIdentity(newMemberQu);
+  await newMemberIdentity.publishMainProfile({ alias: 'New Member' });
+  const newMemberPub = QuCrypto.toBase64Url((await newMemberIdentity.getMainKey()).publicKey);
+  await copyQuBit(newMemberQu, ada.qu, `/store/actors/~${newMemberPub}/profile`);
+
   const channel = await ada.channels.createChannel(SPACE, { title: 'Multi-topic restricted', restricted: true, memberPubs: [] });
   const goodTopic = await ada.channels.createTopic(SPACE, channel._id, { title: 'Fine' });
   const brokenTopic = await ada.channels.createTopic(SPACE, channel._id, { title: 'Corrupted ACL' });
@@ -219,7 +251,7 @@ test('addChannelMember(): one topic failing to grow does not stop the OTHERS fro
   });
 
   await assert.rejects(
-    () => ada.channels.addChannelMember(SPACE, channel._id, 'new-member-pub'),
+    () => ada.channels.addChannelMember(SPACE, channel._id, newMemberPub),
     (err) => {
       assert.match(err.message, /1\/2/);
       return true;
@@ -228,13 +260,13 @@ test('addChannelMember(): one topic failing to grow does not stop the OTHERS fro
 
   // The channel-level membership add still fully succeeded...
   const channelAfter = await ada.channels.getChannel(SPACE, channel._id);
-  assert.ok(channelAfter.memberPubs.includes('new-member-pub'));
+  assert.ok(channelAfter.memberPubs.includes(newMemberPub));
   // ...and the GOOD topic still grew despite the broken one failing.
   const goodConfig = await ada.messages.getConfig(SPACE, goodTopic._id);
-  assert.ok(goodConfig.writers.includes('new-member-pub'));
+  assert.ok(goodConfig.writers.includes(newMemberPub));
   // ...while the broken one genuinely didn't (this is the failure the thrown error is reporting).
   const brokenConfig = await ada.messages.getConfig(SPACE, brokenTopic._id);
-  assert.equal(brokenConfig.writers.includes('new-member-pub'), false);
+  assert.equal(brokenConfig.writers.includes(newMemberPub), false);
 });
 
 test('addChannelMember() is a no-op for an OPEN (non-restricted) channel - nothing to grow', async () => {
@@ -270,21 +302,15 @@ test('listChannels()/listTopics() backfill each individually-referenced document
   const bAccess = new AccessService(bQu, bIdentity);
   const bMessages = new MessageService(bQu, bIdentity, bList, bAccess);
 
-  // Copies the RAW stored QuBit (bypassing @qu/engines' CollectionEngine's
-  // read-time $list resolution) - matching exactly what the real
-  // SyncEngine transmits (`packages/sync/src/sync-engine.js`'s own
-  // `#handleRequest()` reads via `adapter.get(rel)` directly, never
-  // `qu.get()`). Using `qu.get()` here instead would already hand back a
-  // list document with its `$list` entries pre-resolved into full QuBits by
-  // A's own CollectionEngine - a shape real sync never actually produces,
-  // and different from what `listCuratedRawPaths()` (which THIS fix relies
-  // on) expects to parse.
-  async function rawCopy(fromQu, toQu, path) {
-    const { adapter, rel } = fromQu.resolveMount(path);
-    const quBit = await adapter.get(rel);
-    if (quBit) await toQu.putSealed(path, quBit);
-    return quBit ?? null;
-  }
+  // rawCopy() (module-level, see its own doc comment) - bypasses
+  // @qu/engines' CollectionEngine's read-time $list resolution, matching
+  // exactly what the real SyncEngine transmits (`packages/sync/src/
+  // sync-engine.js`'s own `#handleRequest()` reads via `adapter.get(rel)`
+  // directly, never `qu.get()`). Using `copyQuBit()` (i.e. `qu.get()`) here
+  // instead would already hand back a list document with its `$list`
+  // entries pre-resolved into full QuBits by A's own CollectionEngine - a
+  // shape real sync never actually produces, and different from what
+  // `listCuratedRawPaths()` (which THIS fix relies on) expects to parse.
 
   // Simulates watch()'s own syncFetch call backfilling ONLY the channels
   // list document itself, BEFORE anything ever tries to resolve what it
@@ -330,4 +356,131 @@ test('getChannel() returns null for an unknown channel id', async () => {
 test('createTopic() throws for an unknown channel id', async () => {
   const { channels } = await freshSetup();
   await assert.rejects(() => channels.createTopic(SPACE, 'nope', { title: 'x' }), /no channel/);
+});
+
+// ===================================================================
+// PRIVACY - restricted channels/topics are genuine ciphertext at rest,
+// AND filtered out for anyone who can't decrypt them (see channel-service.js's
+// own "RESTRICTED CHANNELS" doc comment for the full model).
+// ===================================================================
+
+test('a restricted channel\'s own title/description document is genuine ciphertext at rest - a non-member with it synced locally sees NEITHER via listChannels() NOR getChannel(), a member sees both', async () => {
+  const ada = await freshSetup();
+  await ada.identity.publishMainProfile({ alias: 'Ada' });
+
+  const bobQu = new QuStore();
+  bobQu.mount('store', new MemoryStoreAdapter());
+  new AccessEngine(bobQu);
+  new ThreadEngine(bobQu);
+  new CollectionEngine(bobQu);
+  const bobIdentity = await freshIdentity(bobQu);
+  await bobIdentity.publishMainProfile({ alias: 'Bob' });
+  const bobPub = QuCrypto.toBase64Url((await bobIdentity.getMainKey()).publicKey);
+  await copyQuBit(bobQu, ada.qu, `/store/actors/~${bobPub}/profile`);
+
+  const channel = await ada.channels.createChannel(SPACE, { title: 'Secret Board', description: 'shh', restricted: true, memberPubs: [bobPub] });
+
+  // The raw stored document is genuinely ciphertext, not a plain object with a filter on top.
+  const raw = await ada.qu.get(`/store/${SPACE}/docs/${channel._id}`);
+  assert.notEqual(raw.val.title, 'Secret Board');
+  assert.equal(typeof raw.val.iv, 'string');
+
+  // Bob (a real member) is synced the same raw envelope - as any normal sync would do.
+  await copyQuBit(ada.qu, bobQu, `/store/${SPACE}/docs/${channel._id}`);
+  await rawCopy(ada.qu, bobQu, `/store/${SPACE}/lists/channels`);
+  await copyQuBit(ada.qu, bobQu, `/store/actors/~${ada.myPub}/profile`);
+  const bobAccess = new AccessService(bobQu, bobIdentity);
+  const bobList = new ListService(bobQu);
+  const bobMessages = new MessageService(bobQu, bobIdentity, bobList, bobAccess);
+  const bobChannels = new ChannelService(bobQu, bobIdentity, bobList, bobAccess, bobMessages);
+  assert.equal((await bobChannels.getChannel(SPACE, channel._id)).title, 'Secret Board');
+  const bobList2 = await bobChannels.listChannels(SPACE);
+  assert.equal(bobList2.length, 1);
+  assert.equal(bobList2[0].title, 'Secret Board');
+
+  // Carol (NOT a member) somehow also has the same raw envelope synced -
+  // same "path is addressing, not proof of readability" scenario every
+  // other resource in this codebase already accepts - but now genuinely
+  // can't read it: neither listChannels() nor a direct getChannel() call
+  // (e.g. a bookmarked board URL) reveals the title.
+  const carolQu = new QuStore();
+  carolQu.mount('store', new MemoryStoreAdapter());
+  new AccessEngine(carolQu);
+  new ThreadEngine(carolQu);
+  new CollectionEngine(carolQu);
+  const carolIdentity = await freshIdentity(carolQu);
+  await carolIdentity.publishMainProfile({ alias: 'Carol' });
+  await copyQuBit(ada.qu, carolQu, `/store/${SPACE}/docs/${channel._id}`);
+  await rawCopy(ada.qu, carolQu, `/store/${SPACE}/lists/channels`);
+  await copyQuBit(ada.qu, carolQu, `/store/actors/~${ada.myPub}/profile`);
+  const carolAccess = new AccessService(carolQu, carolIdentity);
+  const carolList = new ListService(carolQu);
+  const carolMessages = new MessageService(carolQu, carolIdentity, carolList, carolAccess);
+  const carolChannels = new ChannelService(carolQu, carolIdentity, carolList, carolAccess, carolMessages);
+  assert.equal(await carolChannels.getChannel(SPACE, channel._id), null);
+  assert.deepEqual(await carolChannels.listChannels(SPACE), []);
+});
+
+test('a restricted channel\'s topic TITLE is genuine ciphertext too - listTopics() filters it out for a non-member', async () => {
+  const ada = await freshSetup();
+  await ada.identity.publishMainProfile({ alias: 'Ada' });
+
+  const channel = await ada.channels.createChannel(SPACE, { title: 'Board', restricted: true, memberPubs: [] });
+  const topic = await ada.channels.createTopic(SPACE, channel._id, { title: 'Confidential Topic' });
+
+  const rawTopic = await ada.qu.get(`/store/${SPACE}/docs/${topic._id}`);
+  assert.notEqual(rawTopic.val.title, 'Confidential Topic');
+  assert.equal(typeof rawTopic.val.iv, 'string');
+
+  const carolQu = new QuStore();
+  carolQu.mount('store', new MemoryStoreAdapter());
+  new AccessEngine(carolQu);
+  new ThreadEngine(carolQu);
+  new CollectionEngine(carolQu);
+  const carolIdentity = await freshIdentity(carolQu);
+  await carolIdentity.publishMainProfile({ alias: 'Carol' });
+  await copyQuBit(ada.qu, carolQu, `/store/${SPACE}/docs/${channel._id}`);
+  await copyQuBit(ada.qu, carolQu, `/store/${SPACE}/docs/${topic._id}`);
+  await rawCopy(ada.qu, carolQu, `/store/${SPACE}/lists/topics-${channel._id}`);
+  await copyQuBit(ada.qu, carolQu, `/store/actors/~${ada.myPub}/profile`);
+  const carolAccess = new AccessService(carolQu, carolIdentity);
+  const carolList = new ListService(carolQu);
+  const carolMessages = new MessageService(carolQu, carolIdentity, carolList, carolAccess);
+  const carolChannels = new ChannelService(carolQu, carolIdentity, carolList, carolAccess, carolMessages);
+  assert.deepEqual(await carolChannels.listTopics(SPACE, channel._id), []);
+});
+
+test('addChannelMember() lets a newly-added member decrypt an EXISTING topic\'s TITLE too, not just its thread content', async () => {
+  const ada = await freshSetup();
+  await ada.identity.publishMainProfile({ alias: 'Ada' });
+
+  const carolQu = new QuStore();
+  carolQu.mount('store', new MemoryStoreAdapter());
+  new AccessEngine(carolQu);
+  new ThreadEngine(carolQu);
+  new CollectionEngine(carolQu);
+  const carolIdentity = await freshIdentity(carolQu);
+  await carolIdentity.publishMainProfile({ alias: 'Carol' });
+  const carolPub = QuCrypto.toBase64Url((await carolIdentity.getMainKey()).publicKey);
+  await copyQuBit(carolQu, ada.qu, `/store/actors/~${carolPub}/profile`);
+
+  const channel = await ada.channels.createChannel(SPACE, { title: 'Grows later', restricted: true, memberPubs: [] });
+  const topic = await ada.channels.createTopic(SPACE, channel._id, { title: 'Old Topic' });
+
+  await ada.channels.addChannelMember(SPACE, channel._id, carolPub);
+
+  // Carol is synced the topic doc as it stood BEFORE she joined (the exact
+  // ciphertext Ada originally wrote) - addChannelMember() must have
+  // re-encrypted it in place for her to read it at all now.
+  await copyQuBit(ada.qu, carolQu, `/store/${SPACE}/docs/${channel._id}`);
+  await copyQuBit(ada.qu, carolQu, `/store/${SPACE}/docs/${topic._id}`);
+  await rawCopy(ada.qu, carolQu, `/store/${SPACE}/lists/topics-${channel._id}`);
+  await copyQuBit(ada.qu, carolQu, `/store/actors/~${ada.myPub}/profile`);
+  const carolAccess = new AccessService(carolQu, carolIdentity);
+  const carolList = new ListService(carolQu);
+  const carolMessages = new MessageService(carolQu, carolIdentity, carolList, carolAccess);
+  const carolChannels = new ChannelService(carolQu, carolIdentity, carolList, carolAccess, carolMessages);
+  const carolTopics = await carolChannels.listTopics(SPACE, channel._id);
+  assert.equal(carolTopics.length, 1);
+  assert.equal(carolTopics[0].title, 'Old Topic');
 });
