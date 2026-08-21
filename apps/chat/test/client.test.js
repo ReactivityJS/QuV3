@@ -405,6 +405,63 @@ test('reuses apps/reactions\' REAL content.messageFooter extension point - no ch
   }
 });
 
+test('content.messageMenu (pins) / content.topicToolbar: the REAL apps/pins app pins a message via its menu item and shows it in the room\'s own pinned bar, live for a second independent mount; unpinning removes it', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'Pin this one' });
+
+  const PINS_CLIENT_URL = new URL('../../pins/client.js', import.meta.url).href;
+  const appsWithPins = [
+    { name: 'chat', spaceId: CHAT_SPACE_ID },
+    {
+      name: 'pins', clientMainUrl: PINS_CLIENT_URL, contributes: [
+        { point: 'content.messageMenu', export: 'pinMenuItem' },
+        { point: 'content.topicToolbar', export: 'renderPinnedBar' },
+      ],
+    },
+  ];
+
+  const containerA = makeContainer();
+  const containerB = makeContainer();
+  const extensionPointsA = new ExtensionPointHost(appsWithPins);
+  const extensionPointsB = new ExtensionPointHost(appsWithPins);
+  const stopA = mount(containerA, {
+    qu: alice.qu, services: alice.services, apps: appsWithPins, subscribe: noopSubscribe,
+    segments: ['chat', bob.myPub], extensionPoints: extensionPointsA,
+  });
+  const stopB = mount(containerB, {
+    qu: alice.qu, services: alice.services, apps: appsWithPins, subscribe: noopSubscribe,
+    segments: ['chat', bob.myPub], extensionPoints: extensionPointsB,
+  });
+  try {
+    let panelA = await openMessageMenu(containerA);
+    const pinBtn = menuItemButton(panelA, 'Pin');
+    assert.ok(pinBtn, 'expected a "Pin" menu item');
+    pinBtn.click();
+
+    // A second, independent mount of the SAME room sees it live too.
+    await waitFor(() => containerB.querySelector('.qu-pins-bar') !== null);
+    const pinnedRowText = containerB.querySelector('.qu-pins-bar-row-text');
+    assert.match(pinnedRowText.textContent, /Pin this one/);
+    // Clickable - a real permalink, built from chat's own room route, not a
+    // plain unclickable snippet.
+    assert.equal(pinnedRowText.tagName, 'A');
+    const { messages } = await alice.services.messages.listMessages(CHAT_SPACE_ID, roomId);
+    assert.equal(pinnedRowText.getAttribute('href'), `#/chat/${bob.myPub}/m/${messages[0].id}`);
+
+    panelA = await openMessageMenu(containerA); // reopen - menu closed itself on the click above
+    assert.ok(menuItemButton(panelA, 'Unpin'));
+
+    containerB.querySelector('.qu-pins-bar-row button').click(); // unpin via the bar's own X
+    await waitFor(() => containerB.querySelector('.qu-pins-bar') === null);
+  } finally {
+    stopA();
+    stopB();
+  }
+});
+
 test('the "Reply" menu item (native, any message) opens the reply banner and tags the next posted message\'s replyTo', async () => {
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');
@@ -1675,6 +1732,43 @@ test('an open room\'s navigation sidebar lists every room (1:1 + group), the cur
     // nothing left for the mobile footer to show at all (feedback: it
     // duplicated the room's own composer bar right above it).
     assert.equal(container.querySelector('.qu-apptpl-footer'), null);
+  } finally {
+    stop();
+  }
+});
+
+test('the sidebar\'s filter input matches a group room by a PARTICIPANT\'s name too, not just the group\'s own label - a DM room only needs its own label, since that already IS the other participant\'s name', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  await mirrorProfileInto(alice, bob.qu);
+  await bob.services.contacts.addContact(alice.myPub);
+  const { groupId } = await alice.services.chat.createGroup(CHAT_SPACE_ID, { name: 'Team Rocket', memberPubs: [bob.myPub] });
+  const inviteSpace = await bob.services.chat.myInviteSpace();
+  await mirrorThreadInto(alice, bob.qu, inviteSpace, 'groups');
+  await mirrorThreadInto(alice, bob.qu, CHAT_SPACE_ID, groupId);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: bob.qu, services: bob.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat'] });
+  try {
+    await waitFor(() => container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a').length === 2);
+    const input = container.querySelector('.qu-apptpl-sidebar .qu-apptpl-filter');
+    assert.ok(input);
+    const visibleLabels = () => [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list li')].filter((li) => !li.hidden).map((li) => li.textContent);
+
+    // Searching a participant's name matches BOTH the DM with that person
+    // (its own label already IS their name) AND the group they're in (via
+    // `searchText`, not its own label "Team Rocket") - the whole point of
+    // this feature.
+    input.value = 'alice';
+    input.dispatchEvent(new window.Event('input'));
+    assert.deepEqual(visibleLabels().sort(), ['👤Alice', '👥Team Rocket']);
+
+    // The group's own label still works too, on its own (no participant
+    // name involved), and this time does NOT also match the DM.
+    input.value = 'rocket';
+    input.dispatchEvent(new window.Event('input'));
+    assert.deepEqual(visibleLabels(), ['👥Team Rocket']);
   } finally {
     stop();
   }

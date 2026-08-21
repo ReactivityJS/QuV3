@@ -362,6 +362,20 @@ the mobile footer to show, `mountAppTemplate()` renders no footer there at
 all, so the room's own composer bar is the only bottom bar on a phone,
 instead of a second, duplicate-looking one sitting right above it.
 
+**`navigation`/`views`/`settings`' `filter: true`** adds a live search input
+above the list - both in the desktop sidebar and in the mobile pill's popup -
+that hides any item whose `label` (plus `searchText`, if an item sets it)
+doesn't match, case-insensitively, as substrings; empty input shows
+everything again. Both Chat's room list and Forum's channel list set it on
+their own `navigation` now: a channel's own name is already the whole
+story, but a chat room's isn't always - a DM room's `label` already IS the
+other participant's name, but a GROUP room's `label` is the group's own
+name, so searching for a member who isn't in that name would otherwise find
+nothing; `listRooms()` (`apps/chat/client.js`) resolves each group's member
+names once and `roomsToNavItems()` carries them as `searchText`, purely for
+matching - never shown on screen. Leave `filter` off for a short, stable
+list where a search box would just be one more thing on screen.
+
 Both views' `navigation` depends on an async fetch (contacts/groups, and -
 room list only - a group-creation policy check) that isn't ready at the one
 synchronous `mountAppTemplate()` call every app makes —

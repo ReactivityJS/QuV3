@@ -45,7 +45,10 @@
  *     `ExtensionPointHost` is keyed purely by point NAME (see
  *     `@qu/foundation`'s `extension-points.js`), not by which app's own
  *     manifest happens to declare it first - nothing stops a second
- *     consumer app from rendering into an already-declared point.
+ *     consumer app from rendering into an already-declared point. Pins'
+ *     "📌 Pinned" bar (`content.topicToolbar`) is the same story, once per
+ *     room instead of once per message - see `mountRoomView()`'s own
+ *     `toolbarRoot` for where this app renders that slot.
  *   - Mention/emoji autocomplete reuse `@qu/thread-ui`'s
  *     `mountMentionAutocomplete()`/`mountEmojiAutocomplete()`/
  *     `renderEmojiPicker()`/`insertAtCursor()` unchanged - the exact
@@ -363,6 +366,8 @@ const STYLE = `
      flex-shrink: 0 siblings" structure as before, unchanged. */
   .qu-chat-room-view { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--qu-color-surface, #ffffff); }
   .qu-chat-header { flex-shrink: 0; display: flex; align-items: center; gap: 0.6rem; padding: 0.6rem 1rem; border-bottom: 1px solid var(--qu-color-border, #8884); background: var(--qu-color-surface, #ffffff); }
+  .qu-chat-toolbar-root { flex-shrink: 0; padding: 0.5rem 1rem 0; }
+  .qu-chat-toolbar-root:empty { padding: 0; }
   .qu-chat-header-namewrap { min-width: 0; overflow: hidden; }
   .qu-chat-header-nameline { display: flex; align-items: center; gap: 0.35rem; min-width: 0; }
   .qu-chat-header-name { font-weight: 700; font-size: 1.1em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -704,11 +709,19 @@ async function listRooms({ services, SPACE_ID, myPub }) {
     const { messages } = await services.messages.listMessages(SPACE_ID, groupId, { order: 'desc', limit: 1 });
     const lastReadAt = await services.messages.getLastReadAt(SPACE_ID, groupId);
     const last = messages[0] ?? null;
+    // Member display names, resolved once here rather than in
+    // roomsToNavItems() - a group's own `name` is what the room list SHOWS,
+    // but filtering by a participant's name (see this file's own top doc
+    // comment's "NAVIGATION" section) needs those names too, as
+    // `searchText`, even though they never appear on screen for a group row.
+    const otherMembers = (Array.isArray(config.readers) ? config.readers : []).filter((p) => p !== myPub);
+    const memberProfiles = await Promise.all(otherMembers.map((pub) => services.profile.getPublicProfile(pub).catch(() => null)));
+    const memberNames = otherMembers.map((pub, i) => formatActorLabel(pub, memberProfiles[i])).join(' ');
     return {
       kind: 'group', roomId: groupId, href: `#/chat/g/${groupId}`,
       name: config.name ?? groupId, avatarSeed: groupId, avatar: null,
       lastMessage: last, unread: !!last && last.author !== myPub && last.ts > lastReadAt,
-      muted: mutedThreads.has(groupId),
+      muted: mutedThreads.has(groupId), memberNames,
     };
   }))).filter(Boolean);
 
@@ -734,6 +747,13 @@ function roomsToNavItems(rooms) {
     href: room.href,
     icon: room.kind === 'group' ? '👥' : '👤',
     badge: room.unread ? '●' : undefined,
+    // A DM's own `label` already IS the other participant's name - nothing
+    // more to search there. A group's `label` is the GROUP's name, so a
+    // search by a member's name (see this file's own top doc comment's
+    // "NAVIGATION" section) needs `memberNames` (listRooms()'s own doc
+    // comment) as extra `searchText` `mountAppTemplate()`'s `filter: true`
+    // also matches against.
+    searchText: room.kind === 'group' ? room.memberNames : undefined,
   }));
 }
 
@@ -780,7 +800,7 @@ function mountRoomListView(container, { qu, services, subscribe, syncFetch, SPAC
     // section: this same room list already fills `content` below, so a
     // mobile pill duplicating it would be pointless; the desktop sidebar
     // gets it anyway, matching an open room's own sidebar.
-    stopTemplate.update({ navigation: { items: roomsToNavItems(rooms), desktopOnly: true, heading: t('title') } });
+    stopTemplate.update({ navigation: { items: roomsToNavItems(rooms), desktopOnly: true, heading: t('title'), filter: true } });
 
     // MESSAGE REQUESTS - see ChatService's own "1:1 DISCOVERY" doc comment.
     // A request is worth SHOWING only while it's neither already accepted
@@ -1038,6 +1058,16 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   const roomView = document.createElement('div');
   roomView.className = 'qu-chat-room-view';
 
+  // The `content.topicToolbar` slot (Pins' own "📌 Pinned" bar - see that
+  // extension point's own doc comment in apps/forum/manifest.quapp) -
+  // rendered ONCE per room, right below the fixed header, above the
+  // scrolling message list. Same SAME slot `apps/forum/client.js`'s own
+  // `mountTopicView()` renders into, just with THIS room's own `roomId` and
+  // `messagePermalink()` route shape passed through below (once `roomId`
+  // itself resolves - see the async setup IIFE further down).
+  const toolbarRoot = document.createElement('div');
+  toolbarRoot.className = 'qu-chat-toolbar-root';
+
   const heading = document.createElement('div');
   heading.className = 'qu-chat-header';
   const headerAvatarSlot = document.createElement('div');
@@ -1268,7 +1298,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
 
   composerWrap.append(replyBanner, pendingAttachmentEl, composerRow, voiceRecorderEl);
 
-  roomView.append(heading, messagesScroll, composerWrap);
+  roomView.append(heading, toolbarRoot, messagesScroll, composerWrap);
   const stopTemplate = mountAppTemplate(container, {
     fullHeight: true,
     render: (content) => content.appendChild(roomView),
@@ -2401,6 +2431,20 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
       headerAvatarSlot.appendChild(renderAvatarOrAsset(roomId, headerNameEl.textContent, null, { size: '2.6rem' }));
     }
     roomReady = true;
+    // `content.topicToolbar` (Pins' own "📌 Pinned" bar) - `roomId` only
+    // resolves here, not at `toolbarRoot`'s own creation site above, so this
+    // is the earliest point it can render. `messagePermalink` wraps this
+    // file's own `messagePermalink({id})` (which takes a full message
+    // object elsewhere in this file) down to the `(messageId) => string`
+    // shape apps/pins/client.js's own doc comment documents, using THIS
+    // room's own route shape (`roomHash()` + `/m/<id>`) - see
+    // apps/forum/client.js's own identical wiring for `mountTopicView()`.
+    if (extensionPoints?.renderSlot) {
+      extensionPoints.renderSlot('content.topicToolbar', toolbarRoot, {
+        services, qu, syncFetch, spaceId: SPACE_ID, threadId: roomId,
+        messagePermalink: (messageId) => messagePermalink({ id: messageId }),
+      });
+    }
     await refreshHeaderMuted();
     if (stopped) return;
 
@@ -2445,7 +2489,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     const rooms = await listRooms({ services, SPACE_ID, myPub: myPubForNav });
     if (stopped) return;
     stopTemplate.update({
-      navigation: { items: roomsToNavItems(rooms), activeId: roomId, heading: t('title'), desktopOnly: true },
+      navigation: { items: roomsToNavItems(rooms), activeId: roomId, heading: t('title'), desktopOnly: true, filter: true },
     });
   })();
 
