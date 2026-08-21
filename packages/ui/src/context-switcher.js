@@ -142,6 +142,7 @@ function buildSidebarBody(host, { items, renderSidebar, activeId, newItem }) {
  *   breakpoint?: string,
  *   switchHref?: string,
  *   activeLabel?: string,
+ *   hideTitleLink?: boolean,
  *   newItem?: {label: string, href: string},
  *   render: (content: HTMLElement) => void,
  * }} options
@@ -149,7 +150,7 @@ function buildSidebarBody(host, { items, renderSidebar, activeId, newItem }) {
  */
 export function mountContextSwitcher(container, {
   items, renderSidebar, activeId = null, heading, variant = 'tabs', breakpoint = '720px',
-  switchHref, activeLabel, newItem, render,
+  switchHref, activeLabel, hideTitleLink = false, newItem, render,
 }) {
   ensureStyle(breakpoint);
   container.textContent = '';
@@ -157,7 +158,11 @@ export function mountContextSwitcher(container, {
   const root = document.createElement('div');
   root.className = 'qu-ctxswitch-root';
 
-  if (variant === 'page') {
+  // `hideTitleLink` - an opt-out for a caller that reaches `switchHref`
+  // through some OTHER real, routable affordance instead (e.g. Calendar's
+  // own `mountAppTemplate()` settings-gear entry, "Kalender verwalten") -
+  // never leaves `switchHref` unreachable, just avoids showing it twice.
+  if (variant === 'page' && !hideTitleLink) {
     const titlebar = document.createElement('div');
     titlebar.className = 'qu-ctxswitch-titlebar';
     titlebar.dataset.variant = 'page';
