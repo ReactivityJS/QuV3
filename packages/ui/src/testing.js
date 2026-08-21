@@ -59,13 +59,25 @@ export function installDom() {
  * making the test's PASS/FAIL depend on implementation detail unrelated to
  * what it's actually asserting. Polling waits exactly as long as needed,
  * no more, no less, regardless of how many real async layers are involved.
- * @param {() => boolean} check
+ *
+ * `check` may itself be `async` (e.g. `() => services.foo.isBar()`) - the
+ * `await` below is load-bearing, not defensive style: `!check()` on an
+ * async `check` tests the (always-truthy) `Promise` object itself, never
+ * its resolved value, so a naive `while (!check())` returns immediately
+ * having polled nothing at all. FIXED (was a real, silent bug here for a
+ * long time - every caller passing an async `check` was, in effect, not
+ * actually waiting for anything; it only ever looked like it worked
+ * because by the time a test's next line ran, the real condition had
+ * usually already become true anyway - a coincidence, not a guarantee,
+ * and the actual source of several "occasionally flaky" tests across this
+ * codebase's app suites).
+ * @param {() => boolean|Promise<boolean>} check
  * @param {{timeout?: number, interval?: number}} [options]
  * @returns {Promise<void>}
  */
 export async function waitFor(check, { timeout = 1000, interval = 5 } = {}) {
   const start = Date.now();
-  while (!check()) {
+  while (!(await check())) {
     if (Date.now() - start > timeout) throw new Error(`waitFor: condition never became true within ${timeout}ms`);
     await new Promise((resolve) => setTimeout(resolve, interval));
   }
