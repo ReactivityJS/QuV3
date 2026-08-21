@@ -533,6 +533,79 @@ test('muting a room shows a crossed-out bell in the room header immediately, and
   }
 });
 
+test('the room "⋮" menu\'s native "Delete chat" item asks for confirmation, then hides the room from this identity\'s own room list and navigates back to it - the underlying thread is untouched (the other side keeps their own copy)', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  await alice.services.contacts.addContact(bob.myPub);
+  const roomId = await ChatService.roomId([alice.myPub, bob.myPub]);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
+
+    let confirmed = false;
+    window.confirm = (msg) => { confirmed = true; assert.ok(msg.length > 0); return true; };
+
+    const panel = await openRoomMenu(container);
+    assert.ok(menuItemButton(panel, 'Delete chat'));
+    menuItemButton(panel, 'Delete chat').click();
+
+    await waitForAsync(async () => window.location.hash === '#/chat');
+    assert.ok(confirmed);
+
+    // The thread itself is still there (this is a local "hide", not a real delete).
+    const config = await alice.services.messages.getConfig(CHAT_SPACE_ID, roomId);
+    assert.ok(config);
+  } finally {
+    stop();
+  }
+
+  // The room list no longer shows it, even though Bob is still a contact.
+  const listContainer = makeContainer();
+  const stopList = mount(listContainer, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat'] });
+  try {
+    await waitFor(() => listContainer.querySelector('.qu-chat-empty, .qu-chat-room-row') !== null);
+    assert.equal(listContainer.querySelector('.qu-chat-room-row'), null);
+  } finally {
+    stopList();
+  }
+});
+
+test('declining the "Delete chat" confirmation leaves the room in the list untouched', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  await alice.services.contacts.addContact(bob.myPub);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
+    // Different from the previous test's own leftover hash, so an
+    // (incorrect) navigation on decline is still detectable below.
+    window.location.hash = '#/chat/' + bob.myPub;
+    window.confirm = () => false;
+
+    const panel = await openRoomMenu(container);
+    menuItemButton(panel, 'Delete chat').click();
+    await new Promise((resolve) => setTimeout(resolve, 20)); // let any (unwanted) async work settle
+    assert.equal(window.location.hash, '#/chat/' + bob.myPub);
+  } finally {
+    stop();
+  }
+
+  const listContainer = makeContainer();
+  const stopList = mount(listContainer, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat'] });
+  try {
+    await waitFor(() => listContainer.querySelector('.qu-chat-room-row') !== null);
+    assert.ok(listContainer.querySelector('.qu-chat-room-row'));
+  } finally {
+    stopList();
+  }
+});
+
 test('the room "⋮" menu merges native items with whatever a plugin app contributes to content.chatRoomMenu, passing contactPub for a 1:1 room and null for a group', async () => {
   const { resetSeenPayloads, getSeenPayloads } = await import('./fake-chat-room-menu-plugin.js');
   resetSeenPayloads();

@@ -16,13 +16,12 @@
   "definesExtensionPoints": [
     { "point": "content.messageFooter", "kind": "ui", "description": "The per-message footer ROW (menu trigger, timestamp, reactions - order admin-configurable via relay-settings' extensionOrder) - e.g. Reactions' own widget. Payload: {services, qu, syncFetch, spaceId, threadId, messageId, myPub, mine, body, author}." },
     { "point": "content.messageMenu", "kind": "menu", "description": "This message's own \"⋮\" context menu - e.g. Pins'/Bookmarks' own toggle, each one entry. Payload: {services, qu, syncFetch, spaceId, threadId, messageId, myPub, mine, body, author}. Returns {id, label, icon, onClick}." },
-    { "point": "forum.topicToolbar", "kind": "ui", "description": "Rendered ONCE per topic view, above the message list - e.g. Pins' own \"Pinned\" bar. Payload: {services, qu, syncFetch, spaceId, threadId, messagePermalink: (messageId) => string}." },
+    { "point": "content.topicToolbar", "kind": "ui", "description": "Rendered ONCE per topic/room view, above the message list - e.g. Pins' own \"Pinned\" bar. Shared by Chat's and Forum's own view (host-agnostic, like content.composerActions). Payload: {services, qu, syncFetch, spaceId, threadId, messagePermalink: (messageId) => string}." },
     { "point": "content.composerActions", "kind": "menu", "description": "The composer's own \"+\" action menu (Attach, plus whatever a plugin app contributes - e.g. a Calendar/Gallery app's own entry, or a game's own \"share\" action). Shared by Chat's and Forum's composer. Payload: {services, qu, syncFetch, spaceId, threadId}. Returns {id, label, icon, onClick}." }
   ],
   "contributes": [
     { "point": "content.search", "export": "searchForum", "kind": "query" },
     { "point": "content.searchResultTemplate", "export": "renderSearchResult", "kind": "ui" },
-    { "point": "content.resolveReference", "export": "resolveForumReference", "kind": "query" },
-    { "point": "shell.headerNavPoints", "export": "renderHeaderNavPoints", "kind": "ui", "order": 10 }
+    { "point": "content.resolveReference", "export": "resolveForumReference", "kind": "query" }
   ]
 }
