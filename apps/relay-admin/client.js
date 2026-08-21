@@ -75,7 +75,7 @@
 import { QuCrypto } from '@qu/core';
 import { createI18n } from '@qu/i18n';
 import { rankFor } from '@qu/foundation';
-import { injectStyle, ensureTheme } from '@qu/ui';
+import { injectStyle, ensureTheme, mountAppTemplate } from '@qu/ui';
 
 /**
  * The fixed catalog of extension points this UI can reorder - native item
@@ -265,6 +265,7 @@ function buildOrderSection(titleKey, hintKey, items) {
       upBtn.type = 'button';
       upBtn.textContent = '▲';
       upBtn.title = t('orderMoveUp');
+      upBtn.setAttribute('aria-label', t('orderMoveUp'));
       upBtn.disabled = index === 0;
       upBtn.addEventListener('click', () => {
         [order[index - 1], order[index]] = [order[index], order[index - 1]];
@@ -274,6 +275,7 @@ function buildOrderSection(titleKey, hintKey, items) {
       downBtn.type = 'button';
       downBtn.textContent = '▼';
       downBtn.title = t('orderMoveDown');
+      downBtn.setAttribute('aria-label', t('orderMoveDown'));
       downBtn.disabled = index === order.length - 1;
       downBtn.addEventListener('click', () => {
         [order[index], order[index + 1]] = [order[index + 1], order[index]];
@@ -296,30 +298,32 @@ function buildOrderSection(titleKey, hintKey, items) {
 export async function mount(container, { identity, services, apps }) {
   ensureTheme();
   injectStyle(STYLE_ID, STYLE);
-  container.textContent = '';
   let stopped = false;
 
-  const heading = document.createElement('h1');
-  heading.textContent = t('title');
-  container.appendChild(heading);
-  const bodyRoot = document.createElement('div');
-  container.appendChild(bodyRoot);
-
   const myPub = await services.actors.whoAmI();
-  if (stopped) return;
+  if (stopped) return () => { stopped = true; };
 
   let config;
   try {
     const res = await fetch('/config.json');
     config = res.ok ? await res.json() : null;
   } catch { /* offline/unreachable - treated the same as "not authorized": nothing this identity could save right now anyway */ }
-  if (stopped) return;
+  if (stopped) return () => { stopped = true; };
 
   const adminPubs = config?.adminPubs ?? [];
   if (!adminPubs.includes(myPub)) {
-    const p = document.createElement('p');
-    p.textContent = t('notAuthorized');
-    bodyRoot.appendChild(p);
+    // Rule 5 (docs/app-navigation-standard.md) - even this single, chrome-
+    // less "not authorized" state routes through mountAppTemplate(), same
+    // as the real form below, rather than appending straight to `container`.
+    mountAppTemplate(container, {
+      render: (content) => {
+        const heading = document.createElement('h1');
+        heading.textContent = t('title');
+        const p = document.createElement('p');
+        p.textContent = t('notAuthorized');
+        content.append(heading, p);
+      },
+    });
     return () => { stopped = true; };
   }
 
@@ -467,7 +471,18 @@ export async function mount(container, { identity, services, apps }) {
   status.hidden = true;
 
   form.append(generalSection, appsSection, channelsSection, chatSection, linkPreviewsSection, ...orderSections.map((o) => o.section), flagTypesSection, saveBtn, status);
-  bodyRoot.appendChild(form);
+
+  // Rule 5 (docs/app-navigation-standard.md) - none of `navigation`/`views`/
+  // `primaryAction`/`settings` fit a single settings form with no sibling
+  // "places" or create action, so `render` is all that's passed - the same
+  // chrome-less shape apps/search/client.js's own mount() uses.
+  mountAppTemplate(container, {
+    render: (content) => {
+      const heading = document.createElement('h1');
+      heading.textContent = t('title');
+      content.append(heading, form);
+    },
+  });
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();

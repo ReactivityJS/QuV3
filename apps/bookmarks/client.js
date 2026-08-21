@@ -125,6 +125,7 @@ export function mount(container, { qu, services, syncFetch }) {
       removeBtn.type = 'button';
       removeBtn.textContent = '✕';
       removeBtn.title = t('remove');
+      removeBtn.setAttribute('aria-label', t('remove'));
       removeBtn.addEventListener('click', () => services.bookmarks.remove(bookmark.id));
 
       li.append(body, removeBtn);
