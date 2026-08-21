@@ -127,13 +127,15 @@ export function renderHeaderNavPoints(container, { getContext, onContextChange, 
 — on the OTHER slot, so it never actually collides with `order: 10`+ here;
 kept consistent anyway.)
 
-If your items depend on more than just "is my app active" — e.g. Forum's
-"New topic" only makes sense once a specific channel is open — register your
-own `onContextChange` listener from inside `render()` to recompute and
+If your items depend on more than just "is my app active" — e.g. an action
+that only makes sense on a specific sub-route — register your own
+`onContextChange` listener from inside `render()` to recompute and
 re-render on every route change within your app (`mountAppHeaderAction()`
 itself only re-renders on activate/deactivate, not on every internal route
-change). `apps/forum/client.js`'s real `renderHeaderNavPoints()` is the
-working reference for this shape.
+change). `apps/todo/client.js`'s own `shell.headerNavPoints` contribution is
+a working reference for this shape (Forum has since migrated its own
+route-dependent actions onto `mountAppTemplate()`'s `primaryAction`/
+`settings` instead - see Rule 5 below).
 
 The contributor's payload carries `getContext`/`onContextChange` (the current
 route) plus `services`/`qu`/`subscribe`/`syncFetch` — the same ones the
@@ -475,80 +477,71 @@ Room view:
 ### Forum
 
 ```
-BEFORE (mobile, v1 of the migration - a real regression, since fixed):
+BEFORE (mobile, hand-rolled mini sidebar - the "before" for the Rule 5 migration):
 ┌──────────────────────────────┐
-│ [General][Team][Support][Ops] │  <- horizontal scroll, forced sideways
-│ [Random][Off-topic][Archive]…│     scrolling once there were more than
-├──────────────────────────────┤     a handful of channels
-│  Announcements                │
-│  [topics...]                  │
-└──────────────────────────────┘
-
-AFTER (mobile) - the shared sidebar list (mountContextSwitcher, variant:
-'tabs') collapses to a native <select> below 720px instead of a
-horizontally-scrolling strip - shows the active channel/"All channels" as
-its current value, no width problem at any channel count, no custom
-open/close/positioning code. The board view (no channel open) contributes
-just 1 nav-points item, a plain "+" (New channel):
-Global header:  🏠  ←  →  [+]  ⋯  🔔  👤   <- "+" = New channel only, next to Back/Forward
-┌──────────────────────────────┐
-│  ▾ All channels                │
+│ [General][Team][Support][Ops] │  <- own scroll strip / <select>, own CSS,
+│ [Random][Off-topic][Archive]…│     nothing shared with mountAppTemplate()
 ├──────────────────────────────┤
 │  Announcements                │
 │  [topics...]                  │
+├──────────────────────────────┤
+│  + New channel  (header nav points, board view only)
 └──────────────────────────────┘
 
-Opening a channel adds a SECOND nav-points item ("New topic" - its own
-route now, `#/forum/c/<id>/new-topic`, replacing the old inline title field
-at the bottom of the topic list), so the header shows a dropdown instead of
-a plain link:
-Global header:  🏠  ←  →  [⋯▾]  ⋯  🔔  👤   <- 2 items now → a small dropdown, not a plain "+"
-                          ├ New channel
-                          └ New topic
+AFTER (mobile) - board/channel views now go through mountAppTemplate() like
+every other Rule-5 app: the channel list is `navigation` (NOT desktopOnly -
+switching channels is a core action here, unlike Chat's open room), "+ New
+topic" is the view's own `primaryAction` FAB, "+ New channel" moved into the
+`settings` gear popup (freeing `primaryAction` from having to represent two
+different actions):
 ┌──────────────────────────────┐
-│  Announcements                 │  <- no inline "new topic" form here anymore
-│  [topics...]                   │
+│  Announcements            ⚙️  │  <- ⚙️ opens "+ New channel"
+│  [topics...]                  │
+│         ▾ Announcements  (+)  │  <- channel pill (popup: all channels) + New-topic FAB
 └──────────────────────────────┘
 
-AFTER (desktop, ≥720px) - unchanged, a persistent vertical sidebar:
+The topic ("room") view is the same `fullHeight: true` + `navigation`
+`desktopOnly: true` shape as Chat's open room (see above) - no
+`primaryAction`/`settings` there, so on mobile the topic's own composer is
+the only bottom bar, no duplicate footer:
+┌──────────────────────────────┐
+│  Announcements                │
+│  [messages...]                │
+│  [composer]                    │  <- the ONLY bottom bar
+└──────────────────────────────┘
+
+AFTER (desktop, ≥720px) - a persistent `mountAppTemplate()` sidebar, present
+on the board view, an open channel, AND an open topic (desktopOnly there):
 ┌────────────┬───────────────────┐
-│ Channels   │  Announcements    │
-│  All chan. │  [topics...]      │
-│  General   │                   │
-│  Team      │                   │
+│ All chan.  │  Announcements    │
+│ General    │  [topics/messages]│
+│ Team       │                   │
+│ [+New topic│ desktop-primary]  │
 └────────────┴───────────────────┘
 ```
 
 Forum was already compliant on Rule 1 (its subpages already used
-`renderSubpage({ showBackLink: false })`). The migration moved its channel
-list onto the shared `mountContextSwitcher()` shell (`variant: 'tabs'`, via
-a `renderSidebar` override — its channel-list data fetch/live-watch logic is
-non-trivial enough, like Calendar's calendars, to keep self-managed rather
-than flattened into a plain `items` array) so it shares real CSS/layout with
-Calendar's sidebar instead of a parallel, hand-maintained copy — and moved
-"+ New channel" (and later, "New topic") into the global header's App
-Navigation Points Slot (Rule 2), matching Calendar's/Chat's own shape for
-"New channel" alone, and becoming the first REAL 2-item dropdown once "New
-topic" joined it — rather than leaving either as an inline entry.
+`renderSubpage({ showBackLink: false })`). The Rule 5 migration retired the
+app's own hand-rolled `mountMiniChannelSidebar()`/`shell.headerNavPoints`
+contribution (`renderHeaderNavPoints()`) entirely in favor of
+`mountAppTemplate()`, following the exact pattern this doc's Chat section
+already established: `channelsToNavItems(channels)` is the one shared mapper
+every view (board, channel, topic) builds its `navigation` items from, kept
+in sync with the live channel list the same way Chat's `roomsToNavItems()`
+does; `applyNewChannelSettings()` fills in the `settings` gear once the
+channel-creation policy check resolves, via `stopTemplate.update(...)` (see
+this doc's "LATE-ARRIVING CHROME DATA" reference above), reused by both the
+board and channel views.
 
-**A real bug shipped in the first version of this migration**, since fixed:
-the reused `mountMiniChannelSidebar()` did `root.className = '...'` — a
-blind assignment that silently wiped the `.qu-ctxswitch-sidebar` class
-`mountContextSwitcher()` had already put on that same element, breaking its
-own responsive CSS and producing exactly the "too wide, forces horizontal
-scrolling" symptom shown above. **Lesson for any future `renderSidebar`
-override**: only ever `classList.add()` your own class onto the `host`
-element you're handed — never reassign `className` wholesale, since the
-host is already carrying the shared component's own class.
-
-**"New topic" trades one step of convenience for consistency**: it used to
-be a title field right at the bottom of the open channel's topic list — type
-a title, hit enter, done, no page change. It's now a real subpage
-(`#/forum/c/<channelId>/new-topic`, reached via the header's Nav Points
-dropdown) like every other "create X" in this codebase, which costs one
-extra step (open the dropdown → New topic → the page → submit) in exchange
-for a shareable/bookmarkable creation URL and the same shape Rule 2 already
-gives every other dedicated-route action.
+**"New topic" is now reached two ways**: the board view's own `primaryAction`
+(`#/forum/new-topic` - no channel picked yet, so the form adds a `<select>`
+that's disabled until the channel list resolves) and an open channel's own
+`primaryAction` (`#/forum/c/<channelId>/new-topic` - channel already known,
+no picker). Both routes share one `mountNewTopicView()`, and the form itself
+now takes the topic's opening post right there too - title, content
+textarea, and an optional attachment, the same upload lifecycle the topic
+view's own composer uses - rather than creating an empty topic that still
+needs its first reply typed separately.
 
 ## What's explicitly out of scope (for now)
 

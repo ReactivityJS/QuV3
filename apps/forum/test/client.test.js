@@ -12,7 +12,7 @@ import { installDom, waitFor } from '@qu/ui/testing';
 import { register as registerForum } from '../index.js';
 
 installDom();
-const { mount, searchForum, renderSearchResult, renderHeaderNavPoints } = await import('../client.js');
+const { mount, searchForum, renderSearchResult } = await import('../client.js');
 
 function createQu() {
   const qu = new QuStore();
@@ -139,7 +139,7 @@ const FORUM_APPS_WITH_PINS = [
   {
     name: 'pins', clientMainUrl: PINS_CLIENT_URL, contributes: [
       { point: 'content.messageMenu', export: 'pinMenuItem' },
-      { point: 'forum.topicToolbar', export: 'renderPinnedBar' },
+      { point: 'content.topicToolbar', export: 'renderPinnedBar' },
     ],
   },
 ];
@@ -312,7 +312,7 @@ test('the composer\'s "+" action menu (content.composerActions) lists Attach nat
       seen.push({ point, payload });
       return [{ id: 'calendar.newEvent', label: 'New calendar event', icon: '📅', onClick: () => {} }];
     },
-    renderSlot: async () => {}, // forum.topicToolbar - unrelated to this test, just needs to exist
+    renderSlot: async () => {}, // content.topicToolbar - unrelated to this test, just needs to exist
   };
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS, extensionPoints });
   try {
@@ -706,7 +706,7 @@ test('content.messageMenu (bookmarks): a bookmark is private - a SECOND identity
   }
 });
 
-test('content.messageMenu (pins) / forum.topicToolbar: the REAL apps/pins app pins a message via its menu item and shows it in the pinned bar, live for a second independent mount; unpinning removes it', async () => {
+test('content.messageMenu (pins) / content.topicToolbar: the REAL apps/pins app pins a message via its menu item and shows it in the pinned bar, live for a second independent mount; unpinning removes it', async () => {
   const a = await freshEnv('Ada');
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
   await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'Pin this one' });
@@ -1258,17 +1258,20 @@ test('the returned stop function tears down cleanly - no error thrown', async ()
 // BOARD VIEW - #/forum
 // ===================================================================
 
-test('board view (#/forum, no sub-segments) lists the migrated "General" channel in the persistent sidebar and its topic in the recent-activity feed', async () => {
+test('board view (#/forum, no sub-segments) lists the migrated "General" channel in the app-template sidebar (both desktop and mobile), and its topic in the recent-activity feed', async () => {
   const a = await freshEnv('Ada');
   await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'first ever post' });
 
   const container = makeContainer();
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
   try {
-    await waitFor(() => container.querySelector('.qu-forum-mini-all-channels') !== null);
-    assert.equal(container.querySelector('.qu-forum-mini-all-channels').textContent, 'All channels');
-    assert.ok(container.querySelector('.qu-forum-mini-all-channels').classList.contains('qu-forum-mini-channel-active')); // the board view IS "All channels"
-    assert.match(container.querySelector('.qu-forum-mini-channels li:not(:first-child) a').textContent, /General/);
+    await waitFor(() => container.querySelector('.qu-apptpl-sidebar .qu-apptpl-list a') !== null);
+    const links = [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')];
+    assert.equal(links[0].textContent, 'All channels');
+    assert.equal(links[0].getAttribute('href'), '#/forum');
+    assert.match(links[1].textContent, /General/);
+    const activeLink = container.querySelector('.qu-apptpl-sidebar .qu-apptpl-item-active');
+    assert.equal(activeLink.getAttribute('href'), '#/forum'); // the board view IS "All channels"
 
     await waitFor(() => container.querySelector('.qu-forum-topic-row a') !== null);
     const topicLink = container.querySelector('.qu-forum-topic-row a');
@@ -1294,32 +1297,15 @@ test('board view: explicitly backfills each channel\'s OWN topics list via syncF
   }
 });
 
-test('board view: the mobile channel switcher is a native <select> with the same entries as the sidebar list, "All channels" selected by default', async () => {
+test('board view: the mobile footer shows a channel pill whose popup lists the same entries as the sidebar, "All channels" as the active label', async () => {
   const a = await freshEnv('Ada');
   const container = makeContainer();
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
   try {
-    await waitFor(() => container.querySelector('.qu-forum-mini-select') !== null);
-    const select = container.querySelector('.qu-forum-mini-select');
-    const options = [...select.querySelectorAll('option')];
-    assert.equal(options[0].textContent, 'All channels');
-    assert.equal(options[0].value, '#/forum');
-    assert.equal(options[0].selected, true);
-    assert.ok(options.some((o) => o.value === '#/forum/c/general-channel' && o.textContent === 'General'));
-  } finally {
-    stop();
-  }
-});
-
-test('board view/channel view: mountMiniChannelSidebar() only ADDS its own class - never wipes mountContextSwitcher\'s own .qu-ctxswitch-sidebar class it was handed (regression: a blind className= assignment used to silently break the shared responsive sidebar CSS)', async () => {
-  const a = await freshEnv('Ada');
-  const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
-  try {
-    await waitFor(() => container.querySelector('.qu-forum-mini-sidebar') !== null);
-    const sidebar = container.querySelector('.qu-forum-mini-sidebar');
-    assert.ok(sidebar.classList.contains('qu-ctxswitch-sidebar'), 'the shared mountContextSwitcher() class must survive');
-    assert.equal(sidebar.dataset.variant, 'tabs');
+    await waitFor(() => container.querySelector('.qu-apptpl-pill') !== null);
+    assert.equal(container.querySelector('.qu-apptpl-pill-label').textContent, 'All channels');
+    const popupLinks = [...container.querySelectorAll('.qu-apptpl-popup a')];
+    assert.ok(popupLinks.some((l) => l.getAttribute('href') === '#/forum/c/general-channel' && l.textContent.includes('General')));
   } finally {
     stop();
   }
@@ -1332,84 +1318,71 @@ test('board view: a restricted channel shows a 🔒 badge in the persistent side
   const container = makeContainer();
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
   try {
-    await waitFor(() => [...container.querySelectorAll('.qu-forum-mini-channels a')].some((a2) => a2.textContent.includes('Secret Stuff')));
-    const row = [...container.querySelectorAll('.qu-forum-mini-channels a')].find((a2) => a2.textContent.includes('Secret Stuff'));
+    await waitFor(() => [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')].some((a2) => a2.textContent.includes('Secret Stuff')));
+    const row = [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')].find((a2) => a2.textContent.includes('Secret Stuff'));
     assert.match(row.textContent, /🔒/);
   } finally {
     stop();
   }
 });
 
-// ===== renderHeaderNavPoints() - the shell.headerNavPoints contributor (see docs/app-navigation-standard.md Rule 2) =====
-// "+ New channel" moved from an inline sidebar/dropdown entry into the global header's App Navigation Points Slot; "New topic" (a 2nd item, only while a channel is open) replaces the old inline form.
+// ===== mountAppTemplate() chrome: primaryAction ("New topic") + settings ("New channel") (see docs/app-navigation-standard.md Rule 5) =====
+// "+ New channel" now lives in the app-template `settings` gear slot; "+ New topic" is the board/channel view's own `primaryAction` FAB/desktop button.
 
-test('renderHeaderNavPoints(): hidden while another app is active, and shows no items for a non-admin when channels.allowMemberCreate is false, on the board view', async (t) => {
+test('board view: no "New channel" settings entry for a non-admin when channels.allowMemberCreate is false, but "New topic" primaryAction is always present', async (t) => {
   const a = await freshEnv('Ada');
   t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ adminPubs: [], settings: { channels: { allowMemberCreate: false, allowMemberRestricted: false } } }), { status: 200 }));
 
   const container = makeContainer();
-  let appId = 'chat';
-  const listeners = [];
-  renderHeaderNavPoints(container, {
-    getContext: () => ({ appId, segments: [appId] }),
-    onContextChange: (cb) => listeners.push(cb),
-    services: a.services,
-  });
-  const wrap = container.querySelector('.qu-app-header-action');
-  assert.equal(wrap.hidden, true);
-
-  appId = 'forum';
-  listeners.forEach((cb) => cb());
-  assert.equal(wrap.hidden, false);
-  await new Promise((resolve) => setTimeout(resolve, 30)); // let the /config.json fetch settle
-  assert.equal(wrap.querySelector('a'), null);
-  assert.equal(wrap.querySelector('button'), null);
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
+  try {
+    await waitFor(() => container.querySelector('a.qu-apptpl-fab') !== null);
+    assert.equal(container.querySelector('a.qu-apptpl-fab').getAttribute('href'), '#/forum/new-topic');
+    await new Promise((resolve) => setTimeout(resolve, 30)); // let the channel-policy fetch settle
+    assert.equal(container.querySelector('.qu-apptpl-gear'), null);
+  } finally {
+    stop();
+  }
 });
 
-test('renderHeaderNavPoints(): shows a single "New channel" link (no dropdown) for this relay\'s own admin on the board view, even when channels.allowMemberCreate is false', async (t) => {
+test('board view: shows a "New channel" settings entry for this relay\'s own admin, even when channels.allowMemberCreate is false', async (t) => {
   const a = await freshEnv('Ada');
   t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ adminPubs: [a.myPub], settings: { channels: { allowMemberCreate: false, allowMemberRestricted: false } } }), { status: 200 }));
 
   const container = makeContainer();
-  renderHeaderNavPoints(container, {
-    getContext: () => ({ appId: 'forum', segments: ['forum'] }),
-    onContextChange: () => {},
-    services: a.services,
-  });
-  await waitFor(() => container.querySelector('a') !== null);
-  assert.equal(container.querySelector('a').getAttribute('href'), '#/forum/new');
-  assert.equal(container.querySelector('button'), null);
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
+  try {
+    await waitFor(() => container.querySelector('.qu-apptpl-gear') !== null);
+    const settingsLink = container.querySelector('.qu-apptpl-popup a, .qu-apptpl-section--settings a');
+    assert.ok(settingsLink);
+    assert.equal(settingsLink.getAttribute('href'), '#/forum/new');
+  } finally {
+    stop();
+  }
 });
 
-test('renderHeaderNavPoints(): shows a 2-item dropdown ("New channel" + "New topic") once a specific channel is open, and reacts live to switching channels', async (t) => {
+test('channel view: "New topic" primaryAction links into this specific channel, and "New channel" settings entry reacts live to switching channels', async (t) => {
   const a = await freshEnv('Ada');
   t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ adminPubs: [a.myPub], settings: { channels: { allowMemberCreate: true, allowMemberRestricted: false } } }), { status: 200 }));
+  const chan2 = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Second', restricted: false, memberPubs: [] });
 
   const container = makeContainer();
-  const listeners = [];
-  const ctx = { appId: 'forum', segments: ['forum', 'c', 'chan-1'] };
-  renderHeaderNavPoints(container, {
-    getContext: () => ctx,
-    onContextChange: (cb) => listeners.push(cb),
-    services: a.services,
-  });
-  await waitFor(() => container.querySelector('button') !== null);
-  let links = [...container.querySelectorAll('.qu-navpoints-menu a')];
-  assert.deepEqual(links.map((l) => l.textContent), ['New channel', 'New topic']);
-  assert.equal(links[1].getAttribute('href'), '#/forum/c/chan-1/new-topic');
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', 'general-channel'] });
+  try {
+    await waitFor(() => container.querySelector('a.qu-apptpl-fab') !== null);
+    assert.equal(container.querySelector('a.qu-apptpl-fab').getAttribute('href'), '#/forum/c/general-channel/new-topic');
+    await waitFor(() => container.querySelector('.qu-apptpl-gear') !== null);
 
-  // Switching to a DIFFERENT channel updates the "New topic" href in place.
-  ctx.segments = ['forum', 'c', 'chan-2'];
-  listeners.forEach((cb) => cb());
-  await waitFor(() => container.querySelector('.qu-navpoints-menu a[href="#/forum/c/chan-2/new-topic"]') !== null);
-
-  // Back on the board view (no channel open), only "New channel" remains - a single plain link, no dropdown.
-  ctx.segments = ['forum'];
-  listeners.forEach((cb) => cb());
-  await waitFor(() => container.querySelector('button') === null);
-  links = [...container.querySelectorAll('a')];
-  assert.equal(links.length, 1);
-  assert.equal(links[0].getAttribute('href'), '#/forum/new');
+    // Switching to a different channel view updates the active sidebar entry.
+    stop();
+    const container2 = makeContainer();
+    const stop2 = mount(container2, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', chan2._id] });
+    await waitFor(() => container2.querySelector('a.qu-apptpl-fab') !== null);
+    assert.equal(container2.querySelector('a.qu-apptpl-fab').getAttribute('href'), `#/forum/c/${chan2._id}/new-topic`);
+    stop2();
+  } finally {
+    stop();
+  }
 });
 
 // ===================================================================
@@ -1514,6 +1487,51 @@ test('new channel view: channels.allowMemberRestricted: false hides the restrict
 });
 
 // ===================================================================
+// NEW TOPIC VIEW - #/forum/c/<channelId>/new-topic and #/forum/new-topic
+// ===================================================================
+
+test('new topic view (channel known, #/forum/c/<id>/new-topic): no channel picker, creating posts the title + body as the opening message and navigates to the new topic', async () => {
+  const a = await freshEnv('Ada');
+  const channel = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Announcements' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', channel._id, 'new-topic'] });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-new-topic-form') !== null);
+    assert.equal(container.querySelector('.qu-forum-new-topic-form select'), null);
+    container.querySelector('.qu-forum-new-topic-form input[type="text"]').value = 'Hello world';
+    container.querySelector('.qu-forum-new-topic-body').value = 'First post body';
+    container.querySelector('.qu-forum-new-topic-form button[type="submit"]').click();
+
+    await waitFor(() => window.location.hash.startsWith('#/forum/t/'));
+    const topicId = window.location.hash.slice('#/forum/t/'.length);
+    const topics = await a.services.channels.listTopics(FORUM_SPACE_ID, channel._id);
+    assert.ok(topics.some((tp) => tp._id === topicId && tp.title === 'Hello world'));
+    const { messages } = await a.services.messages.listMessages(FORUM_SPACE_ID, topicId);
+    assert.ok(messages.some((m) => m.body === 'First post body'));
+  } finally {
+    stop();
+  }
+});
+
+test('new topic view (no channel, #/forum/new-topic): shows a channel <select>, disabled until channels resolve, required to submit', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Announcements' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'new-topic'] });
+  try {
+    const select = container.querySelector('.qu-forum-new-topic-form select');
+    assert.ok(select);
+    assert.equal(select.disabled, true);
+    await waitFor(() => select.disabled === false);
+    assert.ok([...select.querySelectorAll('option')].some((o) => o.textContent === 'Announcements'));
+  } finally {
+    stop();
+  }
+});
+
+// ===================================================================
 // CHANNEL VIEW - #/forum/c/<channelId>
 // ===================================================================
 
@@ -1523,17 +1541,17 @@ test('none of the forum subpages (channel view, topic view, new-channel view) re
 
   // The new-channel form still goes through renderSubpage() directly
   // (`.qu-subpage-content`). The channel view no longer does - it's
-  // @qu/ui's mountContextSwitcher() now (see mountChannelView()'s own doc
-  // comment / docs/app-navigation-standard.md Rule 3), which owns its own
+  // @qu/ui's mountAppTemplate() now (see mountChannelView()'s own doc
+  // comment / docs/app-navigation-standard.md Rule 5), which owns its own
   // "no back link" guarantee without needing a nested renderSubpage() -
-  // waited for via its own `.qu-ctxswitch-content` marker instead. The
+  // waited for via its own `.qu-apptpl-content` marker instead. The
   // topic view is its own fixed "room" layout with no page-level back-link
   // concept to begin with, checked separately below via its own
   // always-present marker.
   const channelContainer = makeContainer();
   const stopChannel = mount(channelContainer, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', channel._id] });
   try {
-    await waitFor(() => channelContainer.querySelector('.qu-ctxswitch-content') !== null);
+    await waitFor(() => channelContainer.querySelector('.qu-apptpl-content') !== null);
     assert.equal(channelContainer.querySelector('.qu-subpage-back'), null);
   } finally {
     stopChannel();
@@ -1595,7 +1613,7 @@ test('new topic view: submitting the form creates a topic and navigates to its o
 
     const titleInput = container.querySelector('.qu-forum-new-topic-form input[type="text"]');
     titleInput.value = 'Second topic';
-    container.querySelector('.qu-forum-new-topic-form button').click();
+    container.querySelector('.qu-forum-new-topic-form button[type="submit"]').click();
     await waitFor(() => /^#\/forum\/t\//.test(window.location.hash));
   } finally {
     stop();
@@ -1671,7 +1689,7 @@ test('channel view: shows a live "unread by me" badge per topic - someone else\'
   }
 });
 
-test('channel view: a persistent mini sidebar lists every channel and highlights the active one', async () => {
+test('channel view: the app-template sidebar lists every channel and highlights the active one', async () => {
   const a = await freshEnv('Ada');
   const announcements = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Announcements' });
   await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Off-topic' });
@@ -1679,17 +1697,17 @@ test('channel view: a persistent mini sidebar lists every channel and highlights
   const container = makeContainer();
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', announcements._id] });
   try {
-    await waitFor(() => container.querySelectorAll('.qu-forum-mini-channels a').length >= 3); // General + Announcements + Off-topic
-    const links = [...container.querySelectorAll('.qu-forum-mini-channels a')];
+    await waitFor(() => container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a').length >= 4); // All channels + General + Announcements + Off-topic
+    const links = [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')];
     assert.ok(links.some((a2) => a2.textContent.includes('Off-topic')));
-    const active = container.querySelector('.qu-forum-mini-channel-active');
+    const active = container.querySelector('.qu-apptpl-sidebar .qu-apptpl-item-active');
     assert.match(active.textContent, /Announcements/);
   } finally {
     stop();
   }
 });
 
-test('topic view: a persistent mini sidebar lists every channel alongside the thread', async () => {
+test('topic view: a desktopOnly app-template sidebar lists every channel alongside the thread', async () => {
   const a = await freshEnv('Ada');
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
   await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Off-topic' });
@@ -1697,8 +1715,9 @@ test('topic view: a persistent mini sidebar lists every channel alongside the th
   const container = makeContainer();
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
   try {
-    await waitFor(() => container.querySelectorAll('.qu-forum-mini-channels a').length >= 2); // General + Off-topic
+    await waitFor(() => container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a').length >= 3); // All channels + General + Off-topic
     await waitFor(() => container.querySelector('.qu-forum-message, .qu-forum-empty') !== null); // the thread itself still renders alongside it
+    assert.equal(container.querySelector('.qu-apptpl-footer'), null); // desktopOnly nav, no primaryAction/settings -> no mobile footer at all
   } finally {
     stop();
   }
