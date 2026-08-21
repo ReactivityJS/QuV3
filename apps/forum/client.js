@@ -853,6 +853,7 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
             items: channelsToNavItems(channels),
             activeId: 'all', // the board view IS the "All channels" entry
             heading: t('channels'),
+            filter: true,
           },
         });
 
@@ -944,6 +945,7 @@ function mountChannelView(container, { qu, services, syncFetch, SPACE_ID, channe
         items: channelsToNavItems(channels),
         activeId: channelId,
         heading: t('channels'),
+        filter: true,
       },
     });
   }, { syncFetch });
@@ -1367,6 +1369,7 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
         activeId: topic?.channelId ?? null,
         heading: t('channels'),
         desktopOnly: true,
+        filter: true,
       },
     });
   })();

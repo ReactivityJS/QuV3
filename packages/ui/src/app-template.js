@@ -58,6 +58,12 @@ import { injectStyle } from './style.js';
  * @property {string} href
  * @property {string} [icon]
  * @property {string|number} [badge]
+ * @property {string} [searchText] - Extra text `filter: true` matches
+ *   against, IN ADDITION to `label` (e.g. a group chat's own participant
+ *   names, so filtering by a name finds the room even though the room's
+ *   own label is the group's title, not any one member's name). Omit for
+ *   "label is all there is to search" (the common case - a channel's own
+ *   name is already the whole story).
  */
 
 /**
@@ -75,7 +81,7 @@ import { injectStyle } from './style.js';
  *   an `onClick`). Rendered as a prominent button: top of the sidebar on
  *   wide screens, a circular button at the end of the footer (or floating
  *   alone, if nothing else is present) on narrow ones.
- * @property {{items: AppTemplateLinkItem[], activeId?: string|null, heading?: string, desktopOnly?: boolean}} [navigation] -
+ * @property {{items: AppTemplateLinkItem[], activeId?: string|null, heading?: string, desktopOnly?: boolean, filter?: boolean}} [navigation] -
  *   "Where am I / where can I go" - a channel, a calendar, a folder. Omit
  *   (or pass an empty `items`) if your app has nothing to switch between.
  *   `desktopOnly: true` (default `false`) keeps this section OUT of the
@@ -86,12 +92,19 @@ import { injectStyle } from './style.js';
  *   passing its own room list as `navigation` too, so the desktop sidebar
  *   matches an open room's, without also duplicating that same list as a
  *   pointless mobile pill on top of the full list already on screen).
- * @property {{items: AppTemplateLinkItem[], activeId?: string|null, heading?: string, desktopOnly?: boolean}} [views] -
+ *   `filter: true` (default `false`) adds a live search input above the
+ *   list - both in the desktop sidebar and in the mobile pill's popup -
+ *   that hides any item whose `label` (and `searchText`, if set) doesn't
+ *   match, case-insensitively, as substrings. Meant for a list long enough
+ *   that scanning it beats scrolling it (e.g. Chat's room list once there
+ *   are many rooms) - leave `false` for a short, stable list where a search
+ *   box would just be one more thing on screen.
+ * @property {{items: AppTemplateLinkItem[], activeId?: string|null, heading?: string, desktopOnly?: boolean, filter?: boolean}} [views] -
  *   "How do I want to see this" - day/week/month, list/grid, latest/top.
- *   `desktopOnly` - see `navigation`'s own doc above.
- * @property {{items: AppTemplateSettingsItem[], heading?: string, desktopOnly?: boolean}} [settings] -
+ *   `desktopOnly`/`filter` - see `navigation`'s own doc above.
+ * @property {{items: AppTemplateSettingsItem[], heading?: string, desktopOnly?: boolean, filter?: boolean}} [settings] -
  *   App-level settings/management links, reached via a gear icon.
- *   `desktopOnly` - see `navigation`'s own doc above.
+ *   `desktopOnly`/`filter` - see `navigation`'s own doc above.
  * @property {string} [breakpoint='720px'] - Same meaning as
  *   `mountContextSwitcher()`'s own `breakpoint` option.
  * @property {boolean} [fullHeight=false] - Opt-in: `content` (and the
@@ -144,7 +157,9 @@ function styleFor(breakpoint) {
     .qu-apptpl-section { display: flex; flex-direction: column; gap: 0.15rem; }
     .qu-apptpl-section--settings { margin-top: auto; }
     .qu-apptpl-section-heading { font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.6; margin: 0 0 0.2rem; }
+    .qu-apptpl-filter { font: inherit; padding: 0.35rem 0.55rem; margin-bottom: 0.3rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); background: var(--qu-color-surface, transparent); color: inherit; width: 100%; box-sizing: border-box; }
     .qu-apptpl-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.15rem; }
+    .qu-apptpl-list li[hidden] { display: none; }
     .qu-apptpl-list a { display: flex; align-items: center; gap: 0.4rem; padding: 0.4rem 0.6rem; border-radius: var(--qu-radius-md, 0.4rem); text-decoration: none; color: inherit; }
     .qu-apptpl-list a:hover { background: var(--qu-color-border, #8884); }
     .qu-apptpl-item-active { background: color-mix(in srgb, var(--qu-color-accent, #5b5bd6) 15%, transparent); font-weight: 600; }
@@ -202,7 +217,46 @@ function ensureStyle(breakpoint) {
 
 function normalizeLinkSection(section) {
   if (!section || !Array.isArray(section.items) || section.items.length === 0) return null;
-  return { items: section.items, activeId: section.activeId ?? null, heading: section.heading ?? null, desktopOnly: !!section.desktopOnly };
+  return {
+    items: section.items,
+    activeId: section.activeId ?? null,
+    heading: section.heading ?? null,
+    desktopOnly: !!section.desktopOnly,
+    filter: !!section.filter,
+  };
+}
+
+/**
+ * The search string one `filter: true` item is matched against - `label`
+ * plus the optional `searchText` (e.g. a group room's participant names),
+ * lowercased once here rather than on every keystroke.
+ */
+function searchTextFor(item) {
+  return `${item.label} ${item.searchText ?? ''}`.toLowerCase();
+}
+
+/**
+ * A live-search `<input>` for a `filter: true` section - `getEntries()`
+ * returns `{el, search}` pairs (an `<li>` or `<a>`, its precomputed
+ * `searchTextFor()` string) to show/hide on every keystroke. Built fresh per
+ * section instance (sidebar and mobile popup each get their own, filtering
+ * independently) rather than shared/synced - the two are never visible at
+ * the same time (the `720px` breakpoint shows exactly one), so there is
+ * nothing to keep in sync.
+ */
+function buildFilterInput(getEntries, { placeholder = 'Filter…' } = {}) {
+  const input = document.createElement('input');
+  input.type = 'search';
+  input.className = 'qu-apptpl-filter';
+  input.placeholder = placeholder;
+  input.setAttribute('aria-label', placeholder);
+  input.addEventListener('input', () => {
+    const q = input.value.trim().toLowerCase();
+    for (const { el, search } of getEntries()) {
+      el.hidden = q.length > 0 && !search.includes(q);
+    }
+  });
+  return input;
 }
 
 /**
@@ -237,6 +291,7 @@ function buildLinkList(items, { activeId, className = 'qu-apptpl-list', itemActi
   ul.className = className;
   for (const item of items) {
     const li = document.createElement('li');
+    li.dataset.search = searchTextFor(item);
     const a = document.createElement('a');
     a.href = item.href;
     if (item.id != null && item.id === activeId) a.classList.add(itemActiveClass);
@@ -289,7 +344,11 @@ function buildDesktopSidebar(cfg) {
       heading.textContent = section.heading;
       wrap.appendChild(heading);
     }
-    wrap.appendChild(buildLinkList(section.items, { activeId: section.activeId }));
+    const list = buildLinkList(section.items, { activeId: section.activeId });
+    if (section.filter) {
+      wrap.appendChild(buildFilterInput(() => [...list.children].map((li) => ({ el: li, search: li.dataset.search })), { placeholder: section.heading ? `Filter ${section.heading}…` : 'Filter…' }));
+    }
+    wrap.appendChild(list);
     sidebar.appendChild(wrap);
   }
 
@@ -302,7 +361,7 @@ function buildDesktopSidebar(cfg) {
  * doc comment for why this is a real-link popup, not a bottom sheet.
  * @returns {{el: HTMLElement, cleanup: () => void}}
  */
-function buildPopupTrigger({ triggerEl, items, popupPosition = 'left' }) {
+function buildPopupTrigger({ triggerEl, items, popupPosition = 'left', filter = false, filterPlaceholder }) {
   const wrap = document.createElement('div');
   wrap.className = 'qu-apptpl-popup-wrap';
 
@@ -313,9 +372,13 @@ function buildPopupTrigger({ triggerEl, items, popupPosition = 'left' }) {
     menu.style.right = '0';
   }
   menu.hidden = true;
+  if (filter) {
+    menu.appendChild(buildFilterInput(() => [...menu.querySelectorAll('a')].map((a) => ({ el: a, search: a.dataset.search })), { placeholder: filterPlaceholder }));
+  }
   for (const item of items) {
     const a = document.createElement('a');
     a.href = item.href;
+    a.dataset.search = searchTextFor(item);
     if (item.icon) {
       const icon = document.createElement('span');
       icon.textContent = item.icon;
@@ -401,12 +464,12 @@ function buildMobileFooter(cfg, { fabOnly, mobileNav, mobileViews, mobileSetting
   const start = document.createElement('div');
   start.className = 'qu-apptpl-footer-start';
   if (mobileNav) {
-    const { el, cleanup } = buildPopupTrigger({ triggerEl: buildPill(mobileNav), items: mobileNav.items });
+    const { el, cleanup } = buildPopupTrigger({ triggerEl: buildPill(mobileNav), items: mobileNav.items, filter: mobileNav.filter, filterPlaceholder: mobileNav.heading ? `Filter ${mobileNav.heading}…` : 'Filter…' });
     start.appendChild(el);
     cleanupFns.push(cleanup);
   }
   if (mobileViews) {
-    const { el, cleanup } = buildPopupTrigger({ triggerEl: buildPill(mobileViews), items: mobileViews.items });
+    const { el, cleanup } = buildPopupTrigger({ triggerEl: buildPill(mobileViews), items: mobileViews.items, filter: mobileViews.filter, filterPlaceholder: mobileViews.heading ? `Filter ${mobileViews.heading}…` : 'Filter…' });
     start.appendChild(el);
     cleanupFns.push(cleanup);
   }
@@ -420,7 +483,7 @@ function buildMobileFooter(cfg, { fabOnly, mobileNav, mobileViews, mobileSetting
     gearBtn.textContent = '⚙️';
     gearBtn.title = mobileSettings.heading ?? 'Settings';
     gearBtn.setAttribute('aria-label', mobileSettings.heading ?? 'Settings');
-    const { el, cleanup } = buildPopupTrigger({ triggerEl: gearBtn, items: mobileSettings.items, popupPosition: 'right' });
+    const { el, cleanup } = buildPopupTrigger({ triggerEl: gearBtn, items: mobileSettings.items, popupPosition: 'right', filter: mobileSettings.filter, filterPlaceholder: mobileSettings.heading ? `Filter ${mobileSettings.heading}…` : 'Filter…' });
     end.appendChild(el);
     cleanupFns.push(cleanup);
   }

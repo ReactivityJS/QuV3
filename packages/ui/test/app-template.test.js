@@ -336,3 +336,65 @@ test('stop.update() can flip a section to desktopOnly later, removing it from an
   assert.equal(container.querySelector('.qu-apptpl-footer'), null);
   assert.ok(container.querySelector('.qu-apptpl-sidebar .qu-apptpl-list')); // still in the sidebar
 });
+
+// ===== filter =====
+
+const FILTERABLE_NAV = {
+  items: [
+    { id: 'general', label: 'General', href: '#/app/c/general' },
+    { id: 'random', label: 'Random Room', href: '#/app/c/random' },
+    { id: 'team', label: 'Team Chat', href: '#/app/c/team', searchText: 'Alice Bob' },
+  ],
+  heading: 'Channels',
+  filter: true,
+};
+
+test('normalizeAppConfig defaults a section\'s filter to false', () => {
+  const cfg = normalizeAppConfig({ navigation: NAV, render: () => {} });
+  assert.equal(cfg.navigation.filter, false);
+});
+
+test('filter: false (default) renders no search input', () => {
+  const container = makeContainer();
+  mountAppTemplate(container, { navigation: NAV, render: () => {} });
+  assert.equal(container.querySelector('.qu-apptpl-filter'), null);
+});
+
+test('filter: true renders a search input in the desktop sidebar, filtering the list by label as you type', () => {
+  const container = makeContainer();
+  mountAppTemplate(container, { navigation: FILTERABLE_NAV, render: () => {} });
+  const input = container.querySelector('.qu-apptpl-sidebar .qu-apptpl-filter');
+  assert.ok(input);
+
+  const items = () => [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list li')].filter((li) => !li.hidden).map((li) => li.textContent);
+  assert.deepEqual(items(), ['General', 'Random Room', 'Team Chat']);
+
+  input.value = 'rand';
+  input.dispatchEvent(new window.Event('input'));
+  assert.deepEqual(items(), ['Random Room']);
+
+  // Also matches searchText (e.g. a group room's participant names), not just label.
+  input.value = 'alice';
+  input.dispatchEvent(new window.Event('input'));
+  assert.deepEqual(items(), ['Team Chat']);
+
+  input.value = '';
+  input.dispatchEvent(new window.Event('input'));
+  assert.deepEqual(items(), ['General', 'Random Room', 'Team Chat']);
+});
+
+test('filter: true also renders a search input in the mobile popup, filtering independently from the sidebar', () => {
+  const container = makeContainer();
+  mountAppTemplate(container, { navigation: FILTERABLE_NAV, render: () => {} });
+  const pill = container.querySelector('.qu-apptpl-footer .qu-apptpl-pill');
+  pill.click(); // open the popup
+  const input = container.querySelector('.qu-apptpl-popup .qu-apptpl-filter');
+  assert.ok(input);
+
+  const links = () => [...container.querySelectorAll('.qu-apptpl-popup a')].filter((a) => !a.hidden).map((a) => a.textContent);
+  assert.equal(links().length, 3);
+
+  input.value = 'team';
+  input.dispatchEvent(new window.Event('input'));
+  assert.deepEqual(links(), ['Team Chat']);
+});
