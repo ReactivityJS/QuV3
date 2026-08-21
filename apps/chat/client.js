@@ -229,6 +229,10 @@ const DICT = {
     roomMenu: 'Chat options',
     muteChat: 'Mute notifications',
     unmuteChat: 'Unmute notifications',
+    deleteChat: 'Delete chat',
+    deleteChatConfirm: 'Delete this chat? It will be removed from your chat list on this device. The other {who} will keep their own copy.',
+    deleteChatConfirmDm: 'the person',
+    deleteChatConfirmGroup: 'members',
     copyText: 'Copy text',
     copyLink: 'Copy link',
     attachRemove: 'Remove attachment',
@@ -278,6 +282,10 @@ const DICT = {
     roomMenu: 'Chat-Optionen',
     muteChat: 'Benachrichtigungen stummschalten',
     unmuteChat: 'Stummschaltung aufheben',
+    deleteChat: 'Chat löschen',
+    deleteChatConfirm: 'Diesen Chat löschen? Er wird von deiner Chat-Liste auf diesem Gerät entfernt. Die {who} behalten ihre eigene Kopie.',
+    deleteChatConfirmDm: 'andere Person',
+    deleteChatConfirmGroup: 'Mitglieder',
     copyText: 'Text kopieren',
     copyLink: 'Link kopieren',
     attachRemove: 'Anhang entfernen',
@@ -662,12 +670,21 @@ async function fetchChatPolicy(services) {
  * @returns {Promise<Array<{kind: 'dm'|'group', roomId: string, href: string, name: string, avatarSeed: string, avatar: *, lastMessage: *, unread: boolean, muted: boolean}>>}
  */
 async function listRooms({ services, SPACE_ID, myPub }) {
-  const [contacts, groupIds, prefs] = await Promise.all([
+  const [contacts, groupIds, prefs, hiddenRooms] = await Promise.all([
     services.contacts.listContacts(),
     services.chat.listMyGroups(),
     services.notificationPrefs.getOwnPrefs(),
+    // "Delete chat" (the room header's own "⋮" menu - see mountRoomView()'s
+    // own doc comment) is LOCAL-ONLY: a group's membership is fixed at
+    // creation and a DM's room id is deterministically derived from both
+    // members' pubkeys (ChatService's own class doc comment), so there is no
+    // way to truly delete either room out from under the other side - only
+    // to stop showing it in THIS identity's own list, same private-flag
+    // mechanism the "dismissed" chat-request flag above already uses.
+    getPrivateChildren(services.messages.qu, services.messages.identity, paths.privateFlagParentPath(myPub, 'hidden', 'chat-room')),
   ]);
   const mutedThreads = new Set(prefs.apps?.chat?.mutedThreads ?? []);
+  const hiddenRoomIds = new Set(hiddenRooms.map(({ path }) => path.slice(path.lastIndexOf('/') + 1)));
 
   const dmRooms = await Promise.all(contacts.map(async (c) => {
     const roomId = await ChatService.roomId([myPub, c.actorPub]);
@@ -695,7 +712,9 @@ async function listRooms({ services, SPACE_ID, myPub }) {
     };
   }))).filter(Boolean);
 
-  return [...dmRooms, ...groupRooms].sort((a, b) => (b.lastMessage?.ts ?? 0) - (a.lastMessage?.ts ?? 0));
+  return [...dmRooms, ...groupRooms]
+    .filter((room) => !hiddenRoomIds.has(room.roomId))
+    .sort((a, b) => (b.lastMessage?.ts ?? 0) - (a.lastMessage?.ts ?? 0));
 }
 
 /**
@@ -1078,6 +1097,24 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
               apps: { ...current.apps, chat: { ...chatPrefs, mutedThreads: [...mutedThreads] } },
             });
             headerMutedIcon.hidden = muted; // toggled, so the icon shows the NEW state - no need to re-fetch prefs
+          },
+        },
+        {
+          // Same "local-only" caveat listRooms()'s own doc comment already
+          // gives: this room's own thread isn't destroyed (the other
+          // side(s) keep it), just hidden from THIS identity's own room
+          // list from now on (a private flag, `window.confirm()` gate first
+          // - same pattern apps/calendar's/apps/todo's own delete/leave menu
+          // items already use for a destructive, no-undo action).
+          id: 'delete',
+          label: t('deleteChat'),
+          icon: '🗑️',
+          onClick: async () => {
+            const who = target.kind === 'dm' ? t('deleteChatConfirmDm') : t('deleteChatConfirmGroup');
+            if (!window.confirm(t('deleteChatConfirm', { who }))) return;
+            const deletingMyPub = myPub ?? await services.actors.whoAmI();
+            await putPrivate(qu, services.messages.identity, paths.privateFlagPath(deletingMyPub, 'hidden', 'chat-room', roomId), true);
+            window.location.hash = '#/chat';
           },
         },
       ];
