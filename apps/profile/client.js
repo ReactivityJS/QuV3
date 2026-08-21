@@ -14,11 +14,35 @@
  *     and render nothing itself.
  *   - `#/~<pub>` - `pub === myPub` renders the editable own-profile form;
  *     otherwise a read-only public view.
- *   - `#/~<pub>/settings` - language/theme preference picker, own profile
- *     only (redirects back to the plain view for anyone else's pub).
+ *   - `#/~<pub>/settings` - language/theme/template/style/directory
+ *     preferences, own profile only (redirects back to the plain view for
+ *     anyone else's pub).
  *   - Reactive via `watch(qu, actorPath(pub, 'profile'), ...)` (same as
  *     QuV2) - re-renders live on sync updates, including this session's
  *     own saves.
+ *
+ * SAME SHAPE FOR OWN AND FOREIGN PROFILES: the own-profile view used to be a
+ * plain settings-style form (a stack of labeled inputs/selects, a separate
+ * live "preview" box so the owner could see what a visitor sees) that
+ * looked nothing like `renderPublicProfile()`. Both now share ONE header
+ * renderer (`renderIdentityHeader()` below) - avatar, alias, pub/epub - so
+ * the owner's own page IS the same view a visitor gets, just with a few
+ * pieces made directly interactive (click the avatar to upload a new one,
+ * click the alias to edit it) instead of a separate edit form floating
+ * above a separate preview of the real thing. `template`/`style` are
+ * applied to the owner's own view exactly the same way
+ * (`applyTemplateStyle()`) as to a visitor's - no more "preview" needed,
+ * because the real page already looks like what a visitor sees.
+ *
+ * WHAT MOVED TO SETTINGS: `template`/`style` (purely cosmetic, own-eyes-only
+ * preferences about how VISITORS see this profile) and "listed in
+ * directory" (a visibility preference, not profile DATA) now live on
+ * `#/~<pub>/settings` next to language/theme - not on the main profile page,
+ * which now only ever shows the same core fields every profile (own or
+ * foreign) has: alias, avatar, pub/epub, custom fields. Settings keeps its
+ * own small live preview (reusing `applyTemplateStyle()`) so template/style
+ * changes are still easy to see before saving, without cluttering the main
+ * page with a second copy of the same header.
  *
  * IDENTITY-BOUND LANGUAGE/THEME (Settings subpath): `preferredLocale`/
  * `preferredTheme` are private, self-encrypted profile fields (see
@@ -31,57 +55,56 @@
  * mid-session"), and `ensureTheme()` is idempotent (first call per page load
  * wins, see its own doc comment) - both were already-decided, deliberate
  * device-local designs from earlier rounds, not something this file
- * controls. What WAS wrong here: this file used to claim "instant effect on
- * THIS device" - it never was, and nothing told the user a reload was even
- * needed. Fixed with an explicit, persistent (non-auto-clearing) "reload to
- * apply" prompt + button after a Settings save, instead of a misleading
- * status flash implying it already happened.
- *
- * TEMPLATE/STYLE PREVIEW (own edit form): `template` picks one of a few
- * small READ-ONLY layout variants (`renderPublicProfile()` below) a VISITOR
- * sees; `style` reuses `@qu/ui`'s `THEME_PRESETS` (the SAME palette system
- * `apps/shell`'s own device theme uses) as an accent applied ONLY to the
- * profile page itself (an inline CSS custom property on that page's own
- * root, never `ensureTheme()`'s global `:root` - never affects the rest of
- * a visitor's UI). `#/~<myOwnPub>` always renders the EDITABLE form for the
- * owner, never `renderPublicProfile()` - meaning the owner could never
- * actually SEE their own template/style take effect, not even after a
- * reload, without asking someone else to look. Fixed with a small, live
- * preview box directly in the edit form (`renderProfileHeader()`/
- * `applyTemplateStyle()`, shared with `renderPublicProfile()`'s own
- * rendering so the preview is never able to drift from the real thing) -
- * updates on every keystroke/select change, no save required for the
- * preview itself.
+ * controls. An explicit, persistent (non-auto-clearing) "reload to apply"
+ * prompt + button follows a Settings save, instead of a misleading status
+ * flash implying it already happened.
  *
  * AVATAR UPLOAD: the `avatar` field stays the SAME plain string it always
- * was (an emoji, an `https://` image URL, or now a THIRD shape:
+ * was (an emoji, an `https://` image URL, or a THIRD shape:
  * `asset:<assetId>`, an uploaded file via `@qu/services`' `AssetService` -
  * `@qu/engines`' `AssetEngine` doing the actual chunking/hashing/dedup/sync
- * retry, see either's own doc comment). Uploaded via `@qu/ui`'s
- * `<qu-asset-upload>` next to the existing text field (still directly
- * editable too - clearing it or pasting a URL/emoji overrides an uploaded
- * asset just as easily as it always could). Stored under THIS identity's
- * OWN pub as the asset `spaceId` (`services.assets.upload(myPub, assetId,
- * file)`) - a personal, always-unique-per-identity namespace, distinct from
- * any app's own `manifest.spaceId` (see `@qu/foundation`'s manifest schema
- * doc comment on why a space id must be collision-safe). `renderProfileHeader()`
- * below renders it via `@qu/ui`'s `renderAvatarOrAsset()`, which branches on
- * the `asset:` prefix and renders a `<qu-asset kind="image">` instead,
- * falling back to the plain URL/emoji/unset `renderAvatar()` otherwise -
- * `root.assetService` is set once in `mount()` (same "set on an ancestor
- * before children connect" discipline `.qu` already requires) so both this
- * app's own preview AND a VISITOR's read-only view
- * (`renderPublicProfile()`) can resolve it.
- * FIXED (was a documented scope cut for one round): `renderAvatarOrAsset()`
- * used to be a private helper local to this file - `user-list`/
- * `contact-list`/`forum` still only called `@qu/ui`'s plain `renderAvatar()`
- * for OTHER actors' avatars, so an actor who uploaded an asset avatar
- * showed correctly on their OWN profile page but fell back to the initials
- * badge everywhere else (a real user report: an unlisted user found via
- * FP/pub search showed no avatar, even though the SAME profile page showed
- * it fine). Promoted into `@qu/ui/avatar.js` (see its own doc comment) and
- * wired into all three other call sites too - this file now imports the
- * SAME shared function instead of keeping its own copy.
+ * retry, see either's own doc comment). On the OWN profile it's uploaded by
+ * clicking the avatar itself - a `<qu-asset-upload hide-picker>` sits
+ * invisibly over the avatar badge (`renderIdentityHeader()` below), and a
+ * click anywhere on the badge opens the native file picker via its
+ * `openPicker()` method. Stored under THIS identity's OWN pub as the asset
+ * `spaceId` (`services.assets.upload(myPub, assetId, file)`) - a personal,
+ * always-unique-per-identity namespace, distinct from any app's own
+ * `manifest.spaceId`. Rendered via `@qu/ui`'s `renderAvatarOrAsset()`, which
+ * branches on the `asset:` prefix and renders a `<qu-asset kind="image">`
+ * instead, falling back to the plain URL/emoji/unset `renderAvatar()`
+ * otherwise - `root.assetService` is set once in `mount()` (same "set on an
+ * ancestor before children connect" discipline `.qu` already requires) so
+ * both this app's own header AND a VISITOR's read-only view
+ * (`renderPublicProfile()`) can resolve it. A picked file is uploaded and
+ * shown immediately (no save required to preview it locally) but only
+ * becomes part of the actual profile once the fields Save button below is
+ * clicked - same "local write is durable, sync-out verification deferred
+ * until actually sent" flow `<qu-asset-upload>`'s own doc comment describes.
+ *
+ * ALIAS EDITING: rendered as a real `<input>` styled to look like a plain
+ * heading until hovered/focused (no separate "Edit" button/mode toggle
+ * needed - clicking it just works, the same "click text to edit it"
+ * interaction the avatar gets). Still only actually saved by the same Save
+ * button as the custom fields below it - editing the alias is instant
+ * visually, but not persisted until Save, exactly like every other field on
+ * this form always worked.
+ *
+ * COPY PUB/EPUB ON CLICK: both keys, on both the owner's own view and a
+ * visitor's, are rendered via `copyableKeyRow()` below - a best-effort
+ * `copyToClipboard()` (`@qu/thread-ui`, the same helper Forum/Chat/Todo's
+ * own "Copy" menu items already use) on click, with a small transient
+ * "Copied!" confirmation next to the key. No error surface on failure (e.g.
+ * no clipboard permission) - same silent-degrade convention every OTHER
+ * best-effort browser feature in this codebase already follows.
+ *
+ * CONTACT ACTION IN A CONTEXT MENU: a visitor's read-only view used to show
+ * a bare star-icon toggle button for add/remove contact. It's now inside a
+ * real "⋮" context menu (`renderContextMenu()`, `@qu/thread-ui` - the SAME
+ * component Forum/Chat already use for their own per-message menus) with a
+ * single "Add contact"/"Remove contact" item, computed fresh every time the
+ * menu opens (so it can never show a stale add/remove label) - room left
+ * for a future action to join it there without a layout change.
  *
  * USER SETTINGS EXTENSION POINT: Settings (`#/~<pub>/settings`) declares
  * `userSettings.contributions` in its own manifest's `definesExtensionPoints`
@@ -96,9 +119,18 @@
  * entry, without this file ever importing it, exactly like Forum's
  * `content.messageActions` point already works for content plugins. This
  * app defines the point but never contributes to it itself - the
- * language/theme/notifications/push sections above stay hard-coded here
- * because they're intrinsic to what "profile settings" already means, not
- * because the mechanism couldn't cover them too.
+ * language/theme/template/style/directory/notifications/push sections above
+ * stay hard-coded here because they're intrinsic to what "profile settings"
+ * already means, not because the mechanism couldn't cover them too.
+ *
+ * NOT USING `qu-bind`/`qu-view`/`mountAppTemplate()`: this screen has no
+ * list of children to stamp (`<qu-list>`'s own use case) and no
+ * navigation/views tabs to switch between (`mountAppTemplate()`'s own use
+ * case) - a single reactive document, rendered and re-rendered as plain DOM
+ * on every `watch()` tick, is the SAME pattern most other screens in this
+ * codebase already use for exactly this shape of screen (see
+ * `docs/api-reference.md` §6 - `qu-*` custom elements are for a curated/
+ * derived list or a single bound field, neither of which this screen has).
  *
  * Deliberately NOT ported from QuV2's `apps/profile`: the identity backup/
  * export/QR section (seed code, camera scan) - a whole separate concern
@@ -109,15 +141,17 @@
 import { watch } from '@qu/reactive';
 import { actorPath } from '@qu/identity';
 import { createI18n, AVAILABLE_LOCALES, setLocale } from '@qu/i18n';
-import { injectStyle, ensureTheme, renderAvatarOrAsset, ASSET_AVATAR_PREFIX, renderFlagToggle, THEME_PRESETS, setStoredTheme, renderSubpage } from '@qu/ui';
+import { injectStyle, ensureTheme, renderAvatarOrAsset, ASSET_AVATAR_PREFIX, THEME_PRESETS, setStoredTheme, renderSubpage } from '@qu/ui';
 import { formatActorLabel } from '@qu/services';
+import { renderContextMenu, copyToClipboard } from '@qu/thread-ui';
 
 const DICT = {
   en: {
     title: 'Profile',
     alias: 'Alias',
     aliasPlaceholder: 'How others see you (defaults to your public key if left empty)',
-    avatar: 'Avatar (emoji or image URL)',
+    avatar: 'Avatar',
+    avatarChangeTitle: 'Click to change avatar',
     template: 'Template',
     style: 'Style',
     templateDefault: 'Default', templateCompact: 'Compact', templateBanner: 'Banner',
@@ -125,9 +159,11 @@ const DICT = {
     fields: 'Custom fields', fieldKey: 'Label', fieldValue: 'Value', fieldPublic: 'Public', fieldPrivate: 'Private (only you)',
     addField: 'Add field', removeField: 'Remove',
     listedInDirectory: 'Listed in directory (visible to the User List)',
-    settingsLink: 'Language & theme settings',
+    settingsLink: 'Settings',
     language: 'Language', theme: 'Theme', useDefault: '(use default)',
-    yourKeys: 'Your keys', pub: 'Signing key (pub)', epub: 'Encryption key (epub)',
+    pub: 'Signing key (pub)', epub: 'Encryption key (epub)',
+    clickToCopy: 'Click to copy', copied: 'Copied!',
+    actions: 'Actions',
     contactAdd: 'Add contact', contactRemove: 'Remove contact',
     notFound: 'This identity has not published a profile (yet).',
     savedReloadHint: 'Saved! Reload the page to see the new language/theme.',
@@ -151,7 +187,8 @@ const DICT = {
     title: 'Profil',
     alias: 'Alias',
     aliasPlaceholder: 'Wie andere dich sehen (Standard: dein Public Key, falls leer)',
-    avatar: 'Avatar (Emoji oder Bild-URL)',
+    avatar: 'Avatar',
+    avatarChangeTitle: 'Klicken, um den Avatar zu ändern',
     template: 'Vorlage',
     style: 'Stil',
     templateDefault: 'Standard', templateCompact: 'Kompakt', templateBanner: 'Banner',
@@ -159,9 +196,11 @@ const DICT = {
     fields: 'Eigene Felder', fieldKey: 'Bezeichnung', fieldValue: 'Wert', fieldPublic: 'Öffentlich', fieldPrivate: 'Privat (nur du)',
     addField: 'Feld hinzufügen', removeField: 'Entfernen',
     listedInDirectory: 'Im Verzeichnis gelistet (sichtbar in der Nutzerliste)',
-    settingsLink: 'Sprache & Theme',
+    settingsLink: 'Einstellungen',
     language: 'Sprache', theme: 'Theme', useDefault: '(Standard verwenden)',
-    yourKeys: 'Deine Schlüssel', pub: 'Signatur-Schlüssel (pub)', epub: 'Verschlüsselungs-Schlüssel (epub)',
+    pub: 'Signatur-Schlüssel (pub)', epub: 'Verschlüsselungs-Schlüssel (epub)',
+    clickToCopy: 'Klicken zum Kopieren', copied: 'Kopiert!',
+    actions: 'Aktionen',
     contactAdd: 'Kontakt hinzufügen', contactRemove: 'Kontakt entfernen',
     notFound: 'Diese Identität hat (noch) kein Profil veröffentlicht.',
     savedReloadHint: 'Gespeichert! Lade die Seite neu, um Sprache/Theme zu sehen.',
@@ -189,35 +228,64 @@ const TEMPLATES = ['default', 'compact', 'banner'];
 
 const STYLE_ID = 'qu-profile-style';
 const STYLE = `
-  .qu-profile { max-width: 34rem; display: flex; flex-direction: column; gap: 1rem; }
+  .qu-profile { max-width: 100%; display: flex; flex-direction: column; gap: 1.1rem; position: relative; }
   .qu-profile-row { display: flex; flex-direction: column; gap: 0.3rem; }
   .qu-profile-row label { font-weight: 600; font-size: 0.9em; }
   .qu-profile input[type="text"], .qu-profile select { padding: 0.5rem 0.6rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); font: inherit; }
   .qu-profile-fields { display: flex; flex-direction: column; gap: 0.5rem; }
-  .qu-profile-field-row { display: flex; gap: 0.4rem; align-items: center; }
-  .qu-profile-field-row input[type="text"] { flex: 1; }
+  .qu-profile-field-row { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+  .qu-profile-field-row input[type="text"] { flex: 1; min-width: 6rem; }
   .qu-profile button { padding: 0.5rem 0.9rem; border-radius: var(--qu-radius-md, 0.4rem); border: 1px solid var(--qu-color-border, #8884); background: transparent; color: inherit; cursor: pointer; font: inherit; }
   .qu-profile button.qu-profile-primary { background: var(--qu-color-accent, #5b5bd6); color: white; border-color: transparent; }
-  .qu-profile-keys { font-family: var(--qu-font-mono, ui-monospace, monospace); font-size: 0.85em; opacity: 0.75; word-break: break-all; }
   .qu-profile-status { opacity: 0.7; font-size: 0.9em; }
-  .qu-profile-header { display: flex; align-items: center; gap: 0.8rem; }
-  .qu-profile-header h1 { margin: 0; }
-  .qu-profile-view.qu-template-banner .qu-profile-header { flex-direction: column; text-align: center; padding: 1.5rem; border-radius: var(--qu-radius-md, 0.4rem); background: color-mix(in srgb, var(--qu-color-accent, #5b5bd6) 12%, transparent); }
-  .qu-profile-view.qu-template-compact .qu-profile-header { gap: 0.5rem; }
-  .qu-profile-view.qu-template-compact .qu-profile-header h1 { font-size: 1.1em; }
   .qu-profile-not-found { padding: 2rem; text-align: center; opacity: 0.7; }
+
+  /* Shared identity header - own AND foreign profiles render the SAME
+     structure, mobile-first (stacked-friendly flex, wraps naturally on
+     narrow screens; widened/centered under the desktop media query below). */
+  .qu-profile-header { display: flex; align-items: center; gap: 0.9rem; }
+  .qu-profile-avatar-wrap { position: relative; flex-shrink: 0; }
+  .qu-profile-avatar-editable { cursor: pointer; }
+  .qu-profile-avatar-editable qu-asset-upload { position: absolute; inset: 0; opacity: 0; }
+  .qu-profile-avatar-badge { position: absolute; right: -0.15rem; bottom: -0.15rem; width: 1.4rem; height: 1.4rem; display: flex; align-items: center; justify-content: center; font-size: 0.75em; background: var(--qu-color-accent, #5b5bd6); color: #fff; border-radius: 999px; box-shadow: 0 0 0 2px canvas; pointer-events: none; }
+  .qu-profile-header-info { display: flex; flex-direction: column; gap: 0.25rem; min-width: 0; }
+  .qu-profile-header-info h1 { margin: 0; font-size: 1.25em; }
+  .qu-profile-alias-input { font: inherit; font-size: 1.25em; font-weight: 700; border: 1px solid transparent; background: transparent; color: inherit; padding: 0.1rem 0.35rem; margin: 0 0 0 -0.35rem; border-radius: var(--qu-radius-sm, 0.3rem); width: 100%; box-sizing: border-box; }
+  .qu-profile-alias-input:hover, .qu-profile-alias-input:focus { border-color: var(--qu-color-border, #8884); outline: none; }
+  .qu-profile-keys { display: flex; flex-direction: column; gap: 0.1rem; font-family: var(--qu-font-mono, ui-monospace, monospace); font-size: 0.78em; opacity: 0.8; }
+  .qu-profile-key-row { display: flex; gap: 0.4rem; align-items: baseline; cursor: pointer; word-break: break-all; }
+  .qu-profile-key-row:hover { opacity: 1; text-decoration: underline dotted; }
+  .qu-profile-key-label { opacity: 0.7; flex-shrink: 0; }
+  .qu-profile-key-copied { color: var(--qu-color-success, #3fb950); font-family: inherit; }
+
+  .qu-profile-menu { position: absolute; top: 0; right: 0; }
+
+  .qu-profile-view.qu-template-banner .qu-profile-header { flex-direction: column; text-align: center; padding: 1.5rem; border-radius: var(--qu-radius-md, 0.4rem); background: color-mix(in srgb, var(--qu-color-accent, #5b5bd6) 12%, transparent); }
+  .qu-profile-view.qu-template-banner .qu-profile-keys { align-items: center; }
+  .qu-profile-view.qu-template-compact .qu-profile-header { gap: 0.5rem; }
+  .qu-profile-view.qu-template-compact .qu-profile-header h1, .qu-profile-view.qu-template-compact .qu-profile-alias-input { font-size: 1.05em; }
+
   .qu-profile-preview-label { font-weight: 600; font-size: 0.9em; }
   .qu-profile-preview { border: 1px dashed var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); padding: 0.8rem; }
   .qu-profile-preview .qu-profile-header h1 { font-size: 1.1em; }
   .qu-profile-settings-reload { display: flex; align-items: center; gap: 0.6rem; }
-  .qu-profile-avatar-row { display: flex; align-items: center; gap: 0.6rem; }
   .qu-profile-notif-section { border-top: 1px solid var(--qu-color-border, #8884); padding-top: 0.8rem; display: flex; flex-direction: column; gap: 0.6rem; }
   .qu-profile-notif-check-row { display: flex; align-items: center; gap: 0.5rem; }
   .qu-profile-notif-apps { display: flex; flex-direction: column; gap: 0.4rem; padding-left: 1rem; }
   .qu-profile-push-row { display: flex; align-items: center; gap: 0.6rem; }
+
+  /* Desktop: the mobile-first rules above already work full-width on a
+     phone; widen/center the column and give the header a bit more room once
+     there's space for it, same 640px "settled tablet-and-up" breakpoint
+     docs/app-navigation-standard.md's own examples use elsewhere. */
+  @media (min-width: 640px) {
+    .qu-profile { max-width: 34rem; margin: 0 auto; }
+    .qu-profile-header { gap: 1.2rem; }
+    .qu-profile-header-info h1, .qu-profile-alias-input { font-size: 1.4em; }
+  }
 `;
 
-/** Shared by `renderPublicProfile()` (the real thing) and `renderOwnProfile()`'s own live preview - so the preview can never drift from what a visitor actually sees. */
+/** Shared by `renderPublicProfile()` (the real thing) and `renderSettings()`'s own live preview - so the preview can never drift from what a visitor actually sees. */
 function applyTemplateStyle(el, template, style) {
   const validTemplate = TEMPLATES.includes(template) ? template : 'default';
   el.classList.add(`qu-template-${validTemplate}`);
@@ -225,16 +293,120 @@ function applyTemplateStyle(el, template, style) {
   for (const [prop, value] of Object.entries(stylePreset)) el.style.setProperty(prop, value);
 }
 
-/** Same sharing reason as `applyTemplateStyle()` above. */
-function renderProfileHeader(pub, label, avatar, avatarSize = '3rem') {
+/**
+ * One row of a pub/epub key - click (or Enter/Space) copies the full value
+ * via `copyToClipboard()`, showing a small transient "Copied!" next to it.
+ * Best-effort, same silent-degrade convention as every other browser
+ * feature in this codebase - a failed copy just never shows the confirmation.
+ */
+function copyableKeyRow(label, value) {
+  const row = document.createElement('div');
+  row.className = 'qu-profile-key-row';
+  row.tabIndex = 0;
+  row.setAttribute('role', 'button');
+  row.title = t('clickToCopy');
+
+  const labelEl = document.createElement('span');
+  labelEl.className = 'qu-profile-key-label';
+  labelEl.textContent = `${label}:`;
+  const valueEl = document.createElement('span');
+  valueEl.className = 'qu-profile-key-value';
+  valueEl.textContent = value;
+  const statusEl = document.createElement('span');
+  statusEl.className = 'qu-profile-key-copied';
+  row.append(labelEl, valueEl, statusEl);
+
+  async function doCopy() {
+    if (await copyToClipboard(value)) {
+      statusEl.textContent = t('copied');
+      setTimeout(() => { statusEl.textContent = ''; }, 1200);
+    }
+  }
+  row.addEventListener('click', doCopy);
+  row.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); doCopy(); }
+  });
+  return row;
+}
+
+/**
+ * The ONE header shared by the owner's own profile and a visitor's read-only
+ * view (see this file's own top doc comment on why there's no longer a
+ * separate "preview" - this IS the real thing). `editable: true` (own
+ * profile only) turns the avatar into a click-to-upload badge and the alias
+ * into a click-to-edit input; either way the pub/epub rows below are always
+ * `copyableKeyRow()`s.
+ * @returns {{header: HTMLElement, avatarUpload: HTMLElement|null, aliasInput: HTMLInputElement|null, setAvatarDisplay: (value: string) => void}}
+ */
+function renderIdentityHeader({ pub, epub, alias, avatar, editable, avatarSize = '3.4rem' }) {
   const header = document.createElement('div');
   header.className = 'qu-profile-header';
-  header.appendChild(renderAvatarOrAsset(pub, label, avatar, { size: avatarSize }));
-  const headingWrap = document.createElement('div');
+
+  const avatarWrap = document.createElement('div');
+  avatarWrap.className = 'qu-profile-avatar-wrap';
+  avatarWrap.appendChild(renderAvatarOrAsset(pub, alias || pub, avatar, { size: avatarSize }));
+  function setAvatarDisplay(value) {
+    avatarWrap.replaceChild(renderAvatarOrAsset(pub, alias || pub, value, { size: avatarSize }), avatarWrap.children[0]);
+  }
+
+  let avatarUpload = null;
+  if (editable) {
+    avatarWrap.classList.add('qu-profile-avatar-editable');
+    avatarWrap.title = t('avatarChangeTitle');
+    avatarWrap.tabIndex = 0;
+    avatarWrap.setAttribute('role', 'button');
+    avatarUpload = document.createElement('qu-asset-upload');
+    avatarUpload.setAttribute('space-id', pub); // this identity's own pub - a personal, always-unique asset namespace
+    avatarUpload.setAttribute('hide-picker', '');
+    avatarWrap.appendChild(avatarUpload);
+    const badge = document.createElement('span');
+    badge.className = 'qu-profile-avatar-badge';
+    badge.textContent = '📷';
+    badge.setAttribute('aria-hidden', 'true');
+    avatarWrap.appendChild(badge);
+    const openPicker = () => avatarUpload.openPicker();
+    avatarWrap.addEventListener('click', openPicker);
+    avatarWrap.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openPicker(); }
+    });
+  }
+
+  const info = document.createElement('div');
+  info.className = 'qu-profile-header-info';
+
+  let aliasInput = null;
+  if (editable) {
+    aliasInput = document.createElement('input');
+    aliasInput.type = 'text';
+    aliasInput.className = 'qu-profile-alias-input';
+    aliasInput.value = alias ?? '';
+    aliasInput.placeholder = t('aliasPlaceholder');
+    aliasInput.setAttribute('aria-label', t('alias'));
+    info.appendChild(aliasInput);
+  } else {
+    const heading = document.createElement('h1');
+    heading.textContent = alias;
+    info.appendChild(heading);
+  }
+
+  const keysWrap = document.createElement('div');
+  keysWrap.className = 'qu-profile-keys';
+  keysWrap.appendChild(copyableKeyRow(t('pub'), pub));
+  if (epub) keysWrap.appendChild(copyableKeyRow(t('epub'), epub));
+  info.appendChild(keysWrap);
+
+  header.append(avatarWrap, info);
+  return { header, avatarUpload, aliasInput, setAvatarDisplay };
+}
+
+/** Small, self-contained header used ONLY by the Settings-page template/style live preview (`renderSettings()` below) - deliberately simpler than `renderIdentityHeader()`, no upload/copy/edit affordances, since it's a read-only illustration of "how the real header will look", not the real header itself. */
+function renderPreviewHeader(pub, label, avatar) {
+  const header = document.createElement('div');
+  header.className = 'qu-profile-header';
+  header.appendChild(renderAvatarOrAsset(pub, label, avatar, { size: '2.2rem' }));
   const heading = document.createElement('h1');
   heading.textContent = label;
-  headingWrap.appendChild(heading);
-  header.appendChild(headingWrap);
+  header.appendChild(heading);
   return header;
 }
 
@@ -267,12 +439,6 @@ function urlBase64ToUint8Array(base64Url) {
  * where to reach this device.
  * @param {object} services
  * @returns {Promise<PushSubscription>}
- * @throws {Error} If unsupported, permission is denied, or this relay has
- *   no VAPID keys configured - the caller shows the message to the user,
- *   nothing here is silently swallowed (unlike most of this codebase's
- *   OTHER browser-feature-detection, e.g. `pwa.js`'s own - this is a real
- *   user-initiated action with an explicit "did it work?" button, not a
- *   passive background enhancement).
  */
 async function subscribeToPush(services) {
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
@@ -304,7 +470,7 @@ export function mount(container, { qu, identity, services, segments = [], extens
   // Same "set on an ancestor before descendant Custom Elements connect"
   // discipline `.qu` already requires elsewhere in `@qu/ui` - both
   // `<qu-asset>` (avatar rendering, own AND visitor views) and
-  // `<qu-asset-upload>` (own edit form only) resolve this via
+  // `<qu-asset-upload>` (own header only) resolve this via
   // `findAssetService()`'s ancestor walk.
   root.assetService = services.assets;
   container.appendChild(root);
@@ -362,6 +528,7 @@ export function mount(container, { qu, identity, services, segments = [], extens
       if (stopped) return;
       if (isSettings) {
         const own = await services.profile.getOwnProfile();
+        const listed = await services.directory.isVisible(myPub);
         const notifPrefs = await services.notificationPrefs.getOwnPrefs();
         // Only apps that can actually SEND a notification are worth a
         // toggle - filtered here (not left for renderNotifications() to
@@ -377,7 +544,7 @@ export function mount(container, { qu, identity, services, segments = [], extens
         const justSaved = saveState.justSaved;
         saveState.justSaved = false;
         root.textContent = '';
-        const extRoot = renderSettings(root, own, services, saveState, justSaved, notifPrefs, installedApps);
+        const extRoot = renderSettings(root, own, listed, services, myPub, saveState, justSaved, notifPrefs, installedApps);
         // The `userSettings.contributions` extension point (see this file's
         // own top doc comment) - any OTHER app (or a future relay-level
         // settings section) may render its own per-user preferences here,
@@ -391,12 +558,11 @@ export function mount(container, { qu, identity, services, segments = [], extens
       }
       if (isOwn) {
         const own = await services.profile.getOwnProfile();
-        const listed = await services.directory.isVisible(myPub);
         if (stopped || token !== renderToken) return;
         const justSaved = saveState.justSaved;
         saveState.justSaved = false;
         root.textContent = '';
-        renderOwnProfile(root, own, listed, services, myPub, saveState, justSaved);
+        renderOwnProfile(root, own, services, myPub, saveState, justSaved);
         return;
       }
       const pub = await services.profile.getPublicProfile(targetPub);
@@ -456,84 +622,27 @@ function fieldRow(field = { key: '', value: '', visibility: 'public' }) {
   return row;
 }
 
-function renderOwnProfile(root, own, listed, services, myPub, saveState, justSaved) {
+function renderOwnProfile(root, own, services, myPub, saveState, justSaved) {
   const view = document.createElement('div');
-  view.className = 'qu-profile qu-profile-own';
+  view.className = 'qu-profile qu-profile-own qu-profile-view';
+  // The owner's own page now looks exactly like a visitor's (see this
+  // file's own top doc comment) - template/style are applied here too,
+  // there is no separate "preview" of them anymore.
+  applyTemplateStyle(view, own.template, own.style);
 
-  const heading = document.createElement('h1');
-  heading.textContent = t('title');
+  const { header, avatarUpload, aliasInput, setAvatarDisplay } = renderIdentityHeader({
+    pub: myPub, epub: own.epub, alias: own.alias, avatar: own.avatar, editable: true,
+  });
 
-  const aliasRow = labeledInput(t('alias'), own.alias, t('aliasPlaceholder'));
-  const avatarRow = labeledInput(t('avatar'), own.avatar);
-  avatarRow.row.className = 'qu-profile-row qu-profile-avatar-row';
-  const avatarUpload = document.createElement('qu-asset-upload');
-  avatarUpload.setAttribute('space-id', myPub); // this identity's own pub - a personal, always-unique asset namespace, see this file's own top doc comment
-  avatarUpload.setAttribute('label', '📷');
-  avatarRow.row.appendChild(avatarUpload);
-
-  const templateRow = document.createElement('div');
-  templateRow.className = 'qu-profile-row';
-  const templateLabel = document.createElement('label');
-  templateLabel.textContent = t('template');
-  const templateSelect = document.createElement('select');
-  for (const name of TEMPLATES) {
-    const opt = document.createElement('option');
-    opt.value = name;
-    opt.textContent = t(`template${name[0].toUpperCase()}${name.slice(1)}`);
-    templateSelect.appendChild(opt);
-  }
-  templateSelect.value = own.template || 'default';
-  templateRow.append(templateLabel, templateSelect);
-
-  const styleRow = document.createElement('div');
-  styleRow.className = 'qu-profile-row';
-  const styleLabel = document.createElement('label');
-  styleLabel.textContent = t('style');
-  const styleSelect = document.createElement('select');
-  for (const name of Object.keys(THEME_PRESETS)) {
-    const opt = document.createElement('option');
-    opt.value = name;
-    opt.textContent = name;
-    styleSelect.appendChild(opt);
-  }
-  styleSelect.value = own.style || 'default';
-  styleRow.append(styleLabel, styleSelect);
-
-  // Live preview - updates on every keystroke/select change, no save
-  // needed, using the SAME `applyTemplateStyle()`/`renderProfileHeader()`
-  // `renderPublicProfile()` itself renders with, so it can never drift from
-  // what a visitor actually sees. See this file's own top doc comment on
-  // why this exists: `#/~<myOwnPub>` never renders `renderPublicProfile()`
-  // for its own owner, so without this the owner could never see their own
-  // template/style take effect at all, not even after a reload.
-  const previewLabel = document.createElement('label');
-  previewLabel.className = 'qu-profile-preview-label';
-  previewLabel.textContent = t('preview');
-  const previewBox = document.createElement('div');
-  previewBox.className = 'qu-profile-preview';
-  function updatePreview() {
-    previewBox.textContent = '';
-    const inner = document.createElement('div');
-    inner.className = 'qu-profile-view';
-    applyTemplateStyle(inner, templateSelect.value, styleSelect.value);
-    const label = formatActorLabel(myPub, { alias: aliasRow.input.value.trim() });
-    inner.appendChild(renderProfileHeader(myPub, label, avatarRow.input.value, '2.2rem'));
-    previewBox.appendChild(inner);
-  }
-  updatePreview();
-  aliasRow.input.addEventListener('input', updatePreview);
-  avatarRow.input.addEventListener('input', updatePreview);
-  templateSelect.addEventListener('change', updatePreview);
-  styleSelect.addEventListener('change', updatePreview);
   // A successful LOCAL upload (see `<qu-asset-upload>`'s own doc comment -
-  // this fires before sync-out verification even starts) updates the SAME
-  // `avatar` text field an upload is meant to replace, not a separate
-  // hidden field - Save still just reads `avatarRow.input.value`, unchanged.
+  // this fires before sync-out verification even starts) updates the live
+  // header display immediately; Save still just reads `avatarValue`.
+  let avatarValue = own.avatar ?? '';
   let lastUploadedAvatarAssetId = null;
   avatarUpload.addEventListener('qu-asset-uploaded', (e) => {
     lastUploadedAvatarAssetId = e.detail.assetId;
-    avatarRow.input.value = `${ASSET_AVATAR_PREFIX}${e.detail.assetId}`;
-    updatePreview();
+    avatarValue = `${ASSET_AVATAR_PREFIX}${e.detail.assetId}`;
+    setAvatarDisplay(avatarValue);
   });
 
   const fieldsHeading = document.createElement('label');
@@ -568,10 +677,10 @@ function renderOwnProfile(root, own, listed, services, myPub, saveState, justSav
       .filter((f) => f.key);
     saveState.justSaved = true;
     await services.profile.saveProfile({
-      alias: aliasRow.input.value,
-      avatar: avatarRow.input.value,
-      template: templateSelect.value,
-      style: styleSelect.value,
+      alias: aliasInput.value,
+      avatar: avatarValue,
+      template: own.template,
+      style: own.style,
       fields,
       preferredLocale: own.preferredLocale,
       preferredTheme: own.preferredTheme,
@@ -583,50 +692,25 @@ function renderOwnProfile(root, own, listed, services, myPub, saveState, justSav
     // upload but before Save - confirmSent()'s own assetId match already
     // covers a NEWER upload replacing this one, this covers the field
     // simply no longer pointing at it at all.
-    if (lastUploadedAvatarAssetId && avatarRow.input.value === `${ASSET_AVATAR_PREFIX}${lastUploadedAvatarAssetId}`) {
+    if (lastUploadedAvatarAssetId && avatarValue === `${ASSET_AVATAR_PREFIX}${lastUploadedAvatarAssetId}`) {
       avatarUpload.confirmSent(lastUploadedAvatarAssetId);
     }
   });
 
-  const listedLabel = document.createElement('label');
-  const listedCheckbox = document.createElement('input');
-  listedCheckbox.type = 'checkbox';
-  listedCheckbox.checked = listed;
-  listedCheckbox.addEventListener('change', () => services.directory.setVisible(listedCheckbox.checked));
-  listedLabel.append(listedCheckbox, document.createTextNode(t('listedInDirectory')));
-
   const settingsLink = document.createElement('a');
   settingsLink.href = `#/~${myPub}/settings`;
-  settingsLink.textContent = t('settingsLink');
-
-  const keysBlock = document.createElement('div');
-  keysBlock.className = 'qu-profile-keys';
-  keysBlock.innerHTML = `<div>${t('pub')}: ${own.pub}</div><div>${t('epub')}: ${own.epub}</div>`;
+  settingsLink.textContent = `⚙️ ${t('settingsLink')}`;
 
   view.append(
-    heading, aliasRow.row, avatarRow.row, templateRow, styleRow,
-    previewLabel, previewBox,
+    header,
     fieldsHeading, fieldsList, addFieldBtn,
     saveBtn, status,
-    listedLabel, settingsLink, keysBlock
+    settingsLink
   );
   root.appendChild(view);
 }
 
-function labeledInput(label, value, placeholder = '') {
-  const row = document.createElement('div');
-  row.className = 'qu-profile-row';
-  const labelEl = document.createElement('label');
-  labelEl.textContent = label;
-  const input = document.createElement('input');
-  input.type = 'text';
-  input.value = value ?? '';
-  if (placeholder) input.placeholder = placeholder;
-  row.append(labelEl, input);
-  return { row, input };
-}
-
-function renderSettings(root, own, services, saveState, justSaved, notifPrefs, installedApps) {
+function renderSettings(root, own, listed, services, myPub, saveState, justSaved, notifPrefs, installedApps) {
   const view = document.createElement('div');
   view.className = 'qu-profile qu-profile-settings';
 
@@ -669,6 +753,64 @@ function renderSettings(root, own, services, saveState, justSaved, notifPrefs, i
   themeSelect.value = own.preferredTheme || '';
   themeRow.append(themeLabel, themeSelect);
 
+  // Template/style/"listed in directory" - moved here from the main profile
+  // page (see this file's own top doc comment): these are preferences about
+  // how OTHERS see this profile, not profile data itself, so they belong
+  // next to language/theme rather than cluttering the page every profile
+  // (own or foreign) otherwise shows identically.
+  const templateRow = document.createElement('div');
+  templateRow.className = 'qu-profile-row';
+  const templateLabel = document.createElement('label');
+  templateLabel.textContent = t('template');
+  const templateSelect = document.createElement('select');
+  for (const name of TEMPLATES) {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = t(`template${name[0].toUpperCase()}${name.slice(1)}`);
+    templateSelect.appendChild(opt);
+  }
+  templateSelect.value = own.template || 'default';
+  templateRow.append(templateLabel, templateSelect);
+
+  const styleRow = document.createElement('div');
+  styleRow.className = 'qu-profile-row';
+  const styleLabel = document.createElement('label');
+  styleLabel.textContent = t('style');
+  const styleSelect = document.createElement('select');
+  for (const name of Object.keys(THEME_PRESETS)) {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    styleSelect.appendChild(opt);
+  }
+  styleSelect.value = own.style || 'default';
+  styleRow.append(styleLabel, styleSelect);
+
+  const previewLabel = document.createElement('label');
+  previewLabel.className = 'qu-profile-preview-label';
+  previewLabel.textContent = t('preview');
+  const previewBox = document.createElement('div');
+  previewBox.className = 'qu-profile-preview';
+  function updatePreview() {
+    previewBox.textContent = '';
+    const inner = document.createElement('div');
+    inner.className = 'qu-profile-view';
+    applyTemplateStyle(inner, templateSelect.value, styleSelect.value);
+    const label = formatActorLabel(myPub, own);
+    inner.appendChild(renderPreviewHeader(myPub, label, own.avatar));
+    previewBox.appendChild(inner);
+  }
+  updatePreview();
+  templateSelect.addEventListener('change', updatePreview);
+  styleSelect.addEventListener('change', updatePreview);
+
+  const listedLabel = document.createElement('label');
+  const listedCheckbox = document.createElement('input');
+  listedCheckbox.type = 'checkbox';
+  listedCheckbox.checked = listed;
+  listedCheckbox.addEventListener('change', () => services.directory.setVisible(listedCheckbox.checked));
+  listedLabel.append(listedCheckbox, document.createTextNode(t('listedInDirectory')));
+
   const status = document.createElement('span');
   status.className = 'qu-profile-status';
   const reloadRow = document.createElement('div');
@@ -703,8 +845,8 @@ function renderSettings(root, own, services, saveState, justSaved, notifPrefs, i
     await services.profile.saveProfile({
       alias: own.alias,
       avatar: own.avatar,
-      template: own.template,
-      style: own.style,
+      template: templateSelect.value,
+      style: styleSelect.value,
       fields: own.fields,
       preferredLocale,
       preferredTheme,
@@ -727,7 +869,13 @@ function renderSettings(root, own, services, saveState, justSaved, notifPrefs, i
   const extRoot = document.createElement('div');
   extRoot.className = 'qu-profile-ext-settings';
 
-  view.append(heading, localeRow, themeRow, saveBtn, reloadRow, notifSection, extRoot);
+  view.append(
+    heading, localeRow, themeRow,
+    templateRow, styleRow, previewLabel, previewBox,
+    listedLabel,
+    saveBtn, reloadRow,
+    notifSection, extRoot
+  );
   // The shell header's own Back/Forward already covers "return to my
   // profile" - see docs/app-navigation-standard.md Rule 1 (same reasoning
   // apps/forum's/apps/chat's own renderSubpage() calls already document).
@@ -860,7 +1008,9 @@ function renderPublicProfile(root, pub, profile, services) {
   applyTemplateStyle(view, profile.template, profile.style);
 
   const label = formatActorLabel(pub, profile);
-  const header = renderProfileHeader(pub, label, profile.avatar);
+  const { header } = renderIdentityHeader({
+    pub, epub: profile.epub, alias: label, avatar: profile.avatar, editable: false,
+  });
 
   const fieldsBlock = document.createElement('div');
   fieldsBlock.className = 'qu-profile-fields';
@@ -876,19 +1026,26 @@ function renderPublicProfile(root, pub, profile, services) {
     fieldsBlock.appendChild(row);
   }
 
-  const contactToggle = renderFlagToggle({
-    flags: {
-      hasPrivate: () => services.contacts.isContact(pub),
-      setPrivate: (_ft, _ek, _er, on) => (on ? services.contacts.addContact(pub) : services.contacts.removeContact(pub)),
+  // "⋮" context menu (same component Forum/Chat already use for their own
+  // per-message menus) - a single add/remove-contact action for now, room
+  // left for more without a layout change. Computed fresh every time it
+  // opens, so it can never show a stale add/remove label.
+  const menu = renderContextMenu({
+    triggerTitle: t('actions'),
+    getItems: async () => {
+      const isContact = await services.contacts.isContact(pub);
+      return [{
+        id: 'contact',
+        icon: isContact ? '★' : '☆',
+        label: isContact ? t('contactRemove') : t('contactAdd'),
+        onClick: () => (isContact ? services.contacts.removeContact(pub) : services.contacts.addContact(pub)),
+      }];
     },
-    flagType: 'favorite', entityKind: 'user', entityRef: pub,
-    icon: '☆', activeIcon: '★', title: t('contactAdd'), activeTitle: t('contactRemove'),
   });
+  const menuWrap = document.createElement('div');
+  menuWrap.className = 'qu-profile-menu';
+  menuWrap.appendChild(menu);
 
-  const keysBlock = document.createElement('div');
-  keysBlock.className = 'qu-profile-keys';
-  keysBlock.innerHTML = `<div>${t('pub')}: ${profile.pub}</div><div>${t('epub')}: ${profile.epub}</div>`;
-
-  view.append(header, fieldsBlock, contactToggle, keysBlock);
+  view.append(menuWrap, header, fieldsBlock);
   root.appendChild(view);
 }
