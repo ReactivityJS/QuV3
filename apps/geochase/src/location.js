@@ -11,28 +11,33 @@ const log = createLogger('geochase:location');
  * driven by real position CHANGES from the browser, not a fixed interval.
  *
  * @param {Awaited<ReturnType<typeof import('./mesh.js').createGeochaseMesh>>} mesh
- * @param {{minIntervalMs?: number}} [options] - `minIntervalMs`: skips a
- *   `watchPosition()` update that arrives less than this long after the
- *   previous one - the browser can fire far more often than this game's
- *   position sync actually needs, and every update is a signed write plus a
- *   network send to every connected peer.
+ * @param {{minIntervalMs?: number, onPosition?: (position: {lat: number, lng: number, heading?: number, speed?: number}) => void}} [options] -
+ *   `minIntervalMs`: skips a `watchPosition()` update that arrives less than
+ *   this long after the previous one - the browser can fire far more often
+ *   than this game's position sync actually needs, and every update is a
+ *   signed write plus a network send to every connected peer. `onPosition`
+ *   (req. 5/6/7): fires alongside `mesh.putPosition()`, at the exact same
+ *   throttled cadence, with the exact same reading - `client.js`'s own
+ *   `setupLiveMesh()` uses this to ALSO persist the point (encrypted, via
+ *   `track-service.js`'s `recordTrackPoint()`) without a second, independently-
+ *   throttled geolocation watch racing this one.
  * @returns {() => void} Stop function.
  */
-export function startLocationSharing(mesh, { minIntervalMs = 1_000 } = {}) {
+export function startLocationSharing(mesh, { minIntervalMs = 1_000, onPosition = null } = {}) {
   let lastSentAt = 0;
   const watchId = navigator.geolocation.watchPosition(
     (position) => {
       const now = Date.now();
       if (now - lastSentAt < minIntervalMs) return;
       lastSentAt = now;
-      mesh
-        .putPosition({
-          lat: position.coords.latitude,
-          lng: position.coords.longitude,
-          heading: position.coords.heading ?? undefined,
-          speed: position.coords.speed ?? undefined,
-        })
-        .catch((err) => log.warn('putPosition() failed:', err.message));
+      const point = {
+        lat: position.coords.latitude,
+        lng: position.coords.longitude,
+        heading: position.coords.heading ?? undefined,
+        speed: position.coords.speed ?? undefined,
+      };
+      mesh.putPosition(point).catch((err) => log.warn('putPosition() failed:', err.message));
+      onPosition?.(point);
     },
     (err) => log.warn('geolocation watchPosition() error:', err.message),
     { enableHighAccuracy: true }
