@@ -1,7 +1,7 @@
 /**
- * PINS — server-side half. Purely a UI plugin (a `content.messagePinToggle`
- * + `forum.topicToolbar` contribution rendered from WITHIN whatever host
- * app defines those points - currently `apps/forum`, see client.js) -
+ * PINS — server-side half. Purely a UI plugin (a `content.messageMenu`
+ * + `content.topicToolbar` contribution rendered from WITHIN whatever host
+ * app defines those points - `apps/forum` and `apps/chat` both do, see client.js) -
  * nothing to register here, but every loadable package still needs a
  * `main` module per its manifest (see `@qu/foundation`'s manifest schema),
  * so this stays a documented no-op rather than pointing `main` at nothing.
