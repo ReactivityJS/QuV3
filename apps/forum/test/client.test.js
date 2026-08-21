@@ -49,14 +49,24 @@ const TOPIC_SEGMENTS = ['forum', 't', 'general'];
  * every real deployment relies on for the "General" channel/topic to exist -
  * exactly once per fresh store, exactly like a real relay boot would.
  */
-async function freshEnv(alias) {
+/**
+ * @param {string} alias
+ * @param {{syncFetch?: (path: string) => Promise<object|null>}} [options] -
+ *   `syncFetch`, when given, is wired into every Service constructor that
+ *   accepts one (`list`/`access`/`messages`/`channels`) - see the "an
+ *   unauthorized post is rejected LOCALLY" test below for the one caller
+ *   that actually needs this (a second, uninvited identity whose own
+ *   `syncFetch` stub answers from a THIRD store, simulating a reachable
+ *   relay - every other call site omits this entirely, unaffected).
+ */
+async function freshEnv(alias, { syncFetch = null } = {}) {
   const qu = createQu();
   const identity = new QuIdentityEngine(qu);
   await identity.importMnemonic(identity.generateMnemonic());
   await identity.publishMainProfile({ alias });
-  const list = new ListService(qu);
-  const access = new AccessService(qu, identity);
-  const messages = new MessageService(qu, identity, list, access);
+  const list = new ListService(qu, syncFetch);
+  const access = new AccessService(qu, identity, syncFetch);
+  const messages = new MessageService(qu, identity, list, access, syncFetch);
   const services = {
     actors: new ActorService(identity),
     profile: new ProfileService(qu, identity),
@@ -67,7 +77,7 @@ async function freshEnv(alias) {
     bookmarks: new BookmarksService(new FlagService(qu, identity, list)),
     directory: new DirectoryService(qu, identity, list),
     contacts: new ContactsService(new FlagService(qu, identity, list), identity),
-    channels: new ChannelService(qu, identity, list, access, messages),
+    channels: new ChannelService(qu, identity, list, access, messages, syncFetch),
   };
   const registry = new Registry();
   registry.registerService('list-service', list);
@@ -391,6 +401,58 @@ test('composer: a failed postMessage() (e.g. this identity\'s local ACL copy for
     assert.equal(textarea.value, 'This should fail');
   } finally {
     a.services.messages.postMessage = originalPostMessage;
+    stop();
+  }
+});
+
+test('composer: an unauthorized post is rejected LOCALLY, before it ever reaches the relay/other peers - not merely a friendlier error surfaced after the fact', async () => {
+  const ada = await freshEnv('Ada');
+  const channel = await ada.services.channels.createChannel(FORUM_SPACE_ID, { title: 'VIP', restricted: true, memberPubs: [] });
+  const topic = await ada.services.channels.createTopic(FORUM_SPACE_ID, channel._id, { title: 'Secret' });
+
+  // Eve - a real identity, never invited to this channel. Her OWN local
+  // store has the topic's title document (simulating e.g. a stale bookmark
+  // from before this restricted-channel privacy fix), but crucially NOT
+  // this topic's own thread ACL - the exact "never synced this ACL, ever"
+  // scenario the composer's own pre-send syncFetch() call (client.js,
+  // mountTopicView()'s actionBtn handler) exists to close.
+  const eve = await freshEnv('Eve', {
+    // A syncFetch stub answering from Ada's store - THE relay's real job
+    // (`SyncEngine.fetch()`/`#handleResponse()`) is exactly this: serve
+    // whatever the authoritative store actually has for a path, regardless
+    // of whether the REQUESTER would be allowed to write it. Copies the
+    // RAW stored QuBit (bypassing any pipeline), same as production sync.
+    syncFetch: async (path) => {
+      const { adapter, rel } = ada.qu.resolveMount(path);
+      const quBit = await adapter.get(rel);
+      if (quBit) await eve.qu.putSealed(path, quBit);
+      return quBit ?? null;
+    },
+  });
+  await eve.qu.putSealed(paths.documentPath(FORUM_SPACE_ID, topic._id), await ada.qu.get(paths.documentPath(FORUM_SPACE_ID, topic._id)));
+
+  const container = makeContainer();
+  const stop = mount(container, {
+    qu: eve.qu, services: eve.services, apps: FORUM_APPS, subscribe: noopSubscribe,
+    segments: ['forum', 't', topic._id], syncFetch: eve.services.messages.syncFetch,
+  });
+  try {
+    await waitFor(() => container.querySelector('textarea') !== null);
+    container.querySelector('textarea').value = 'I should never arrive';
+    const sendBtn = container.querySelector('.qu-forum-composer-action');
+    sendBtn.click();
+
+    await waitFor(() => container.querySelector('.qu-forum-composer-error')?.hidden === false);
+    assert.match(container.querySelector('.qu-forum-composer-error').textContent, /not authorized/);
+
+    // The message is genuinely nowhere - not just hidden from Eve's own
+    // view, but never written to the authoritative store (Ada's) at all,
+    // i.e. the local rejection happened BEFORE anything was ever sent out.
+    const { messages } = await ada.services.messages.listMessages(FORUM_SPACE_ID, topic._id);
+    assert.equal(messages.length, 0);
+    const { messages: eveMessages } = await eve.services.messages.listMessages(FORUM_SPACE_ID, topic._id);
+    assert.equal(eveMessages.length, 0);
+  } finally {
     stop();
   }
 });

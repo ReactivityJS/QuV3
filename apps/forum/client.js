@@ -2066,15 +2066,29 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     actionBtn.disabled = true;
     composerErrorEl.hidden = true;
     try {
-      // Refreshes this topic's own ACL doc right before posting - shrinks
-      // the window for the exact silent-failure scenario this file's own
-      // top doc comment describes (`[SyncEngine] rejecting synced QuBit
-      // ... writer not authorized`): a stale LOCAL copy of the ACL lets
-      // `postMessage()` resolve successfully here, only for the relay to
-      // reject it downstream with nothing ever reaching this catch. Turns
-      // most such cases into a LOUD local rejection (caught below) instead.
-      // Not a hard guarantee - a genuine network split can still slip
-      // through - but the cheap, protocol-change-free mitigation.
+      // Refreshes this topic's own ACL doc right before posting - closes
+      // the exact silent-failure scenario this file's own top doc comment
+      // describes (`[SyncEngine] rejecting synced QuBit ... writer not
+      // authorized`), NOT merely shrinks it, whenever a relay is actually
+      // reachable: `syncFetch()` (`SyncEngine.fetch()`) ingests the fetched
+      // ACL via the same trusted "already-signed synced data" path
+      // `#handleSync()` uses, bypassing any local write-authorization check
+      // (it's not this identity authoring a change, just receiving one) -
+      // so it persists REGARDLESS of whether this identity itself has
+      // write access. The very next line's `postMessage()` then runs
+      // through `QuStore.put()`'s own synchronous `AccessEngine` pipeline
+      // hook (`assertWriteAuthorized()`), which now sees the FRESH,
+      // authoritative ACL and throws immediately if unauthorized - the
+      // write never reaches PERSIST/NOTIFY, never enters the outbox, and
+      // is never sent out at all. Proven end-to-end (two real identities,
+      // no mocked rejection) by this app's own test: "composer: an
+      // unauthorized post is rejected LOCALLY, before it ever reaches the
+      // relay/other peers". The one case this can't close: genuinely
+      // OFFLINE (no relay reachable at all) - `syncFetch` then silently
+      // no-ops (`.catch(() => {})` below) and this identity's existing,
+      // possibly-stale local ACL cache is all there is to go on, same
+      // optimistic-write-while-offline trade-off `outbox.js` already makes
+      // for every other write in this codebase.
       await syncFetch?.(paths.aclPath(SPACE_ID, 'threads', topicId)).catch(() => {});
       const attachment = pendingAttachment;
       const extra = attachment ? { attachment } : {};
