@@ -367,6 +367,34 @@ test('attaching a file via the composer\'s <qu-asset-upload> sends it along with
   }
 });
 
+test('composer: a failed postMessage() (e.g. this identity\'s local ACL copy for the thread went stale) surfaces the error instead of failing silently', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  const originalPostMessage = a.services.messages.postMessage.bind(a.services.messages);
+  a.services.messages.postMessage = async () => {
+    throw new Error('AccessEngine: writer not authorized to write to threads "general"');
+  };
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => container.querySelector('textarea') !== null);
+    const textarea = container.querySelector('textarea');
+    textarea.value = 'This should fail';
+    const sendBtn = container.querySelector('.qu-forum-composer-action');
+    sendBtn.click();
+
+    await waitFor(() => container.querySelector('.qu-forum-composer-error')?.hidden === false);
+    assert.match(container.querySelector('.qu-forum-composer-error').textContent, /writer not authorized/);
+    assert.equal(sendBtn.disabled, false);
+    // the composer text is NOT cleared on failure - the user can retry.
+    assert.equal(textarea.value, 'This should fail');
+  } finally {
+    a.services.messages.postMessage = originalPostMessage;
+    stop();
+  }
+});
+
 test('an attachment can be sent with no caption at all - the same rule voice messages already get in apps/chat', async () => {
   const a = await freshEnv('Ada');
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
@@ -1443,6 +1471,33 @@ test('new channel view: double-clicking "Create channel" before the first call r
   }
 });
 
+test('new channel view: a failed create (e.g. a restricted channel\'s own member list contains a pubkey with no resolvable profile) surfaces the error instead of failing silently', async () => {
+  const a = await freshEnv('Ada');
+  const originalCreateChannel = a.services.channels.createChannel.bind(a.services.channels);
+  a.services.channels.createChannel = async () => {
+    throw new Error('resolveReaderXKeys: reader "some-actor-pub" has no published profile - cannot encrypt for them');
+  };
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'new'] });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-new-channel-form') !== null);
+    const titleInput = container.querySelector('.qu-forum-new-channel-form input[type="text"]');
+    titleInput.value = 'Doomed Board';
+    const submit = container.querySelector('.qu-forum-new-channel-form button');
+    submit.click();
+
+    await waitFor(() => container.querySelector('.qu-forum-new-channel-error')?.hidden === false);
+    assert.match(container.querySelector('.qu-forum-new-channel-error').textContent, /no published profile/);
+    // the button re-enables - the admin can fix the input and retry.
+    assert.equal(submit.disabled, false);
+    assert.equal(titleInput.value, 'Doomed Board');
+  } finally {
+    a.services.channels.createChannel = originalCreateChannel;
+    stop();
+  }
+});
+
 test('new channel view: channels.allowMemberCreate: false shows "not allowed" instead of the form for a non-admin', async (t) => {
   const a = await freshEnv('Ada');
   t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ adminPubs: [], settings: { channels: { allowMemberCreate: false, allowMemberRestricted: false } } }), { status: 200 }));
@@ -1527,6 +1582,33 @@ test('new topic view (no channel, #/forum/new-topic): shows a channel <select>, 
     await waitFor(() => select.disabled === false);
     assert.ok([...select.querySelectorAll('option')].some((o) => o.textContent === 'Announcements'));
   } finally {
+    stop();
+  }
+});
+
+test('new topic view: a failed createTopic() (e.g. this identity is no longer a member of the channel) surfaces the error instead of failing silently', async () => {
+  const a = await freshEnv('Ada');
+  const channel = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Announcements' });
+  const originalCreateTopic = a.services.channels.createTopic.bind(a.services.channels);
+  a.services.channels.createTopic = async () => {
+    throw new Error('ChannelService.createTopic: no channel "x" in space "y"');
+  };
+
+  window.location.hash = ''; // a prior test may have left a #/forum/t/... hash behind
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', channel._id, 'new-topic'] });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-new-topic-form') !== null);
+    container.querySelector('.qu-forum-new-topic-form input[type="text"]').value = 'Doomed Topic';
+    container.querySelector('.qu-forum-new-topic-form button[type="submit"]').click();
+
+    await waitFor(() => container.querySelector('.qu-forum-new-topic-error')?.hidden === false);
+    assert.match(container.querySelector('.qu-forum-new-topic-error').textContent, /no channel/);
+    assert.equal(container.querySelector('.qu-forum-new-topic-form button[type="submit"]').disabled, false);
+    assert.equal(window.location.hash.startsWith('#/forum/t/'), false); // never navigated away
+  } finally {
+    a.services.channels.createTopic = originalCreateTopic;
+    window.location.hash = '';
     stop();
   }
 });
@@ -1725,6 +1807,14 @@ test('topic view: a desktopOnly app-template sidebar lists every channel alongsi
 
 test('channel view: an OPEN channel shows no invite form; a RESTRICTED one does, and inviting actually grows membership', async () => {
   const a = await freshEnv('Ada');
+  // A REAL actor with a published profile - re-encrypting the channel
+  // document for a new reader (see channel-service.js's own "RESTRICTED
+  // CHANNELS" doc comment) needs a resolvable X key, `resolveReaderXKeys()`'s
+  // own fail-closed contract - a bare made-up pubkey with no profile can no
+  // longer stand in for "someone to invite" here.
+  const bob = await freshEnv('Bob');
+  await a.qu.putSealed(actorPath(bob.myPub, 'profile'), await bob.qu.get(actorPath(bob.myPub, 'profile')));
+
   const openChannel = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Open' });
   const restrictedChannel = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Closed', restricted: true, memberPubs: [] });
 
@@ -1739,7 +1829,7 @@ test('channel view: an OPEN channel shows no invite form; a RESTRICTED one does,
 
     await waitFor(() => containerRestricted.querySelector('.qu-forum-invite-form') !== null);
     const pubInput = containerRestricted.querySelector('.qu-forum-invite-form input[type="text"]');
-    pubInput.value = 'some-actor-pub-1234567890';
+    pubInput.value = bob.myPub;
     containerRestricted.querySelector('.qu-forum-invite-form button').click();
 
     // waitFor()'s predicate is never awaited (see @qu/ui/testing's own
@@ -1748,7 +1838,7 @@ test('channel view: an OPEN channel shows no invite form; a RESTRICTED one does,
     let invited = false;
     for (let i = 0; i < 200 && !invited; i++) {
       const channel = await a.services.channels.getChannel(FORUM_SPACE_ID, restrictedChannel._id);
-      invited = channel.memberPubs.includes('some-actor-pub-1234567890');
+      invited = channel.memberPubs.includes(bob.myPub);
       if (!invited) await new Promise((resolve) => setTimeout(resolve, 5));
     }
     assert.ok(invited, 'expected addChannelMember() to have run by now');

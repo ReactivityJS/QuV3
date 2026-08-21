@@ -1,6 +1,7 @@
-import { QuCrypto } from '@qu/core';
+import { QuCrypto, isEncryptedEnvelope } from '@qu/core';
 import { documentPath, listPath, threadMetaPath } from './paths.js';
 import { THREAD_PRESETS } from './message-service.js';
+import { decryptEnvelope } from './crypto-envelope.js';
 
 /**
  * CHANNEL SERVICE — Forum's Channel -> Topic -> per-Topic-Thread hierarchy
@@ -24,18 +25,37 @@ import { THREAD_PRESETS } from './message-service.js';
  * flight) is the client's job, not this Service's.
  *
  * RESTRICTED CHANNELS - real end-to-end encryption, not a UI-only filter:
- * the channel Document itself is protected via `AccessService.protect()`
- * (`writers: memberPubs`, `readers` deliberately left at the default `'*'`
- * - encrypting a plain Document would make it unreadable, since nothing
- * reading a Document expects a decrypt step, see `AccessService.
- * writeOptionsFor()`'s own doc comment) so only members may rename/edit it
- * later; every Topic CREATED under it gets `THREAD_PRESETS.chat(memberPubs)`
- * instead of the public `THREAD_PRESETS.forum()` - genuine encryption for
- * exactly that member list, the relay included, sees ciphertext only. This
- * only locks CONTENT: the channel's and its topics' TITLES stay visible
- * plaintext metadata (same "path is addressing, not proof of readability"
- * limitation as everywhere else in this codebase) - fully hiding a
- * restricted channel's existence is real future work, not implemented here.
+ * the channel Document AND every Topic Document created under it are
+ * protected via `AccessService.protect()` with BOTH `writers` AND `readers`
+ * set to `memberPubs` - unlike most `kind: 'docs'` resources elsewhere in
+ * this codebase (which deliberately leave `readers: '*'`, see
+ * `AccessService.writeOptionsFor()`'s own "GOTCHA for docs/lists" doc
+ * comment - nothing generic decrypts a plain Document read back), THIS
+ * Service is decrypt-aware for its own two doc shapes (`#decrypt()` below,
+ * the same `isEncryptedEnvelope()`/`decryptEnvelope()` pair `MessageService`/
+ * `AssetService` already use internally) - so a restricted channel's title
+ * AND description, and every one of its topics' own titles, are genuinely
+ * ciphertext at rest, not just access-controlled. `#resolveItems()`'s
+ * existing "drop anything unresolvable" behavior means `decryptEnvelope()`
+ * returning `null` for a non-member (see its own doc comment - no listed
+ * reader entry, no throw) makes `listChannels()`/`listTopics()` filter
+ * themselves by membership for free, no separate check needed; `getChannel()`
+ * returns `null` for a non-member even via a direct/bookmarked board URL.
+ * Every Topic CREATED under a restricted channel also gets
+ * `THREAD_PRESETS.chat(memberPubs)` instead of the public
+ * `THREAD_PRESETS.forum()` for its own message THREAD - the relay, and any
+ * non-member, sees ciphertext only, for metadata and content alike.
+ *
+ * WHAT'S STILL NOT HIDDEN (accepted, documented trade-off - a bigger
+ * invite-mailbox redesign like Chat's own group rooms was explicitly
+ * declined for now): the encrypted envelope's own `to: [{pub, key}, ...]`
+ * array (`QuStore.put()`'s encryption shape) lists every reader's raw
+ * X25519 pubkey in the clear - someone inspecting the raw synced store
+ * directly (not through this app's own UI, which never shows this) can
+ * still enumerate a restricted channel's MEMBERSHIP, just not its title,
+ * description, or any topic's title/content. And none of this is
+ * retroactive: a restricted channel/topic created before this Service
+ * started requesting `readers` restriction stays plaintext until re-created.
  *
  * GROWING MEMBERSHIP (`addChannelMember()`) - not something QuV2 ever
  * shipped ("creator-only at creation, no UI wired up" was its own
@@ -86,6 +106,38 @@ export class ChannelService {
     return QuCrypto.toBase64Url(mainKey.publicKey);
   }
 
+  /**
+   * Same syncFetch-backfilled resolver shape every other Service's own
+   * `#getProfile()` already uses (e.g. `AccessService`'s, `access-service.js:
+   * 42-51`) - `#decrypt()` below needs it to resolve a channel/topic
+   * document's SENDER's X key (`decryptEnvelope()`'s own contract).
+   * @param {string} actorPub
+   * @returns {Promise<object|null>}
+   */
+  async #getProfile(actorPub) {
+    const local = await this.identity.getProfile(actorPub);
+    if (local || !this.syncFetch) return local;
+    await this.syncFetch(`/store/actors/~${actorPub}/profile`).catch(() => {});
+    return this.identity.getProfile(actorPub);
+  }
+
+  /**
+   * Decrypts a channel/topic QuBit's `val` for the current identity, or
+   * passes a still-plaintext one through unchanged (an already-existing
+   * restricted channel/topic created before `readers` restriction was
+   * added here - see class doc comment's "not retroactive" note). Returns
+   * `null` for an encrypted value this identity can't decrypt (not a
+   * listed reader) - `decryptEnvelope()`'s own contract, no throw - which
+   * is exactly what makes `#resolveItems()`'s `.filter(Boolean)` below
+   * double as membership filtering, for free.
+   * @param {{val: object, pub: string|null}} quBit
+   * @returns {Promise<object|null>}
+   */
+  async #decrypt(quBit) {
+    if (!isEncryptedEnvelope(quBit.val)) return quBit.val;
+    return decryptEnvelope(quBit, this.identity, (pub) => this.#getProfile(pub));
+  }
+
   #channelsListPath(spaceId) {
     return listPath(spaceId, 'channels');
   }
@@ -113,7 +165,7 @@ export class ChannelService {
     const allMembers = restricted ? [...new Set([myPub, ...memberPubs])] : [];
 
     if (restricted) {
-      await this.access.protect(spaceId, 'docs', id, { writers: allMembers });
+      await this.access.protect(spaceId, 'docs', id, { writers: allMembers, readers: allMembers });
       writeOptions = await this.access.writeOptionsFor(spaceId, 'docs', id);
     }
 
@@ -144,7 +196,8 @@ export class ChannelService {
         await this.syncFetch(path).catch(() => {});
         quBit = await this.qu.get(path);
       }
-      return quBit?.val ?? null;
+      if (!quBit?.val) return null;
+      return this.#decrypt(quBit);
     }));
     return resolved.filter(Boolean);
   }
@@ -166,7 +219,8 @@ export class ChannelService {
       await this.syncFetch(path).catch(() => {});
       quBit = await this.qu.get(path);
     }
-    return quBit?.val ?? null;
+    if (!quBit?.val) return null;
+    return this.#decrypt(quBit);
   }
 
   /**
@@ -182,8 +236,18 @@ export class ChannelService {
     const id = globalThis.crypto.randomUUID();
     const myPub = await this.#myActorPub();
     const mainKey = await this.identity.getMainKey();
+    let topicWriteOptions = { signWith: mainKey.privateKeyPkcs8, writerPub: mainKey.publicKey };
+    // A restricted channel's topic TITLE gets the exact same treatment as
+    // the channel's own title (see class doc comment's "RESTRICTED
+    // CHANNELS" section) - protected AND encrypted, not just access-
+    // controlled, so it's genuine ciphertext to a non-member, same as the
+    // channel doc itself.
+    if (channel.restricted) {
+      await this.access.protect(spaceId, 'docs', id, { writers: channel.memberPubs, readers: channel.memberPubs });
+      topicWriteOptions = await this.access.writeOptionsFor(spaceId, 'docs', id);
+    }
     const topic = { _id: id, title, channelId, author: myPub, createdAt: Date.now() };
-    await this.qu.put(documentPath(spaceId, id), topic, { signWith: mainKey.privateKeyPkcs8, writerPub: mainKey.publicKey });
+    await this.qu.put(documentPath(spaceId, id), topic, topicWriteOptions);
     await this.list.addCurated(this.#topicsListPath(spaceId, channelId), documentPath(spaceId, id), {
       signWith: mainKey.privateKeyPkcs8, writerPub: mainKey.publicKey,
     });
@@ -244,17 +308,41 @@ export class ChannelService {
     return withActivity.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
   }
 
-  /** Grows BOTH `writers` and `readers` on a topic's thread config in one write - see class doc comment on why not `MessageService.addReader()` alone. */
+  /**
+   * Grows BOTH `writers` and `readers` on a topic's thread config in one
+   * write - see class doc comment on why not `MessageService.addReader()`
+   * alone - AND, separately, the topic's own TITLE Document: adding a
+   * reader to the ACL alone doesn't let them decrypt ciphertext that was
+   * already encrypted for the OLD member list, so the title has to be
+   * re-read (plaintext, since this identity - already a member - can
+   * decrypt it) and re-written with a freshly resolved `encryptWith` that
+   * now includes the new member's key too - same "grow the ACL, then
+   * re-encrypt" two-step `addChannelMember()` itself already does for the
+   * channel document below.
+   */
   async #growTopicMembership(spaceId, topicId, actorPub) {
     const config = await this.messages.getConfig(spaceId, topicId);
-    if (!config || !Array.isArray(config.writers)) return; // a public thread ('*') or a missing one - nothing to grow
-    const writers = config.writers.includes(actorPub) ? config.writers : [...config.writers, actorPub];
-    const readers = Array.isArray(config.readers) && !config.readers.includes(actorPub) ? [...config.readers, actorPub] : config.readers;
-    if (writers === config.writers && readers === config.readers) return; // already a member of this topic
-    const updated = { ...config, writers, readers };
-    const mainKey = await this.identity.getMainKey();
-    await this.qu.put(threadMetaPath(spaceId, topicId), updated, { signWith: mainKey.privateKeyPkcs8, writerPub: mainKey.publicKey });
-    await this.access.protect(spaceId, 'threads', topicId, { writers: updated.writers, readers: updated.readers }, { includeSelfAsWriter: false });
+    if (config && Array.isArray(config.writers)) {
+      const writers = config.writers.includes(actorPub) ? config.writers : [...config.writers, actorPub];
+      const readers = Array.isArray(config.readers) && !config.readers.includes(actorPub) ? [...config.readers, actorPub] : config.readers;
+      if (writers !== config.writers || readers !== config.readers) {
+        const updated = { ...config, writers, readers };
+        const mainKey = await this.identity.getMainKey();
+        await this.qu.put(threadMetaPath(spaceId, topicId), updated, { signWith: mainKey.privateKeyPkcs8, writerPub: mainKey.publicKey });
+        await this.access.protect(spaceId, 'threads', topicId, { writers: updated.writers, readers: updated.readers }, { includeSelfAsWriter: false });
+      }
+    }
+
+    const docAcl = await this.access.getAcl(spaceId, 'docs', topicId);
+    if (docAcl && Array.isArray(docAcl.readers) && !docAcl.readers.includes(actorPub)) {
+      const [topic] = await this.#resolveItems([documentPath(spaceId, topicId)]);
+      if (topic) {
+        await this.access.addWriter(spaceId, 'docs', topicId, actorPub);
+        await this.access.addReader(spaceId, 'docs', topicId, actorPub);
+        const writeOptions = await this.access.writeOptionsFor(spaceId, 'docs', topicId);
+        await this.qu.put(documentPath(spaceId, topicId), topic, writeOptions);
+      }
+    }
   }
 
   /**
@@ -295,6 +383,12 @@ export class ChannelService {
     if (!channel.restricted || channel.memberPubs.includes(actorPub)) return channel;
 
     await this.access.addWriter(spaceId, 'docs', channelId, actorPub);
+    // Growing `readers` too (not just `writers`) is what makes the
+    // `writeOptionsFor()` call right below actually re-encrypt the channel
+    // document FOR the new member - `writers` alone only lets them WRITE,
+    // it has no bearing on `encryptWith`'s own reader list (see class doc
+    // comment's "RESTRICTED CHANNELS" section).
+    await this.access.addReader(spaceId, 'docs', channelId, actorPub);
     const writeOptions = await this.access.writeOptionsFor(spaceId, 'docs', channelId);
     const updated = { ...channel, memberPubs: [...channel.memberPubs, actorPub] };
     await this.qu.put(documentPath(spaceId, channelId), updated, writeOptions);

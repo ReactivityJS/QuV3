@@ -423,8 +423,8 @@ const STYLE = `
   .qu-forum-scroll-bottom-btn[hidden] { display: none; }
   .qu-forum-scroll-bottom-btn-unseen { background: var(--qu-color-danger, #d64545); }
   .qu-forum-new-channel-form, .qu-forum-new-topic-form, .qu-forum-invite-form { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.6rem; max-width: 26rem; }
-  .qu-forum-invite-error { color: var(--qu-color-danger, #c00); font-size: 0.85em; margin: 0; }
-  .qu-forum-invite-error[hidden] { display: none; }
+  .qu-forum-invite-error, .qu-forum-new-channel-error, .qu-forum-new-topic-error, .qu-forum-composer-error { color: var(--qu-color-danger, #c00); font-size: 0.85em; margin: 0; }
+  .qu-forum-invite-error[hidden], .qu-forum-new-channel-error[hidden], .qu-forum-new-topic-error[hidden], .qu-forum-composer-error[hidden] { display: none; }
   .qu-forum-new-channel-form input[type="text"], .qu-forum-new-topic-form input[type="text"], .qu-forum-invite-form input[type="text"] { font: inherit; padding: 0.4rem 0.6rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); }
   .qu-forum-new-channel-form label, .qu-forum-new-topic-form label { display: flex; align-items: center; gap: 0.4rem; font-size: 0.9em; }
   .qu-forum-new-topic-form select { font: inherit; padding: 0.4rem 0.6rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); flex: 1; min-width: 0; }
@@ -735,7 +735,10 @@ function buildChannelForm({ services, SPACE_ID, allowRestricted, onCreated }) {
   const submit = document.createElement('button');
   submit.type = 'submit';
   submit.textContent = t('createChannel');
-  form.append(titleInput, restrictedLabel, membersInput, submit);
+  const errorEl = document.createElement('p');
+  errorEl.className = 'qu-forum-new-channel-error';
+  errorEl.hidden = true;
+  form.append(titleInput, restrictedLabel, membersInput, submit, errorEl);
 
   // The actual fix for "double-clicking Create sometimes makes two boards"
   // (see this file's own top doc comment) - disable for the duration of the
@@ -745,10 +748,21 @@ function buildChannelForm({ services, SPACE_ID, allowRestricted, onCreated }) {
     const title = titleInput.value.trim();
     if (!title) return;
     submit.disabled = true;
+    errorEl.hidden = true;
     try {
       const memberPubs = membersInput.value.split(',').map((s) => s.trim()).filter(Boolean);
       const channel = await services.channels.createChannel(SPACE_ID, { title, restricted: restrictedInput.checked, memberPubs });
       onCreated?.(channel);
+    } catch (err) {
+      // Same "a caller with no catch here previously saw NOTHING" fix as
+      // mountInviteForm()'s own `.qu-forum-invite-error` (see its doc
+      // comment) - most commonly a restricted channel's own member list
+      // containing a pubkey with no resolvable profile (`resolveReaderXKeys()`'s
+      // fail-closed contract, see channel-service.js's "RESTRICTED CHANNELS"
+      // doc comment), previously an unhandled rejection with the button just
+      // quietly re-enabling.
+      errorEl.textContent = err.message;
+      errorEl.hidden = false;
     } finally {
       submit.disabled = false;
     }
@@ -1162,7 +1176,10 @@ function mountNewTopicView(container, { services, SPACE_ID, channelId }) {
   const submit = document.createElement('button');
   submit.type = 'submit';
   submit.textContent = t('createTopic');
-  form.appendChild(submit);
+  const errorEl = document.createElement('p');
+  errorEl.className = 'qu-forum-new-topic-error';
+  errorEl.hidden = true;
+  form.append(submit, errorEl);
 
   // Same double-submit guard as the board view's "create channel" form.
   form.addEventListener('submit', async (e) => {
@@ -1172,6 +1189,7 @@ function mountNewTopicView(container, { services, SPACE_ID, channelId }) {
     const targetChannelId = channelId ?? channelSelect?.value;
     if (!title || !targetChannelId) return;
     submit.disabled = true;
+    errorEl.hidden = true;
     try {
       const topic = await services.channels.createTopic(SPACE_ID, targetChannelId, { title });
       const attachment = pendingAttachment;
@@ -1181,6 +1199,14 @@ function mountNewTopicView(container, { services, SPACE_ID, channelId }) {
         if (attachment) attachUpload.confirmSent(attachment.assetId);
       }
       if (!stopped) window.location.hash = `#/forum/t/${topic._id}`;
+    } catch (err) {
+      // Same "no catch here previously meant NOTHING visible" fix as
+      // mountInviteForm()'s own `.qu-forum-invite-error` - a locally
+      // rejected createTopic()/postMessage() (e.g. this identity was
+      // removed from a restricted channel between opening this form and
+      // submitting it) used to leave the button just quietly re-enabling.
+      errorEl.textContent = err.message;
+      errorEl.hidden = false;
     } finally {
       submit.disabled = false;
     }
@@ -1341,10 +1367,13 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
   const pendingAttachmentEl = document.createElement('div');
   pendingAttachmentEl.className = 'qu-forum-pending-attachment';
   pendingAttachmentEl.hidden = true;
+  const composerErrorEl = document.createElement('p');
+  composerErrorEl.className = 'qu-forum-composer-error';
+  composerErrorEl.hidden = true;
   // ABOVE the input row, not below it - see apps/chat/client.js's own
   // identical composer-ordering fix for why (a pending attachment is
   // context for what's about to be sent, not a footnote after the fact).
-  composerWrap.append(replyBanner, pendingAttachmentEl, composerRow);
+  composerWrap.append(replyBanner, pendingAttachmentEl, composerErrorEl, composerRow);
 
   roomView.append(header, messagesScroll, composerWrap);
 
@@ -2035,7 +2064,18 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     // genuinely empty post (no text AND no attachment) is refused.
     if (!body && !pendingAttachment) return;
     actionBtn.disabled = true;
+    composerErrorEl.hidden = true;
     try {
+      // Refreshes this topic's own ACL doc right before posting - shrinks
+      // the window for the exact silent-failure scenario this file's own
+      // top doc comment describes (`[SyncEngine] rejecting synced QuBit
+      // ... writer not authorized`): a stale LOCAL copy of the ACL lets
+      // `postMessage()` resolve successfully here, only for the relay to
+      // reject it downstream with nothing ever reaching this catch. Turns
+      // most such cases into a LOUD local rejection (caught below) instead.
+      // Not a hard guarantee - a genuine network split can still slip
+      // through - but the cheap, protocol-change-free mitigation.
+      await syncFetch?.(paths.aclPath(SPACE_ID, 'threads', topicId)).catch(() => {});
       const attachment = pendingAttachment;
       const extra = attachment ? { attachment } : {};
       await services.messages.postMessage(SPACE_ID, topicId, { body, replyTo: replyingTo?.id ?? null, extra });
@@ -2047,6 +2087,16 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
       // does the (deferred) sync-out verification phase start - see
       // <qu-asset-upload>'s own doc comment on confirmSent() for why.
       if (attachment) attachUpload.confirmSent(attachment.assetId);
+    } catch (err) {
+      // Same "no catch here previously meant NOTHING visible" fix as
+      // mountInviteForm()'s own `.qu-forum-invite-error` - e.g. this
+      // identity's own local ACL copy for this topic's thread is stale
+      // (see this file's own top doc comment's reasoning on
+      // `[SyncEngine] rejecting synced QuBit ... writer not authorized`)
+      // and the local write is rejected before ever reaching the network -
+      // the composer used to just silently re-enable with nothing sent.
+      composerErrorEl.textContent = err.message;
+      composerErrorEl.hidden = false;
     } finally {
       actionBtn.disabled = false;
     }
