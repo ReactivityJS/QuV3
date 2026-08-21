@@ -1,13 +1,22 @@
 import { projectLocal, fitScaleMetersPerPixel } from './geometry.js';
 
+/** Same chased/self/chaser color scheme `map-leaflet.js` uses - kept here too so both renderers, the live player list, and the legend all agree on one palette (`client.js` reuses these directly for the legend/player-list dots, not a re-declared copy). */
+export const PLAYER_COLORS = { chased: '#e5484d', self: '#12a594', chaser: '#5b5bd6' };
+
+/** @param {string} actorPub @param {string} chasedPub @param {string} selfPub @returns {string} */
+export function colorFor(actorPub, chasedPub, selfPub) {
+  return actorPub === chasedPub ? PLAYER_COLORS.chased : (actorPub === selfPub ? PLAYER_COLORS.self : PLAYER_COLORS.chaser);
+}
+
 /**
- * PLANE MAP — the abstract "everyone relative to the chased player" canvas
- * renderer (`mapMode: 'plane'`, see game-service.js's own `DEFAULT_SETTINGS`
- * doc comment). Centers on the chased player's own latest known position
- * (falling back to whichever player IS known, for a chaser-only view before
- * the chased has ever reported in), auto-zooms to fit every player plus the
- * radius circle, and draws each player as a colored dot (chased/self/other
- * distinguished by color) with their label.
+ * PLANE MAP — the abstract "everyone relative to a chosen reference player"
+ * canvas renderer (`mapMode: 'plane'`, see game-service.js's own
+ * `DEFAULT_SETTINGS` doc comment). Centers on `centerOn`'s own latest known
+ * position (falling back to whichever player IS known, for a view before
+ * that specific target has ever reported in), auto-zooms to fit every
+ * player, their trails, and the radius circle, and draws each player as a
+ * colored dot (chased/self/other distinguished by color, see `PLAYER_COLORS`
+ * above) with their label.
  *
  * jsdom (this repo's test DOM) has no real Canvas 2D implementation -
  * `canvas.getContext('2d')` returns `null` there, so this bails out (a
@@ -25,9 +34,11 @@ import { projectLocal, fitScaleMetersPerPixel } from './geometry.js';
  *   selfPub: string,
  *   radiusMeters?: number,
  *   labelFor?: (actorPub: string) => string,
+ *   centerOn?: 'chased'|'self',
+ *   trails?: Map<string, Array<{lat: number, lng: number}>>,
  * }} options
  */
-export function renderPlaneMap(canvas, { players, chasedPub, selfPub, radiusMeters = 0, labelFor = (pub) => pub.slice(0, 6) }) {
+export function renderPlaneMap(canvas, { players, chasedPub, selfPub, radiusMeters = 0, labelFor = (pub) => pub.slice(0, 6), centerOn = 'chased', trails = new Map() }) {
   const ctx = canvas.getContext && canvas.getContext('2d');
   if (!ctx) return;
 
@@ -35,15 +46,24 @@ export function renderPlaneMap(canvas, { players, chasedPub, selfPub, radiusMete
   const h = canvas.height;
   ctx.clearRect(0, 0, w, h);
 
-  const chased = players.find((p) => p.actorPub === chasedPub);
-  const ref = (chased ?? players[0])?.position;
+  // `centerOn` picks WHICH player's position anchors the whole relative view
+  // (see client.js's own "center map" controls) - falls back to whichever
+  // player IS known if the requested target hasn't reported in yet, same
+  // "never just show a blank canvas" reasoning the original chased-only
+  // fallback already had.
+  const targetPub = centerOn === 'self' ? selfPub : chasedPub;
+  const target = players.find((p) => p.actorPub === targetPub);
+  const ref = (target ?? players[0])?.position;
   if (!ref) return; // nothing known yet - an empty canvas is the correct state
 
   const offsets = players.map((p) => ({ ...projectLocal(p.position, ref), player: p }));
   const radiusExtent = radiusMeters > 0
     ? [{ xMeters: radiusMeters, yMeters: 0 }, { xMeters: -radiusMeters, yMeters: 0 }, { xMeters: 0, yMeters: radiusMeters }, { xMeters: 0, yMeters: -radiusMeters }]
     : [];
-  const scale = fitScaleMetersPerPixel([...offsets, ...radiusExtent], Math.min(w, h));
+  // Trail points count toward the fitted extent too, so a player's recent
+  // path never gets clipped off the edge of the canvas.
+  const trailOffsets = [...trails.values()].flatMap((points) => points.map((p) => projectLocal(p, ref)));
+  const scale = fitScaleMetersPerPixel([...offsets, ...radiusExtent, ...trailOffsets], Math.min(w, h));
   const toPx = (m) => ({ x: w / 2 + m.xMeters / scale, y: h / 2 + m.yMeters / scale });
 
   ctx.fillStyle = '#f4f4f5';
@@ -55,23 +75,41 @@ export function renderPlaneMap(canvas, { players, chasedPub, selfPub, radiusMete
     ctx.beginPath();
     ctx.arc(center.x, center.y, radiusMeters / scale, 0, Math.PI * 2);
     ctx.setLineDash([6, 4]);
-    ctx.strokeStyle = '#e5484d';
+    ctx.strokeStyle = PLAYER_COLORS.chased;
     ctx.globalAlpha = 0.55;
     ctx.lineWidth = 2;
     ctx.stroke();
-    ctx.fillStyle = '#e5484d';
+    ctx.fillStyle = PLAYER_COLORS.chased;
     ctx.globalAlpha = 0.08;
     ctx.fill();
+    ctx.restore();
+  }
+
+  // Trails drawn BEFORE the current-position dots, so the dots always sit
+  // visibly on top of their own tail rather than being obscured by it.
+  for (const [actorPub, points] of trails) {
+    if (points.length < 2) continue;
+    ctx.save();
+    ctx.beginPath();
+    const first = toPx(projectLocal(points[0], ref));
+    ctx.moveTo(first.x, first.y);
+    for (const point of points.slice(1)) {
+      const px = toPx(projectLocal(point, ref));
+      ctx.lineTo(px.x, px.y);
+    }
+    ctx.strokeStyle = colorFor(actorPub, chasedPub, selfPub);
+    ctx.globalAlpha = 0.4;
+    ctx.lineWidth = 2;
+    ctx.stroke();
     ctx.restore();
   }
 
   for (const { xMeters, yMeters, player } of offsets) {
     const { x, y } = toPx({ xMeters, yMeters });
     const isChased = player.actorPub === chasedPub;
-    const isSelf = player.actorPub === selfPub;
     ctx.beginPath();
     ctx.arc(x, y, isChased ? 8 : 6, 0, Math.PI * 2);
-    ctx.fillStyle = isChased ? '#e5484d' : (isSelf ? '#12a594' : '#5b5bd6');
+    ctx.fillStyle = colorFor(player.actorPub, chasedPub, selfPub);
     ctx.fill();
     ctx.lineWidth = 2;
     ctx.strokeStyle = '#ffffff';
