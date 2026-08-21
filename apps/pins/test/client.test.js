@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { QuStore, MemoryStoreAdapter } from '@qu/core';
 import { QuIdentityEngine } from '@qu/identity';
-import { ListService, PinService, paths } from '@qu/services';
+import { ListService, MessageService, PinService, paths } from '@qu/services';
 import { installDom, waitFor } from '@qu/ui/testing';
 
 installDom();
@@ -14,7 +14,15 @@ async function freshEnv() {
   const identity = new QuIdentityEngine(qu);
   await identity.importMnemonic(identity.generateMnemonic());
   const list = new ListService(qu);
-  const services = { pins: new PinService(qu, identity, list) };
+  // `renderPinnedBar()` reads a pinned message's body through
+  // `services.messages.getMessage()` (decrypts it if the thread is
+  // private - see apps/pins/client.js's own doc comment on WHY, not a raw
+  // `qu.get()`), so this env needs a real MessageService alongside PinService,
+  // the same pairing both apps/forum's and apps/chat's own tests already use.
+  const services = {
+    pins: new PinService(qu, identity, list),
+    messages: new MessageService(qu, identity, list, null),
+  };
   return { qu, services };
 }
 
@@ -57,7 +65,7 @@ test('pinMenuItem(): resolves the CURRENT state fresh on every call (no stale ca
   assert.equal((await pinMenuItem({ ...basePayload(env), messageId: 'msg1' })).label, 'Unpin');
 });
 
-// ===== renderPinnedBar() - the forum.topicToolbar contributor =============
+// ===== renderPinnedBar() - the content.topicToolbar contributor ===========
 
 test('renderPinnedBar(): renders nothing when the topic has no pins', async () => {
   const env = await freshEnv();
@@ -125,4 +133,81 @@ test('disconnecting the pinned-bar widget from the DOM tears down its live subsc
   barContainer.remove();
 
   await assert.doesNotReject(() => env.services.pins.setPinned('forum-space', 'topic1', 'msg1', true));
+});
+
+// ===== multiple pins ========================================================
+
+test('renderPinnedBar(): pinning several messages shows every one of them, each a live, independently-clickable link; unpinning one removes ONLY that row', async () => {
+  const env = await freshEnv();
+  for (const id of ['msg1', 'msg2', 'msg3']) {
+    await env.qu.put(paths.threadMessagePath('forum-space', 'topic1', id), { body: `body-${id}` });
+  }
+
+  const container = makeContainer();
+  await renderPinnedBar(container, { ...basePayload(env), messagePermalink: (messageId) => `#/forum/t/topic1/m/${messageId}` });
+
+  await env.services.pins.setPinned('forum-space', 'topic1', 'msg1', true);
+  await waitFor(() => container.querySelectorAll('.qu-pins-bar-row').length === 1);
+
+  await env.services.pins.setPinned('forum-space', 'topic1', 'msg2', true);
+  await env.services.pins.setPinned('forum-space', 'topic1', 'msg3', true);
+  await waitFor(() => container.querySelectorAll('.qu-pins-bar-row').length === 3);
+
+  const links = [...container.querySelectorAll('a.qu-pins-bar-row-text')];
+  assert.deepEqual(links.map((l) => l.getAttribute('href')).sort(), [
+    '#/forum/t/topic1/m/msg1', '#/forum/t/topic1/m/msg2', '#/forum/t/topic1/m/msg3',
+  ]);
+  assert.deepEqual(links.map((l) => l.textContent).sort(), ['body-msg1', 'body-msg2', 'body-msg3']);
+
+  // Unpinning one of several removes ONLY that row, from the SAME bar - the
+  // rest stay visible and untouched.
+  await env.services.pins.setPinned('forum-space', 'topic1', 'msg2', false);
+  await waitFor(() => container.querySelectorAll('.qu-pins-bar-row').length === 2);
+  assert.deepEqual(
+    [...container.querySelectorAll('.qu-pins-bar-row-text')].map((el) => el.textContent).sort(),
+    ['body-msg1', 'body-msg3'],
+  );
+});
+
+test('renderPinnedBar(): beyond COLLAPSE_ROWS pins, the bar collapses with a "Show all" toggle - clicking it expands to show every pinned message, clicking again collapses back', async () => {
+  const env = await freshEnv();
+  const ids = ['msg1', 'msg2', 'msg3', 'msg4', 'msg5'];
+  for (const id of ids) {
+    await env.qu.put(paths.threadMessagePath('forum-space', 'topic1', id), { body: id });
+    await env.services.pins.setPinned('forum-space', 'topic1', id, true);
+  }
+
+  const container = makeContainer();
+  await renderPinnedBar(container, basePayload(env));
+  await waitFor(() => container.querySelector('.qu-pins-bar-row') !== null);
+
+  // Collapsed by default: fewer rows than pinned messages, plus a clickable toggle.
+  assert.ok(container.querySelectorAll('.qu-pins-bar-row').length < ids.length);
+  const toggle = container.querySelector('button.qu-pins-bar-title');
+  assert.ok(toggle, 'expected a clickable title button to expand the collapsed bar');
+  assert.match(toggle.textContent, /Show all/);
+
+  toggle.click();
+  await waitFor(() => container.querySelectorAll('.qu-pins-bar-row').length === ids.length);
+  assert.deepEqual(
+    [...container.querySelectorAll('.qu-pins-bar-row-text')].map((el) => el.textContent).sort(),
+    ids,
+  );
+  assert.match(container.querySelector('button.qu-pins-bar-title').textContent, /Show less/);
+
+  container.querySelector('button.qu-pins-bar-title').click();
+  await waitFor(() => container.querySelectorAll('.qu-pins-bar-row').length < ids.length);
+});
+
+test('renderPinnedBar(): at or below COLLAPSE_ROWS pins, every pin is shown directly with no collapse toggle at all', async () => {
+  const env = await freshEnv();
+  for (const id of ['msg1', 'msg2', 'msg3']) {
+    await env.qu.put(paths.threadMessagePath('forum-space', 'topic1', id), { body: id });
+    await env.services.pins.setPinned('forum-space', 'topic1', id, true);
+  }
+
+  const container = makeContainer();
+  await renderPinnedBar(container, basePayload(env));
+  await waitFor(() => container.querySelectorAll('.qu-pins-bar-row').length === 3);
+  assert.equal(container.querySelector('button.qu-pins-bar-title'), null);
 });

@@ -6,10 +6,11 @@ import { AccessEngine, ThreadEngine } from '@qu/engines';
 import { ListService, AccessService, SharingService, MessageService, FlagService, ActorService, ContactsService, ProfileService, paths } from '@qu/services';
 import { installDom, waitFor } from '@qu/ui/testing';
 import { installFakeRTCPeerConnection } from '../../../packages/webrtc/test/fake-rtc-peer-connection.js';
+import { listMyGames } from '../src/game-service.js';
 
 installFakeRTCPeerConnection();
 installDom();
-const { mount, renderHeaderNavPoints } = await import('../client.js');
+const { mount } = await import('../client.js');
 
 const SPACE_ID = '65a3739c-e0a5-443b-a5ef-4005c8412659'; // real UUID from apps/geochase/manifest.quapp
 const APPS = [{ name: 'geochase', spaceId: SPACE_ID }];
@@ -81,6 +82,39 @@ function segmentsFor(hash) {
   return hash.replace(/^#\//, '').split('/');
 }
 
+/**
+ * Mounts `#/geochase/new` (the draft settings form - see client.js's own
+ * `renderNewGamePage()` doc comment: NOTHING is written to the store just
+ * from mounting this route, req. 2), submits it with the prefilled
+ * defaults, and waits for the resulting redirect into the freshly created
+ * game. Mirrors what every test that used to rely on the old
+ * create-and-redirect-on-mount behavior now has to do explicitly.
+ * @returns {Promise<string>} The new game's own id.
+ */
+async function createGameViaNewPage(container, mountOptions) {
+  window.location.hash = ''; // a stale hash left by an earlier test could otherwise satisfy the waitFor() below instantly
+  // Mirrors apps/shell/client.js's own renderRoute() ordering (stop the
+  // previous mount, THEN clear the screen, before mounting again) - without
+  // this, a caller that already mounted+stopped 'new' once on this SAME
+  // container (e.g. to assert nothing was persisted yet) leaves that stale
+  // form's DOM (and its now-stopped closure's event listeners) sitting in
+  // `container` until THIS mount's own async chain gets around to
+  // `renderSubpage()`'s own container.textContent = '' - a real race the
+  // production shell never hits (it clears synchronously, before ever
+  // awaiting into `mod.mount()`), but a bare `mount()` call here otherwise
+  // would: this helper's own waitFor() below could see the STALE form and
+  // click its long-stopped submit button instead of the new one.
+  container.textContent = '';
+  const stop = mount(container, { ...mountOptions, segments: ['geochase', 'new'] });
+  await waitFor(() => container.querySelector('.qu-geochase-form') !== null);
+  const submitBtn = [...container.querySelectorAll('button[type="submit"]')].find((b) => b.textContent === 'Create game');
+  submitBtn.click();
+  await waitFor(() => /^#\/geochase\/[^/]+$/.test(window.location.hash));
+  stop();
+  container.textContent = ''; // see this function's own top doc comment - leaves `container` clean for whatever the caller mounts into it next
+  return window.location.hash.split('/')[2];
+}
+
 test('renders the empty state when there are no games yet', async () => {
   const { qu, services } = await freshEnv();
   const container = makeContainer();
@@ -94,32 +128,32 @@ test('renders the empty state when there are no games yet', async () => {
   }
 });
 
-test('#/geochase/new creates a fresh game (this identity as chased) and redirects straight into it', async () => {
+test('#/geochase/new renders a draft form that writes NOTHING to the store until submitted, then creates the game on submit', async () => {
   const { qu, services, myPub } = await freshEnv();
   const container = makeContainer();
-  window.location.hash = ''; // see this file's own top-level note in the client.test.js suites this mirrors (apps/todo's/apps/chat's) - a stale hash left by an earlier test could otherwise satisfy the waitFor() below instantly
+  window.location.hash = '';
   const stop = mount(container, { qu, services, apps: APPS, segments: ['geochase', 'new'], subscribe: noopSubscribe });
   try {
-    await waitFor(() => /^#\/geochase\/[^/]+$/.test(window.location.hash));
-    const gameId = window.location.hash.split('/')[2];
-    const config = await services.messages.getConfig(SPACE_ID, `geochase-${gameId}`);
-    assert.equal(config.chasedPub, myPub);
-    assert.equal(config.status, 'pending');
+    await waitFor(() => container.querySelector('.qu-geochase-form') !== null);
+    // req. 2 - merely viewing the draft page must not have created a game yet.
+    const mine = await listMyGames(services);
+    assert.deepEqual(mine, []);
   } finally {
     stop();
   }
+
+  const gameId = await createGameViaNewPage(container, { qu, services, apps: APPS, subscribe: noopSubscribe });
+  const config = await services.messages.getConfig(SPACE_ID, `geochase-${gameId}`);
+  assert.equal(config.chasedPub, myPub);
+  assert.equal(config.status, 'pending');
 });
 
 test('the chased player\'s pending game view shows the settings form, invite panel, a Start button, and themself as chased in the participant list', async () => {
-  const { qu, services, myPub } = await freshEnv();
+  const { qu, services } = await freshEnv();
   const container = makeContainer();
-  window.location.hash = ''; // reset - a stale hash left by an earlier test could otherwise satisfy this test's own waitFor() instantly
-  let stop = mount(container, { qu, services, apps: APPS, segments: ['geochase', 'new'], subscribe: noopSubscribe });
-  await waitFor(() => /^#\/geochase\/[^/]+$/.test(window.location.hash));
-  const gameId = window.location.hash.split('/')[2];
-  stop();
+  const gameId = await createGameViaNewPage(container, { qu, services, apps: APPS, subscribe: noopSubscribe });
 
-  stop = mount(container, { qu, services, apps: APPS, segments: segmentsFor(`#/geochase/${gameId}`), subscribe: noopSubscribe });
+  const stop = mount(container, { qu, services, apps: APPS, segments: segmentsFor(`#/geochase/${gameId}`), subscribe: noopSubscribe });
   try {
     await waitFor(() => container.querySelector('.qu-geochase-form') !== null);
     assert.ok(container.querySelector('.qu-actor-picker input'), 'expected the invite panel\'s actor picker');
@@ -147,11 +181,7 @@ test('a non-member sees "no access", not the game itself', async () => {
   const { qu: strangerQu, services: strangerServices } = await createPeer(ownerQu, { alias: 'Stranger' });
 
   const ownerContainer = makeContainer();
-  window.location.hash = ''; // reset - a stale hash left by an earlier test could otherwise satisfy this test's own waitFor() instantly
-  let stop = mount(ownerContainer, { qu: ownerQu, services: ownerServices, apps: APPS, segments: ['geochase', 'new'], subscribe: noopSubscribe });
-  await waitFor(() => /^#\/geochase\/[^/]+$/.test(window.location.hash));
-  const gameId = window.location.hash.split('/')[2];
-  stop();
+  const gameId = await createGameViaNewPage(ownerContainer, { qu: ownerQu, services: ownerServices, apps: APPS, subscribe: noopSubscribe });
 
   // Mirror the game thread into the stranger's own store, as a real relay sync would -
   // they can SEE it exists (it's unencrypted meta, see game-service.js's own doc comment)
@@ -160,7 +190,7 @@ test('a non-member sees "no access", not the game itself', async () => {
   await strangerQu.putSealed(paths.threadMetaPath(SPACE_ID, `geochase-${gameId}`), bit);
 
   const strangerContainer = makeContainer();
-  stop = mount(strangerContainer, { qu: strangerQu, services: strangerServices, apps: APPS, segments: segmentsFor(`#/geochase/${gameId}`), subscribe: noopSubscribe });
+  const stop = mount(strangerContainer, { qu: strangerQu, services: strangerServices, apps: APPS, segments: segmentsFor(`#/geochase/${gameId}`), subscribe: noopSubscribe });
   try {
     await waitFor(() => strangerContainer.textContent.includes('No access') || strangerContainer.textContent.includes('access'));
     assert.equal(strangerContainer.querySelector('.qu-geochase-form'), null);
@@ -176,13 +206,9 @@ test('inviting a chaser via the actor picker grows the participant list and thei
   await ownerServices.contacts.addContact(chaserPub, {});
 
   const container = makeContainer();
-  window.location.hash = ''; // reset - a stale hash left by an earlier test could otherwise satisfy this test's own waitFor() instantly
-  let stop = mount(container, { qu: ownerQu, services: ownerServices, apps: APPS, segments: ['geochase', 'new'], subscribe: noopSubscribe });
-  await waitFor(() => /^#\/geochase\/[^/]+$/.test(window.location.hash));
-  const gameId = window.location.hash.split('/')[2];
-  stop();
+  const gameId = await createGameViaNewPage(container, { qu: ownerQu, services: ownerServices, apps: APPS, subscribe: noopSubscribe });
 
-  stop = mount(container, { qu: ownerQu, identity: ownerIdentity, services: ownerServices, apps: APPS, segments: segmentsFor(`#/geochase/${gameId}`), subscribe: noopSubscribe });
+  let stop = mount(container, { qu: ownerQu, identity: ownerIdentity, services: ownerServices, apps: APPS, segments: segmentsFor(`#/geochase/${gameId}`), subscribe: noopSubscribe });
   try {
     await waitFor(() => container.querySelector('.qu-actor-picker input') !== null);
     const picker = container.querySelector('.qu-actor-picker input');
@@ -204,13 +230,9 @@ test('starting the game (chased, no chasers) flips it from pending to active - t
   installGeolocationMock();
   const { qu, identity, services, myPub } = await freshEnv();
   const container = makeContainer();
-  window.location.hash = ''; // reset - a stale hash left by an earlier test could otherwise satisfy this test's own waitFor() instantly
-  let stop = mount(container, { qu, services, apps: APPS, segments: ['geochase', 'new'], subscribe: noopSubscribe });
-  await waitFor(() => /^#\/geochase\/[^/]+$/.test(window.location.hash));
-  const gameId = window.location.hash.split('/')[2];
-  stop();
+  const gameId = await createGameViaNewPage(container, { qu, services, apps: APPS, subscribe: noopSubscribe });
 
-  stop = mount(container, { qu, identity, services, apps: APPS, segments: segmentsFor(`#/geochase/${gameId}`), subscribe: noopSubscribe });
+  const stop = mount(container, { qu, identity, services, apps: APPS, segments: segmentsFor(`#/geochase/${gameId}`), subscribe: noopSubscribe });
   try {
     await waitFor(() => [...container.querySelectorAll('button')].some((b) => b.textContent === 'Start the chase'));
     [...container.querySelectorAll('button')].find((b) => b.textContent === 'Start the chase').click();
@@ -230,13 +252,9 @@ test('ending an active game shows "This game has ended."', async () => {
   installGeolocationMock();
   const { qu, identity, services } = await freshEnv();
   const container = makeContainer();
-  window.location.hash = ''; // reset - a stale hash left by an earlier test could otherwise satisfy this test's own waitFor() instantly
-  let stop = mount(container, { qu, services, apps: APPS, segments: ['geochase', 'new'], subscribe: noopSubscribe });
-  await waitFor(() => /^#\/geochase\/[^/]+$/.test(window.location.hash));
-  const gameId = window.location.hash.split('/')[2];
-  stop();
+  const gameId = await createGameViaNewPage(container, { qu, services, apps: APPS, subscribe: noopSubscribe });
 
-  stop = mount(container, { qu, identity, services, apps: APPS, segments: segmentsFor(`#/geochase/${gameId}`), subscribe: noopSubscribe });
+  const stop = mount(container, { qu, identity, services, apps: APPS, segments: segmentsFor(`#/geochase/${gameId}`), subscribe: noopSubscribe });
   try {
     await waitFor(() => [...container.querySelectorAll('button')].some((b) => b.textContent === 'Start the chase'));
     [...container.querySelectorAll('button')].find((b) => b.textContent === 'Start the chase').click();
@@ -251,11 +269,7 @@ test('ending an active game shows "This game has ended."', async () => {
 test('the "Copy link" button copies an absolute, shareable game URL', async () => {
   const { qu, services } = await freshEnv();
   const container = makeContainer();
-  window.location.hash = ''; // reset - a stale hash left by an earlier test could otherwise satisfy this test's own waitFor() instantly
-  let stop = mount(container, { qu, services, apps: APPS, segments: ['geochase', 'new'], subscribe: noopSubscribe });
-  await waitFor(() => /^#\/geochase\/[^/]+$/.test(window.location.hash));
-  const gameId = window.location.hash.split('/')[2];
-  stop();
+  const gameId = await createGameViaNewPage(container, { qu, services, apps: APPS, subscribe: noopSubscribe });
 
   const written = [];
   const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
@@ -264,6 +278,7 @@ test('the "Copy link" button copies an absolute, shareable game URL', async () =
     value: { ...navigator, geolocation: originalGeo, clipboard: { writeText: async (text) => { written.push(text); } } },
     configurable: true,
   });
+  let stop;
   try {
     stop = mount(container, { qu, services, apps: APPS, segments: segmentsFor(`#/geochase/${gameId}`), subscribe: noopSubscribe });
     await waitFor(() => container.querySelector('.qu-geochase-copy-link') !== null);
@@ -276,19 +291,27 @@ test('the "Copy link" button copies an absolute, shareable game URL', async () =
   }
 });
 
-test('renderHeaderNavPoints(): hidden while another app is active, shows "Start a game" -> #/geochase/new once Geo Chase is active', async () => {
-  const container = makeContainer();
-  let appId = 'chat';
-  const listeners = [];
-  renderHeaderNavPoints(container, {
-    getContext: () => ({ appId, segments: [appId] }),
-    onContextChange: (cb) => listeners.push(cb),
-  });
-  const wrap = container.querySelector('.qu-app-header-action');
-  assert.equal(wrap.hidden, true);
+/**
+ * "Start a game" now lives as the game-list view's own `mountAppTemplate()`
+ * `primaryAction` (docs/app-navigation-standard.md Rule 5) instead of a
+ * `shell.headerNavPoints` contribution AND a duplicate inline link in the
+ * page body - see client.js's own top doc comment. On mobile this renders as
+ * a circular FAB (`.qu-apptpl-fab`); on desktop, a prominent link at the top
+ * of the sidebar (`.qu-apptpl-primary-desktop`) - either is enough to prove
+ * the action is wired up.
+ */
+function primaryActionLink(container) {
+  return container.querySelector('.qu-apptpl-fab, .qu-apptpl-primary-desktop');
+}
 
-  appId = 'geochase';
-  listeners.forEach((cb) => cb());
-  assert.equal(wrap.hidden, false);
-  assert.equal(wrap.querySelector('a')?.getAttribute('href'), '#/geochase/new');
+test('the game list\'s own primaryAction is "Start a game", pointing at #/geochase/new', async () => {
+  const { qu, services } = await freshEnv();
+  const container = makeContainer();
+  const stop = mount(container, { qu, services, apps: APPS, segments: ['geochase'], subscribe: noopSubscribe });
+  try {
+    await waitFor(() => primaryActionLink(container) !== null);
+    assert.equal(primaryActionLink(container).getAttribute('href'), '#/geochase/new');
+  } finally {
+    stop();
+  }
 });

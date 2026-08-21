@@ -4,7 +4,7 @@ import { QuStore, MemoryStoreAdapter } from '@qu/core';
 import { QuIdentityEngine, actorPath } from '@qu/identity';
 import { AccessEngine, ThreadEngine } from '@qu/engines';
 import { ListService, AccessService, SharingService, MessageService, FlagService, ActorService, paths } from '@qu/services';
-import { createGame, readGame, inviteChaser, updateGame, listMyGames, discoverInvites, gameThreadId, DEFAULT_SETTINGS } from '../src/game-service.js';
+import { createGame, readGame, inviteChaser, updateGame, listMyGames, discoverInvites, gameThreadId, DEFAULT_SETTINGS, archiveGame, isArchivable, ARCHIVE_AFTER_MS } from '../src/game-service.js';
 
 const SPACE_ID = 'test-geochase-space';
 
@@ -178,4 +178,64 @@ test('discoverInvites(): a chaser who never opened the invite mailbox still gets
 test('readGame(): returns null for a game that was never created', async () => {
   const { services } = await freshEnv();
   assert.equal(await readGame(services, SPACE_ID, 'nope'), null);
+});
+
+test('updateGame(): starting a game sets startedAt once; ending it derives endedAt/durationMs from it, only on the transition into "ended"', async () => {
+  const { qu, identity, services } = await freshEnv();
+  await createGame(services, SPACE_ID, 'g1');
+
+  const started = await updateGame(qu, identity, services, SPACE_ID, 'g1', { status: 'active' });
+  assert.ok(started.startedAt > 0);
+  assert.equal(started.endedAt, null);
+  assert.equal(started.durationMs, null);
+
+  // A second "active" patch (e.g. a settings save while already active) must
+  // not reset startedAt - it's a one-time mark, not re-derived on every write.
+  const stillActive = await updateGame(qu, identity, services, SPACE_ID, 'g1', { settings: { showRadius: false } });
+  assert.equal(stillActive.startedAt, started.startedAt);
+
+  const ended = await updateGame(qu, identity, services, SPACE_ID, 'g1', { status: 'ended', caughtBy: 'some-pub' });
+  assert.ok(ended.endedAt >= started.startedAt);
+  assert.equal(ended.durationMs, ended.endedAt - started.startedAt);
+  assert.equal(ended.caughtBy, 'some-pub');
+
+  // Ending an already-ended game again (a stray double-click) must not shift endedAt/durationMs.
+  const endedAgain = await updateGame(qu, identity, services, SPACE_ID, 'g1', { status: 'ended' });
+  assert.equal(endedAgain.endedAt, ended.endedAt);
+  assert.equal(endedAgain.durationMs, ended.durationMs);
+  assert.equal(endedAgain.caughtBy, 'some-pub'); // untouched by a patch that didn't pass caughtBy
+});
+
+test('updateGame(): startDistances shallow-merges, never overwriting an already-recorded entry', async () => {
+  const { qu, identity, services } = await freshEnv();
+  await createGame(services, SPACE_ID, 'g1');
+
+  const first = await updateGame(qu, identity, services, SPACE_ID, 'g1', { startDistances: { chaserA: 100 } });
+  assert.deepEqual(first.startDistances, { chaserA: 100 });
+
+  const second = await updateGame(qu, identity, services, SPACE_ID, 'g1', { startDistances: { chaserB: 250, chaserA: 999 } });
+  // chaserA's ORIGINAL distance survives - a later "first sighting" of the
+  // same chaser (e.g. a stale duplicate mesh tick) must never overwrite it.
+  assert.deepEqual(second.startDistances, { chaserA: 100, chaserB: 250 });
+});
+
+test('isArchivable(): only an ended game older than ARCHIVE_AFTER_MS qualifies', async () => {
+  assert.equal(isArchivable({ status: 'pending', endedAt: null }), false);
+  assert.equal(isArchivable({ status: 'active', endedAt: null }), false);
+  assert.equal(isArchivable({ status: 'ended', endedAt: Date.now() }), false); // just ended
+  assert.equal(isArchivable({ status: 'ended', endedAt: Date.now() - ARCHIVE_AFTER_MS - 1000 }), true);
+});
+
+test('archiveGame(): unstars the game from THIS identity\'s own listMyGames() without touching the underlying game data', async () => {
+  const { services } = await freshEnv();
+  await createGame(services, SPACE_ID, 'g1');
+  assert.deepEqual((await listMyGames(services)).map((g) => g.id), ['g1']);
+
+  await archiveGame(services, 'g1');
+  assert.deepEqual(await listMyGames(services), []);
+
+  // The game itself is untouched - a soft, per-user delete only (see
+  // archiveGame()'s own doc comment).
+  const meta = await readGame(services, SPACE_ID, 'g1');
+  assert.equal(meta.status, 'pending');
 });

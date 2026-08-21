@@ -11,7 +11,7 @@ import { ExtensionPointHost } from '@qu/foundation';
 import { installDom, waitFor } from '@qu/ui/testing';
 
 installDom();
-const { mount, renderChatSettings, renderHeaderNavPoints, searchChat, resolveChatReference, renderSearchResult } = await import('../client.js');
+const { mount, renderChatSettings, searchChat, resolveChatReference, renderSearchResult } = await import('../client.js');
 
 /** A minimal MediaRecorder test double - start()/pause()/resume()/stop(), stop() synchronously fires ondataavailable then onstop, matching real MediaRecorder's own event order closely enough for startRecording()'s own handler. pause()/resume() just track state (this file's own tests only assert on the DOM state the client itself derives, not on MediaRecorder.state). */
 class FakeMediaRecorder {
@@ -405,6 +405,63 @@ test('reuses apps/reactions\' REAL content.messageFooter extension point - no ch
   }
 });
 
+test('content.messageMenu (pins) / content.topicToolbar: the REAL apps/pins app pins a message via its menu item and shows it in the room\'s own pinned bar, live for a second independent mount; unpinning removes it', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'Pin this one' });
+
+  const PINS_CLIENT_URL = new URL('../../pins/client.js', import.meta.url).href;
+  const appsWithPins = [
+    { name: 'chat', spaceId: CHAT_SPACE_ID },
+    {
+      name: 'pins', clientMainUrl: PINS_CLIENT_URL, contributes: [
+        { point: 'content.messageMenu', export: 'pinMenuItem' },
+        { point: 'content.topicToolbar', export: 'renderPinnedBar' },
+      ],
+    },
+  ];
+
+  const containerA = makeContainer();
+  const containerB = makeContainer();
+  const extensionPointsA = new ExtensionPointHost(appsWithPins);
+  const extensionPointsB = new ExtensionPointHost(appsWithPins);
+  const stopA = mount(containerA, {
+    qu: alice.qu, services: alice.services, apps: appsWithPins, subscribe: noopSubscribe,
+    segments: ['chat', bob.myPub], extensionPoints: extensionPointsA,
+  });
+  const stopB = mount(containerB, {
+    qu: alice.qu, services: alice.services, apps: appsWithPins, subscribe: noopSubscribe,
+    segments: ['chat', bob.myPub], extensionPoints: extensionPointsB,
+  });
+  try {
+    let panelA = await openMessageMenu(containerA);
+    const pinBtn = menuItemButton(panelA, 'Pin');
+    assert.ok(pinBtn, 'expected a "Pin" menu item');
+    pinBtn.click();
+
+    // A second, independent mount of the SAME room sees it live too.
+    await waitFor(() => containerB.querySelector('.qu-pins-bar') !== null);
+    const pinnedRowText = containerB.querySelector('.qu-pins-bar-row-text');
+    assert.match(pinnedRowText.textContent, /Pin this one/);
+    // Clickable - a real permalink, built from chat's own room route, not a
+    // plain unclickable snippet.
+    assert.equal(pinnedRowText.tagName, 'A');
+    const { messages } = await alice.services.messages.listMessages(CHAT_SPACE_ID, roomId);
+    assert.equal(pinnedRowText.getAttribute('href'), `#/chat/${bob.myPub}/m/${messages[0].id}`);
+
+    panelA = await openMessageMenu(containerA); // reopen - menu closed itself on the click above
+    assert.ok(menuItemButton(panelA, 'Unpin'));
+
+    containerB.querySelector('.qu-pins-bar-row button').click(); // unpin via the bar's own X
+    await waitFor(() => containerB.querySelector('.qu-pins-bar') === null);
+  } finally {
+    stopA();
+    stopB();
+  }
+});
+
 test('the "Reply" menu item (native, any message) opens the reply banner and tags the next posted message\'s replyTo', async () => {
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');
@@ -528,6 +585,79 @@ test('muting a room shows a crossed-out bell in the room header immediately, and
     const row = listContainer.querySelector('.qu-chat-room-row');
     assert.ok(row.querySelector('.qu-chat-room-muted'));
     assert.equal(row.querySelector('.qu-chat-room-muted').textContent, '🔕');
+  } finally {
+    stopList();
+  }
+});
+
+test('the room "⋮" menu\'s native "Delete chat" item asks for confirmation, then hides the room from this identity\'s own room list and navigates back to it - the underlying thread is untouched (the other side keeps their own copy)', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  await alice.services.contacts.addContact(bob.myPub);
+  const roomId = await ChatService.roomId([alice.myPub, bob.myPub]);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
+
+    let confirmed = false;
+    window.confirm = (msg) => { confirmed = true; assert.ok(msg.length > 0); return true; };
+
+    const panel = await openRoomMenu(container);
+    assert.ok(menuItemButton(panel, 'Delete chat'));
+    menuItemButton(panel, 'Delete chat').click();
+
+    await waitForAsync(async () => window.location.hash === '#/chat');
+    assert.ok(confirmed);
+
+    // The thread itself is still there (this is a local "hide", not a real delete).
+    const config = await alice.services.messages.getConfig(CHAT_SPACE_ID, roomId);
+    assert.ok(config);
+  } finally {
+    stop();
+  }
+
+  // The room list no longer shows it, even though Bob is still a contact.
+  const listContainer = makeContainer();
+  const stopList = mount(listContainer, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat'] });
+  try {
+    await waitFor(() => listContainer.querySelector('.qu-chat-empty, .qu-chat-room-row') !== null);
+    assert.equal(listContainer.querySelector('.qu-chat-room-row'), null);
+  } finally {
+    stopList();
+  }
+});
+
+test('declining the "Delete chat" confirmation leaves the room in the list untouched', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  await alice.services.contacts.addContact(bob.myPub);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
+    // Different from the previous test's own leftover hash, so an
+    // (incorrect) navigation on decline is still detectable below.
+    window.location.hash = '#/chat/' + bob.myPub;
+    window.confirm = () => false;
+
+    const panel = await openRoomMenu(container);
+    menuItemButton(panel, 'Delete chat').click();
+    await new Promise((resolve) => setTimeout(resolve, 20)); // let any (unwanted) async work settle
+    assert.equal(window.location.hash, '#/chat/' + bob.myPub);
+  } finally {
+    stop();
+  }
+
+  const listContainer = makeContainer();
+  const stopList = mount(listContainer, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat'] });
+  try {
+    await waitFor(() => listContainer.querySelector('.qu-chat-room-row') !== null);
+    assert.ok(listContainer.querySelector('.qu-chat-room-row'));
   } finally {
     stopList();
   }
@@ -1531,27 +1661,133 @@ test('the new-group form has no bespoke back link either - just the shell header
   }
 });
 
-// ===== renderHeaderNavPoints() - the shell.headerNavPoints contributor (see docs/app-navigation-standard.md Rule 2) =====
+// ===== mountAppTemplate() chrome (see docs/app-navigation-standard.md Rule 5) =====
 
-test('renderHeaderNavPoints(): hidden while another app is active, shows a "New chat group" link once Chat becomes active', async () => {
-  const { services } = await freshEnv('Alice');
+test('the room list\'s primaryAction ("+ New group") links to #/chat/new-group, and the desktop sidebar ALSO gets a (desktop-only) room list, while the mobile footer stays fab-only', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  await alice.services.contacts.addContact(bob.myPub);
+
   const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat'] });
+  try {
+    await waitFor(() => container.querySelector('a.qu-apptpl-fab') !== null);
+    const fab = container.querySelector('a.qu-apptpl-fab');
+    assert.equal(fab.getAttribute('href'), '#/chat/new-group');
+    assert.equal(fab.title, 'New chat group');
+    const desktopPrimary = container.querySelector('a.qu-apptpl-primary-desktop');
+    assert.equal(desktopPrimary.getAttribute('href'), '#/chat/new-group');
 
-  let appId = 'calendar';
-  const listeners = [];
-  renderHeaderNavPoints(container, {
-    getContext: () => ({ appId, segments: [appId] }),
-    onContextChange: (cb) => listeners.push(cb),
-    services,
-  });
-  const wrap = container.querySelector('.qu-app-header-action');
-  assert.equal(wrap.hidden, true);
-  assert.equal(wrap.querySelector('a'), null);
+    // The desktop sidebar ALSO shows the room list now (feedback: it felt
+    // inconsistent that only an open room got one) - none marked active,
+    // since no specific room is open here.
+    await waitFor(() => container.querySelector('.qu-apptpl-sidebar .qu-apptpl-list a') !== null);
+    assert.equal(container.querySelector('.qu-apptpl-sidebar .qu-apptpl-list a').textContent, '👤Bob');
+    assert.equal(container.querySelector('.qu-apptpl-sidebar .qu-apptpl-item-active'), null);
 
-  appId = 'chat';
-  listeners.forEach((cb) => cb());
-  assert.equal(wrap.hidden, false);
-  await waitFor(() => wrap.querySelector('a') !== null);
-  assert.equal(wrap.querySelector('a').getAttribute('href'), '#/chat/new-group');
-  assert.equal(wrap.querySelector('a').title, 'New chat group');
+    // But the mobile footer stays fab-only - the room list is ALREADY the
+    // page's own full-width content there, so a pill duplicating it would
+    // be pointless (feedback: "keep rooms on the start page, not a pill").
+    const footer = container.querySelector('.qu-apptpl-footer');
+    assert.equal(footer.classList.contains('qu-apptpl-footer--fab-only'), true);
+    assert.equal(footer.querySelector('.qu-apptpl-pill'), null);
+  } finally {
+    stop();
+  }
+});
+
+test('an open room\'s navigation sidebar lists every room (1:1 + group), the current one active, on desktop only - no primaryAction and no mobile footer at all', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  await mirrorProfileInto(alice, bob.qu);
+  // Bob's own DM-with-Alice room (ChatService's own "creator never sees
+  // their own created group" quirk - see the "createGroup() + posting..."
+  // test above - means BOB, the invited member, is the side whose room
+  // list can show both a 1:1 AND a group at once here, not Alice).
+  await bob.services.contacts.addContact(alice.myPub);
+  const { groupId } = await alice.services.chat.createGroup(CHAT_SPACE_ID, { name: 'Team Rocket', memberPubs: [bob.myPub] });
+  const inviteSpace = await bob.services.chat.myInviteSpace();
+  await mirrorThreadInto(alice, bob.qu, inviteSpace, 'groups');
+  await mirrorThreadInto(alice, bob.qu, CHAT_SPACE_ID, groupId);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: bob.qu, services: bob.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', 'g', groupId] });
+  try {
+    await waitFor(() => container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a').length === 2);
+    const links = [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')];
+    assert.deepEqual(links.map((a) => a.textContent).sort(), ['👤Alice', '👥Team Rocket']);
+    assert.equal(links.map((a) => a.getAttribute('href')).includes(`#/chat/${alice.myPub}`), true);
+    assert.equal(links.map((a) => a.getAttribute('href')).includes(`#/chat/g/${groupId}`), true);
+    const activeLink = container.querySelector('.qu-apptpl-sidebar .qu-apptpl-item-active');
+    assert.equal(activeLink.getAttribute('href'), `#/chat/g/${groupId}`); // the currently open room, not the DM
+
+    // No "+ New group" anywhere inside an open room (feedback: rarely
+    // needed once already inside a room) - neither the desktop sidebar
+    // button nor a mobile FAB.
+    assert.equal(container.querySelector('.qu-apptpl-primary-desktop'), null);
+    assert.equal(container.querySelector('a.qu-apptpl-fab'), null);
+    // And with no primaryAction AND a desktop-only navigation, there's
+    // nothing left for the mobile footer to show at all (feedback: it
+    // duplicated the room's own composer bar right above it).
+    assert.equal(container.querySelector('.qu-apptpl-footer'), null);
+  } finally {
+    stop();
+  }
+});
+
+test('the sidebar\'s filter input matches a group room by a PARTICIPANT\'s name too, not just the group\'s own label - a DM room only needs its own label, since that already IS the other participant\'s name', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  await mirrorProfileInto(alice, bob.qu);
+  await bob.services.contacts.addContact(alice.myPub);
+  const { groupId } = await alice.services.chat.createGroup(CHAT_SPACE_ID, { name: 'Team Rocket', memberPubs: [bob.myPub] });
+  const inviteSpace = await bob.services.chat.myInviteSpace();
+  await mirrorThreadInto(alice, bob.qu, inviteSpace, 'groups');
+  await mirrorThreadInto(alice, bob.qu, CHAT_SPACE_ID, groupId);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: bob.qu, services: bob.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat'] });
+  try {
+    await waitFor(() => container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a').length === 2);
+    const input = container.querySelector('.qu-apptpl-sidebar .qu-apptpl-filter');
+    assert.ok(input);
+    const visibleLabels = () => [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list li')].filter((li) => !li.hidden).map((li) => li.textContent);
+
+    // Searching a participant's name matches BOTH the DM with that person
+    // (its own label already IS their name) AND the group they're in (via
+    // `searchText`, not its own label "Team Rocket") - the whole point of
+    // this feature.
+    input.value = 'alice';
+    input.dispatchEvent(new window.Event('input'));
+    assert.deepEqual(visibleLabels().sort(), ['👤Alice', '👥Team Rocket']);
+
+    // The group's own label still works too, on its own (no participant
+    // name involved), and this time does NOT also match the DM.
+    input.value = 'rocket';
+    input.dispatchEvent(new window.Event('input'));
+    assert.deepEqual(visibleLabels(), ['👥Team Rocket']);
+  } finally {
+    stop();
+  }
+});
+
+test('the room view\'s navigation still populates (for switching AWAY) even when the current group no longer resolves', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  await alice.services.contacts.addContact(bob.myPub);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', 'g', 'does-not-exist'] });
+  try {
+    await waitFor(() => container.textContent.includes('This group doesn\'t exist, or you\'re not a member.'));
+    await waitFor(() => container.querySelector('.qu-apptpl-sidebar .qu-apptpl-list a') !== null);
+    assert.equal(container.querySelector('.qu-apptpl-sidebar .qu-apptpl-list a').getAttribute('href'), `#/chat/${bob.myPub}`);
+    assert.equal(container.querySelector('.qu-apptpl-footer'), null); // still no mobile footer, even in this edge case
+  } finally {
+    stop();
+  }
 });

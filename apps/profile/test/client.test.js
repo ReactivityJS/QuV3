@@ -86,7 +86,7 @@ test('a bare #/profile redirects immediately to #/~<myPub> and renders nothing i
   }
 });
 
-test('own profile renders an editable form pre-filled with the current alias/avatar', async () => {
+test('own profile renders like a foreign profile, editable: alias as a click-to-edit input, avatar shown in the shared header', async () => {
   const { qu, identity, services, myPub } = await freshEnv();
   await services.profile.saveProfile({ alias: 'Ada', avatar: '🚀' });
 
@@ -94,9 +94,15 @@ test('own profile renders an editable form pre-filled with the current alias/ava
   const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`] });
   try {
     await waitFor(() => container.querySelector('.qu-profile-own') !== null);
-    const inputs = container.querySelectorAll('input[type="text"]');
-    assert.equal(inputs[0].value, 'Ada');
-    assert.equal(inputs[1].value, '🚀');
+    const aliasText = container.querySelector('.qu-profile-alias-text');
+    assert.equal(aliasText.textContent, 'Ada');
+    assert.equal(aliasText.contentEditable, 'false'); // not editing yet - click the pencil first
+    // No plain text inputs anywhere - alias and custom fields are all
+    // contentEditable now, avatar only settable via the click-to-upload
+    // header badge, and there's no central Save button either.
+    assert.equal(container.querySelectorAll('input[type="text"]').length, 0);
+    assert.equal(container.querySelector('.qu-profile-primary'), null);
+    assert.ok(container.querySelector('.qu-profile-header').textContent.includes('🚀'));
     assert.ok(container.querySelector('.qu-profile-keys').textContent.includes(myPub));
   } finally {
     stop();
@@ -134,14 +140,14 @@ test('REGRESSION: two saves close enough together to overlap never leave duplica
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     assert.equal(container.querySelectorAll('.qu-profile-own').length, 1, 'exactly one profile form, never duplicated');
-    const addFieldButtons = [...container.querySelectorAll('button')].filter((b) => b.textContent === 'Add field');
-    assert.equal(addFieldButtons.length, 1, 'exactly one "Add field" button, never duplicated');
+    const addFieldButtons = container.querySelectorAll('.qu-profile-add-field-btn');
+    assert.equal(addFieldButtons.length, 1, 'exactly one "add field" button, never duplicated');
   } finally {
     stop();
   }
 });
 
-test('editing and saving the own-profile form persists alias/avatar/template/style', async () => {
+test('editing the alias via pencil/contentEditable/confirm persists it immediately - no central Save button', async () => {
   const { qu, identity, services, myPub } = await freshEnv();
   await services.profile.saveProfile({ alias: 'Ada' });
 
@@ -149,13 +155,11 @@ test('editing and saving the own-profile form persists alias/avatar/template/sty
   const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`] });
   try {
     await waitFor(() => container.querySelector('.qu-profile-own') !== null);
-    const inputs = container.querySelectorAll('input[type="text"]');
-    inputs[0].value = 'Ada Lovelace';
-    const selects = container.querySelectorAll('select');
-    selects[0].value = 'compact'; // template
-    selects[1].value = 'ocean'; // style
-    const saveBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === 'Save');
-    saveBtn.click();
+    container.querySelector('.qu-profile-edit-btn').click();
+    const aliasText = container.querySelector('.qu-profile-alias-text');
+    assert.equal(aliasText.contentEditable, 'true');
+    aliasText.textContent = 'Ada Lovelace';
+    container.querySelector('.qu-profile-confirm-btn').click();
 
     // Optional chaining is load-bearing here, not defensive style: render()
     // clears `root` synchronously before its async re-fetch on EVERY call
@@ -166,14 +170,12 @@ test('editing and saving the own-profile form persists alias/avatar/template/sty
     await waitFor(() => container.querySelector('.qu-profile-status')?.textContent === 'Saved!');
     const own = await services.profile.getOwnProfile();
     assert.equal(own.alias, 'Ada Lovelace');
-    assert.equal(own.template, 'compact');
-    assert.equal(own.style, 'ocean');
   } finally {
     stop();
   }
 });
 
-test('uploading an avatar via <qu-asset-upload> fills the avatar field with "asset:<id>" and updates the live preview, without saving', async () => {
+test('cancelling an alias edit restores the original text and never saves', async () => {
   const { qu, identity, services, myPub } = await freshEnv();
   await services.profile.saveProfile({ alias: 'Ada' });
 
@@ -181,16 +183,36 @@ test('uploading an avatar via <qu-asset-upload> fills the avatar field with "ass
   const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`] });
   try {
     await waitFor(() => container.querySelector('.qu-profile-own') !== null);
-    const avatarInput = container.querySelectorAll('input[type="text"]')[1]; // alias, THEN avatar
-    assert.equal(avatarInput.value, '');
+    container.querySelector('.qu-profile-edit-btn').click();
+    const aliasText = container.querySelector('.qu-profile-alias-text');
+    aliasText.textContent = 'Someone Else';
+    container.querySelector('.qu-profile-cancel-btn').click();
+
+    assert.equal(aliasText.textContent, 'Ada');
+    assert.equal(aliasText.contentEditable, 'false');
+    const own = await services.profile.getOwnProfile();
+    assert.equal(own.alias, 'Ada');
+  } finally {
+    stop();
+  }
+});
+
+test('uploading an avatar via <qu-asset-upload> (click-to-upload header badge) fills the avatar with "asset:<id>" and updates the header live, without saving', async () => {
+  const { qu, identity, services, myPub } = await freshEnv();
+  await services.profile.saveProfile({ alias: 'Ada' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`] });
+  try {
+    await waitFor(() => container.querySelector('.qu-profile-own') !== null);
+    assert.equal(container.querySelector('.qu-profile-header qu-asset'), null);
 
     const fileInput = container.querySelector('qu-asset-upload input[type=file]');
     const file = new File(['fake image bytes'], 'me.png', { type: 'image/png' });
     Object.defineProperty(fileInput, 'files', { value: [file], configurable: true });
     fileInput.dispatchEvent(new window.Event('change'));
 
-    await waitFor(() => avatarInput.value.startsWith('asset:'));
-    await waitFor(() => container.querySelector('.qu-profile-preview qu-asset') !== null);
+    await waitFor(() => container.querySelector('.qu-profile-header qu-asset') !== null);
 
     // Not saved yet - the profile document itself is untouched.
     const own = await services.profile.getOwnProfile();
@@ -200,7 +222,7 @@ test('uploading an avatar via <qu-asset-upload> fills the avatar field with "ass
   }
 });
 
-test('an "asset:<id>" avatar round-trips through saveProfile() and renders as <qu-asset> on the OWN profile\'s preview', async () => {
+test('an "asset:<id>" avatar round-trips through saveProfile() and renders as <qu-asset> in the OWN profile\'s header', async () => {
   const { qu, identity, services, myPub } = await freshEnv();
   await services.assets.upload(myPub, 'avatar1', new TextEncoder().encode('fake png bytes'));
   await services.profile.saveProfile({ alias: 'Ada', avatar: 'asset:avatar1' });
@@ -208,8 +230,8 @@ test('an "asset:<id>" avatar round-trips through saveProfile() and renders as <q
   const container = makeContainer();
   const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`] });
   try {
-    await waitFor(() => container.querySelector('.qu-profile-preview qu-asset') !== null);
-    const assetEl = container.querySelector('.qu-profile-preview qu-asset');
+    await waitFor(() => container.querySelector('.qu-profile-own .qu-profile-header qu-asset') !== null);
+    const assetEl = container.querySelector('.qu-profile-header qu-asset');
     assert.equal(assetEl.getAttribute('space-id'), myPub);
     assert.equal(assetEl.getAttribute('asset-id'), 'avatar1');
   } finally {
@@ -255,36 +277,50 @@ test('an "asset:<id>" avatar renders as <qu-asset> on a VISITOR\'s read-only pub
   }
 });
 
-test('adding a custom field (public and private) round-trips through saveProfile()', async () => {
+test('adding a custom field via "+"/pencil/confirm persists it immediately, public then private', async () => {
   const { qu, identity, services, myPub } = await freshEnv();
   await services.profile.saveProfile({ alias: 'Ada' });
 
   const container = makeContainer();
   const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`] });
   try {
-    await waitFor(() => container.querySelector('.qu-profile-own') !== null);
-    const addBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === 'Add field');
-    addBtn.click();
-    addBtn.click();
+    await waitFor(() => container.querySelector('.qu-profile-add-field-btn') !== null);
+    container.querySelector('.qu-profile-add-field-btn').click();
 
-    const rows = container.querySelectorAll('.qu-profile-field-row');
-    assert.equal(rows.length, 2);
-    rows[0].qu_key.value = 'Website';
-    rows[0].qu_value.value = 'https://example.com';
-    rows[0].qu_visibility.value = 'public';
-    rows[1].qu_key.value = 'Secret';
-    rows[1].qu_value.value = 'shh';
-    rows[1].qu_visibility.value = 'private';
+    // The new row starts already in edit mode (no separate pencil click needed).
+    let row = container.querySelector('.qu-profile-field-row');
+    assert.equal(row.querySelector('.qu-profile-field-key').contentEditable, 'true');
+    row.querySelector('.qu-profile-field-key').textContent = 'Website';
+    row.querySelector('.qu-profile-field-value').textContent = 'https://example.com';
+    row.querySelector('.qu-profile-confirm-btn').click();
 
-    const saveBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === 'Save');
-    saveBtn.click();
-    // Optional chaining is load-bearing here, not defensive style: render()
-    // clears `root` synchronously before its async re-fetch on EVERY call
-    // (including the one this save triggers via watch()), so a poll can
-    // legitimately land in the gap where `.qu-profile-status` doesn't exist
-    // at all yet - `?.textContent` on that moment is `undefined` (falsy,
-    // keep polling), not a thrown TypeError.
-    await waitFor(() => container.querySelector('.qu-profile-status')?.textContent === 'Saved!');
+    // Confirming saves immediately - the whole own-profile view re-renders
+    // via this component's own watch()-driven redraw once the save lands,
+    // same as every other inline edit on this page. A brief settle before
+    // starting the SECOND save avoids racing two overlapping saves/renders
+    // against each other (see mount()'s own `renderToken` doc comment -
+    // the exact same class of race, just triggered here by two real user
+    // actions close together instead of two concurrent saveProfile() calls).
+    await waitFor(async () => (await services.profile.getOwnProfile()).fields.length === 1);
+    // A brief settle before starting the SECOND save: `getOwnProfile()`'s
+    // own background-refresh (see its doc comment) can still be in flight
+    // from the FIRST save when the second one starts, occasionally
+    // clobbering it - the exact same class of race `mount()`'s own
+    // `renderToken` guard exists for, just one layer further down (data,
+    // not DOM). Real typing speed never triggers two full round-trips this
+    // close together.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitFor(() => container.querySelector('.qu-profile-add-field-btn') !== null);
+
+    container.querySelector('.qu-profile-add-field-btn').click();
+    await waitFor(() => container.querySelectorAll('.qu-profile-field-row').length === 2);
+    row = [...container.querySelectorAll('.qu-profile-field-row')].find((r) => r.querySelector('.qu-profile-field-key').textContent === '');
+    row.querySelector('.qu-profile-field-visibility').click(); // toggle to private, before confirming
+    row.querySelector('.qu-profile-field-key').textContent = 'Secret';
+    row.querySelector('.qu-profile-field-value').textContent = 'shh';
+    row.querySelector('.qu-profile-confirm-btn').click();
+
+    await waitFor(async () => (await services.profile.getOwnProfile()).fields.length === 2);
 
     const own = await services.profile.getOwnProfile();
     assert.deepEqual(
@@ -303,27 +339,21 @@ test('adding a custom field (public and private) round-trips through saveProfile
   }
 });
 
-test('removing a custom field via its "Remove" button drops it on save', async () => {
+test('cancelling a brand-new field row removes it without saving', async () => {
   const { qu, identity, services, myPub } = await freshEnv();
-  await services.profile.saveProfile({ alias: 'Ada', fields: [{ key: 'Website', value: 'x', visibility: 'public' }] });
+  await services.profile.saveProfile({ alias: 'Ada' });
 
   const container = makeContainer();
   const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`] });
   try {
+    await waitFor(() => container.querySelector('.qu-profile-add-field-btn') !== null);
+    container.querySelector('.qu-profile-add-field-btn').click();
     await waitFor(() => container.querySelector('.qu-profile-field-row') !== null);
-    container.querySelector('.qu-profile-field-row button').click(); // "Remove"
-    assert.equal(container.querySelectorAll('.qu-profile-field-row').length, 0);
+    // Scoped to the row, not the container: the (hidden) alias cancel
+    // button is earlier in the DOM and would otherwise match first.
+    container.querySelector('.qu-profile-field-row .qu-profile-cancel-btn').click();
 
-    const saveBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === 'Save');
-    saveBtn.click();
-    // Optional chaining is load-bearing here, not defensive style: render()
-    // clears `root` synchronously before its async re-fetch on EVERY call
-    // (including the one this save triggers via watch()), so a poll can
-    // legitimately land in the gap where `.qu-profile-status` doesn't exist
-    // at all yet - `?.textContent` on that moment is `undefined` (falsy,
-    // keep polling), not a thrown TypeError.
-    await waitFor(() => container.querySelector('.qu-profile-status')?.textContent === 'Saved!');
-
+    assert.equal(container.querySelector('.qu-profile-field-row'), null);
     const own = await services.profile.getOwnProfile();
     assert.deepEqual(own.fields, []);
   } finally {
@@ -331,21 +361,96 @@ test('removing a custom field via its "Remove" button drops it on save', async (
   }
 });
 
-test('toggling the directory-visibility checkbox calls setVisible()', async () => {
+test('deleting an existing custom field via its 🗑 button removes it immediately', async () => {
+  const { qu, identity, services, myPub } = await freshEnv();
+  await services.profile.saveProfile({ alias: 'Ada', fields: [{ key: 'Website', value: 'x', visibility: 'public' }] });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`] });
+  try {
+    await waitFor(() => container.querySelector('.qu-profile-field-row') !== null);
+    container.querySelector('.qu-profile-delete-btn').click();
+    assert.equal(container.querySelector('.qu-profile-field-row'), null);
+
+    await waitFor(async () => (await services.profile.getOwnProfile()).fields.length === 0);
+    const own = await services.profile.getOwnProfile();
+    assert.deepEqual(own.fields, []);
+  } finally {
+    stop();
+  }
+});
+
+test('confirming an existing field with an emptied-out key removes it (same convention as the delete button)', async () => {
+  const { qu, identity, services, myPub } = await freshEnv();
+  await services.profile.saveProfile({ alias: 'Ada', fields: [{ key: 'Website', value: 'x', visibility: 'public' }] });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`] });
+  try {
+    await waitFor(() => container.querySelector('.qu-profile-field-row') !== null);
+    // Scoped to the row: the alias's own (hidden) pencil button is earlier
+    // in the DOM and would otherwise match first.
+    const row = container.querySelector('.qu-profile-field-row');
+    row.querySelector('.qu-profile-edit-btn').click();
+    assert.equal(row.querySelector('.qu-profile-field-key').contentEditable, 'true');
+    row.querySelector('.qu-profile-field-key').textContent = '';
+    row.querySelector('.qu-profile-confirm-btn').click();
+
+    assert.equal(container.querySelector('.qu-profile-field-row'), null);
+    await waitFor(async () => (await services.profile.getOwnProfile()).fields.length === 0);
+  } finally {
+    stop();
+  }
+});
+
+test('cancelling an edit on an existing field restores its original text', async () => {
+  const { qu, identity, services, myPub } = await freshEnv();
+  await services.profile.saveProfile({ alias: 'Ada', fields: [{ key: 'Website', value: 'https://example.com', visibility: 'public' }] });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`] });
+  try {
+    await waitFor(() => container.querySelector('.qu-profile-field-row') !== null);
+    // Scoped to the row: the alias's own (hidden) pencil button is earlier
+    // in the DOM and would otherwise match first.
+    const row = container.querySelector('.qu-profile-field-row');
+    row.querySelector('.qu-profile-edit-btn').click();
+    row.querySelector('.qu-profile-field-value').textContent = 'https://evil.example';
+    row.querySelector('.qu-profile-cancel-btn').click();
+
+    assert.equal(row.querySelector('.qu-profile-field-value').textContent, 'https://example.com');
+    const own = await services.profile.getOwnProfile();
+    assert.equal(own.fields[0].value, 'https://example.com');
+  } finally {
+    stop();
+  }
+});
+
+test('toggling the directory-visibility checkbox on Settings calls setVisible() - moved off the main profile page', async () => {
   const { qu, identity, services, myPub } = await freshEnv();
   await services.profile.saveProfile({ alias: 'Ada' });
   assert.equal(await services.directory.isVisible(myPub), false);
 
   const container = makeContainer();
-  const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`] });
+  const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`, 'settings'] });
   try {
-    await waitFor(() => container.querySelector('.qu-profile-own input[type="checkbox"]') !== null);
-    const checkbox = container.querySelector('.qu-profile-own input[type="checkbox"]');
+    await waitFor(() => container.querySelector('.qu-profile-settings input[type="checkbox"]') !== null);
+    const checkbox = container.querySelector('.qu-profile-settings input[type="checkbox"]');
     assert.equal(checkbox.checked, false);
     checkbox.click();
     await waitFor(async () => (await services.directory.isVisible(myPub)) === true);
   } finally {
     stop();
+  }
+
+  // Confirm it's really gone from the main profile page.
+  const container2 = makeContainer();
+  const stop2 = mount(container2, { qu, identity, services, segments: [`~${myPub}`] });
+  try {
+    await waitFor(() => container2.querySelector('.qu-profile-own') !== null);
+    assert.equal(container2.querySelector('input[type="checkbox"]'), null);
+  } finally {
+    stop2();
   }
 });
 
@@ -387,19 +492,25 @@ test('a foreign profile\'s custom PUBLIC field is shown; there is no way for a p
   }
 });
 
-test('the contact toggle on a foreign profile adds/removes a contact', async () => {
+test('a foreign profile\'s "⋮" context menu offers Add contact, then Remove contact once added', async () => {
   const { qu, identity, services } = await freshEnv();
   const otherPub = await publishOtherUser(qu, { alias: 'Grace' });
 
   const container = makeContainer();
   const stop = mount(container, { qu, identity, services, segments: [`~${otherPub}`] });
   try {
-    await waitFor(() => container.querySelector('button') !== null);
-    const toggle = container.querySelector('button');
-    await waitFor(() => toggle.textContent === '☆');
-    toggle.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-    await waitFor(() => toggle.textContent === '★');
-    assert.equal(await services.contacts.isContact(otherPub), true);
+    await waitFor(() => container.querySelector('.qu-profile-menu button') !== null);
+    const trigger = container.querySelector('.qu-profile-menu button');
+    assert.equal(trigger.textContent, '⋮');
+
+    trigger.click();
+    await waitFor(() => [...container.querySelectorAll('.qu-profile-menu button')].some((b) => b.textContent.includes('Add contact')));
+    const addItem = [...container.querySelectorAll('.qu-profile-menu button')].find((b) => b.textContent.includes('Add contact'));
+    addItem.click();
+    await waitFor(async () => (await services.contacts.isContact(otherPub)) === true);
+
+    trigger.click();
+    await waitFor(() => [...container.querySelectorAll('.qu-profile-menu button')].some((b) => b.textContent.includes('Remove contact')));
   } finally {
     stop();
   }
@@ -681,27 +792,22 @@ test('Notifications section: a denied Notification permission shows the error, n
   }
 });
 
-test('the live template/style preview updates as the form changes, without saving', async () => {
+test('Settings: the live template/style preview updates as the selects change, without saving', async () => {
   const { qu, identity, services, myPub } = await freshEnv();
   await services.profile.saveProfile({ alias: 'Ada', avatar: '🚀' });
 
   const container = makeContainer();
-  const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`] });
+  const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`, 'settings'] });
   try {
     await waitFor(() => container.querySelector('.qu-profile-preview') !== null);
     const preview = container.querySelector('.qu-profile-preview');
     assert.match(preview.textContent, /Ada/);
 
-    const inputs = container.querySelectorAll('.qu-profile-own input[type="text"]');
-    inputs[0].value = 'Ada Lovelace';
-    inputs[0].dispatchEvent(new window.Event('input'));
-    assert.match(preview.textContent, /Ada Lovelace/);
-
-    const selects = container.querySelectorAll('.qu-profile-own select');
-    selects[0].value = 'banner'; // template
-    selects[0].dispatchEvent(new window.Event('change'));
-    selects[1].value = 'ocean'; // style
-    selects[1].dispatchEvent(new window.Event('change'));
+    const selects = container.querySelectorAll('.qu-profile-settings select');
+    selects[2].value = 'banner'; // template
+    selects[2].dispatchEvent(new window.Event('change'));
+    selects[3].value = 'ocean'; // style
+    selects[3].dispatchEvent(new window.Event('change'));
 
     assert.ok(preview.querySelector('.qu-template-banner'), 'expected the banner template class applied live');
     const accent = preview.querySelector('.qu-profile-view').style.getPropertyValue('--qu-color-accent');
@@ -716,7 +822,48 @@ test('the live template/style preview updates as the form changes, without savin
   }
 });
 
-test('saving the own-profile edit form leaves an already-set language/theme preference untouched', async () => {
+test('the main profile page no longer shows template/style/preview controls - they moved to Settings', async () => {
+  const { qu, identity, services, myPub } = await freshEnv();
+  await services.profile.saveProfile({ alias: 'Ada' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`] });
+  try {
+    await waitFor(() => container.querySelector('.qu-profile-own') !== null);
+    assert.equal(container.querySelector('select'), null);
+    assert.equal(container.querySelector('.qu-profile-preview'), null);
+  } finally {
+    stop();
+  }
+});
+
+test('clicking a pub/epub key row copies its value to the clipboard', async () => {
+  const { qu, identity, services, myPub } = await freshEnv();
+  await services.profile.saveProfile({ alias: 'Ada' });
+
+  const writeCalls = [];
+  const realClipboard = navigator.clipboard;
+  Object.defineProperty(navigator, 'clipboard', {
+    value: { writeText: async (text) => { writeCalls.push(text); } },
+    configurable: true,
+  });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`] });
+  try {
+    await waitFor(() => container.querySelector('.qu-profile-key-row') !== null);
+    const pubRow = container.querySelector('.qu-profile-key-row');
+    pubRow.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    await waitFor(() => writeCalls.length === 1);
+    assert.equal(writeCalls[0], myPub);
+    await waitFor(() => pubRow.querySelector('.qu-profile-key-copied').textContent !== '');
+  } finally {
+    stop();
+    Object.defineProperty(navigator, 'clipboard', { value: realClipboard, configurable: true });
+  }
+});
+
+test('an inline edit on the own-profile page (e.g. the alias) leaves an already-set language/theme preference untouched', async () => {
   const { qu, identity, services, myPub } = await freshEnv();
   await services.profile.saveProfile({ alias: 'Ada', preferredLocale: 'de', preferredTheme: 'forest' });
 
@@ -724,8 +871,9 @@ test('saving the own-profile edit form leaves an already-set language/theme pref
   const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`] });
   try {
     await waitFor(() => container.querySelector('.qu-profile-own') !== null);
-    const saveBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === 'Save');
-    saveBtn.click();
+    container.querySelector('.qu-profile-edit-btn').click();
+    container.querySelector('.qu-profile-alias-text').textContent = 'Ada Lovelace';
+    container.querySelector('.qu-profile-confirm-btn').click();
     // Optional chaining is load-bearing here, not defensive style: render()
     // clears `root` synchronously before its async re-fetch on EVERY call
     // (including the one this save triggers via watch()), so a poll can

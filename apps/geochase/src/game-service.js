@@ -58,9 +58,33 @@ export const DEFAULT_SETTINGS = {
   mapMode: 'plane', // 'plane' (abstract canvas) | 'osm' (a real interactive Leaflet+OpenStreetMap-tiles map)
   showRadius: true, // the chased player's speed-based "could be anywhere in here" circle
   assumedMinSpeedMps: 1.2, // see geometry.js's own possibleRadiusMeters() doc comment
+  // Granular alert thresholds (both in meters, both user-configurable at
+  // game creation - see client.js's own draft form) - see src/proximity.js's
+  // own doc comment for how these two distinct, edge-triggered alerts work.
+  proximityAlertMeters: 150, // "a chaser is getting close" - the outer warning ring
+  catchRangeMeters: 20, // "close enough to actually tag them" - the inner ring; a chaser inside it may press the Catch button
 };
 
+// A finished game older than this fades out of the main list into a
+// collapsed "Archive" section (client.js's own renderGameListPage()) -
+// purely a client-side read-time filter, no schema/store change - see
+// isArchivable() below and this app's own plan doc for why no real
+// hard-delete/retention primitive exists anywhere else in this codebase to
+// build on top of instead.
+export const ARCHIVE_AFTER_MS = 30 * 24 * 60 * 60_000; // 30 days
+
 export function gameThreadId(gameId) { return `geochase-${gameId}`; }
+
+/**
+ * A finished game old enough to be folded into the collapsed "Archive"
+ * section of the game list, rather than the main list - see
+ * `ARCHIVE_AFTER_MS`'s own doc comment.
+ * @param {object} meta
+ * @returns {boolean}
+ */
+export function isArchivable(meta) {
+  return meta.status === 'ended' && !!meta.endedAt && Date.now() - meta.endedAt > ARCHIVE_AFTER_MS;
+}
 
 /**
  * @param {object} services @param {string|number} spaceId
@@ -79,11 +103,31 @@ export async function createGame(services, spaceId, gameId, settingsOverride = {
     chasedPub,
     members: [{ actorPub: chasedPub, role: 'chased', addedAt: Date.now() }],
     status: 'pending',
+    startedAt: null,
+    endedAt: null,
+    durationMs: null,
+    caughtBy: null,
+    startDistances: {},
     settings: { ...DEFAULT_SETTINGS, ...settingsOverride },
     createdAt: Date.now(),
   });
   await services.flags.setPrivate(FLAG_TYPE, ENTITY_KIND, gameId, true, {});
   return config;
+}
+
+/**
+ * Removes `gameId` from THIS identity's own `listMyGames()` - a soft,
+ * per-user "delete" (mirrors `SharingService.unstar()`'s own convention, see
+ * `sharing-service.js:234-236`): the game's own data (config, members,
+ * track history) is untouched, and any OTHER member still sees it in their
+ * own list. There is no hard-delete anywhere in this codebase to build a
+ * "wipe it for everyone" version on top of (append-only signed/encrypted
+ * QuBits, no `qu.delete()`) - see this app's own plan doc for the explicit
+ * choice.
+ * @param {object} services @param {string} gameId
+ */
+export async function archiveGame(services, gameId) {
+  await services.sharing.unstar(FLAG_TYPE, ENTITY_KIND, gameId);
 }
 
 /** @returns {Promise<object|null>} The game's current config, or null if it doesn't exist (yet). */
@@ -147,22 +191,63 @@ export async function inviteChaser(qu, identity, services, spaceId, gameId, chas
 }
 
 /**
- * Patches `status` and/or `settings` (a shallow merge into the existing
- * `settings` object, so a caller only passing `{mapMode: 'osm'}` doesn't
- * clobber the other settings fields). CHASED-only, same ACL enforcement as
- * `inviteChaser()`.
+ * Patches `status`/`settings` (a shallow merge into the existing `settings`
+ * object, so a caller only passing `{mapMode: 'osm'}` doesn't clobber the
+ * other settings fields) and/or `caughtBy`. CHASED-ONLY, same ACL enforcement
+ * as `inviteChaser()` - `writers: [chasedPub]` means `AccessEngine` itself
+ * rejects this write from any chaser. In practice that means a chaser whose
+ * own proximity check (`src/proximity.js`) reaches catch range only ever
+ * shows them an informational "you're within catch range" state (see
+ * client.js's own Catch button) - only the CHASED player's own device
+ * actually ends the game as caught, e.g. after being tagged in person and
+ * confirming it themselves. This keeps the same single-writer ACL model the
+ * rest of this file already relies on, rather than inventing a second,
+ * cross-actor write path just for this one field.
+ *
+ * `startedAt` is set once, the moment the chased player starts the chase
+ * (`status: 'active'`) - `endedAt`/`durationMs` are then derived
+ * automatically the moment `status: 'ended'` is ever reached (whether from an
+ * explicit `endedAt` or just `status`), never by the caller computing them
+ * itself - this is what req. 5's "duration of the game until the catch" is
+ * built from, without a second write.
+ *
+ * `startDistances` (shallow-merged into the existing map, never replaced
+ * wholesale) records, once per chaser, the great-circle distance between
+ * them and the chased player AT THE MOMENT that chaser's position was first
+ * seen after the chase started - only ever written by the CHASED player's
+ * own device (the one live view that both computes it, via
+ * `src/geometry.js`'s `haversineMeters()`, and holds write access), the
+ * instant it notices a chaser it doesn't have a starting distance for yet
+ * (see client.js's own `updateLiveView()`). Never overwritten afterward, so
+ * it stays a true "how big a head start did they have" figure for later
+ * review, not a live distance readout (the player list already shows that).
  * @param {import('@qu/core').QuStore} qu @param {import('@qu/identity').QuIdentityEngine} identity @param {object} services
  * @param {string|number} spaceId @param {string} gameId
- * @param {{status?: 'pending'|'active'|'ended', settings?: Partial<typeof DEFAULT_SETTINGS>}} patch
+ * @param {{status?: 'pending'|'active'|'ended', settings?: Partial<typeof DEFAULT_SETTINGS>, caughtBy?: string, startDistances?: Record<string, number>}} patch
  */
-export async function updateGame(qu, identity, services, spaceId, gameId, { status, settings } = {}) {
+export async function updateGame(qu, identity, services, spaceId, gameId, { status, settings, caughtBy, startDistances } = {}) {
   const threadId = gameThreadId(gameId);
   const config = await services.messages.getConfig(spaceId, threadId);
   if (!config) throw new Error(`geochase: no game "${gameId}" in space "${spaceId}"`);
+  const nextStatus = status ?? config.status;
+  const startedAt = nextStatus === 'active' && !config.startedAt ? Date.now() : config.startedAt ?? null;
+  const justEnded = nextStatus === 'ended' && config.status !== 'ended';
+  const endedAt = justEnded ? Date.now() : config.endedAt ?? null;
+  const durationMs = justEnded && startedAt ? endedAt - startedAt : config.durationMs ?? null;
   const updated = {
     ...config,
-    status: status ?? config.status,
+    status: nextStatus,
     settings: settings ? { ...config.settings, ...settings } : config.settings,
+    startedAt,
+    endedAt,
+    durationMs,
+    caughtBy: caughtBy ?? config.caughtBy ?? null,
+    // NEW keys only - an existing entry is never overwritten (see this
+    // function's own `startDistances` doc comment above): `startDistances`
+    // spread FIRST, so a caller re-reporting an already-recorded chaser
+    // (e.g. a stale duplicate "first sighting" tick) can't clobber the true
+    // original value.
+    startDistances: startDistances ? { ...startDistances, ...(config.startDistances ?? {}) } : (config.startDistances ?? {}),
   };
   await writeThreadMeta(qu, identity, services, spaceId, threadId, updated);
   return updated;

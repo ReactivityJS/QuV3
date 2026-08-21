@@ -66,7 +66,7 @@
 import { watch } from '@qu/reactive';
 import { paths, THREAD_PRESETS, formatActorLabel, matchesActorQuery } from '@qu/services';
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme, renderSubpage, mountContextSwitcher, renderContextListPage, mountAppHeaderAction, renderNavPointsMenu, mountActorPicker } from '@qu/ui';
+import { injectStyle, ensureTheme, renderSubpage, mountContextSwitcher, renderContextListPage, mountAppHeaderAction, renderNavPointsMenu, mountActorPicker, mountAppTemplate } from '@qu/ui';
 
 const SPACE_ID = 'ff73365b-144a-4285-8e98-ac7f9928a95f'; // this app's own manifest.spaceId - see index.js's own copy of this constant
 const PALETTE = ['#e0483e', '#3e7fe0', '#3ea05e', '#d0a02a', '#9a4fe0', '#e0648a', '#2ab3a6', '#c47a2a'];
@@ -89,7 +89,7 @@ const DICT = {
     delete: 'Delete', edit: 'Edit', noEvents: 'No events.', more: '+{count} more',
     noCalendars: 'No calendars yet — create one below, or wait for an invite.',
     allHidden: 'Every calendar is hidden — check one below to see its events.',
-    calendarsMenu: 'Calendars', close: 'Close',
+    calendarsMenu: 'Calendars', close: 'Close', manageCalendars: 'Manage calendars',
     share: 'Share', shareTitle: 'Share "{title}"', people: 'People', role_owner: 'Owner', role_editor: 'Editor', role_viewer: 'Viewer',
     invite: 'Invite', invitePlaceholder: 'Search by alias or paste a public key…',
     noMatches: 'No matches.', pasteAsIs: 'Invite "~{pub}…"',
@@ -118,7 +118,7 @@ const DICT = {
     delete: 'Löschen', edit: 'Bearbeiten', noEvents: 'Keine Termine.', more: '+{count} weitere',
     noCalendars: 'Noch keine Kalender — unten einen anlegen oder auf eine Einladung warten.',
     allHidden: 'Alle Kalender sind ausgeblendet — unten einen anhaken, um Termine zu sehen.',
-    calendarsMenu: 'Kalender', close: 'Schließen',
+    calendarsMenu: 'Kalender', close: 'Schließen', manageCalendars: 'Kalender verwalten',
     share: 'Teilen', shareTitle: '"{title}" teilen', people: 'Personen', role_owner: 'Besitzer', role_editor: 'Bearbeiter', role_viewer: 'Betrachter',
     invite: 'Einladen', invitePlaceholder: 'Nach Alias suchen oder Public Key einfügen…',
     noMatches: 'Keine Treffer.', pasteAsIs: '"~{pub}…" einladen',
@@ -200,13 +200,13 @@ const STYLE = `
   .qu-cal-event-row { border-left: 4px solid #888; border-radius: 0.3rem; padding: 0.5rem 0.6rem; background: #8881; cursor: pointer; text-decoration: none; color: inherit; display: block; }
   .qu-cal-event-row * { display: block; }
   .qu-cal-event-time { font-size: 0.8em; opacity: 0.7; }
-  .qu-cal-allday-wrap { display: flex; margin: 0.4rem 0 0.6rem; }
+  .qu-cal-allday-wrap { display: flex; margin: 0.4rem 0 0.6rem; overflow-x: auto; -webkit-overflow-scrolling: touch; max-width: 100%; }
   .qu-cal-allday-gutter { width: 3rem; flex-shrink: 0; }
   .qu-cal-allday-grid { flex: 1; min-width: 0; display: grid; grid-auto-rows: 1.6rem; gap: 0.2rem; }
   .qu-cal-allday-bar { grid-row: 1; min-width: 0; display: flex; align-items: center; border-radius: 0.25rem; padding: 0 0.4rem; color: #fff; font-size: 0.78em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; text-decoration: none; box-sizing: border-box; }
   .qu-cal-allday-bar[data-continues-from="true"] { border-top-left-radius: 0; border-bottom-left-radius: 0; }
   .qu-cal-allday-bar[data-continues-to="true"] { border-top-right-radius: 0; border-bottom-right-radius: 0; }
-  .qu-cal-timegrid-wrap { display: flex; border-top: 1px solid var(--qu-color-border, #8884); overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .qu-cal-timegrid-wrap { display: flex; max-width: 100%; border-top: 1px solid var(--qu-color-border, #8884); overflow-x: auto; -webkit-overflow-scrolling: touch; }
   .qu-cal-hours { width: 2.7rem; flex-shrink: 0; }
   .qu-cal-hour-label { height: ${HOUR_PX}px; box-sizing: border-box; font-size: 0.7em; opacity: 0.6; transform: translateY(-0.6em); text-align: right; padding-right: 0.35rem; }
   .qu-cal-daycols { flex: 1; display: flex; }
@@ -672,55 +672,70 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
       }
     }
 
-    container.textContent = '';
-    const root = document.createElement('div');
-    root.className = 'qu-cal-root';
-
-    mountContextSwitcher(root, {
-      renderSidebar: (host) => buildCalendarsSidebar(host, infos, renderMain),
-      variant: 'page',
-      switchHref: '#/calendar/manage',
-      activeLabel: t('title'),
-      heading: t('calendarsMenu'),
+    // The calendars-list sidebar (multi-select show/hide + share/delete/
+    // rename) stays `mountContextSwitcher()`'s `variant: 'page'` - it has its
+    // own per-item management UI that doesn't fit a simple link list (see
+    // docs/app-navigation-standard.md Rule 3), so `mountAppTemplate()`'s own
+    // `navigation` (plain href items only) can't replace it. Instead
+    // `mountAppTemplate()` wraps the WHOLE view purely for its `settings`
+    // gear - "Kalender verwalten" now reaches the exact same `#/calendar/manage`
+    // page `switchHref` already routes to, so the inline "„Kalender" ›"
+    // title-row link (`hideTitleLink: true` below) is no longer needed as a
+    // SECOND way to reach it (Rule 5's "app settings" affordance instead).
+    mountAppTemplate(container, {
+      settings: { items: [{ label: t('manageCalendars'), href: '#/calendar/manage', icon: '📅' }] },
       render: (content) => {
-        if (infos.length === 0) {
-          const empty = document.createElement('p');
-          empty.className = 'qu-cal-empty';
-          empty.textContent = t('noCalendars');
-          content.appendChild(empty);
-        } else if (checked.size === 0) {
-          // Nothing to filter with every calendar hidden - just keep the
-          // typed text (no re-render needed, the empty message doesn't
-          // depend on it), so the filter input stays usable instead of
-          // throwing on the otherwise-required onFilterChange callback.
-          content.appendChild(toolbar(infos, (value) => { filterText = value; }));
-          const empty = document.createElement('p');
-          empty.className = 'qu-cal-empty';
-          empty.textContent = t('allHidden');
-          content.appendChild(empty);
-        } else {
-          // The filter input lives inside toolbar(infos), rendered ONCE per
-          // renderMain() call - typing into it must NOT trigger a full
-          // renderMain() rebuild (that recreates the <input> element itself
-          // from scratch on every keystroke, dropping focus/cursor position
-          // after every single character, confirmed live). Only the view
-          // portion below the toolbar is swapped on a filter change instead,
-          // via this closure's own onFilterChange callback - the toolbar
-          // (and its input) is never touched again until the next REAL
-          // renderMain() (a view/nav/calendar-visibility change).
-          const viewContainer = document.createElement('div');
-          content.appendChild(toolbar(infos, (value) => {
-            filterText = value;
-            viewContainer.textContent = '';
-            viewContainer.appendChild(viewEl(events, infos));
-          }));
-          viewContainer.appendChild(viewEl(events, infos));
-          content.appendChild(viewContainer);
-        }
+        const root = document.createElement('div');
+        root.className = 'qu-cal-root';
+
+        mountContextSwitcher(root, {
+          renderSidebar: (host) => buildCalendarsSidebar(host, infos, renderMain),
+          variant: 'page',
+          switchHref: '#/calendar/manage',
+          activeLabel: t('title'),
+          hideTitleLink: true,
+          heading: t('calendarsMenu'),
+          render: (ctxContent) => {
+            if (infos.length === 0) {
+              const empty = document.createElement('p');
+              empty.className = 'qu-cal-empty';
+              empty.textContent = t('noCalendars');
+              ctxContent.appendChild(empty);
+            } else if (checked.size === 0) {
+              // Nothing to filter with every calendar hidden - just keep the
+              // typed text (no re-render needed, the empty message doesn't
+              // depend on it), so the filter input stays usable instead of
+              // throwing on the otherwise-required onFilterChange callback.
+              ctxContent.appendChild(toolbar(infos, (value) => { filterText = value; }));
+              const empty = document.createElement('p');
+              empty.className = 'qu-cal-empty';
+              empty.textContent = t('allHidden');
+              ctxContent.appendChild(empty);
+            } else {
+              // The filter input lives inside toolbar(infos), rendered ONCE per
+              // renderMain() call - typing into it must NOT trigger a full
+              // renderMain() rebuild (that recreates the <input> element itself
+              // from scratch on every keystroke, dropping focus/cursor position
+              // after every single character, confirmed live). Only the view
+              // portion below the toolbar is swapped on a filter change instead,
+              // via this closure's own onFilterChange callback - the toolbar
+              // (and its input) is never touched again until the next REAL
+              // renderMain() (a view/nav/calendar-visibility change).
+              const viewContainer = document.createElement('div');
+              ctxContent.appendChild(toolbar(infos, (value) => {
+                filterText = value;
+                viewContainer.textContent = '';
+                viewContainer.appendChild(viewEl(events, infos));
+              }));
+              viewContainer.appendChild(viewEl(events, infos));
+              ctxContent.appendChild(viewContainer);
+            }
+          },
+        });
+
+        content.appendChild(root);
       },
     });
-
-    container.appendChild(root);
   }
 
   /**
@@ -813,6 +828,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
         badge.className = 'qu-cal-shared-badge';
         badge.textContent = '🔗';
         badge.title = t('sharedBadge');
+        badge.setAttribute('aria-label', t('sharedBadge'));
         row.appendChild(badge);
       } else {
         const titleSpan = document.createElement('span');
@@ -825,12 +841,14 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
         const shareLink = document.createElement('a');
         shareLink.href = shareHash(info.id);
         shareLink.title = t('share');
+        shareLink.setAttribute('aria-label', t('share'));
         shareLink.textContent = '👥';
         row.appendChild(shareLink);
 
         const deleteBtn = document.createElement('button');
         deleteBtn.type = 'button';
         deleteBtn.title = t('deleteCalendar');
+        deleteBtn.setAttribute('aria-label', t('deleteCalendar'));
         deleteBtn.textContent = '🗑';
         deleteBtn.addEventListener('click', async () => {
           if (!window.confirm(t('deleteCalendarConfirm', { title: info.meta.title || t('untitled') }))) return;
@@ -842,6 +860,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
         const leaveBtn = document.createElement('button');
         leaveBtn.type = 'button';
         leaveBtn.title = t('leave');
+        leaveBtn.setAttribute('aria-label', t('leave'));
         leaveBtn.textContent = '✕';
         leaveBtn.addEventListener('click', async () => {
           if (!window.confirm(t('leaveConfirm', { title: info.meta.title || t('untitled') }))) return;
@@ -929,11 +948,13 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
       prevBtn.type = 'button';
       prevBtn.textContent = '←';
       prevBtn.title = t('prev');
+      prevBtn.setAttribute('aria-label', t('prev'));
       prevBtn.addEventListener('click', () => { shiftCursor(-1); renderMain(); });
       const nextBtn = document.createElement('button');
       nextBtn.type = 'button';
       nextBtn.textContent = '→';
       nextBtn.title = t('next');
+      nextBtn.setAttribute('aria-label', t('next'));
       nextBtn.addEventListener('click', () => { shiftCursor(1); renderMain(); });
       nav.append(prevBtn, nextBtn);
     }

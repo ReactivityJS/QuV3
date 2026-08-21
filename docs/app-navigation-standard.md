@@ -22,7 +22,7 @@ answer for "how do I get back," "where does 'create new X' live," and "how
 do I see/reach the other channels-or-calendars-or-conversations," so every
 app (old and new) looks and behaves the same way.
 
-## The four rules
+## The five rules
 
 ### Rule 1 — Global chrome owns Back/Forward
 
@@ -127,13 +127,15 @@ export function renderHeaderNavPoints(container, { getContext, onContextChange, 
 — on the OTHER slot, so it never actually collides with `order: 10`+ here;
 kept consistent anyway.)
 
-If your items depend on more than just "is my app active" — e.g. Forum's
-"New topic" only makes sense once a specific channel is open — register your
-own `onContextChange` listener from inside `render()` to recompute and
+If your items depend on more than just "is my app active" — e.g. an action
+that only makes sense on a specific sub-route — register your own
+`onContextChange` listener from inside `render()` to recompute and
 re-render on every route change within your app (`mountAppHeaderAction()`
 itself only re-renders on activate/deactivate, not on every internal route
-change). `apps/forum/client.js`'s real `renderHeaderNavPoints()` is the
-working reference for this shape.
+change). `apps/todo/client.js`'s own `shell.headerNavPoints` contribution is
+a working reference for this shape (Forum has since migrated its own
+route-dependent actions onto `mountAppTemplate()`'s `primaryAction`/
+`settings` instead - see Rule 5 below).
 
 The contributor's payload carries `getContext`/`onContextChange` (the current
 route) plus `services`/`qu`/`subscribe`/`syncFetch` — the same ones the
@@ -207,21 +209,209 @@ header's own Back/Forward/bell, `apps/search`'s icon, every icon-only row
 button in Calendar/Chat/Forum); it's now a hard requirement for any new
 icon-only control, not optional polish.
 
+### Rule 5 — The App Template / Footer-Sidebar Chrome
+
+Beyond the global header (Rules 1-2) and the Context Switcher (Rule 3), most
+apps eventually need some version of four more things: a way to switch
+between "places" that's reachable without going through a header slot, a way
+to switch how the current place is *displayed* (day/week/month, list/grid,
+latest/top), one obvious spot to create something new, and a spot for
+app-level settings. Building each of those by hand, per app, is exactly the
+kind of drift this whole document exists to prevent — so `@qu/ui`'s
+`mountAppTemplate()` does it once, as a second, **optional**, per-app-owned
+chrome region: a left sidebar on wide screens, a fixed bottom bar on narrow
+ones. An app hands it a plain data object (`AppConfig`) — navigation items, a
+"views" list, a primary action, settings entries, plus a `render(content)`
+callback for its own UI — and never writes footer/sidebar layout code
+itself. The Core decides placement and sizing; the content element handed to
+`render()` is already constrained to exactly the remaining space.
+
+```js
+import { mountAppTemplate } from '@qu/ui';
+
+mountAppTemplate(container, {
+  navigation: {
+    items: channels.map((c) => ({ id: c.id, label: c.label, href: `#/yourapp/c/${c.id}` })),
+    activeId: currentChannelId,
+    heading: 'Channels',
+  },
+  views: {
+    items: [{ id: 'latest', label: 'Latest', href: '#/yourapp/v/latest' }, { id: 'top', label: 'Top', href: '#/yourapp/v/top' }],
+    activeId: currentView,
+  },
+  primaryAction: { label: 'New topic', href: '#/yourapp/new', icon: '✏️' },
+  settings: { items: [{ label: 'Manage channels', href: '#/yourapp/manage' }] },
+  render: (content) => { /* your app's own main view, full-width/full-height */ },
+});
+```
+
+**Every section is optional, and an empty section renders nothing.** An app
+that passes only `render` gets zero chrome — the content area is exactly
+100% of the container. An app that passes only `primaryAction` gets a single
+floating action button in the bottom-right corner instead of a full-width
+bar, since there's no bar content to build one around.
+
+**Why a FAB is fine here, when this document used to reject one outright:**
+Calendar's *old* FAB (see the Before/After diagrams above) was a floating
+button with no system behind it — every app that wanted one built its own,
+inconsistently, and it could sit wherever it liked on top of content. This
+FAB is different in kind: it's one field (`primaryAction`) in a single,
+Core-owned, data-driven template that every app renders identically, exactly
+the same reasoning that already justifies the App Navigation Points Slot
+(Rule 2) existing as a fixed, predictable location. The two aren't
+competing — `shell.headerNavPoints` remains valid for apps that already use
+it (Calendar, Chat, ToDo, Forum are not required to migrate), but **new**
+apps should reach for `mountAppTemplate()`'s `primaryAction` first: it keeps
+the "create X" action next to the rest of that app's own chrome
+(navigation/views/settings) instead of splitting it across the global header
+and the app's own UI.
+
+**No bottom sheet, no drawer/scrim** — same reasoning as Rule 3's rejection
+of a JS-toggled overlay for the Context Switcher (no route, no Back/Forward
+support of its own). A `navigation`/`views` pill with more than one item, and
+the settings gear, open a small, anchored popup of real `<a href>` links —
+the exact same shape `renderNavPointsMenu()`'s 2+-item dropdown and the shell
+header's own user menu already use, not a full-screen overlay.
+
+```
+Mobile (<720px), fixed footer:
+┌──────────────────────────────────────────────────┐
+│ [💬 #general ▾]   [👁️ Latest ▾]        ⚙️   (✏️) │
+└──────────────────────────────────────────────────┘
+  navigation pill      views pill          settings  primaryAction
+  (popup of real       (popup of real      gear      (a real link,
+   links)                links)            (popup)    styled as a FAB)
+
+Desktop (≥720px), left sidebar (content sits to its right, flex: 1):
+┌────────────────────────┐
+│ [ ✏️ New topic       ] │  <- primaryAction, prominent, top
+├────────────────────────┤
+│ CHANNELS                │
+│  • # general             │  <- navigation
+│  • # random            3 │
+├────────────────────────┤
+│ latest   top             │  <- views
+├────────────────────────┤
+│                          │
+│ ⚙ Manage channels        │  <- settings, pinned to the bottom
+└────────────────────────┘
+```
+
+See `apps/_template/`'s `renderFolderView()` for a complete, tested, working
+example (`navigation` + `primaryAction`). `apps/notifications/client.js` is a
+second real example, of `views` specifically: its old "Show all (incl. read)"
+button (in-place JS state) is now two real routes, `#/notifications`
+(unread-only, the default) and `#/notifications/all`, decided once at mount
+time from `segments[1]` and rendered as the `views` pill — the exact "real
+route instead of a toggle" trade-off Rule 2's own "New topic" migration
+already made, applied here to a view switch instead of a create action.
+
+Every app's MAIN view — even one with none of `navigation`/`views`/
+`primaryAction`/`settings` today — should still go through
+`mountAppTemplate()`, passing only `render`. `apps/app-list`,
+`apps/contact-list`, `apps/user-list`, and `apps/bookmarks` do exactly this:
+zero visible change today (an empty config renders zero chrome, content gets
+100% of the container, same as calling `render()` directly), but the app is
+already wired into the one Core-owned chrome entry point — adding
+`primaryAction`/`navigation`/`views`/`settings` later is a config change, not
+a rewrite of how the app boots.
+
+`apps/phone/client.js` is the example for a MULTI-ROUTE app where none of
+the four chrome fields fit any route: each of its 5 routes (call-starter,
+caller/audio, caller/video, callee, decline) is still its own
+chrome-less `mountAppTemplate(container, { render })` call — a real page with
+a real route, exactly per this rule — but none contributes a `navigation`
+item. `accept`/`decline` in particular are never reached through any menu at
+all (only via a notification click, an in-app toast action, or another app's
+`content.chatRoomMenu` contribution) — a route doesn't need a nav entry to
+be a "real page" in this sense. The call view's own full-bleed, fixed-position
+styling (`.qu-phone-call-view`) is untouched by the wrap — a chrome-less
+`mountAppTemplate()` call adds no visible sidebar/footer, so a
+`position: fixed` overlay inside its `content` element behaves exactly as
+before. (Phone's own hand-rolled `position: fixed` predates the `fullHeight`
+option below — `apps/chat/client.js` is the app that actually needed it,
+since its room view ALSO needs a `navigation` sidebar alongside the fixed
+box, which Phone's call view never does; migrating Phone's own CSS onto
+`fullHeight: true` too is a reasonable follow-up, not required.)
+
+**`fullHeight: true`** binds `content` (and the sidebar, if any) to exactly
+the remaining VIEWPORT height below the shell header, real `position: fixed`
+under the hood (see `@qu/ui`'s `app-template.js` own "FULL HEIGHT MODE" doc
+comment for the full "why fixed, not `calc(100vh - ...)`" reasoning) — for a
+messenger-style view with its own internal header/scroll-region/composer
+structure. `apps/chat/client.js`'s `mountRoomView()` is the real example: an
+open room mounts with `fullHeight: true` AND a `navigation` section listing
+every room (1:1 + group), the current one active — a genuine room-switcher
+sidebar on wide screens, so switching rooms no longer means going back to
+`#/chat` first (this used to be an explicitly out-of-scope gap in this doc).
+
+**`navigation`/`views`/`settings`' `desktopOnly: true`** keeps a section OUT
+of the mobile footer entirely — no pill, and it doesn't count towards
+deciding whether a footer bar exists at all — while it still shows normally
+in the desktop sidebar. Two real uses in `apps/chat/client.js`, from actual
+usability feedback on the first version of this migration: the room LIST
+(`mountRoomListView()`) now also passes its own room list as a `desktopOnly`
+`navigation` section, so the desktop sidebar matches an open room's (it felt
+inconsistent that only an open room got one) — `desktopOnly` because the
+room list is ALREADY that same list, full-width, as the page's own content
+on narrow screens, so a mobile pill duplicating it would be pointless. An
+open room (`mountRoomView()`) has NO `primaryAction` at all anymore ("+ New
+group" lives on the room list only — rarely needed once already inside a
+room) and its own `navigation` is `desktopOnly` too — with nothing left for
+the mobile footer to show, `mountAppTemplate()` renders no footer there at
+all, so the room's own composer bar is the only bottom bar on a phone,
+instead of a second, duplicate-looking one sitting right above it.
+
+**`navigation`/`views`/`settings`' `filter: true`** adds a live search input
+above the list - both in the desktop sidebar and in the mobile pill's popup -
+that hides any item whose `label` (plus `searchText`, if an item sets it)
+doesn't match, case-insensitively, as substrings; empty input shows
+everything again. Both Chat's room list and Forum's channel list set it on
+their own `navigation` now: a channel's own name is already the whole
+story, but a chat room's isn't always - a DM room's `label` already IS the
+other participant's name, but a GROUP room's `label` is the group's own
+name, so searching for a member who isn't in that name would otherwise find
+nothing; `listRooms()` (`apps/chat/client.js`) resolves each group's member
+names once and `roomsToNavItems()` carries them as `searchText`, purely for
+matching - never shown on screen. Leave `filter` off for a short, stable
+list where a search box would just be one more thing on screen.
+
+Both views' `navigation` depends on an async fetch (contacts/groups, and -
+room list only - a group-creation policy check) that isn't ready at the one
+synchronous `mountAppTemplate()` call every app makes —
+**`stopTemplate.update(partialConfig)`** (the function `mountAppTemplate()`
+returns also carries this property — see that function's own "LATE-ARRIVING
+CHROME DATA" doc comment) fills chrome in once that resolves, without
+re-calling `render()` or disturbing the app's own already-mounted content.
+`apps/chat/client.js`'s `listRooms()` is the one place that computes "what
+rooms exist, in what order, with what unread/muted state", shared by both
+the rich room-list view and the lightweight `navigation` items either view
+builds from the same data via `roomsToNavItems()`.
+
 ## Building a new app? A checklist
 
-1. Copy `apps/_template/` — it implements all four rules above, working and
+1. Copy `apps/_template/` — it implements every rule above, working and
    tested. Rename the directory, `manifest.quapp`'s `name`/`label`/`icon`,
    and restore `"clientMain": "./dist/client.js"` (the template omits it on
    purpose, so it's never itself bundled/catalog-listed).
 2. No custom back link, anywhere. `renderSubpage({ showBackLink: false })`
    for every subpage.
-3. One `shell.headerNavPoints` contribution if you have one or more "create
-   new X" actions that navigate to their own route (`renderNavPointsMenu()`
-   renders 1 as a plain link, 2+ as a dropdown). Nothing if every create
-   action is composed inline (a form at the bottom of a list, a composer).
-4. `mountContextSwitcher()` if you have more than one sibling place to be —
-   `variant: 'tabs'` for a short/stable list, `variant: 'page'` for a longer
-   one or one with its own management UI.
+3. Route your app's MAIN view through `mountAppTemplate()` (Rule 5), even if
+   you pass only `render` — that's the standard entry point now, chrome-less
+   by default. Add `primaryAction`/`navigation`/`views`/`settings` (any
+   combination, omit the rest) the moment your app actually has a "create new
+   X" action, more than one sibling place to switch between, more than one
+   way to view the current place, or app-level settings — never build that
+   chrome by hand. `mountAppTemplate()`'s `primaryAction` is now the
+   recommended home for a NEW app's "create new X" action; a plain
+   `shell.headerNavPoints` contribution (`renderNavPointsMenu()` renders 1
+   item as a plain link, 2+ as a dropdown) is still valid for apps that
+   already use it.
+4. `mountContextSwitcher()` if you need a channel/calendar-style switcher
+   OUTSIDE of `mountAppTemplate()`'s own `navigation` section (e.g. a
+   dedicated `variant: 'page'` management page) — `variant: 'tabs'` for a
+   short/stable list, `variant: 'page'` for a longer one or one with its own
+   management UI.
 5. Every icon-only control gets a `title` + `aria-label`.
 6. Read [`docs/building-an-app.md`](./building-an-app.md) for everything
    else — the `mount(container, ctx)` contract, Services, extension points,
@@ -301,102 +491,95 @@ Room view:
 ### Forum
 
 ```
-BEFORE (mobile, v1 of the migration - a real regression, since fixed):
+BEFORE (mobile, hand-rolled mini sidebar - the "before" for the Rule 5 migration):
 ┌──────────────────────────────┐
-│ [General][Team][Support][Ops] │  <- horizontal scroll, forced sideways
-│ [Random][Off-topic][Archive]…│     scrolling once there were more than
-├──────────────────────────────┤     a handful of channels
-│  Announcements                │
-│  [topics...]                  │
-└──────────────────────────────┘
-
-AFTER (mobile) - the shared sidebar list (mountContextSwitcher, variant:
-'tabs') collapses to a native <select> below 720px instead of a
-horizontally-scrolling strip - shows the active channel/"All channels" as
-its current value, no width problem at any channel count, no custom
-open/close/positioning code. The board view (no channel open) contributes
-just 1 nav-points item, a plain "+" (New channel):
-Global header:  🏠  ←  →  [+]  ⋯  🔔  👤   <- "+" = New channel only, next to Back/Forward
-┌──────────────────────────────┐
-│  ▾ All channels                │
+│ [General][Team][Support][Ops] │  <- own scroll strip / <select>, own CSS,
+│ [Random][Off-topic][Archive]…│     nothing shared with mountAppTemplate()
 ├──────────────────────────────┤
 │  Announcements                │
 │  [topics...]                  │
+├──────────────────────────────┤
+│  + New channel  (header nav points, board view only)
 └──────────────────────────────┘
 
-Opening a channel adds a SECOND nav-points item ("New topic" - its own
-route now, `#/forum/c/<id>/new-topic`, replacing the old inline title field
-at the bottom of the topic list), so the header shows a dropdown instead of
-a plain link:
-Global header:  🏠  ←  →  [⋯▾]  ⋯  🔔  👤   <- 2 items now → a small dropdown, not a plain "+"
-                          ├ New channel
-                          └ New topic
+AFTER (mobile) - board/channel views now go through mountAppTemplate() like
+every other Rule-5 app: the channel list is `navigation` (NOT desktopOnly -
+switching channels is a core action here, unlike Chat's open room), "+ New
+topic" is the view's own `primaryAction` FAB, "+ New channel" moved into the
+`settings` gear popup (freeing `primaryAction` from having to represent two
+different actions):
 ┌──────────────────────────────┐
-│  Announcements                 │  <- no inline "new topic" form here anymore
-│  [topics...]                   │
+│  Announcements            ⚙️  │  <- ⚙️ opens "+ New channel"
+│  [topics...]                  │
+│         ▾ Announcements  (+)  │  <- channel pill (popup: all channels) + New-topic FAB
 └──────────────────────────────┘
 
-AFTER (desktop, ≥720px) - unchanged, a persistent vertical sidebar:
+The topic ("room") view is the same `fullHeight: true` + `navigation`
+`desktopOnly: true` shape as Chat's open room (see above) - no
+`primaryAction`/`settings` there, so on mobile the topic's own composer is
+the only bottom bar, no duplicate footer:
+┌──────────────────────────────┐
+│  Announcements                │
+│  [messages...]                │
+│  [composer]                    │  <- the ONLY bottom bar
+└──────────────────────────────┘
+
+AFTER (desktop, ≥720px) - a persistent `mountAppTemplate()` sidebar, present
+on the board view, an open channel, AND an open topic (desktopOnly there):
 ┌────────────┬───────────────────┐
-│ Channels   │  Announcements    │
-│  All chan. │  [topics...]      │
-│  General   │                   │
-│  Team      │                   │
+│ All chan.  │  Announcements    │
+│ General    │  [topics/messages]│
+│ Team       │                   │
+│ [+New topic│ desktop-primary]  │
 └────────────┴───────────────────┘
 ```
 
 Forum was already compliant on Rule 1 (its subpages already used
-`renderSubpage({ showBackLink: false })`). The migration moved its channel
-list onto the shared `mountContextSwitcher()` shell (`variant: 'tabs'`, via
-a `renderSidebar` override — its channel-list data fetch/live-watch logic is
-non-trivial enough, like Calendar's calendars, to keep self-managed rather
-than flattened into a plain `items` array) so it shares real CSS/layout with
-Calendar's sidebar instead of a parallel, hand-maintained copy — and moved
-"+ New channel" (and later, "New topic") into the global header's App
-Navigation Points Slot (Rule 2), matching Calendar's/Chat's own shape for
-"New channel" alone, and becoming the first REAL 2-item dropdown once "New
-topic" joined it — rather than leaving either as an inline entry.
+`renderSubpage({ showBackLink: false })`). The Rule 5 migration retired the
+app's own hand-rolled `mountMiniChannelSidebar()`/`shell.headerNavPoints`
+contribution (`renderHeaderNavPoints()`) entirely in favor of
+`mountAppTemplate()`, following the exact pattern this doc's Chat section
+already established: `channelsToNavItems(channels)` is the one shared mapper
+every view (board, channel, topic) builds its `navigation` items from, kept
+in sync with the live channel list the same way Chat's `roomsToNavItems()`
+does; `applyNewChannelSettings()` fills in the `settings` gear once the
+channel-creation policy check resolves, via `stopTemplate.update(...)` (see
+this doc's "LATE-ARRIVING CHROME DATA" reference above), reused by both the
+board and channel views.
 
-**A real bug shipped in the first version of this migration**, since fixed:
-the reused `mountMiniChannelSidebar()` did `root.className = '...'` — a
-blind assignment that silently wiped the `.qu-ctxswitch-sidebar` class
-`mountContextSwitcher()` had already put on that same element, breaking its
-own responsive CSS and producing exactly the "too wide, forces horizontal
-scrolling" symptom shown above. **Lesson for any future `renderSidebar`
-override**: only ever `classList.add()` your own class onto the `host`
-element you're handed — never reassign `className` wholesale, since the
-host is already carrying the shared component's own class.
-
-**"New topic" trades one step of convenience for consistency**: it used to
-be a title field right at the bottom of the open channel's topic list — type
-a title, hit enter, done, no page change. It's now a real subpage
-(`#/forum/c/<channelId>/new-topic`, reached via the header's Nav Points
-dropdown) like every other "create X" in this codebase, which costs one
-extra step (open the dropdown → New topic → the page → submit) in exchange
-for a shareable/bookmarkable creation URL and the same shape Rule 2 already
-gives every other dedicated-route action.
+**"New topic" is now reached two ways**: the board view's own `primaryAction`
+(`#/forum/new-topic` - no channel picked yet, so the form adds a `<select>`
+that's disabled until the channel list resolves) and an open channel's own
+`primaryAction` (`#/forum/c/<channelId>/new-topic` - channel already known,
+no picker). Both routes share one `mountNewTopicView()`, and the form itself
+now takes the topic's opening post right there too - title, content
+textarea, and an optional attachment, the same upload lifecycle the topic
+view's own composer uses - rather than creating an empty topic that still
+needs its first reply typed separately.
 
 ## What's explicitly out of scope (for now)
 
-- **Chat has no Context Switcher yet.** It has no sidebar of any kind today
-  — switching rooms means going back to `#/chat` and picking a different
-  row. Building one is new functionality, not cleanup of existing chrome;
-  the natural shape once someone picks it up is
-  `mountContextSwitcher(..., variant: 'page')` (a room list can grow long —
-  DMs plus groups — so `'page'`, not `'tabs'`).
-- **ToDo has no Context Switcher either** — the exact same gap as Chat's,
-  one level up: switching lists means going back to `#/todo` and picking a
-  different row, with no way to jump straight from one open list to a
-  sibling. ToDo IS on Rule 2 (`shell.headerNavPoints`, its "+ New task" icon)
-  — only Rule 3 is unbuilt. It's a strong `variant: 'page'` candidate: its
-  existing `#/todo` (list picker + create form) and `#/todo/manage`
-  (rename/share/delete/leave) pages are already almost exactly the
-  `renderSidebar`/`renderContextListPage()` shape Calendar's own calendar
-  list uses — the natural next step is consolidating those two into one
-  `renderSidebar` callback shared between a persistent sidebar (desktop,
-  alongside an open list's tasks) and the full `/manage` page (mobile),
-  the same way Calendar's migration did it.
-- **Apps with no navigation chrome of their own** — Bookmarks, Notifications,
-  Pins, Reactions, Contact List, User List, App List, Search, Relay Admin —
-  are unchanged. They comply automatically, by following this doc and
-  `apps/_template/`, whenever they grow a subpage or a create action.
+- **ToDo and Calendar are now on `mountAppTemplate()` too** — ToDo's list
+  picker/list page/"Mir zugewiesen" aggregate route through it with a
+  `navigation` switcher (built from the same list-fetching logic every page
+  already needed), a per-route `primaryAction` ("New list" everywhere, "New
+  task" only once a specific editable list is open) replacing the older
+  `shell.headerNavPoints` contribution entirely, and a `settings` entry for
+  "Listen verwalten" (`#/todo/manage` — previously unreachable from any link
+  in the app). Calendar's own calendars sidebar stays `mountContextSwitcher()`
+  (its per-item show/hide+share+delete UI still doesn't fit a plain link
+  list), but the whole view is now ALSO wrapped in `mountAppTemplate()` purely
+  for its `settings` gear — "Kalender verwalten" reaches `#/calendar/manage`
+  from there instead of the old inline "„Kalender" ›" title-row link, which is
+  now suppressed via `mountContextSwitcher()`'s new `hideTitleLink` option.
+- **Pins, Reactions** are unchanged — both only contribute to other apps'
+  extension points and have no `mount()` UI of their own, so `mountAppTemplate()`
+  doesn't apply. **Search and Relay Admin are now also on `mountAppTemplate()`**
+  (chrome-less — `render` only, since neither has a natural `navigation`/
+  `views`/`primaryAction`/`settings`), completing this doc's own migration
+  checklist for every app under `apps/*`. **Geo Chase** (`apps/geochase`) was
+  built after this doc's first pass, on the older pre-`mountAppTemplate()`
+  toolkit; it's since been migrated too — the game list (`#/geochase`) is the
+  one `mountAppTemplate()` call, `primaryAction: "Start a game"` replacing
+  both its old `shell.headerNavPoints` contribution and a second, duplicate
+  inline link in the page body.

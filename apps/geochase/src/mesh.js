@@ -12,7 +12,16 @@ const log = createLogger('geochase:mesh');
  * GEOCHASE MESH — this pilot's own composition wiring for the WebRTC-as-
  * app-feature foundation (see the plan's "Ein Mount, zwei Zugriffsformen,
  * ein pluggable Backend" / "Persistenz & Re-Sync für private Direktkanäle"
- * sections): a SECOND, independent `QuStore` (`p2pQu`) mounts a `p2p` mount
+ * sections). NO LONGER WIRED FROM `client.js` - Geo Chase's live position
+ * channel moved onto the relay-backed store instead (see
+ * `track-service.js`'s own top doc comment for why: a P2P mesh depends on a
+ * direct connection actually forming between every pair of devices, which
+ * turned out not to be reliable enough for something the game itself
+ * depends on). Kept here, still fully tested (`test/mesh.test.js`), as a
+ * ready building block for a future feature that genuinely needs P2P (e.g.
+ * voice) - not because this app still uses it.
+ *
+ * Architecturally: a SECOND, independent `QuStore` (`p2pQu`) mounts a `p2p` mount
  * backed by `@qu/webrtc`'s `WebRTCAdapter` - state side (`put`/`get`/
  * `getChildren`) for player positions, backed by a plain `MemoryStoreAdapter`
  * (positions don't need to survive a reload - a fresh WebRTC handshake would

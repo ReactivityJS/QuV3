@@ -11,8 +11,5 @@
   "requires": [],
   "pushActions": [
     { "id": "geochase-invite", "label": "Geo Chase game invitations", "type": "mention", "urlTemplate": "#/geochase/{gameId}" }
-  ],
-  "contributes": [
-    { "point": "shell.headerNavPoints", "export": "renderHeaderNavPoints", "kind": "ui", "order": 10 }
   ]
 }

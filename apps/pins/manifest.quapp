@@ -7,6 +7,6 @@
   "requires": [],
   "contributes": [
     { "point": "content.messageMenu", "export": "pinMenuItem", "kind": "menu", "order": 0 },
-    { "point": "forum.topicToolbar", "export": "renderPinnedBar", "kind": "ui", "order": 0 }
+    { "point": "content.topicToolbar", "export": "renderPinnedBar", "kind": "ui", "order": 0 }
   ]
 }

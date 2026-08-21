@@ -1,6 +1,6 @@
 import { projectLocal, fitScaleMetersPerPixel } from './geometry.js';
 
-/** Same chased/self/chaser color scheme `map-leaflet.js` uses - kept here too so both renderers, the live player list, and the legend all agree on one palette (`client.js` reuses these directly for the legend/player-list dots, not a re-declared copy). */
+/** Shared chased/self/chaser color scheme - kept here so both renderers, the live player list, and the legend all agree on one palette (`client.js`/`map-leaflet.js` reuse these directly, not a re-declared copy). */
 export const PLAYER_COLORS = { chased: '#e5484d', self: '#12a594', chaser: '#5b5bd6' };
 
 /** @param {string} actorPub @param {string} chasedPub @param {string} selfPub @returns {string} */
@@ -14,9 +14,9 @@ export function colorFor(actorPub, chasedPub, selfPub) {
  * `DEFAULT_SETTINGS` doc comment). Centers on `centerOn`'s own latest known
  * position (falling back to whichever player IS known, for a view before
  * that specific target has ever reported in), auto-zooms to fit every
- * player, their trails, and the radius circle, and draws each player as a
- * colored dot (chased/self/other distinguished by color, see `PLAYER_COLORS`
- * above) with their label.
+ * player, the radius circle(s), and any track history, and draws each
+ * player as a colored dot (chased/self/other distinguished by color, see
+ * `PLAYER_COLORS` above) with their label.
  *
  * jsdom (this repo's test DOM) has no real Canvas 2D implementation -
  * `canvas.getContext('2d')` returns `null` there, so this bails out (a
@@ -35,10 +35,15 @@ export function colorFor(actorPub, chasedPub, selfPub) {
  *   radiusMeters?: number,
  *   labelFor?: (actorPub: string) => string,
  *   centerOn?: 'chased'|'self',
- *   trails?: Map<string, Array<{lat: number, lng: number}>>,
- * }} options
+ *   extraCircles?: Array<{radiusMeters: number, color: string}>,
+ *   tracks?: Map<string, Array<{lat: number, lng: number}>>,
+ * }} options - `extraCircles` (req. 8) draws additional dashed rings around
+ *   the chased player (e.g. the proximity-alert/catch-range thresholds),
+ *   alongside the existing speed-based "possible radius" one. `tracks`
+ *   (req. 5/6) draws each player's own persisted route history
+ *   (`track-service.js`'s `listTrackPoints()`) as a faint trailing line.
  */
-export function renderPlaneMap(canvas, { players, chasedPub, selfPub, radiusMeters = 0, labelFor = (pub) => pub.slice(0, 6), centerOn = 'chased', trails = new Map() }) {
+export function renderPlaneMap(canvas, { players, chasedPub, selfPub, radiusMeters = 0, labelFor = (pub) => pub.slice(0, 6), centerOn = 'chased', extraCircles = [], tracks = null }) {
   const ctx = canvas.getContext && canvas.getContext('2d');
   if (!ctx) return;
 
@@ -57,50 +62,53 @@ export function renderPlaneMap(canvas, { players, chasedPub, selfPub, radiusMete
   if (!ref) return; // nothing known yet - an empty canvas is the correct state
 
   const offsets = players.map((p) => ({ ...projectLocal(p.position, ref), player: p }));
-  const radiusExtent = radiusMeters > 0
-    ? [{ xMeters: radiusMeters, yMeters: 0 }, { xMeters: -radiusMeters, yMeters: 0 }, { xMeters: 0, yMeters: radiusMeters }, { xMeters: 0, yMeters: -radiusMeters }]
+  const allRadii = [radiusMeters, ...extraCircles.map((c) => c.radiusMeters)].filter((r) => r > 0);
+  const maxRadius = allRadii.length ? Math.max(...allRadii) : 0;
+  const radiusExtent = maxRadius > 0
+    ? [{ xMeters: maxRadius, yMeters: 0 }, { xMeters: -maxRadius, yMeters: 0 }, { xMeters: 0, yMeters: maxRadius }, { xMeters: 0, yMeters: -maxRadius }]
     : [];
-  // Trail points count toward the fitted extent too, so a player's recent
-  // path never gets clipped off the edge of the canvas.
-  const trailOffsets = [...trails.values()].flatMap((points) => points.map((p) => projectLocal(p, ref)));
-  const scale = fitScaleMetersPerPixel([...offsets, ...radiusExtent, ...trailOffsets], Math.min(w, h));
+  const trackOffsets = tracks
+    ? [...tracks.values()].flat().map((pt) => projectLocal(pt, ref))
+    : [];
+  const scale = fitScaleMetersPerPixel([...offsets, ...radiusExtent, ...trackOffsets], Math.min(w, h));
   const toPx = (m) => ({ x: w / 2 + m.xMeters / scale, y: h / 2 + m.yMeters / scale });
 
   ctx.fillStyle = '#f4f4f5';
   ctx.fillRect(0, 0, w, h);
 
-  if (radiusMeters > 0) {
-    const center = toPx({ xMeters: 0, yMeters: 0 });
+  if (tracks) {
     ctx.save();
-    ctx.beginPath();
-    ctx.arc(center.x, center.y, radiusMeters / scale, 0, Math.PI * 2);
-    ctx.setLineDash([6, 4]);
-    ctx.strokeStyle = PLAYER_COLORS.chased;
-    ctx.globalAlpha = 0.55;
     ctx.lineWidth = 2;
-    ctx.stroke();
-    ctx.fillStyle = PLAYER_COLORS.chased;
-    ctx.globalAlpha = 0.08;
-    ctx.fill();
+    ctx.setLineDash([2, 3]);
+    ctx.globalAlpha = 0.45;
+    for (const [actorPub, points] of tracks) {
+      if (points.length < 2) continue;
+      ctx.strokeStyle = colorFor(actorPub, chasedPub, selfPub);
+      ctx.beginPath();
+      points.forEach((pt, i) => {
+        const { x, y } = toPx(projectLocal(pt, ref));
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    }
     ctx.restore();
   }
 
-  // Trails drawn BEFORE the current-position dots, so the dots always sit
-  // visibly on top of their own tail rather than being obscured by it.
-  for (const [actorPub, points] of trails) {
-    if (points.length < 2) continue;
+  const circles = [...extraCircles, ...(radiusMeters > 0 ? [{ radiusMeters, color: PLAYER_COLORS.chased }] : [])];
+  for (const circle of circles) {
+    if (!(circle.radiusMeters > 0)) continue;
+    const center = toPx({ xMeters: 0, yMeters: 0 });
     ctx.save();
     ctx.beginPath();
-    const first = toPx(projectLocal(points[0], ref));
-    ctx.moveTo(first.x, first.y);
-    for (const point of points.slice(1)) {
-      const px = toPx(projectLocal(point, ref));
-      ctx.lineTo(px.x, px.y);
-    }
-    ctx.strokeStyle = colorFor(actorPub, chasedPub, selfPub);
-    ctx.globalAlpha = 0.4;
+    ctx.arc(center.x, center.y, circle.radiusMeters / scale, 0, Math.PI * 2);
+    ctx.setLineDash([6, 4]);
+    ctx.strokeStyle = circle.color;
+    ctx.globalAlpha = 0.55;
     ctx.lineWidth = 2;
     ctx.stroke();
+    ctx.fillStyle = circle.color;
+    ctx.globalAlpha = 0.08;
+    ctx.fill();
     ctx.restore();
   }
 

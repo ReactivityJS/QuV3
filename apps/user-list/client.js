@@ -44,7 +44,7 @@
  */
 import { createI18n } from '@qu/i18n';
 import { formatActorLabel, paths } from '@qu/services';
-import { renderAvatarOrAsset, injectStyle, ensureTheme, renderFlagToggle } from '@qu/ui';
+import { renderAvatarOrAsset, injectStyle, ensureTheme, renderFlagToggle, mountAppTemplate } from '@qu/ui';
 import { QuCrypto } from '@qu/core';
 
 const DICT = {
@@ -141,7 +141,7 @@ export function mount(container, { qu, services, subscribe, syncFetch }) {
 
   const listRoot = document.createElement('div');
   const unlistedRoot = document.createElement('div');
-  container.append(heading, search, listRoot, unlistedRoot);
+  mountAppTemplate(container, { render: (content) => content.append(heading, search, listRoot, unlistedRoot) });
 
   let debounceTimer = null;
   search.addEventListener('input', () => {

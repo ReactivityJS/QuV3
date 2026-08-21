@@ -45,7 +45,10 @@
  *     `ExtensionPointHost` is keyed purely by point NAME (see
  *     `@qu/foundation`'s `extension-points.js`), not by which app's own
  *     manifest happens to declare it first - nothing stops a second
- *     consumer app from rendering into an already-declared point.
+ *     consumer app from rendering into an already-declared point. Pins'
+ *     "📌 Pinned" bar (`content.topicToolbar`) is the same story, once per
+ *     room instead of once per message - see `mountRoomView()`'s own
+ *     `toolbarRoot` for where this app renders that slot.
  *   - Mention/emoji autocomplete reuse `@qu/thread-ui`'s
  *     `mountMentionAutocomplete()`/`mountEmojiAutocomplete()`/
  *     `renderEmojiPicker()`/`insertAtCursor()` unchanged - the exact
@@ -82,6 +85,34 @@
  * `#/chat/g/<groupId>` (group room), `#/chat/new-group` (create-group form),
  * plus an optional trailing `/m/<messageId>` on either room route - a
  * message PERMALINK (see `mount()`'s own route-parsing comment).
+ *
+ * NAVIGATION (`docs/app-navigation-standard.md` Rule 5): both the room list
+ * (`mountRoomListView()`) and an open room (`mountRoomView()`) mount through
+ * `@qu/ui`'s `mountAppTemplate()`. "+ New group" (`primaryAction`) lives on
+ * the room list ONLY - the global header's `shell.headerNavPoints`
+ * contributor this app used to ship is gone, superseded by this, but an
+ * open room does NOT also get it (feedback: rarely needed once already
+ * inside a room, and a mobile FAB there had nothing to pair with). Both
+ * views also get `navigation`: every room (1:1 + group), the current one
+ * marked active on the room list (none active) or the open room (itself
+ * active) - a real room-switcher sidebar on wide screens either way. On
+ * NARROW screens, `desktopOnly: true` on both views' `navigation` keeps it
+ * OUT of the mobile footer entirely: the room list already shows this same
+ * list as its own full-width content (a pill would just duplicate it,
+ * feedback: "keep rooms on the start page, not a sidebar/pill on mobile"),
+ * and an open room drops the mobile footer bar altogether once
+ * `primaryAction` is also absent (feedback: it read as a second, duplicate
+ * footer sitting right above the room's own composer bar) - Back to the
+ * room list is the shell header's own Back button either way (Rule 1).
+ * Both fields depend on an async fetch (contacts/groups, and - room list
+ * only - the group-creation policy check `fetchChatPolicy()` does) that
+ * isn't ready at the one synchronous `mountAppTemplate()` call -
+ * `stopTemplate.update({...})` (see that function's own "LATE-ARRIVING
+ * CHROME DATA" doc comment) fills them in once resolved, same "build
+ * immediately, fill in via your own async IIFE" shape every other async
+ * render in this file already follows. `listRooms()` (shared by both views)
+ * is the one place that computes "what rooms exist, in what order, with
+ * what unread/muted state".
  *
  * PERMALINKS + SCROLL-FOLLOW: a message's timestamp (see
  * `buildMessageFooter()`) IS its permalink - clicking it (or landing on one
@@ -167,7 +198,7 @@ import { watch, watchChildren } from '@qu/reactive';
 import { paths, formatActorLabel, getPrivate, putPrivate, getPrivateChildren, detectLinks, ChatService } from '@qu/services';
 import { rankFor } from '@qu/foundation';
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage, mountAppHeaderAction, renderNavPointsMenu } from '@qu/ui';
+import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage, mountAppTemplate, createIconButton } from '@qu/ui';
 import {
   renderEmojiPicker, renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, insertAtCursor, copyToClipboard,
   mountComposerAutogrow, COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS, flipUpIfNeeded,
@@ -201,6 +232,10 @@ const DICT = {
     roomMenu: 'Chat options',
     muteChat: 'Mute notifications',
     unmuteChat: 'Unmute notifications',
+    deleteChat: 'Delete chat',
+    deleteChatConfirm: 'Delete this chat? It will be removed from your chat list on this device. The other {who} will keep their own copy.',
+    deleteChatConfirmDm: 'the person',
+    deleteChatConfirmGroup: 'members',
     copyText: 'Copy text',
     copyLink: 'Copy link',
     attachRemove: 'Remove attachment',
@@ -250,6 +285,10 @@ const DICT = {
     roomMenu: 'Chat-Optionen',
     muteChat: 'Benachrichtigungen stummschalten',
     unmuteChat: 'Stummschaltung aufheben',
+    deleteChat: 'Chat löschen',
+    deleteChatConfirm: 'Diesen Chat löschen? Er wird von deiner Chat-Liste auf diesem Gerät entfernt. Die {who} behalten ihre eigene Kopie.',
+    deleteChatConfirmDm: 'andere Person',
+    deleteChatConfirmGroup: 'Mitglieder',
     copyText: 'Text kopieren',
     copyLink: 'Link kopieren',
     attachRemove: 'Anhang entfernen',
@@ -314,35 +353,21 @@ const STYLE = `
   .qu-chat-request-actions button { padding: 0.3rem 0.7rem; border-radius: var(--qu-radius-sm, 0.3rem); border: 1px solid var(--qu-color-border, #8884); background: transparent; cursor: pointer; font: inherit; }
   .qu-chat-request-actions button:first-child { background: var(--qu-color-accent, #5b5bd6); color: white; border-color: transparent; }
   .qu-chat-empty { padding: 1.5rem; text-align: center; opacity: 0.7; }
-  /* ROOM VIEW FIXED LAYOUT - see this file's own top doc comment. Genuine
-     position: fixed (viewport-relative), NOT a calc(100vh - ...) height
-     against .qu-shell-screen's own padding/box model - a PRIOR version of
-     this rule computed the height that way, plus a canceling negative
-     margin, reverse-engineering the screen's own 1rem padding - fragile by
-     construction (any drift in that padding, an extra wrapping element, or
-     simple accumulated sub-pixel rounding makes the computed box even
-     slightly TALLER than the real remaining viewport), and confirmed live:
-     it produced a DOUBLE scrollbar (the inner messages area AND the outer
-     page both scrolling) with the composer and the newest message(s)
-     pushed below the visible area, needing an extra page-level scroll to
-     reach - scrolling the inner container to its own bottom can't fix
-     that, since the container's own bottom edge was itself past the
-     visible viewport. Fixed positioning sidesteps all of that: its
-     containing block is the VIEWPORT itself, completely independent of any
-     ancestor's padding/margin/box model, and removes this element from the
-     page's normal flow entirely - it can no longer contribute to (or be
-     pushed around by) the page's own scroll height, which is what actually
-     rules out a second, page-level scrollbar. Top AND bottom BOTH set
-     (rather than top plus an explicit height) is deliberate: the browser
-     derives the box's height from the two insets live, on every reflow -
-     including a mobile browser's collapsing/expanding address bar changing
-     the real visible height - with no vh/dvh calc() needed at all (a
-     bottom inset is, by definition, anchored to the ACTUAL current
-     viewport edge). Only the messages-scroll element scrolls internally -
-     the header/composer-wrap are flex-shrink: 0 siblings within this fixed
-     box, so they're simply never part of the scrolling region. */
-  .qu-chat-room-view { position: fixed; top: 3.25rem; right: 0; bottom: 0; left: 0; display: flex; flex-direction: column; background: var(--qu-color-surface, #ffffff); z-index: 10; }
+  /* ROOM VIEW LAYOUT - mounted with mountAppTemplate({fullHeight: true, ...})
+     now (see this file's own top doc comment and @qu/ui's app-template.js
+     own "FULL HEIGHT MODE" doc comment for the full "why fixed, not
+     calc(100vh)" reasoning, which now lives there instead of here - the
+     Core's .qu-apptpl-root--full-height/.qu-apptpl-content already do
+     the real, viewport-relative position: fixed sizing this room view
+     used to do entirely on its own). This element is now just a plain flex
+     COLUMN filling whatever height .qu-apptpl-content hands it - flex: 1;
+     min-height: 0 is what makes it actually stretch, the same "only the
+     messages-scroll element scrolls internally, header/composer-wrap are
+     flex-shrink: 0 siblings" structure as before, unchanged. */
+  .qu-chat-room-view { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--qu-color-surface, #ffffff); }
   .qu-chat-header { flex-shrink: 0; display: flex; align-items: center; gap: 0.6rem; padding: 0.6rem 1rem; border-bottom: 1px solid var(--qu-color-border, #8884); background: var(--qu-color-surface, #ffffff); }
+  .qu-chat-toolbar-root { flex-shrink: 0; padding: 0.5rem 1rem 0; }
+  .qu-chat-toolbar-root:empty { padding: 0; }
   .qu-chat-header-namewrap { min-width: 0; overflow: hidden; }
   .qu-chat-header-nameline { display: flex; align-items: center; gap: 0.35rem; min-width: 0; }
   .qu-chat-header-name { font-weight: 700; font-size: 1.1em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -579,37 +604,6 @@ export async function renderChatSettings(container, { myPub, services }) {
 }
 
 // ===================================================================
-// HEADER ACTION - "+ New group" (see docs/app-navigation-standard.md Rule 2)
-// ===================================================================
-
-/**
- * The `shell.headerNavPoints` contributor (see `apps/chat/manifest.quapp`'s
- * `contributes`) - shows a single "+" icon in the GLOBAL header, only while
- * Chat is the active app, linking to the New Group form - gated by the SAME
- * `fetchChatPolicy()` check the old inline "+ New group" room-list link used
- * (below, moved here). Replaces that inline link entirely. Its label is
- * `newChatGroup` ("New chat group"), not the more generic "New group" the
- * old inline link used - a hover tooltip is read with no surrounding page
- * context, so it needs to name what it creates on its own.
- * @param {HTMLElement} container
- * @param {{getContext: Function, onContextChange: Function, services: object}} payload
- */
-export function renderHeaderNavPoints(container, { getContext, onContextChange, services }) {
-  mountAppHeaderAction(container, {
-    appId: 'chat', getContext, onContextChange,
-    render: (wrap) => {
-      let stopped = false;
-      (async () => {
-        const { allowMemberCreateGroup, isAdmin } = await fetchChatPolicy(services);
-        if (stopped || !(isAdmin || allowMemberCreateGroup)) return;
-        renderNavPointsMenu(wrap, { items: [{ label: t('newChatGroup'), href: '#/chat/new-group' }] });
-      })();
-      return () => { stopped = true; };
-    },
-  });
-}
-
-// ===================================================================
 // ROUTER
 // ===================================================================
 
@@ -669,19 +663,123 @@ async function fetchChatPolicy(services) {
   return { allowMemberCreateGroup, isAdmin };
 }
 
+/**
+ * The full room list (1:1 + group) - kind, id, href, display name, avatar,
+ * last message, unread/muted state - shared between the rich room-list view
+ * (`mountRoomListView()`'s own `roomRow()`) and the lightweight room-
+ * switcher `navigation` items an open room's own `mountAppTemplate()`
+ * sidebar shows (`mountRoomView()`, via `roomsToNavItems()` below). ONE
+ * place computes "what rooms exist and are they unread", not two - see this
+ * file's own top doc comment's "NAVIGATION" section.
+ * @param {{services: object, SPACE_ID: string, myPub: string}} deps
+ * @returns {Promise<Array<{kind: 'dm'|'group', roomId: string, href: string, name: string, avatarSeed: string, avatar: *, lastMessage: *, unread: boolean, muted: boolean}>>}
+ */
+async function listRooms({ services, SPACE_ID, myPub }) {
+  const [contacts, groupIds, prefs, hiddenRooms] = await Promise.all([
+    services.contacts.listContacts(),
+    services.chat.listMyGroups(),
+    services.notificationPrefs.getOwnPrefs(),
+    // "Delete chat" (the room header's own "⋮" menu - see mountRoomView()'s
+    // own doc comment) is LOCAL-ONLY: a group's membership is fixed at
+    // creation and a DM's room id is deterministically derived from both
+    // members' pubkeys (ChatService's own class doc comment), so there is no
+    // way to truly delete either room out from under the other side - only
+    // to stop showing it in THIS identity's own list, same private-flag
+    // mechanism the "dismissed" chat-request flag above already uses.
+    getPrivateChildren(services.messages.qu, services.messages.identity, paths.privateFlagParentPath(myPub, 'hidden', 'chat-room')),
+  ]);
+  const mutedThreads = new Set(prefs.apps?.chat?.mutedThreads ?? []);
+  const hiddenRoomIds = new Set(hiddenRooms.map(({ path }) => path.slice(path.lastIndexOf('/') + 1)));
+
+  const dmRooms = await Promise.all(contacts.map(async (c) => {
+    const roomId = await ChatService.roomId([myPub, c.actorPub]);
+    const { messages } = await services.messages.listMessages(SPACE_ID, roomId, { order: 'desc', limit: 1 });
+    const lastReadAt = await services.messages.getLastReadAt(SPACE_ID, roomId);
+    const last = messages[0] ?? null;
+    return {
+      kind: 'dm', roomId, href: `#/chat/${c.actorPub}`,
+      name: formatActorLabel(c.actorPub, c.profile), avatarSeed: c.actorPub, avatar: c.profile?.avatar,
+      lastMessage: last, unread: !!last && last.author !== myPub && last.ts > lastReadAt,
+      muted: mutedThreads.has(roomId),
+    };
+  }));
+  const groupRooms = (await Promise.all(groupIds.map(async (groupId) => {
+    const config = await services.messages.getConfig(SPACE_ID, groupId);
+    if (!config) return null; // invited but the group thread itself hasn't synced in yet
+    const { messages } = await services.messages.listMessages(SPACE_ID, groupId, { order: 'desc', limit: 1 });
+    const lastReadAt = await services.messages.getLastReadAt(SPACE_ID, groupId);
+    const last = messages[0] ?? null;
+    // Member display names, resolved once here rather than in
+    // roomsToNavItems() - a group's own `name` is what the room list SHOWS,
+    // but filtering by a participant's name (see this file's own top doc
+    // comment's "NAVIGATION" section) needs those names too, as
+    // `searchText`, even though they never appear on screen for a group row.
+    const otherMembers = (Array.isArray(config.readers) ? config.readers : []).filter((p) => p !== myPub);
+    const memberProfiles = await Promise.all(otherMembers.map((pub) => services.profile.getPublicProfile(pub).catch(() => null)));
+    const memberNames = otherMembers.map((pub, i) => formatActorLabel(pub, memberProfiles[i])).join(' ');
+    return {
+      kind: 'group', roomId: groupId, href: `#/chat/g/${groupId}`,
+      name: config.name ?? groupId, avatarSeed: groupId, avatar: null,
+      lastMessage: last, unread: !!last && last.author !== myPub && last.ts > lastReadAt,
+      muted: mutedThreads.has(groupId), memberNames,
+    };
+  }))).filter(Boolean);
+
+  return [...dmRooms, ...groupRooms]
+    .filter((room) => !hiddenRoomIds.has(room.roomId))
+    .sort((a, b) => (b.lastMessage?.ts ?? 0) - (a.lastMessage?.ts ?? 0));
+}
+
+/**
+ * `listRooms()`'s rich room objects, reduced to `mountAppTemplate()`'s
+ * plain `{id, label, href, icon, badge}` link-item shape (see
+ * `@qu/ui`'s `app-template.js` own `AppTemplateLinkItem` typedef) - a
+ * sidebar/pill entry has no room for a last-message preview or a real
+ * timestamp, only an icon (kind) and a badge (unread), same reduction
+ * `apps/forum/client.js`'s own channel sidebar already accepts relative to
+ * its board view's richer channel rows.
+ * @param {Awaited<ReturnType<typeof listRooms>>} rooms
+ */
+function roomsToNavItems(rooms) {
+  return rooms.map((room) => ({
+    id: room.roomId,
+    label: room.name,
+    href: room.href,
+    icon: room.kind === 'group' ? '👥' : '👤',
+    badge: room.unread ? '●' : undefined,
+    // A DM's own `label` already IS the other participant's name - nothing
+    // more to search there. A group's `label` is the GROUP's name, so a
+    // search by a member's name (see this file's own top doc comment's
+    // "NAVIGATION" section) needs `memberNames` (listRooms()'s own doc
+    // comment) as extra `searchText` `mountAppTemplate()`'s `filter: true`
+    // also matches against.
+    searchText: room.kind === 'group' ? room.memberNames : undefined,
+  }));
+}
+
 // ===================================================================
 // ROOM LIST VIEW - #/chat
 // ===================================================================
 
 function mountRoomListView(container, { qu, services, subscribe, syncFetch, SPACE_ID }) {
   let stopped = false;
-  container.textContent = '';
 
-  const heading = document.createElement('h1');
-  heading.textContent = t('title');
   const requestsRoot = document.createElement('div');
   const listRoot = document.createElement('div');
-  container.append(heading, requestsRoot, listRoot);
+  const stopTemplate = mountAppTemplate(container, {
+    render: (content) => {
+      const heading = document.createElement('h1');
+      heading.textContent = t('title');
+      content.append(heading, requestsRoot, listRoot);
+    },
+  });
+  // primaryAction ("+ New group") depends on an async policy check - see
+  // mountAppTemplate()'s own "LATE-ARRIVING CHROME DATA" doc comment.
+  (async () => {
+    const { allowMemberCreateGroup, isAdmin } = await fetchChatPolicy(services);
+    if (stopped || !(isAdmin || allowMemberCreateGroup)) return;
+    stopTemplate.update({ primaryAction: { label: t('newChatGroup'), href: '#/chat/new-group', icon: '✏️' } });
+  })();
 
   let renderToken = 0;
   async function render() {
@@ -691,22 +789,25 @@ function mountRoomListView(container, { qu, services, subscribe, syncFetch, SPAC
     const identity = services.messages.identity;
     if (stopped || token !== renderToken) return;
 
-    const [contacts, groupIds, dmRequests, dismissed, prefs] = await Promise.all([
-      services.contacts.listContacts(),
-      services.chat.listMyGroups(),
+    const [rooms, dmRequests, dismissed] = await Promise.all([
+      listRooms({ services, SPACE_ID, myPub }),
       services.chat.listMyDmRequests(),
       getPrivateChildren(qu, identity, paths.privateFlagParentPath(myPub, 'dismissed', 'chat-request')),
-      services.notificationPrefs.getOwnPrefs(),
     ]);
     if (stopped || token !== renderToken) return;
-    const mutedThreads = new Set(prefs.apps?.chat?.mutedThreads ?? []);
+
+    // Desktop-only - see this file's own top doc comment's "NAVIGATION"
+    // section: this same room list already fills `content` below, so a
+    // mobile pill duplicating it would be pointless; the desktop sidebar
+    // gets it anyway, matching an open room's own sidebar.
+    stopTemplate.update({ navigation: { items: roomsToNavItems(rooms), desktopOnly: true, heading: t('title'), filter: true } });
 
     // MESSAGE REQUESTS - see ChatService's own "1:1 DISCOVERY" doc comment.
     // A request is worth SHOWING only while it's neither already accepted
     // (the sender is a Contact - they already show up as an ordinary dmRoom
     // below, would be redundant/confusing to ALSO list them here) nor
     // already declined (a dismissed flag, see the `Decline` button below).
-    const contactPubs = new Set(contacts.map((c) => c.actorPub));
+    const contactPubs = new Set(rooms.filter((r) => r.kind === 'dm').map((r) => r.avatarSeed));
     const dismissedPubs = new Set(dismissed.map(({ path }) => path.slice(path.lastIndexOf('/') + 1)));
     const pendingRequests = dmRequests.filter((r) => !contactPubs.has(r.fromPub) && !dismissedPubs.has(r.fromPub));
     requestsRoot.textContent = '';
@@ -724,35 +825,6 @@ function mountRoomListView(container, { qu, services, subscribe, syncFetch, SPAC
       requestsRoot.append(requestsHeading, ul);
     }
 
-    const dmRooms = await Promise.all(contacts.map(async (c) => {
-      const roomId = await ChatService.roomId([myPub, c.actorPub]);
-      const { messages } = await services.messages.listMessages(SPACE_ID, roomId, { order: 'desc', limit: 1 });
-      const lastReadAt = await services.messages.getLastReadAt(SPACE_ID, roomId);
-      const last = messages[0] ?? null;
-      return {
-        kind: 'dm', roomId, href: `#/chat/${c.actorPub}`,
-        name: formatActorLabel(c.actorPub, c.profile), avatarSeed: c.actorPub, avatar: c.profile?.avatar,
-        lastMessage: last, unread: !!last && last.author !== myPub && last.ts > lastReadAt,
-        muted: mutedThreads.has(roomId),
-      };
-    }));
-    const groupRooms = (await Promise.all(groupIds.map(async (groupId) => {
-      const config = await services.messages.getConfig(SPACE_ID, groupId);
-      if (!config) return null; // invited but the group thread itself hasn't synced in yet
-      const { messages } = await services.messages.listMessages(SPACE_ID, groupId, { order: 'desc', limit: 1 });
-      const lastReadAt = await services.messages.getLastReadAt(SPACE_ID, groupId);
-      const last = messages[0] ?? null;
-      return {
-        kind: 'group', roomId: groupId, href: `#/chat/g/${groupId}`,
-        name: config.name ?? groupId, avatarSeed: groupId, avatar: null,
-        lastMessage: last, unread: !!last && last.author !== myPub && last.ts > lastReadAt,
-        muted: mutedThreads.has(groupId),
-      };
-    }))).filter(Boolean);
-
-    if (stopped || token !== renderToken) return;
-    const rooms = [...dmRooms, ...groupRooms].sort((a, b) => (b.lastMessage?.ts ?? 0) - (a.lastMessage?.ts ?? 0));
-
     listRoot.textContent = '';
     if (rooms.length === 0) {
       const empty = document.createElement('p');
@@ -765,9 +837,9 @@ function mountRoomListView(container, { qu, services, subscribe, syncFetch, SPAC
       for (const room of rooms) ul.appendChild(roomRow(room));
       listRoot.appendChild(ul);
     }
-    // No inline "+ New group" link here anymore - it's the global header's
-    // App Navigation Points Slot now (see renderHeaderNavPoints() below and
-    // docs/app-navigation-standard.md Rule 2), same policy check.
+    // No inline "+ New group" link here - it's `primaryAction` on this
+    // view's own `mountAppTemplate()` call above (see this file's own top
+    // doc comment's "NAVIGATION" section), same policy check.
   }
 
   function roomRow(room) {
@@ -885,6 +957,7 @@ function mountRoomListView(container, { qu, services, subscribe, syncFetch, SPAC
     stopped = true;
     offContacts();
     offInvites();
+    stopTemplate();
   };
 }
 
@@ -971,11 +1044,12 @@ function mountNewGroupView(container, { services, SPACE_ID }) {
 
 function mountRoomView(container, { qu, services, subscribe, syncFetch, extensionPoints, SPACE_ID }, target) {
   let stopped = false;
-  container.textContent = '';
 
   // A flex COLUMN filling the viewport height below the shell's own fixed
-  // top header (see this file's own top doc comment's "FIXED LAYOUT"
-  // section) - `heading`/`composerWrap` are flex-shrink:0 (pinned), only
+  // top header, via `mountAppTemplate({fullHeight: true, ...})` below (see
+  // this file's own top doc comment's "NAVIGATION" section and `@qu/ui`'s
+  // `app-template.js` own "FULL HEIGHT MODE" doc comment) -
+  // `heading`/`composerWrap` are flex-shrink:0 (pinned), only
   // `.qu-chat-messages-scroll` (wrapping `messagesRoot`) scrolls. Doesn't use
   // `renderSubpage()` for the same reason it never did - no bespoke back
   // link either (see docs/app-navigation-standard.md Rule 1): the shell
@@ -983,6 +1057,16 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   // so this row is just avatar + name/status, one fixed top bar total.
   const roomView = document.createElement('div');
   roomView.className = 'qu-chat-room-view';
+
+  // The `content.topicToolbar` slot (Pins' own "📌 Pinned" bar - see that
+  // extension point's own doc comment in apps/forum/manifest.quapp) -
+  // rendered ONCE per room, right below the fixed header, above the
+  // scrolling message list. Same SAME slot `apps/forum/client.js`'s own
+  // `mountTopicView()` renders into, just with THIS room's own `roomId` and
+  // `messagePermalink()` route shape passed through below (once `roomId`
+  // itself resolves - see the async setup IIFE further down).
+  const toolbarRoot = document.createElement('div');
+  toolbarRoot.className = 'qu-chat-toolbar-root';
 
   const heading = document.createElement('div');
   heading.className = 'qu-chat-header';
@@ -997,6 +1081,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   headerMutedIcon.className = 'qu-chat-header-muted';
   headerMutedIcon.textContent = '🔕';
   headerMutedIcon.title = t('muteChat');
+  headerMutedIcon.setAttribute('aria-label', t('muteChat'));
   headerMutedIcon.hidden = true;
   headerNameLine.append(headerNameEl, headerMutedIcon);
   const headerStatusEl = document.createElement('div');
@@ -1043,6 +1128,24 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
               apps: { ...current.apps, chat: { ...chatPrefs, mutedThreads: [...mutedThreads] } },
             });
             headerMutedIcon.hidden = muted; // toggled, so the icon shows the NEW state - no need to re-fetch prefs
+          },
+        },
+        {
+          // Same "local-only" caveat listRooms()'s own doc comment already
+          // gives: this room's own thread isn't destroyed (the other
+          // side(s) keep it), just hidden from THIS identity's own room
+          // list from now on (a private flag, `window.confirm()` gate first
+          // - same pattern apps/calendar's/apps/todo's own delete/leave menu
+          // items already use for a destructive, no-undo action).
+          id: 'delete',
+          label: t('deleteChat'),
+          icon: '🗑️',
+          onClick: async () => {
+            const who = target.kind === 'dm' ? t('deleteChatConfirmDm') : t('deleteChatConfirmGroup');
+            if (!window.confirm(t('deleteChatConfirm', { who }))) return;
+            const deletingMyPub = myPub ?? await services.actors.whoAmI();
+            await putPrivate(qu, services.messages.identity, paths.privateFlagPath(deletingMyPub, 'hidden', 'chat-room', roomId), true);
+            window.location.hash = '#/chat';
           },
         },
       ];
@@ -1168,6 +1271,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   voiceDiscardBtn.className = 'qu-chat-tool-btn qu-chat-voice-discard-btn';
   voiceDiscardBtn.textContent = '🗑️';
   voiceDiscardBtn.title = t('voiceDiscard');
+  voiceDiscardBtn.setAttribute('aria-label', t('voiceDiscard'));
   const voiceRecorderDot = document.createElement('span');
   voiceRecorderDot.className = 'qu-chat-voice-recorder-dot';
   const voiceRecorderTime = document.createElement('span');
@@ -1184,11 +1288,13 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   voiceFinishBtn.className = 'qu-chat-tool-btn qu-chat-voice-finish-btn';
   voiceFinishBtn.textContent = '⏹';
   voiceFinishBtn.title = t('voiceFinish');
+  voiceFinishBtn.setAttribute('aria-label', t('voiceFinish'));
   const voiceSendBtn = document.createElement('button');
   voiceSendBtn.type = 'button';
   voiceSendBtn.className = 'qu-chat-composer-action qu-chat-voice-send-btn';
   voiceSendBtn.textContent = '➤';
   voiceSendBtn.title = t('send');
+  voiceSendBtn.setAttribute('aria-label', t('send'));
   voiceRecorderEl.append(
     voiceDiscardBtn, voiceRecorderDot, voiceRecorderTime, voicePreviewPlayer,
     voicePauseBtn, voiceFinishBtn, voiceSendBtn,
@@ -1196,8 +1302,11 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
 
   composerWrap.append(replyBanner, pendingAttachmentEl, composerRow, voiceRecorderEl);
 
-  roomView.append(heading, messagesScroll, composerWrap);
-  container.appendChild(roomView);
+  roomView.append(heading, toolbarRoot, messagesScroll, composerWrap);
+  const stopTemplate = mountAppTemplate(container, {
+    fullHeight: true,
+    render: (content) => content.appendChild(roomView),
+  });
 
   const stopComposerMentions = mountMentionAutocomplete(composerInput, { services, subscribe });
   const stopComposerEmoji = mountEmojiAutocomplete(composerInput);
@@ -1333,8 +1442,9 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   // the bare `window` 'resize' event) is the correct, purpose-built API for
   // this - it fires precisely when the KEYBOARD (or pinch-zoom) changes the
   // visible area, independent of the LAYOUT viewport `position: fixed`
-  // itself already tracks (see this file's own ROOM VIEW FIXED LAYOUT doc
-  // comment) - falls back to `window` for a host with no `visualViewport`
+  // itself already tracks (see `@qu/ui`'s `app-template.js` own "FULL
+  // HEIGHT MODE" doc comment - this room view mounts with `fullHeight:
+  // true`) - falls back to `window` for a host with no `visualViewport`
   // at all (jsdom, this repo's test DOM, included). Same `correcting: true`
   // guard as the image-driven case above: only re-snaps while already stuck
   // to the bottom, never yanking the view while the user is reading further up.
@@ -1428,11 +1538,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     pendingAttachmentEl.hidden = false;
     const label = document.createElement('span');
     label.textContent = `📎 ${pendingAttachment.name}`;
-    const removeBtn = document.createElement('button');
-    removeBtn.type = 'button';
-    removeBtn.textContent = '✕';
-    removeBtn.title = t('attachRemove');
-    removeBtn.addEventListener('click', clearPendingAttachment);
+    const removeBtn = createIconButton({ icon: '✕', label: t('attachRemove'), onClick: clearPendingAttachment });
     pendingAttachmentEl.append(label, removeBtn);
     updateActionBtn(); // an attachment alone is now enough to make the action button "Send", not just typed text
   });
@@ -1445,10 +1551,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     replyBanner.hidden = false;
     const label = document.createElement('span');
     label.textContent = t('replyingTo', { name: authorLabel });
-    const cancelBtn = document.createElement('button');
-    cancelBtn.type = 'button';
-    cancelBtn.textContent = '✕';
-    cancelBtn.addEventListener('click', () => setReplyingTo(null));
+    const cancelBtn = createIconButton({ icon: '✕', label: t('cancel'), onClick: () => setReplyingTo(null) });
     replyBanner.append(label, cancelBtn);
   }
 
@@ -1556,9 +1659,11 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     if (recorderState === 'paused') {
       voicePauseBtn.textContent = '▶️';
       voicePauseBtn.title = t('voiceResume');
+      voicePauseBtn.setAttribute('aria-label', t('voiceResume'));
     } else {
       voicePauseBtn.textContent = '⏸️';
       voicePauseBtn.title = t('voicePause');
+      voicePauseBtn.setAttribute('aria-label', t('voicePause'));
     }
   }
 
@@ -1580,9 +1685,11 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     if (composerInput.value.trim() || pendingAttachment) {
       actionBtn.textContent = '➤';
       actionBtn.title = t('send');
+      actionBtn.setAttribute('aria-label', t('send'));
     } else {
       actionBtn.textContent = '🎙️';
       actionBtn.title = t('recordVoice');
+      actionBtn.setAttribute('aria-label', t('recordVoice'));
     }
   }
   composerInput.addEventListener('input', updateActionBtn);
@@ -1972,6 +2079,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     }
     glyph.textContent = isRead ? '✓✓' : '✓';
     el.title = isRead ? t('read') : t('sent');
+    el.setAttribute('aria-label', isRead ? t('read') : t('sent'));
     el.classList.toggle('qu-chat-bubble-tick-read', isRead);
     // Rebinding onclick (not addEventListener) on every render/refresh is
     // deliberate - it always closes over the CURRENT `readers`, and never
@@ -2325,6 +2433,20 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
       headerAvatarSlot.appendChild(renderAvatarOrAsset(roomId, headerNameEl.textContent, null, { size: '2.6rem' }));
     }
     roomReady = true;
+    // `content.topicToolbar` (Pins' own "📌 Pinned" bar) - `roomId` only
+    // resolves here, not at `toolbarRoot`'s own creation site above, so this
+    // is the earliest point it can render. `messagePermalink` wraps this
+    // file's own `messagePermalink({id})` (which takes a full message
+    // object elsewhere in this file) down to the `(messageId) => string`
+    // shape apps/pins/client.js's own doc comment documents, using THIS
+    // room's own route shape (`roomHash()` + `/m/<id>`) - see
+    // apps/forum/client.js's own identical wiring for `mountTopicView()`.
+    if (extensionPoints?.renderSlot) {
+      extensionPoints.renderSlot('content.topicToolbar', toolbarRoot, {
+        services, qu, syncFetch, spaceId: SPACE_ID, threadId: roomId,
+        messagePermalink: (messageId) => messagePermalink({ id: messageId }),
+      });
+    }
     await refreshHeaderMuted();
     if (stopped) return;
 
@@ -2352,6 +2474,27 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     renderMessages();
   })();
 
+  // Room-switcher `navigation` (desktop-sidebar-only - see this file's own
+  // top doc comment's "NAVIGATION" section: "+ New group" lives ONLY on the
+  // room list now, an open room has no `primaryAction` at all, and the
+  // mobile footer this used to add here is gone entirely - the room's own
+  // composer is already a bottom bar, a second one right above it read as
+  // duplicated chrome). Independent of the main setup IIFE above (its own
+  // `services.actors.whoAmI()` call, not a shared await) so a
+  // group-not-found early return up there still leaves the sidebar usable
+  // to get to a DIFFERENT room. `roomId` (read once this resolves) is set
+  // synchronously at the very top of both branches up there, well before
+  // either can bail out.
+  (async () => {
+    const myPubForNav = await services.actors.whoAmI();
+    if (stopped) return;
+    const rooms = await listRooms({ services, SPACE_ID, myPub: myPubForNav });
+    if (stopped) return;
+    stopTemplate.update({
+      navigation: { items: roomsToNavItems(rooms), activeId: roomId, heading: t('title'), desktopOnly: true, filter: true },
+    });
+  })();
+
   let offMessages = () => {};
   let offReadReceipts = () => {};
 
@@ -2370,6 +2513,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     stopVoiceTimer();
     for (const track of mediaStream?.getTracks() ?? []) track.stop();
     if (recordedObjectUrl) URL.revokeObjectURL(recordedObjectUrl);
+    stopTemplate();
   };
 }
 

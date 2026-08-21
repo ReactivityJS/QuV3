@@ -16,33 +16,43 @@
  *     newest first.
  *   - `#/forum/c/<channelId>` - one channel's topic list, and (if
  *     restricted) an "invite member" field.
- *   - `#/forum/c/<channelId>/new-topic` - the "create a topic in this
+ *   - `#/forum/c/<channelId>/new-topic` - the "create a topic in THIS
  *     channel" form, its own subpage (see `mountNewTopicView()`'s own doc
  *     comment) - replaces what used to be an inline title field at the
- *     bottom of the topic list.
+ *     bottom of the topic list. The channel is already known here (no
+ *     picker).
+ *   - `#/forum/new-topic` - the SAME form, reached from the board view's own
+ *     `primaryAction` (no channel open yet) - adds a channel `<select>` at
+ *     the top, since a topic always needs a parent channel.
  *   - `#/forum/t/<topicId>` - one topic's thread: message list, composer,
  *     attachments, plus whatever admin-enabled plugins render into this
  *     app's own extension points (reactions/pins/bookmarks - see EXTENSION
  *     POINTS below) - everything this app already had before Channels/
  *     Topics existed, now parametrized by `topicId` instead of a single
  *     hardcoded thread id.
- *   - `#/forum/new` - the "create a channel" form, its own subpage (moved
- *     out of the board view - see `mountMiniChannelSidebar()`'s own doc
- *     comment on why), policy-gated the same way the sidebar's own "+ New
- *     channel" link is.
+ *   - `#/forum/new` - the "create a channel" form, its own subpage, gated by
+ *     the same policy check as the board/channel views' own `settings`
+ *     entry that links to it (see `applyNewChannelSettings()`).
  *
- * Both create-forms above are reachable from the global header's App
- * Navigation Points Slot (`renderHeaderNavPoints()`, `shell.headerNavPoints`)
- * rather than from inline links/forms - see `docs/app-navigation-standard.md`
- * Rule 2.
- *
- * EVERY view above shares ONE persistent channel list (`mountMiniChannelSidebar()`),
- * not just the board view - esoTalk's own "the channel list never disappears,
- * no matter how deep you've drilled in" idiom. A narrow/mobile viewport
- * collapses it from a sidebar into a horizontal, scrollable tab bar above
- * the content instead of stacking a tall list on top (see this file's own
- * `@media` rules) - a compact single row, not a second full-height list to
- * scroll past before reaching the actual content.
+ * NAVIGATION (`docs/app-navigation-standard.md` Rule 5): every view mounts
+ * through `@qu/ui`'s `mountAppTemplate()`. "+ New topic" is `primaryAction`
+ * on the board/channel views (context-aware href: the board view links to
+ * the channel-picker form above, an open channel links straight to its own
+ * `new-topic` route); "+ New channel" is `settings` (a gear icon) on both -
+ * the old `shell.headerNavPoints` 1-or-2-item dropdown this app used to ship
+ * is gone, superseded by these. EVERY view also gets `navigation`: the full
+ * channel list, current one active where known - esoTalk's own "the channel
+ * list never disappears, no matter how deep you've drilled in" idiom, still
+ * true. The board/channel views' own `navigation` is NOT `desktopOnly`
+ * (their own content is an activity feed/topic list, not the channel list
+ * itself, so mobile genuinely needs the footer pill to switch channels at
+ * all) - a topic's own `navigation` IS `desktopOnly` (mirrors
+ * `apps/chat/client.js`'s room view: with no `primaryAction`/`settings`
+ * either, mobile gets no app footer at all inside a topic, just the
+ * composer). `channelsToNavItems()` is the one shared mapper every view's
+ * own `stopTemplate.update()` call uses - each view already
+ * fetches/watches `services.channels.listChannels()` for its own reasons,
+ * so only the "channels -> nav items" shape is shared, not the fetch itself.
  *
  * MIGRATION: `apps/forum/index.js`'s `register()` wraps the ORIGINAL flat
  * public thread (from before this round) in a real "General" channel/topic,
@@ -104,7 +114,7 @@
  * REACTIONS/PINS/BOOKMARKS are NOT built into this file at all - they're
  * admin-toggleable plugins (`apps/reactions`, `apps/pins`, `apps/bookmarks`),
  * reached only through the extension points below (`content.messageFooter`,
- * `content.messageMenu`, `forum.topicToolbar`). Disabling any of them via
+ * `content.messageMenu`, `content.topicToolbar`). Disabling any of them via
  * relay-settings' `disabledApps` (see `packages/relay/src/relay-settings.js`)
  * makes it render nothing, with zero change needed here.
  *
@@ -164,14 +174,17 @@
  *     opens and merged with this file's own native "Edit" item - see
  *     `buildMessageFooter()`. Same payload shape as `content.messageFooter`.
  *     Returns `{id, label, icon, onClick}` (Pins'/Bookmarks' own entries).
- *   - `forum.topicToolbar` (`kind: 'ui'`) - rendered ONCE per topic view,
+ *   - `content.topicToolbar` (`kind: 'ui'`) - rendered ONCE per topic view,
  *     above the message list. Payload: `{services, qu, syncFetch, spaceId,
- *     threadId}` (Pins' own "Pinned" bar).
+ *     threadId, messagePermalink}` (Pins' own "Pinned" bar).
+ *     `apps/chat/client.js` renders this SAME point into its own room view
+ *     (with its own `messagePermalink` route shape) - see that file's own
+ *     doc comment.
  *   - `content.composerActions` (`kind: 'menu'`, `ExtensionPointHost.
  *     collect()`) - the composer's own "+" action menu (Attach, plus
  *     whatever a plugin app contributes - e.g. a Calendar/Gallery app's own
  *     entry), gathered fresh every time it opens, same shape/mechanism as
- *     `content.messageMenu` above. Same payload shape as `forum.
+ *     `content.messageMenu` above. Same payload shape as `content.
  *     topicToolbar`. `apps/chat/client.js` shares this SAME point (plus its
  *     own native "Share location" item, which forum's composer has no
  *     equivalent of) - see that file's own doc comment.
@@ -188,7 +201,7 @@ import { watchChildren, watch } from '@qu/reactive';
 import { rankFor } from '@qu/foundation';
 import { paths, formatActorLabel, detectLinks } from '@qu/services';
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage, mountContextSwitcher, mountAppHeaderAction, renderNavPointsMenu } from '@qu/ui';
+import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage, mountAppTemplate, createIconButton } from '@qu/ui';
 import {
   renderEmojiPicker, renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, insertAtCursor, copyToClipboard,
   mountComposerAutogrow, COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS,
@@ -239,6 +252,8 @@ const DICT = {
     noTopicsAnywhereYet: 'No topics yet.',
     noTopicsYet: 'No topics in this channel yet.',
     newTopicPlaceholder: 'New topic title…',
+    newTopicChannelLabel: 'Channel',
+    newTopicNoChannels: 'No channels yet - create one first.',
     createTopic: 'Create topic',
     invite: 'Invite',
     invitePlaceholder: 'Actor pubkey to invite',
@@ -281,6 +296,8 @@ const DICT = {
     noTopicsAnywhereYet: 'Noch keine Themen.',
     noTopicsYet: 'Noch keine Themen in diesem Kanal.',
     newTopicPlaceholder: 'Titel des neuen Themas…',
+    newTopicChannelLabel: 'Kanal',
+    newTopicNoChannels: 'Noch keine Kanäle - lege zuerst einen an.',
     createTopic: 'Thema erstellen',
     invite: 'Einladen',
     invitePlaceholder: 'Pubkey zum Einladen',
@@ -386,28 +403,14 @@ const STYLE = `
   .qu-forum-pending-attachment button { background: none; border: none; cursor: pointer; opacity: 0.7; font: inherit; padding: 0; }
   .qu-forum-message-attachment { margin-top: 0.5rem; max-width: 18rem; }
   .qu-forum-restricted-badge { font-size: 0.75em; opacity: 0.75; }
-  /* Board/channel/topic view layout: ONE persistent mini channel list
-     alongside the main content, on every view - esoTalk's own "the channel
-     list never disappears, no matter how deep you've drilled in" idiom (see
-     this app's own top doc comment / mountMiniChannelSidebar()'s own doc
-     comment). */
-  .qu-forum-layout { display: flex; gap: 1.2rem; align-items: flex-start; }
-  .qu-forum-layout > aside { flex: 0 0 12rem; min-width: 0; }
-  .qu-forum-layout > div { flex: 1; min-width: 0; }
-  /* TOPIC VIEW ROOM LAYOUT - see mountTopicView()'s own top doc comment.
-     .qu-forum-layout-room is an ADDITIONAL class alongside the base
-     .qu-forum-layout above (never a replacement) - a topic view's own
-     layout element carries BOTH, so it still gets the base flex-row AND
-     the mobile collapse-to-tab-bar media query below "for free", with only
-     position: fixed/align-items: stretch overridden here via the
-     combined-class selector's higher specificity. Board/channel views only
-     ever carry the base class alone and stay completely unaffected. Same
-     position: fixed technique (and the same "why fixed, not vh/dvh calc()"
-     reasoning) as apps/chat/client.js's own .qu-chat-room-view - see that
-     file's own STYLE comment for the full explanation. */
-  .qu-forum-layout.qu-forum-layout-room { position: fixed; top: 3.25rem; right: 0; bottom: 0; left: 0; margin: 0; align-items: stretch; z-index: 10; background: var(--qu-color-surface, #ffffff); }
-  .qu-forum-layout-room > aside { overflow-y: auto; padding: 1rem 0 1rem 1rem; }
-  .qu-forum-room-view { display: flex; flex-direction: column; min-height: 0; }
+  /* TOPIC VIEW ROOM LAYOUT - mounted with mountAppTemplate({fullHeight: true,
+     ...}) now (see mountTopicView()'s own top doc comment and @qu/ui's
+     app-template.js own "FULL HEIGHT MODE" doc comment for the full "why
+     fixed, not calc(100vh)" reasoning, which now lives there instead of
+     here). This element is just a plain flex COLUMN filling whatever height
+     .qu-apptpl-content hands it - flex: 1; min-height: 0 is what makes it
+     actually stretch, same as apps/chat/client.js's own .qu-chat-room-view. */
+  .qu-forum-room-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .qu-forum-topic-header { flex-shrink: 0; padding: 0.6rem 1rem 0.4rem; border-bottom: 1px solid var(--qu-color-border, #8884); }
   .qu-forum-topic-header h1 { margin: 0 0 0.3rem; font-size: 1.2em; }
   .qu-forum-messages-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 1rem; }
@@ -419,38 +422,13 @@ const STYLE = `
   .qu-forum-scroll-bottom-btn:hover { filter: brightness(1.08); }
   .qu-forum-scroll-bottom-btn[hidden] { display: none; }
   .qu-forum-scroll-bottom-btn-unseen { background: var(--qu-color-danger, #d64545); }
-  .qu-forum-mini-sidebar h2 { font-size: 0.85em; opacity: 0.75; margin: 0 0 0.4rem; }
-  .qu-forum-mini-channels { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.15rem; }
-  .qu-forum-mini-channels a { display: flex; align-items: center; gap: 0.3rem; padding: 0.3rem 0.5rem; border-radius: var(--qu-radius-md, 0.4rem); text-decoration: none; color: inherit; font-size: 0.9em; }
-  .qu-forum-mini-channels a:hover { background: var(--qu-color-border, #8884); }
-  .qu-forum-mini-channel-active { background: color-mix(in srgb, var(--qu-color-accent, #5b5bd6) 15%, transparent); font-weight: 600; }
-  /* Native <select> - the mobile (<720px) presentation of the same channel
-     list (see mountMiniChannelSidebar()'s own doc comment for why: a
-     horizontally-scrolling row of pills forced sideways scrolling once
-     there were more than a handful of channels; a native dropdown has no
-     width problem at any count and shows the active channel/"All channels"
-     as its current value for free). Hidden by default (desktop shows the
-     vertical list instead) - see the media query below. */
-  .qu-forum-mini-select { display: none; width: 100%; padding: 0.5rem 0.6rem; font: inherit; font-size: 0.9em; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); background: var(--qu-color-surface, Canvas); color: inherit; }
-  /* Below this width there's no room for a side-by-side sidebar column -
-     the sidebar collapses to a single-row native <select> ABOVE the content
-     instead of stacking a full-height list on top of it. Same breakpoint
-     @qu/ui's mountContextSwitcher() itself defaults to, so the shared
-     component (board/channel views) and this app's own topic ("room") view
-     - which still builds its .qu-forum-layout wrapper directly - agree on
-     where "mobile" starts. */
-  @media (max-width: 720px) {
-    .qu-forum-layout { flex-direction: column; gap: 0.6rem; }
-    .qu-forum-layout > aside { flex-basis: auto; width: 100%; }
-    .qu-forum-mini-sidebar h2 { display: none; }
-    .qu-forum-mini-channels { display: none; }
-    .qu-forum-mini-select { display: block; }
-  }
   .qu-forum-new-channel-form, .qu-forum-new-topic-form, .qu-forum-invite-form { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.6rem; max-width: 26rem; }
-  .qu-forum-invite-error { color: var(--qu-color-danger, #c00); font-size: 0.85em; margin: 0; }
-  .qu-forum-invite-error[hidden] { display: none; }
+  .qu-forum-invite-error, .qu-forum-new-channel-error, .qu-forum-new-topic-error, .qu-forum-composer-error { color: var(--qu-color-danger, #c00); font-size: 0.85em; margin: 0; }
+  .qu-forum-invite-error[hidden], .qu-forum-new-channel-error[hidden], .qu-forum-new-topic-error[hidden], .qu-forum-composer-error[hidden] { display: none; }
   .qu-forum-new-channel-form input[type="text"], .qu-forum-new-topic-form input[type="text"], .qu-forum-invite-form input[type="text"] { font: inherit; padding: 0.4rem 0.6rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); }
-  .qu-forum-new-channel-form label { display: flex; align-items: center; gap: 0.4rem; font-size: 0.9em; }
+  .qu-forum-new-channel-form label, .qu-forum-new-topic-form label { display: flex; align-items: center; gap: 0.4rem; font-size: 0.9em; }
+  .qu-forum-new-topic-form select { font: inherit; padding: 0.4rem 0.6rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); flex: 1; min-width: 0; }
+  .qu-forum-new-topic-body { font: inherit; padding: 0.4rem 0.6rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); resize: vertical; min-height: 6rem; }
   .qu-forum-new-channel-form button, .qu-forum-new-topic-form button, .qu-forum-invite-form button { align-self: flex-start; padding: 0.4rem 1rem; border-radius: var(--qu-radius-md, 0.4rem); border: none; background: var(--qu-color-accent, #5b5bd6); color: white; cursor: pointer; font: inherit; }
   .qu-forum-new-channel-form button:disabled, .qu-forum-new-topic-form button:disabled, .qu-forum-invite-form button:disabled { opacity: 0.6; cursor: default; }
   .qu-forum-topics { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
@@ -600,8 +578,10 @@ function watchTopicsActivity(qu, syncFetch, SPACE_ID, services, onChange) {
 }
 
 /**
- * Router - dispatches `#/forum`, `#/forum/c/<channelId>`, `#/forum/t/<topicId>`
- * to their own view mounter. `segments[0]` is always this app's own id
+ * Router - dispatches `#/forum`, `#/forum/c/<channelId>`, `#/forum/t/<topicId>`,
+ * `#/forum/new-topic` (channel picker, reached from the board view's own
+ * `primaryAction`) and `#/forum/c/<channelId>/new-topic` (channel already
+ * known) to their own view mounter. `segments[0]` is always this app's own id
  * (`'forum'`), never part of the actual sub-route - see
  * `docs/building-an-app.md` §4.2/§5.1.
  */
@@ -640,6 +620,8 @@ export function mount(container, ctx) {
     stopView = mountNewTopicView(container, { ...viewCtx, channelId: idSeg });
   } else if (kindSeg === 'c' && idSeg) {
     stopView = mountChannelView(container, { ...viewCtx, channelId: idSeg });
+  } else if (kindSeg === 'new-topic') {
+    stopView = mountNewTopicView(container, { ...viewCtx, channelId: null });
   } else if (kindSeg === 'new') {
     stopView = mountNewChannelView(container, viewCtx);
   } else {
@@ -678,6 +660,51 @@ async function fetchChannelPolicy(services) {
 }
 
 /**
+ * An already-fetched channel list, reduced to `mountAppTemplate()`'s plain
+ * `{id, label, href, icon}` link-item shape (see `@qu/ui`'s
+ * `app-template.js` own `AppTemplateLinkItem` typedef) - shared by the
+ * board view, channel view, and topic view's own `navigation` sections
+ * (each already fetches/watches `services.channels.listChannels()` for its
+ * own reasons, so this only does the mapping, not the fetch itself - the
+ * same "one place computes the shape, every view's chrome reuses it" idea
+ * `apps/chat/client.js`'s own `roomsToNavItems()` established, just without
+ * a matching `listRooms()`-style fetcher here since there's nothing extra
+ * to compute per channel). A leading `{id: 'all', ...}` entry (never a real
+ * channel id - `crypto.randomUUID()` never produces it) is the board view's
+ * own destination, `#/forum` - mirrors the retired
+ * `mountMiniChannelSidebar()`'s identical sentinel.
+ * @param {Array<{_id: string, title: string, restricted?: boolean}>} channels
+ * @returns {Array<{id: string, label: string, href: string, icon?: string}>}
+ */
+function channelsToNavItems(channels) {
+  return [
+    { id: 'all', label: t('allChannels'), href: '#/forum' },
+    ...channels.map((c) => ({ id: c._id, label: c.title, href: `#/forum/c/${c._id}`, icon: c.restricted ? '🔒' : undefined })),
+  ];
+}
+
+/**
+ * "+ New channel" - `settings` (gear icon), not `primaryAction` (that's
+ * "+ New topic" now - see `docs/app-navigation-standard.md` Rule 5's forum
+ * example) - policy-gated the same way the retired sidebar's own inline
+ * link and `renderHeaderNavPoints()`'s "New channel" dropdown item both
+ * were. Depends on an async fetch not ready at the one synchronous
+ * `mountAppTemplate()` call every view makes - see that function's own
+ * "LATE-ARRIVING CHROME DATA" doc comment - so this is always called via
+ * `stopTemplate.update()` from an app's own async IIFE, never awaited
+ * before the initial `mountAppTemplate()` call itself.
+ * @param {ReturnType<typeof mountAppTemplate>} stopTemplate
+ * @param {object} services
+ * @param {() => boolean} isStopped
+ */
+async function applyNewChannelSettings(stopTemplate, services, isStopped) {
+  const { channelPolicy, isAdmin } = await fetchChannelPolicy(services);
+  if (isStopped()) return;
+  if (!isAdmin && !channelPolicy.allowMemberCreate) return;
+  stopTemplate.update({ settings: { items: [{ label: t('newChannelLink'), href: '#/forum/new' }] } });
+}
+
+/**
  * The "create a channel" form - a standalone builder (not a closure over
  * any one view) so both `mountNewChannelView()` (the only real caller
  * today) and any future embedding can reuse it without duplicating the
@@ -708,7 +735,10 @@ function buildChannelForm({ services, SPACE_ID, allowRestricted, onCreated }) {
   const submit = document.createElement('button');
   submit.type = 'submit';
   submit.textContent = t('createChannel');
-  form.append(titleInput, restrictedLabel, membersInput, submit);
+  const errorEl = document.createElement('p');
+  errorEl.className = 'qu-forum-new-channel-error';
+  errorEl.hidden = true;
+  form.append(titleInput, restrictedLabel, membersInput, submit, errorEl);
 
   // The actual fix for "double-clicking Create sometimes makes two boards"
   // (see this file's own top doc comment) - disable for the duration of the
@@ -718,10 +748,21 @@ function buildChannelForm({ services, SPACE_ID, allowRestricted, onCreated }) {
     const title = titleInput.value.trim();
     if (!title) return;
     submit.disabled = true;
+    errorEl.hidden = true;
     try {
       const memberPubs = membersInput.value.split(',').map((s) => s.trim()).filter(Boolean);
       const channel = await services.channels.createChannel(SPACE_ID, { title, restricted: restrictedInput.checked, memberPubs });
       onCreated?.(channel);
+    } catch (err) {
+      // Same "a caller with no catch here previously saw NOTHING" fix as
+      // mountInviteForm()'s own `.qu-forum-invite-error` (see its doc
+      // comment) - most commonly a restricted channel's own member list
+      // containing a pubkey with no resolvable profile (`resolveReaderXKeys()`'s
+      // fail-closed contract, see channel-service.js's "RESTRICTED CHANNELS"
+      // doc comment), previously an unhandled rejection with the button just
+      // quietly re-enabling.
+      errorEl.textContent = err.message;
+      errorEl.hidden = false;
     } finally {
       submit.disabled = false;
     }
@@ -773,7 +814,6 @@ function mountNewChannelView(container, { services, SPACE_ID }) {
 
 function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
   let stopped = false;
-  let stopSidebar = () => {};
   let topicsActivity;
   let off;
   const topicsListWatchers = new Map(); // channelId -> stop function
@@ -797,17 +837,13 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
     root.appendChild(ul);
   }
 
-  // See docs/app-navigation-standard.md Rule 3 - the shared responsive
-  // sidebar/tab-strip shell (@qu/ui's mountContextSwitcher(), variant:
-  // 'tabs'), with `renderSidebar` handing off to mountMiniChannelSidebar()
-  // UNCHANGED (it self-manages its own channel-list fetch + live watch,
-  // same as before - only the surrounding layout/CSS is now shared with
-  // every other app instead of this app's own bespoke `.qu-forum-layout`).
-  mountContextSwitcher(container, {
-    // 'all' - the board view IS the "All channels" entry, see
-    // mountMiniChannelSidebar()'s own doc comment on that sentinel.
-    renderSidebar: (host) => { stopSidebar = mountMiniChannelSidebar(host, { qu, services, syncFetch, SPACE_ID }, 'all'); },
-    variant: 'tabs',
+  // See docs/app-navigation-standard.md Rule 5 - `navigation` is NOT
+  // `desktopOnly` here (unlike an open topic's own room-style view, or
+  // apps/chat/client.js's room list): this view's own CONTENT is a merged
+  // activity FEED, not the channel list itself, so mobile genuinely needs
+  // the footer pill to reach a specific channel at all.
+  const stopTemplate = mountAppTemplate(container, {
+    primaryAction: { label: t('newTopicLink'), href: '#/forum/new-topic', icon: '✏️' },
     render: (content) => {
       const heading = document.createElement('h1');
       heading.textContent = t('title');
@@ -825,6 +861,15 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
         if (stopped) return;
         const channels = await services.channels.listChannels(SPACE_ID);
         if (stopped || token !== renderToken) return;
+
+        stopTemplate.update({
+          navigation: {
+            items: channelsToNavItems(channels),
+            activeId: 'all', // the board view IS the "All channels" entry
+            heading: t('channels'),
+            filter: true,
+          },
+        });
 
         // A per-channel topics-list watch, added once per channel (never
         // re-added on a later render() re-run) - `ChannelService`'s own
@@ -862,164 +907,29 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
       off = watch(qu, paths.listPath(SPACE_ID, 'channels'), () => render(), { syncFetch }); // initial: true (default) - fires render() immediately, not just on later changes
     },
   });
+  applyNewChannelSettings(stopTemplate, services, () => stopped);
 
   return () => {
     stopped = true;
     off?.();
     topicsActivity?.stop();
     for (const stopWatch of topicsListWatchers.values()) stopWatch();
-    stopSidebar();
+    stopTemplate();
   };
-}
-
-/**
- * THE one persistent channel list, shared by all three views (board,
- * channel, topic) - esoTalk's own "channel tabs stay visible no matter how
- * deep you've drilled in" idiom. Channel creation lives on its own subpage
- * (`mountNewChannelView()`, `#/forum/new`), reachable via the global
- * header's App Navigation Points Slot (`renderHeaderNavPoints()` below, see
- * docs/app-navigation-standard.md Rule 2) - not from this list itself.
- *
- * RESPONSIVE: two presentations of the SAME data, built every render -
- * a vertical `<ul>` (desktop, >=720px) and a native `<select>` (mobile,
- * <720px, see this file's own `@media` rules under `.qu-forum-mini-*`) -
- * CSS alone decides which one is visible, no separate "mobile" JS path. The
- * `<select>` exists because a horizontally-scrolling row of channel pills
- * forced sideways scrolling once there were more than a handful of channels
- * - a native dropdown has no width problem at any channel count, shows the
- * active channel (or "All channels") as its current value for free, and
- * needs no custom open/close/positioning code.
- *
- * NOTE: reused directly (unchanged) via `@qu/ui`'s `mountContextSwitcher()`
- * `renderSidebar` option for the board/channel views - `root` there is
- * ALREADY a styled `<aside class="qu-ctxswitch-sidebar">` when this runs, so
- * this function only ever ADDS its own class (`classList.add`), never
- * overwrites `className` wholesale - overwriting it once silently broke
- * `mountContextSwitcher`'s own responsive sidebar CSS for both views.
- * @param {HTMLElement} root
- * @param {{qu: object, services: object, syncFetch?: Function, SPACE_ID: string}} deps
- * @param {string|null} [activeChannelId] - Highlighted in the list, when
- *   known. The literal sentinel `'all'` (never a real channel id -
- *   `crypto.randomUUID()` never produces it) highlights the leading
- *   "All channels" entry instead - passed by the board view, since IT is
- *   that entry's own destination (`#/forum`).
- * @returns {() => void} stop function
- */
-function mountMiniChannelSidebar(root, { qu, services, syncFetch, SPACE_ID }, activeChannelId = null) {
-  root.classList.add('qu-forum-mini-sidebar');
-  let stopped = false;
-
-  async function render() {
-    if (stopped) return;
-    const channels = await services.channels.listChannels(SPACE_ID);
-    if (stopped) return;
-    root.textContent = '';
-    const title = document.createElement('h2');
-    title.textContent = t('channels');
-    root.appendChild(title);
-
-    const entries = [{ id: 'all', label: t('allChannels'), href: '#/forum', restricted: false }, ...channels.map((c) => ({
-      id: c._id, label: c.title, href: `#/forum/c/${c._id}`, restricted: c.restricted,
-    }))];
-
-    const ul = document.createElement('ul');
-    ul.className = 'qu-forum-mini-channels';
-    for (const entry of entries) {
-      const li = document.createElement('li');
-      const a = document.createElement('a');
-      a.href = entry.href;
-      a.textContent = entry.label;
-      a.className = entry.id === 'all' ? 'qu-forum-mini-all-channels' : '';
-      if (entry.id === activeChannelId) a.classList.add('qu-forum-mini-channel-active');
-      if (entry.restricted) {
-        const badge = document.createElement('span');
-        badge.className = 'qu-forum-restricted-badge';
-        badge.textContent = '🔒';
-        a.appendChild(badge);
-      }
-      li.appendChild(a);
-      ul.appendChild(li);
-    }
-    root.appendChild(ul);
-
-    const select = document.createElement('select');
-    select.className = 'qu-forum-mini-select';
-    for (const entry of entries) {
-      const opt = document.createElement('option');
-      opt.value = entry.href;
-      opt.textContent = entry.restricted ? `${entry.label} 🔒` : entry.label;
-      opt.selected = entry.id === activeChannelId;
-      select.appendChild(opt);
-    }
-    select.addEventListener('change', () => { window.location.hash = select.value; });
-    root.appendChild(select);
-  }
-
-  const off = watch(qu, paths.listPath(SPACE_ID, 'channels'), () => render(), { syncFetch });
-  return () => {
-    stopped = true;
-    off();
-  };
-}
-
-// ===================================================================
-// HEADER ACTION - "+ New channel" (see docs/app-navigation-standard.md Rule 2)
-// ===================================================================
-
-/**
- * The `shell.headerNavPoints` contributor (see `apps/forum/manifest.quapp`'s
- * `contributes`) - shown only while Forum is active. Contributes 1 or 2
- * items, so this is the first real case of `renderNavPointsMenu()`'s
- * dropdown shape (see that file's own doc comment): "New channel" (gated by
- * the SAME `fetchChannelPolicy()` check the old inline "+ New channel" list
- * entry used, moved here from `mountMiniChannelSidebar()` above) is always
- * the first item while Forum is active; "New topic" is added ONLY while a
- * specific channel is open (`getContext().segments` is `['forum', 'c',
- * <channelId>, ...]`) - on the board view (no channel open), "create a
- * topic in THIS channel" isn't meaningful, so Forum contributes just the 1
- * item there (a plain link, no dropdown). Unlike Calendar/Chat/ToDo's
- * contributors, this one stays reactive to WITHIN-app navigation (switching
- * channels) by registering its own `onContextChange` listener from inside
- * `render()`, since `mountAppHeaderAction()` itself only re-renders on
- * activate/deactivate, not on every route change within the same app.
- * @param {HTMLElement} container
- * @param {{getContext: Function, onContextChange: Function, services: object}} payload
- */
-export function renderHeaderNavPoints(container, { getContext, onContextChange, services }) {
-  mountAppHeaderAction(container, {
-    appId: 'forum', getContext, onContextChange,
-    render: (wrap) => {
-      let stopped = false;
-      let policyCache = null;
-      let lastChannelId;
-      async function update() {
-        if (stopped) return;
-        if (!policyCache) policyCache = await fetchChannelPolicy(services);
-        if (stopped) return;
-        const { segments } = getContext();
-        const channelId = segments[1] === 'c' ? segments[2] : null;
-        if (channelId === lastChannelId) return; // nothing this depends on actually changed
-        lastChannelId = channelId;
-        const items = [];
-        if (policyCache.isAdmin || policyCache.channelPolicy.allowMemberCreate) items.push({ label: t('newChannelLink'), href: '#/forum/new' });
-        if (channelId) items.push({ label: t('newTopicLink'), href: `#/forum/c/${channelId}/new-topic` });
-        wrap.textContent = '';
-        renderNavPointsMenu(wrap, { items, menuLabel: t('newActions') });
-      }
-      update();
-      onContextChange(update);
-      return () => { stopped = true; };
-    },
-  });
 }
 
 // ===================================================================
 // CHANNEL VIEW - #/forum/c/<channelId>: one channel's topics
 // ===================================================================
+// The former `shell.headerNavPoints` contributor ("+ New channel"/"+ New
+// topic", a 1-or-2-item dropdown) is retired - see
+// docs/app-navigation-standard.md Rule 5. Both actions now live as
+// `mountAppTemplate()` chrome instead: "+ New topic" is the board/channel
+// view's own `primaryAction`, "+ New channel" is `settings`
+// (`applyNewChannelSettings()` above).
 
 function mountChannelView(container, { qu, services, syncFetch, SPACE_ID, channelId }) {
   let stopped = false;
-  let stopSidebar = () => {};
 
   const heading = document.createElement('div');
   heading.className = 'qu-forum-channel-heading';
@@ -1032,14 +942,27 @@ function mountChannelView(container, { qu, services, syncFetch, SPACE_ID, channe
 
   // See docs/app-navigation-standard.md Rule 1 (no bespoke back link - the
   // shell header's own Back/Forward already covers this, and the sidebar's
-  // own "All channels" entry covers the rest) and Rule 3 (the shared
-  // responsive sidebar/tab-strip shell) - same shape as mountBoardView()'s
-  // own mountContextSwitcher() call just above.
-  mountContextSwitcher(container, {
-    renderSidebar: (host) => { stopSidebar = mountMiniChannelSidebar(host, { qu, services, syncFetch, SPACE_ID }, channelId); },
-    variant: 'tabs',
+  // own "All channels" entry covers the rest) and Rule 5 - same shape as
+  // mountBoardView()'s own mountAppTemplate() call above; `navigation` is
+  // NOT `desktopOnly` here either, for the same reason.
+  const stopTemplate = mountAppTemplate(container, {
+    primaryAction: { label: t('newTopicLink'), href: `#/forum/c/${channelId}/new-topic`, icon: '✏️' },
     render: (content) => content.append(heading, topicsRoot, inviteRoot),
   });
+  applyNewChannelSettings(stopTemplate, services, () => stopped);
+  const offChannelList = watch(qu, paths.listPath(SPACE_ID, 'channels'), async () => {
+    if (stopped) return;
+    const channels = await services.channels.listChannels(SPACE_ID);
+    if (stopped) return;
+    stopTemplate.update({
+      navigation: {
+        items: channelsToNavItems(channels),
+        activeId: channelId,
+        heading: t('channels'),
+        filter: true,
+      },
+    });
+  }, { syncFetch });
 
   let currentChannel = null;
   let topicsRenderToken = 0;
@@ -1129,8 +1052,9 @@ function mountChannelView(container, { qu, services, syncFetch, SPACE_ID, channe
     stopped = true;
     offTopics();
     offChannel();
+    offChannelList();
     topicsActivity.stop();
-    stopSidebar();
+    stopTemplate();
   };
 }
 
@@ -1144,6 +1068,27 @@ function mountChannelView(container, { qu, services, syncFetch, SPACE_ID, channe
 // channel's own writer ACL (restricted or not) to enforce who can actually
 // post; this view has nothing extra to check client-side.
 
+/**
+ * NEW TOPIC - `#/forum/c/<channelId>/new-topic` (channel already known - no
+ * picker, `channelId` is a real id) or `#/forum/new-topic` (reached from the
+ * board view's own `primaryAction` - `channelId` is `null`, so a channel
+ * `<select>` is added at the top of the form; the channel list resolves
+ * asynchronously, same "build immediately, fill in via your own async IIFE"
+ * shape every other async render in this file already follows - the form is
+ * simply not submittable yet while it's empty, `<select required>` already
+ * enforces that natively).
+ *
+ * Beyond the title, the form also takes the topic's opening post right here
+ * (content textarea + one optional attachment) - same "build immediately,
+ * fill in via your own async IIFE" shape every other async render in this
+ * file already follows for the channel `<select>`, and the exact same
+ * upload-starts-on-pick / `qu-asset-uploaded` / `confirmSent()` attachment
+ * lifecycle `mountTopicView()`'s own composer uses (see this file's own top
+ * doc comment's "ATTACHMENTS" section) - createTopic() then postMessage()
+ * are two calls, but read as one atomic "create topic with its first post"
+ * action from the form's point of view (a topic with no opening post makes
+ * no sense here, unlike a later reply in an existing thread).
+ */
 function mountNewTopicView(container, { services, SPACE_ID, channelId }) {
   let stopped = false;
   const formRoot = document.createElement('div');
@@ -1157,24 +1102,107 @@ function mountNewTopicView(container, { services, SPACE_ID, channelId }) {
 
   const form = document.createElement('form');
   form.className = 'qu-forum-new-topic-form';
+
+  let channelSelect = null;
+  if (!channelId) {
+    channelSelect = document.createElement('select');
+    channelSelect.required = true;
+    channelSelect.disabled = true; // enabled once the channel list resolves, below
+    const label = document.createElement('label');
+    label.textContent = t('newTopicChannelLabel');
+    label.appendChild(channelSelect);
+    form.appendChild(label);
+
+    (async () => {
+      const channels = await services.channels.listChannels(SPACE_ID);
+      if (stopped) return;
+      if (channels.length === 0) {
+        const empty = document.createElement('p');
+        empty.className = 'qu-forum-empty';
+        empty.textContent = t('newTopicNoChannels');
+        label.replaceWith(empty);
+        form.hidden = true;
+        return;
+      }
+      for (const c of channels) {
+        const opt = document.createElement('option');
+        opt.value = c._id;
+        opt.textContent = c.title;
+        channelSelect.appendChild(opt);
+      }
+      channelSelect.disabled = false;
+    })();
+  }
+
   const titleInput = document.createElement('input');
   titleInput.type = 'text';
   titleInput.placeholder = t('newTopicPlaceholder');
   titleInput.required = true;
+  form.appendChild(titleInput);
+
+  const bodyInput = document.createElement('textarea');
+  bodyInput.className = 'qu-forum-new-topic-body';
+  bodyInput.placeholder = t('composerPlaceholder');
+  form.appendChild(bodyInput);
+
+  // Same "upload starts on file-pick, held as `pendingAttachment` until
+  // submit" lifecycle as the topic view's own composer - see this file's
+  // own top doc comment's "ATTACHMENTS" section.
+  const attachUpload = document.createElement('qu-asset-upload');
+  const pendingAttachmentEl = document.createElement('div');
+  pendingAttachmentEl.className = 'qu-forum-pending-attachment';
+  pendingAttachmentEl.hidden = true;
+  let pendingAttachment = null;
+  function clearPendingAttachment() {
+    pendingAttachment = null;
+    pendingAttachmentEl.hidden = true;
+    pendingAttachmentEl.textContent = '';
+  }
+  attachUpload.addEventListener('qu-asset-uploaded', (e) => {
+    pendingAttachment = { assetId: e.detail.assetId, ...e.detail.meta };
+    pendingAttachmentEl.textContent = '';
+    pendingAttachmentEl.hidden = false;
+    const label = document.createElement('span');
+    label.textContent = `📎 ${pendingAttachment.name}`;
+    const removeBtn = createIconButton({ icon: '✕', label: t('attachRemove'), onClick: clearPendingAttachment });
+    pendingAttachmentEl.append(label, removeBtn);
+  });
+  form.append(attachUpload, pendingAttachmentEl);
+
   const submit = document.createElement('button');
   submit.type = 'submit';
   submit.textContent = t('createTopic');
-  form.append(titleInput, submit);
+  const errorEl = document.createElement('p');
+  errorEl.className = 'qu-forum-new-topic-error';
+  errorEl.hidden = true;
+  form.append(submit, errorEl);
 
   // Same double-submit guard as the board view's "create channel" form.
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const title = titleInput.value.trim();
-    if (!title) return;
+    const body = bodyInput.value.trim();
+    const targetChannelId = channelId ?? channelSelect?.value;
+    if (!title || !targetChannelId) return;
     submit.disabled = true;
+    errorEl.hidden = true;
     try {
-      const topic = await services.channels.createTopic(SPACE_ID, channelId, { title });
+      const topic = await services.channels.createTopic(SPACE_ID, targetChannelId, { title });
+      const attachment = pendingAttachment;
+      if (body || attachment) {
+        const extra = attachment ? { attachment } : {};
+        await services.messages.postMessage(SPACE_ID, topic._id, { body, extra });
+        if (attachment) attachUpload.confirmSent(attachment.assetId);
+      }
       if (!stopped) window.location.hash = `#/forum/t/${topic._id}`;
+    } catch (err) {
+      // Same "no catch here previously meant NOTHING visible" fix as
+      // mountInviteForm()'s own `.qu-forum-invite-error` - a locally
+      // rejected createTopic()/postMessage() (e.g. this identity was
+      // removed from a restricted channel between opening this form and
+      // submitting it) used to leave the button just quietly re-enabling.
+      errorEl.textContent = err.message;
+      errorEl.hidden = false;
     } finally {
       submit.disabled = false;
     }
@@ -1189,22 +1217,22 @@ function mountNewTopicView(container, { services, SPACE_ID, channelId }) {
 // ===================================================================
 
 /**
- * TOPIC VIEW - a fixed "room" layout, the exact same technique
- * `apps/chat/client.js`'s own `mountRoomView()` uses (that file's own STYLE
- * has the full "why fixed positioning, not vh/dvh calc()" reasoning) -
- * ported over per explicit request ("the base for Forum and Chat really is
+ * TOPIC VIEW - mounts with `mountAppTemplate({fullHeight: true, ...})`, the
+ * exact same technique `apps/chat/client.js`'s own `mountRoomView()` uses
+ * (see `@qu/ui`'s `app-template.js` own "FULL HEIGHT MODE" doc comment for
+ * the full "why fixed positioning, not vh/dvh calc()" reasoning) - ported
+ * over per explicit request ("the base for Forum and Chat really is
  * identical - Forum just doesn't need voice messages"). A topic's message
  * list and composer never scroll away, no double-scrollbar, and it gets the
  * exact same scroll-follow/persistent-scroll-to-bottom/true-bottom-
  * correction machinery Chat has (see the "SCROLL-FOLLOW" block below). The
- * channel sidebar (`mountMiniChannelSidebar()`) stays a FLEX SIBLING inside
- * the SAME fixed box, not a separate fixed element of its own - this app's
+ * channel sidebar is now the Core's own `navigation` (`desktopOnly: true` -
+ * see this function's own `stopTemplate.update()` call below) - this app's
  * own "the channel list never disappears, no matter how deep you've drilled
- * in" idiom (top doc comment) still holds exactly as before. Board/channel
- * views keep the OLDER plain page-scroll `.qu-forum-layout` completely
- * unchanged (see STYLE's own `.qu-forum-layout-room` modifier doc comment)
- * - only a topic's actual thread benefits from being pinned, the same way
- * only a chat ROOM (never the room list) is pinned in `apps/chat/client.js`.
+ * in" idiom (top doc comment) still holds on wide screens; on mobile there's
+ * no footer here at all (no `primaryAction`/`settings`, unlike the board/
+ * channel views), so the topic's own composer is the only bottom bar,
+ * same fix `apps/chat/client.js`'s room view migration made.
  *
  * PERMALINKS - a post's timestamp (see `buildMessageFooter()`) IS its
  * permalink, `#/forum/t/<topicId>/m/<messageId>` - clicking it, or landing
@@ -1215,25 +1243,20 @@ function mountNewTopicView(container, { services, SPACE_ID, channelId }) {
  */
 function mountTopicView(container, { qu, services, subscribe, syncFetch, extensionPoints, SPACE_ID, topicId, messageId = null }) {
   let stopped = false;
-  container.textContent = '';
 
-  const layout = document.createElement('div');
-  // `qu-forum-layout-room` is an ADDITIONAL class alongside the base
-  // `qu-forum-layout` (never a replacement) - see STYLE's own doc comment
-  // on that modifier for why board/channel views stay entirely unaffected.
-  layout.className = 'qu-forum-layout qu-forum-layout-room';
-  const sidebarRoot = document.createElement('aside');
   const roomView = document.createElement('div');
   roomView.className = 'qu-forum-room-view';
-  layout.append(sidebarRoot, roomView);
-  container.appendChild(layout);
-  // No activeChannelId yet - a topic only knows its own parent channel
-  // after the async lookup below resolves, and this list is cheap enough
-  // (and rare enough to actually matter) that re-highlighting it isn't
-  // worth a second render pass - it still fully works for navigation, just
-  // without the active-channel highlight in a topic view specifically
-  // (unlike the channel view, which has its `channelId` synchronously).
-  const stopSidebar = mountMiniChannelSidebar(sidebarRoot, { qu, services, syncFetch, SPACE_ID }, null);
+  // `fullHeight: true` + a `desktopOnly` `navigation` - the exact same
+  // shape apps/chat/client.js's own `mountRoomView()` uses (see that
+  // function's own doc comment and @qu/ui's app-template.js own "FULL
+  // HEIGHT MODE" doc comment): the channel sidebar still "never disappears,
+  // no matter how deep you've drilled in" on wide screens, but on mobile
+  // there's no primaryAction/settings here at all (unlike the board/channel
+  // views), so the mobile footer is empty and the Core renders none -
+  // the topic's own composer is already a bottom bar, a second one right
+  // above it would read as duplicated chrome (same reasoning chat's own
+  // room view migration was fixed for).
+  const stopTemplate = mountAppTemplate(container, { fullHeight: true, render: (content) => content.appendChild(roomView) });
 
   const header = document.createElement('div');
   header.className = 'qu-forum-topic-header';
@@ -1247,7 +1270,7 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
   // itself - see that file's own doc comment), so there's no per-topic
   // watchChildren() left in THIS file for pins at all.
   if (extensionPoints) {
-    extensionPoints.renderSlot('forum.topicToolbar', pinnedRoot, {
+    extensionPoints.renderSlot('content.topicToolbar', pinnedRoot, {
       services, qu, syncFetch, spaceId: SPACE_ID, threadId: topicId,
       // Lets a contributor (Pins' own "📌 Pinned" bar) link a message back
       // to its real permalink without hardcoding/duplicating forum's own
@@ -1327,6 +1350,7 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
   actionBtn.className = 'qu-forum-composer-action';
   actionBtn.textContent = '➤';
   actionBtn.title = t('send');
+  actionBtn.setAttribute('aria-label', t('send'));
 
   composerRow.append(composerTools, inputWrap, actionBtn);
 
@@ -1340,20 +1364,40 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
   const pendingAttachmentEl = document.createElement('div');
   pendingAttachmentEl.className = 'qu-forum-pending-attachment';
   pendingAttachmentEl.hidden = true;
+  const composerErrorEl = document.createElement('p');
+  composerErrorEl.className = 'qu-forum-composer-error';
+  composerErrorEl.hidden = true;
   // ABOVE the input row, not below it - see apps/chat/client.js's own
   // identical composer-ordering fix for why (a pending attachment is
   // context for what's about to be sent, not a footnote after the fact).
-  composerWrap.append(replyBanner, pendingAttachmentEl, composerRow);
+  composerWrap.append(replyBanner, pendingAttachmentEl, composerErrorEl, composerRow);
 
   roomView.append(header, messagesScroll, composerWrap);
 
-  // Resolves the topic's own title - doesn't block the message list itself
-  // from loading, both start independently.
+  // Resolves the topic's own title AND its room-switcher `navigation` (see
+  // mountAppTemplate()'s own "LATE-ARRIVING CHROME DATA" doc comment) -
+  // doesn't block the message list itself from loading, both start
+  // independently. No activeChannelId known until `topicBit` resolves - a
+  // topic only knows its own parent channel from its own stored document -
+  // so, unlike the channel view, the sidebar briefly shows with no active
+  // highlight before this settles.
   (async () => {
-    const topicBit = await qu.get(paths.documentPath(SPACE_ID, topicId));
+    const [channels, topicBit] = await Promise.all([
+      services.channels.listChannels(SPACE_ID),
+      qu.get(paths.documentPath(SPACE_ID, topicId)),
+    ]);
     if (stopped) return;
     const topic = topicBit?.val;
     if (topic) heading.textContent = topic.title;
+    stopTemplate.update({
+      navigation: {
+        items: channelsToNavItems(channels),
+        activeId: topic?.channelId ?? null,
+        heading: t('channels'),
+        desktopOnly: true,
+        filter: true,
+      },
+    });
   })();
 
   // ---- PERMALINKS + scroll-follow - the exact same state machine
@@ -1560,11 +1604,7 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     pendingAttachmentEl.hidden = false;
     const label = document.createElement('span');
     label.textContent = `📎 ${pendingAttachment.name}`;
-    const removeBtn = document.createElement('button');
-    removeBtn.type = 'button';
-    removeBtn.textContent = '✕';
-    removeBtn.title = t('attachRemove');
-    removeBtn.addEventListener('click', clearPendingAttachment);
+    const removeBtn = createIconButton({ icon: '✕', label: t('attachRemove'), onClick: clearPendingAttachment });
     pendingAttachmentEl.append(label, removeBtn);
   });
 
@@ -1587,10 +1627,7 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     replyBanner.hidden = false;
     const label = document.createElement('span');
     label.textContent = t('replyingTo', { name: authorLabel });
-    const cancelBtn = document.createElement('button');
-    cancelBtn.type = 'button';
-    cancelBtn.textContent = '✕';
-    cancelBtn.addEventListener('click', () => setReplyingTo(null));
+    const cancelBtn = createIconButton({ icon: '✕', label: t('cancel'), onClick: () => setReplyingTo(null) });
     replyBanner.append(label, cancelBtn);
   }
 
@@ -2006,7 +2043,7 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
   // Reactions/Pin/Bookmark used to be hardcoded here - now admin-toggleable
   // plugins (`apps/reactions`, `apps/pins`, `apps/bookmarks`), reached
   // through `content.messageFooter`/`content.messageMenu` (see
-  // `buildMessageFooter()` above) and the once-per-topic `forum.topicToolbar`
+  // `buildMessageFooter()` above) and the once-per-topic `content.topicToolbar`
   // slot (`mountTopicView()`'s own setup below).
 
   actionBtn.addEventListener('click', async () => {
@@ -2017,7 +2054,32 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     // genuinely empty post (no text AND no attachment) is refused.
     if (!body && !pendingAttachment) return;
     actionBtn.disabled = true;
+    composerErrorEl.hidden = true;
     try {
+      // Refreshes this topic's own ACL doc right before posting - closes
+      // the exact silent-failure scenario this file's own top doc comment
+      // describes (`[SyncEngine] rejecting synced QuBit ... writer not
+      // authorized`), NOT merely shrinks it, whenever a relay is actually
+      // reachable: `syncFetch()` (`SyncEngine.fetch()`) ingests the fetched
+      // ACL via the same trusted "already-signed synced data" path
+      // `#handleSync()` uses, bypassing any local write-authorization check
+      // (it's not this identity authoring a change, just receiving one) -
+      // so it persists REGARDLESS of whether this identity itself has
+      // write access. The very next line's `postMessage()` then runs
+      // through `QuStore.put()`'s own synchronous `AccessEngine` pipeline
+      // hook (`assertWriteAuthorized()`), which now sees the FRESH,
+      // authoritative ACL and throws immediately if unauthorized - the
+      // write never reaches PERSIST/NOTIFY, never enters the outbox, and
+      // is never sent out at all. Proven end-to-end (two real identities,
+      // no mocked rejection) by this app's own test: "composer: an
+      // unauthorized post is rejected LOCALLY, before it ever reaches the
+      // relay/other peers". The one case this can't close: genuinely
+      // OFFLINE (no relay reachable at all) - `syncFetch` then silently
+      // no-ops (`.catch(() => {})` below) and this identity's existing,
+      // possibly-stale local ACL cache is all there is to go on, same
+      // optimistic-write-while-offline trade-off `outbox.js` already makes
+      // for every other write in this codebase.
+      await syncFetch?.(paths.aclPath(SPACE_ID, 'threads', topicId)).catch(() => {});
       const attachment = pendingAttachment;
       const extra = attachment ? { attachment } : {};
       await services.messages.postMessage(SPACE_ID, topicId, { body, replyTo: replyingTo?.id ?? null, extra });
@@ -2029,6 +2091,16 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
       // does the (deferred) sync-out verification phase start - see
       // <qu-asset-upload>'s own doc comment on confirmSent() for why.
       if (attachment) attachUpload.confirmSent(attachment.assetId);
+    } catch (err) {
+      // Same "no catch here previously meant NOTHING visible" fix as
+      // mountInviteForm()'s own `.qu-forum-invite-error` - e.g. this
+      // identity's own local ACL copy for this topic's thread is stale
+      // (see this file's own top doc comment's reasoning on
+      // `[SyncEngine] rejecting synced QuBit ... writer not authorized`)
+      // and the local write is rejected before ever reaching the network -
+      // the composer used to just silently re-enable with nothing sent.
+      composerErrorEl.textContent = err.message;
+      composerErrorEl.hidden = false;
     } finally {
       actionBtn.disabled = false;
     }
@@ -2044,7 +2116,7 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     stopComposerMentions();
     stopComposerEmoji();
     stopComposerAutogrow();
-    stopSidebar();
+    stopTemplate();
   };
 }
 

@@ -47,7 +47,7 @@
 import { watchChildren } from '@qu/reactive';
 import { paths } from '@qu/services';
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme } from '@qu/ui';
+import { injectStyle, ensureTheme, mountAppTemplate } from '@qu/ui';
 
 const DICT = {
   en: {
@@ -87,7 +87,7 @@ export function mount(container, { qu, services, syncFetch }) {
   const heading = document.createElement('h1');
   heading.textContent = t('title');
   const listRoot = document.createElement('div');
-  container.append(heading, listRoot);
+  mountAppTemplate(container, { render: (content) => content.append(heading, listRoot) });
 
   async function render() {
     if (stopped) return;
@@ -125,6 +125,7 @@ export function mount(container, { qu, services, syncFetch }) {
       removeBtn.type = 'button';
       removeBtn.textContent = '✕';
       removeBtn.title = t('remove');
+      removeBtn.setAttribute('aria-label', t('remove'));
       removeBtn.addEventListener('click', () => services.bookmarks.remove(bookmark.id));
 
       li.append(body, removeBtn);

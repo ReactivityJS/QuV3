@@ -26,11 +26,14 @@ export function renderFlagToggle({ flags, flagType, entityKind, entityRef, icon,
   btn.className = 'qu-flag-toggle';
   btn.textContent = icon;
   btn.title = title;
+  btn.setAttribute('aria-label', title);
 
   function render(active) {
     btn.textContent = active ? (activeIcon ?? icon) : icon;
     btn.classList.toggle('qu-flag-toggle-active', active);
-    btn.title = active ? (activeTitle ?? title) : title;
+    const label = active ? (activeTitle ?? title) : title;
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
   }
 
   flags.hasPrivate(flagType, entityKind, entityRef).then(render);

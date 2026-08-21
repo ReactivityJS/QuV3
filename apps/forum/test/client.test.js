@@ -12,7 +12,7 @@ import { installDom, waitFor } from '@qu/ui/testing';
 import { register as registerForum } from '../index.js';
 
 installDom();
-const { mount, searchForum, renderSearchResult, renderHeaderNavPoints } = await import('../client.js');
+const { mount, searchForum, renderSearchResult } = await import('../client.js');
 
 function createQu() {
   const qu = new QuStore();
@@ -49,14 +49,24 @@ const TOPIC_SEGMENTS = ['forum', 't', 'general'];
  * every real deployment relies on for the "General" channel/topic to exist -
  * exactly once per fresh store, exactly like a real relay boot would.
  */
-async function freshEnv(alias) {
+/**
+ * @param {string} alias
+ * @param {{syncFetch?: (path: string) => Promise<object|null>}} [options] -
+ *   `syncFetch`, when given, is wired into every Service constructor that
+ *   accepts one (`list`/`access`/`messages`/`channels`) - see the "an
+ *   unauthorized post is rejected LOCALLY" test below for the one caller
+ *   that actually needs this (a second, uninvited identity whose own
+ *   `syncFetch` stub answers from a THIRD store, simulating a reachable
+ *   relay - every other call site omits this entirely, unaffected).
+ */
+async function freshEnv(alias, { syncFetch = null } = {}) {
   const qu = createQu();
   const identity = new QuIdentityEngine(qu);
   await identity.importMnemonic(identity.generateMnemonic());
   await identity.publishMainProfile({ alias });
-  const list = new ListService(qu);
-  const access = new AccessService(qu, identity);
-  const messages = new MessageService(qu, identity, list, access);
+  const list = new ListService(qu, syncFetch);
+  const access = new AccessService(qu, identity, syncFetch);
+  const messages = new MessageService(qu, identity, list, access, syncFetch);
   const services = {
     actors: new ActorService(identity),
     profile: new ProfileService(qu, identity),
@@ -67,7 +77,7 @@ async function freshEnv(alias) {
     bookmarks: new BookmarksService(new FlagService(qu, identity, list)),
     directory: new DirectoryService(qu, identity, list),
     contacts: new ContactsService(new FlagService(qu, identity, list), identity),
-    channels: new ChannelService(qu, identity, list, access, messages),
+    channels: new ChannelService(qu, identity, list, access, messages, syncFetch),
   };
   const registry = new Registry();
   registry.registerService('list-service', list);
@@ -139,7 +149,7 @@ const FORUM_APPS_WITH_PINS = [
   {
     name: 'pins', clientMainUrl: PINS_CLIENT_URL, contributes: [
       { point: 'content.messageMenu', export: 'pinMenuItem' },
-      { point: 'forum.topicToolbar', export: 'renderPinnedBar' },
+      { point: 'content.topicToolbar', export: 'renderPinnedBar' },
     ],
   },
 ];
@@ -312,7 +322,7 @@ test('the composer\'s "+" action menu (content.composerActions) lists Attach nat
       seen.push({ point, payload });
       return [{ id: 'calendar.newEvent', label: 'New calendar event', icon: '📅', onClick: () => {} }];
     },
-    renderSlot: async () => {}, // forum.topicToolbar - unrelated to this test, just needs to exist
+    renderSlot: async () => {}, // content.topicToolbar - unrelated to this test, just needs to exist
   };
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS, extensionPoints });
   try {
@@ -362,6 +372,86 @@ test('attaching a file via the composer\'s <qu-asset-upload> sends it along with
     assert.equal(container.querySelector('.qu-forum-message-attachment').getAttribute('asset-id'), messages[0].attachment.assetId);
     // The pending-attachment chip is cleared after a successful send.
     assert.equal(container.querySelector('.qu-forum-pending-attachment').hidden, true);
+  } finally {
+    stop();
+  }
+});
+
+test('composer: a failed postMessage() (e.g. this identity\'s local ACL copy for the thread went stale) surfaces the error instead of failing silently', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  const originalPostMessage = a.services.messages.postMessage.bind(a.services.messages);
+  a.services.messages.postMessage = async () => {
+    throw new Error('AccessEngine: writer not authorized to write to threads "general"');
+  };
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => container.querySelector('textarea') !== null);
+    const textarea = container.querySelector('textarea');
+    textarea.value = 'This should fail';
+    const sendBtn = container.querySelector('.qu-forum-composer-action');
+    sendBtn.click();
+
+    await waitFor(() => container.querySelector('.qu-forum-composer-error')?.hidden === false);
+    assert.match(container.querySelector('.qu-forum-composer-error').textContent, /writer not authorized/);
+    assert.equal(sendBtn.disabled, false);
+    // the composer text is NOT cleared on failure - the user can retry.
+    assert.equal(textarea.value, 'This should fail');
+  } finally {
+    a.services.messages.postMessage = originalPostMessage;
+    stop();
+  }
+});
+
+test('composer: an unauthorized post is rejected LOCALLY, before it ever reaches the relay/other peers - not merely a friendlier error surfaced after the fact', async () => {
+  const ada = await freshEnv('Ada');
+  const channel = await ada.services.channels.createChannel(FORUM_SPACE_ID, { title: 'VIP', restricted: true, memberPubs: [] });
+  const topic = await ada.services.channels.createTopic(FORUM_SPACE_ID, channel._id, { title: 'Secret' });
+
+  // Eve - a real identity, never invited to this channel. Her OWN local
+  // store has the topic's title document (simulating e.g. a stale bookmark
+  // from before this restricted-channel privacy fix), but crucially NOT
+  // this topic's own thread ACL - the exact "never synced this ACL, ever"
+  // scenario the composer's own pre-send syncFetch() call (client.js,
+  // mountTopicView()'s actionBtn handler) exists to close.
+  const eve = await freshEnv('Eve', {
+    // A syncFetch stub answering from Ada's store - THE relay's real job
+    // (`SyncEngine.fetch()`/`#handleResponse()`) is exactly this: serve
+    // whatever the authoritative store actually has for a path, regardless
+    // of whether the REQUESTER would be allowed to write it. Copies the
+    // RAW stored QuBit (bypassing any pipeline), same as production sync.
+    syncFetch: async (path) => {
+      const { adapter, rel } = ada.qu.resolveMount(path);
+      const quBit = await adapter.get(rel);
+      if (quBit) await eve.qu.putSealed(path, quBit);
+      return quBit ?? null;
+    },
+  });
+  await eve.qu.putSealed(paths.documentPath(FORUM_SPACE_ID, topic._id), await ada.qu.get(paths.documentPath(FORUM_SPACE_ID, topic._id)));
+
+  const container = makeContainer();
+  const stop = mount(container, {
+    qu: eve.qu, services: eve.services, apps: FORUM_APPS, subscribe: noopSubscribe,
+    segments: ['forum', 't', topic._id], syncFetch: eve.services.messages.syncFetch,
+  });
+  try {
+    await waitFor(() => container.querySelector('textarea') !== null);
+    container.querySelector('textarea').value = 'I should never arrive';
+    const sendBtn = container.querySelector('.qu-forum-composer-action');
+    sendBtn.click();
+
+    await waitFor(() => container.querySelector('.qu-forum-composer-error')?.hidden === false);
+    assert.match(container.querySelector('.qu-forum-composer-error').textContent, /not authorized/);
+
+    // The message is genuinely nowhere - not just hidden from Eve's own
+    // view, but never written to the authoritative store (Ada's) at all,
+    // i.e. the local rejection happened BEFORE anything was ever sent out.
+    const { messages } = await ada.services.messages.listMessages(FORUM_SPACE_ID, topic._id);
+    assert.equal(messages.length, 0);
+    const { messages: eveMessages } = await eve.services.messages.listMessages(FORUM_SPACE_ID, topic._id);
+    assert.equal(eveMessages.length, 0);
   } finally {
     stop();
   }
@@ -706,7 +796,7 @@ test('content.messageMenu (bookmarks): a bookmark is private - a SECOND identity
   }
 });
 
-test('content.messageMenu (pins) / forum.topicToolbar: the REAL apps/pins app pins a message via its menu item and shows it in the pinned bar, live for a second independent mount; unpinning removes it', async () => {
+test('content.messageMenu (pins) / content.topicToolbar: the REAL apps/pins app pins a message via its menu item and shows it in the pinned bar, live for a second independent mount; unpinning removes it', async () => {
   const a = await freshEnv('Ada');
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
   await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'Pin this one' });
@@ -1258,17 +1348,20 @@ test('the returned stop function tears down cleanly - no error thrown', async ()
 // BOARD VIEW - #/forum
 // ===================================================================
 
-test('board view (#/forum, no sub-segments) lists the migrated "General" channel in the persistent sidebar and its topic in the recent-activity feed', async () => {
+test('board view (#/forum, no sub-segments) lists the migrated "General" channel in the app-template sidebar (both desktop and mobile), and its topic in the recent-activity feed', async () => {
   const a = await freshEnv('Ada');
   await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'first ever post' });
 
   const container = makeContainer();
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
   try {
-    await waitFor(() => container.querySelector('.qu-forum-mini-all-channels') !== null);
-    assert.equal(container.querySelector('.qu-forum-mini-all-channels').textContent, 'All channels');
-    assert.ok(container.querySelector('.qu-forum-mini-all-channels').classList.contains('qu-forum-mini-channel-active')); // the board view IS "All channels"
-    assert.match(container.querySelector('.qu-forum-mini-channels li:not(:first-child) a').textContent, /General/);
+    await waitFor(() => container.querySelector('.qu-apptpl-sidebar .qu-apptpl-list a') !== null);
+    const links = [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')];
+    assert.equal(links[0].textContent, 'All channels');
+    assert.equal(links[0].getAttribute('href'), '#/forum');
+    assert.match(links[1].textContent, /General/);
+    const activeLink = container.querySelector('.qu-apptpl-sidebar .qu-apptpl-item-active');
+    assert.equal(activeLink.getAttribute('href'), '#/forum'); // the board view IS "All channels"
 
     await waitFor(() => container.querySelector('.qu-forum-topic-row a') !== null);
     const topicLink = container.querySelector('.qu-forum-topic-row a');
@@ -1294,32 +1387,15 @@ test('board view: explicitly backfills each channel\'s OWN topics list via syncF
   }
 });
 
-test('board view: the mobile channel switcher is a native <select> with the same entries as the sidebar list, "All channels" selected by default', async () => {
+test('board view: the mobile footer shows a channel pill whose popup lists the same entries as the sidebar, "All channels" as the active label', async () => {
   const a = await freshEnv('Ada');
   const container = makeContainer();
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
   try {
-    await waitFor(() => container.querySelector('.qu-forum-mini-select') !== null);
-    const select = container.querySelector('.qu-forum-mini-select');
-    const options = [...select.querySelectorAll('option')];
-    assert.equal(options[0].textContent, 'All channels');
-    assert.equal(options[0].value, '#/forum');
-    assert.equal(options[0].selected, true);
-    assert.ok(options.some((o) => o.value === '#/forum/c/general-channel' && o.textContent === 'General'));
-  } finally {
-    stop();
-  }
-});
-
-test('board view/channel view: mountMiniChannelSidebar() only ADDS its own class - never wipes mountContextSwitcher\'s own .qu-ctxswitch-sidebar class it was handed (regression: a blind className= assignment used to silently break the shared responsive sidebar CSS)', async () => {
-  const a = await freshEnv('Ada');
-  const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
-  try {
-    await waitFor(() => container.querySelector('.qu-forum-mini-sidebar') !== null);
-    const sidebar = container.querySelector('.qu-forum-mini-sidebar');
-    assert.ok(sidebar.classList.contains('qu-ctxswitch-sidebar'), 'the shared mountContextSwitcher() class must survive');
-    assert.equal(sidebar.dataset.variant, 'tabs');
+    await waitFor(() => container.querySelector('.qu-apptpl-pill') !== null);
+    assert.equal(container.querySelector('.qu-apptpl-pill-label').textContent, 'All channels');
+    const popupLinks = [...container.querySelectorAll('.qu-apptpl-popup a')];
+    assert.ok(popupLinks.some((l) => l.getAttribute('href') === '#/forum/c/general-channel' && l.textContent.includes('General')));
   } finally {
     stop();
   }
@@ -1332,84 +1408,71 @@ test('board view: a restricted channel shows a 🔒 badge in the persistent side
   const container = makeContainer();
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
   try {
-    await waitFor(() => [...container.querySelectorAll('.qu-forum-mini-channels a')].some((a2) => a2.textContent.includes('Secret Stuff')));
-    const row = [...container.querySelectorAll('.qu-forum-mini-channels a')].find((a2) => a2.textContent.includes('Secret Stuff'));
+    await waitFor(() => [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')].some((a2) => a2.textContent.includes('Secret Stuff')));
+    const row = [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')].find((a2) => a2.textContent.includes('Secret Stuff'));
     assert.match(row.textContent, /🔒/);
   } finally {
     stop();
   }
 });
 
-// ===== renderHeaderNavPoints() - the shell.headerNavPoints contributor (see docs/app-navigation-standard.md Rule 2) =====
-// "+ New channel" moved from an inline sidebar/dropdown entry into the global header's App Navigation Points Slot; "New topic" (a 2nd item, only while a channel is open) replaces the old inline form.
+// ===== mountAppTemplate() chrome: primaryAction ("New topic") + settings ("New channel") (see docs/app-navigation-standard.md Rule 5) =====
+// "+ New channel" now lives in the app-template `settings` gear slot; "+ New topic" is the board/channel view's own `primaryAction` FAB/desktop button.
 
-test('renderHeaderNavPoints(): hidden while another app is active, and shows no items for a non-admin when channels.allowMemberCreate is false, on the board view', async (t) => {
+test('board view: no "New channel" settings entry for a non-admin when channels.allowMemberCreate is false, but "New topic" primaryAction is always present', async (t) => {
   const a = await freshEnv('Ada');
   t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ adminPubs: [], settings: { channels: { allowMemberCreate: false, allowMemberRestricted: false } } }), { status: 200 }));
 
   const container = makeContainer();
-  let appId = 'chat';
-  const listeners = [];
-  renderHeaderNavPoints(container, {
-    getContext: () => ({ appId, segments: [appId] }),
-    onContextChange: (cb) => listeners.push(cb),
-    services: a.services,
-  });
-  const wrap = container.querySelector('.qu-app-header-action');
-  assert.equal(wrap.hidden, true);
-
-  appId = 'forum';
-  listeners.forEach((cb) => cb());
-  assert.equal(wrap.hidden, false);
-  await new Promise((resolve) => setTimeout(resolve, 30)); // let the /config.json fetch settle
-  assert.equal(wrap.querySelector('a'), null);
-  assert.equal(wrap.querySelector('button'), null);
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
+  try {
+    await waitFor(() => container.querySelector('a.qu-apptpl-fab') !== null);
+    assert.equal(container.querySelector('a.qu-apptpl-fab').getAttribute('href'), '#/forum/new-topic');
+    await new Promise((resolve) => setTimeout(resolve, 30)); // let the channel-policy fetch settle
+    assert.equal(container.querySelector('.qu-apptpl-gear'), null);
+  } finally {
+    stop();
+  }
 });
 
-test('renderHeaderNavPoints(): shows a single "New channel" link (no dropdown) for this relay\'s own admin on the board view, even when channels.allowMemberCreate is false', async (t) => {
+test('board view: shows a "New channel" settings entry for this relay\'s own admin, even when channels.allowMemberCreate is false', async (t) => {
   const a = await freshEnv('Ada');
   t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ adminPubs: [a.myPub], settings: { channels: { allowMemberCreate: false, allowMemberRestricted: false } } }), { status: 200 }));
 
   const container = makeContainer();
-  renderHeaderNavPoints(container, {
-    getContext: () => ({ appId: 'forum', segments: ['forum'] }),
-    onContextChange: () => {},
-    services: a.services,
-  });
-  await waitFor(() => container.querySelector('a') !== null);
-  assert.equal(container.querySelector('a').getAttribute('href'), '#/forum/new');
-  assert.equal(container.querySelector('button'), null);
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
+  try {
+    await waitFor(() => container.querySelector('.qu-apptpl-gear') !== null);
+    const settingsLink = container.querySelector('.qu-apptpl-popup a, .qu-apptpl-section--settings a');
+    assert.ok(settingsLink);
+    assert.equal(settingsLink.getAttribute('href'), '#/forum/new');
+  } finally {
+    stop();
+  }
 });
 
-test('renderHeaderNavPoints(): shows a 2-item dropdown ("New channel" + "New topic") once a specific channel is open, and reacts live to switching channels', async (t) => {
+test('channel view: "New topic" primaryAction links into this specific channel, and "New channel" settings entry reacts live to switching channels', async (t) => {
   const a = await freshEnv('Ada');
   t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ adminPubs: [a.myPub], settings: { channels: { allowMemberCreate: true, allowMemberRestricted: false } } }), { status: 200 }));
+  const chan2 = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Second', restricted: false, memberPubs: [] });
 
   const container = makeContainer();
-  const listeners = [];
-  const ctx = { appId: 'forum', segments: ['forum', 'c', 'chan-1'] };
-  renderHeaderNavPoints(container, {
-    getContext: () => ctx,
-    onContextChange: (cb) => listeners.push(cb),
-    services: a.services,
-  });
-  await waitFor(() => container.querySelector('button') !== null);
-  let links = [...container.querySelectorAll('.qu-navpoints-menu a')];
-  assert.deepEqual(links.map((l) => l.textContent), ['New channel', 'New topic']);
-  assert.equal(links[1].getAttribute('href'), '#/forum/c/chan-1/new-topic');
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', 'general-channel'] });
+  try {
+    await waitFor(() => container.querySelector('a.qu-apptpl-fab') !== null);
+    assert.equal(container.querySelector('a.qu-apptpl-fab').getAttribute('href'), '#/forum/c/general-channel/new-topic');
+    await waitFor(() => container.querySelector('.qu-apptpl-gear') !== null);
 
-  // Switching to a DIFFERENT channel updates the "New topic" href in place.
-  ctx.segments = ['forum', 'c', 'chan-2'];
-  listeners.forEach((cb) => cb());
-  await waitFor(() => container.querySelector('.qu-navpoints-menu a[href="#/forum/c/chan-2/new-topic"]') !== null);
-
-  // Back on the board view (no channel open), only "New channel" remains - a single plain link, no dropdown.
-  ctx.segments = ['forum'];
-  listeners.forEach((cb) => cb());
-  await waitFor(() => container.querySelector('button') === null);
-  links = [...container.querySelectorAll('a')];
-  assert.equal(links.length, 1);
-  assert.equal(links[0].getAttribute('href'), '#/forum/new');
+    // Switching to a different channel view updates the active sidebar entry.
+    stop();
+    const container2 = makeContainer();
+    const stop2 = mount(container2, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', chan2._id] });
+    await waitFor(() => container2.querySelector('a.qu-apptpl-fab') !== null);
+    assert.equal(container2.querySelector('a.qu-apptpl-fab').getAttribute('href'), `#/forum/c/${chan2._id}/new-topic`);
+    stop2();
+  } finally {
+    stop();
+  }
 });
 
 // ===================================================================
@@ -1470,6 +1533,33 @@ test('new channel view: double-clicking "Create channel" before the first call r
   }
 });
 
+test('new channel view: a failed create (e.g. a restricted channel\'s own member list contains a pubkey with no resolvable profile) surfaces the error instead of failing silently', async () => {
+  const a = await freshEnv('Ada');
+  const originalCreateChannel = a.services.channels.createChannel.bind(a.services.channels);
+  a.services.channels.createChannel = async () => {
+    throw new Error('resolveReaderXKeys: reader "some-actor-pub" has no published profile - cannot encrypt for them');
+  };
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'new'] });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-new-channel-form') !== null);
+    const titleInput = container.querySelector('.qu-forum-new-channel-form input[type="text"]');
+    titleInput.value = 'Doomed Board';
+    const submit = container.querySelector('.qu-forum-new-channel-form button');
+    submit.click();
+
+    await waitFor(() => container.querySelector('.qu-forum-new-channel-error')?.hidden === false);
+    assert.match(container.querySelector('.qu-forum-new-channel-error').textContent, /no published profile/);
+    // the button re-enables - the admin can fix the input and retry.
+    assert.equal(submit.disabled, false);
+    assert.equal(titleInput.value, 'Doomed Board');
+  } finally {
+    a.services.channels.createChannel = originalCreateChannel;
+    stop();
+  }
+});
+
 test('new channel view: channels.allowMemberCreate: false shows "not allowed" instead of the form for a non-admin', async (t) => {
   const a = await freshEnv('Ada');
   t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ adminPubs: [], settings: { channels: { allowMemberCreate: false, allowMemberRestricted: false } } }), { status: 200 }));
@@ -1514,6 +1604,78 @@ test('new channel view: channels.allowMemberRestricted: false hides the restrict
 });
 
 // ===================================================================
+// NEW TOPIC VIEW - #/forum/c/<channelId>/new-topic and #/forum/new-topic
+// ===================================================================
+
+test('new topic view (channel known, #/forum/c/<id>/new-topic): no channel picker, creating posts the title + body as the opening message and navigates to the new topic', async () => {
+  const a = await freshEnv('Ada');
+  const channel = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Announcements' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', channel._id, 'new-topic'] });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-new-topic-form') !== null);
+    assert.equal(container.querySelector('.qu-forum-new-topic-form select'), null);
+    container.querySelector('.qu-forum-new-topic-form input[type="text"]').value = 'Hello world';
+    container.querySelector('.qu-forum-new-topic-body').value = 'First post body';
+    container.querySelector('.qu-forum-new-topic-form button[type="submit"]').click();
+
+    await waitFor(() => window.location.hash.startsWith('#/forum/t/'));
+    const topicId = window.location.hash.slice('#/forum/t/'.length);
+    const topics = await a.services.channels.listTopics(FORUM_SPACE_ID, channel._id);
+    assert.ok(topics.some((tp) => tp._id === topicId && tp.title === 'Hello world'));
+    const { messages } = await a.services.messages.listMessages(FORUM_SPACE_ID, topicId);
+    assert.ok(messages.some((m) => m.body === 'First post body'));
+  } finally {
+    stop();
+  }
+});
+
+test('new topic view (no channel, #/forum/new-topic): shows a channel <select>, disabled until channels resolve, required to submit', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Announcements' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'new-topic'] });
+  try {
+    const select = container.querySelector('.qu-forum-new-topic-form select');
+    assert.ok(select);
+    assert.equal(select.disabled, true);
+    await waitFor(() => select.disabled === false);
+    assert.ok([...select.querySelectorAll('option')].some((o) => o.textContent === 'Announcements'));
+  } finally {
+    stop();
+  }
+});
+
+test('new topic view: a failed createTopic() (e.g. this identity is no longer a member of the channel) surfaces the error instead of failing silently', async () => {
+  const a = await freshEnv('Ada');
+  const channel = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Announcements' });
+  const originalCreateTopic = a.services.channels.createTopic.bind(a.services.channels);
+  a.services.channels.createTopic = async () => {
+    throw new Error('ChannelService.createTopic: no channel "x" in space "y"');
+  };
+
+  window.location.hash = ''; // a prior test may have left a #/forum/t/... hash behind
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', channel._id, 'new-topic'] });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-new-topic-form') !== null);
+    container.querySelector('.qu-forum-new-topic-form input[type="text"]').value = 'Doomed Topic';
+    container.querySelector('.qu-forum-new-topic-form button[type="submit"]').click();
+
+    await waitFor(() => container.querySelector('.qu-forum-new-topic-error')?.hidden === false);
+    assert.match(container.querySelector('.qu-forum-new-topic-error').textContent, /no channel/);
+    assert.equal(container.querySelector('.qu-forum-new-topic-form button[type="submit"]').disabled, false);
+    assert.equal(window.location.hash.startsWith('#/forum/t/'), false); // never navigated away
+  } finally {
+    a.services.channels.createTopic = originalCreateTopic;
+    window.location.hash = '';
+    stop();
+  }
+});
+
+// ===================================================================
 // CHANNEL VIEW - #/forum/c/<channelId>
 // ===================================================================
 
@@ -1523,17 +1685,17 @@ test('none of the forum subpages (channel view, topic view, new-channel view) re
 
   // The new-channel form still goes through renderSubpage() directly
   // (`.qu-subpage-content`). The channel view no longer does - it's
-  // @qu/ui's mountContextSwitcher() now (see mountChannelView()'s own doc
-  // comment / docs/app-navigation-standard.md Rule 3), which owns its own
+  // @qu/ui's mountAppTemplate() now (see mountChannelView()'s own doc
+  // comment / docs/app-navigation-standard.md Rule 5), which owns its own
   // "no back link" guarantee without needing a nested renderSubpage() -
-  // waited for via its own `.qu-ctxswitch-content` marker instead. The
+  // waited for via its own `.qu-apptpl-content` marker instead. The
   // topic view is its own fixed "room" layout with no page-level back-link
   // concept to begin with, checked separately below via its own
   // always-present marker.
   const channelContainer = makeContainer();
   const stopChannel = mount(channelContainer, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', channel._id] });
   try {
-    await waitFor(() => channelContainer.querySelector('.qu-ctxswitch-content') !== null);
+    await waitFor(() => channelContainer.querySelector('.qu-apptpl-content') !== null);
     assert.equal(channelContainer.querySelector('.qu-subpage-back'), null);
   } finally {
     stopChannel();
@@ -1595,7 +1757,7 @@ test('new topic view: submitting the form creates a topic and navigates to its o
 
     const titleInput = container.querySelector('.qu-forum-new-topic-form input[type="text"]');
     titleInput.value = 'Second topic';
-    container.querySelector('.qu-forum-new-topic-form button').click();
+    container.querySelector('.qu-forum-new-topic-form button[type="submit"]').click();
     await waitFor(() => /^#\/forum\/t\//.test(window.location.hash));
   } finally {
     stop();
@@ -1671,7 +1833,7 @@ test('channel view: shows a live "unread by me" badge per topic - someone else\'
   }
 });
 
-test('channel view: a persistent mini sidebar lists every channel and highlights the active one', async () => {
+test('channel view: the app-template sidebar lists every channel and highlights the active one', async () => {
   const a = await freshEnv('Ada');
   const announcements = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Announcements' });
   await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Off-topic' });
@@ -1679,17 +1841,17 @@ test('channel view: a persistent mini sidebar lists every channel and highlights
   const container = makeContainer();
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', announcements._id] });
   try {
-    await waitFor(() => container.querySelectorAll('.qu-forum-mini-channels a').length >= 3); // General + Announcements + Off-topic
-    const links = [...container.querySelectorAll('.qu-forum-mini-channels a')];
+    await waitFor(() => container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a').length >= 4); // All channels + General + Announcements + Off-topic
+    const links = [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')];
     assert.ok(links.some((a2) => a2.textContent.includes('Off-topic')));
-    const active = container.querySelector('.qu-forum-mini-channel-active');
+    const active = container.querySelector('.qu-apptpl-sidebar .qu-apptpl-item-active');
     assert.match(active.textContent, /Announcements/);
   } finally {
     stop();
   }
 });
 
-test('topic view: a persistent mini sidebar lists every channel alongside the thread', async () => {
+test('topic view: a desktopOnly app-template sidebar lists every channel alongside the thread', async () => {
   const a = await freshEnv('Ada');
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
   await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Off-topic' });
@@ -1697,8 +1859,9 @@ test('topic view: a persistent mini sidebar lists every channel alongside the th
   const container = makeContainer();
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
   try {
-    await waitFor(() => container.querySelectorAll('.qu-forum-mini-channels a').length >= 2); // General + Off-topic
+    await waitFor(() => container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a').length >= 3); // All channels + General + Off-topic
     await waitFor(() => container.querySelector('.qu-forum-message, .qu-forum-empty') !== null); // the thread itself still renders alongside it
+    assert.equal(container.querySelector('.qu-apptpl-footer'), null); // desktopOnly nav, no primaryAction/settings -> no mobile footer at all
   } finally {
     stop();
   }
@@ -1706,6 +1869,14 @@ test('topic view: a persistent mini sidebar lists every channel alongside the th
 
 test('channel view: an OPEN channel shows no invite form; a RESTRICTED one does, and inviting actually grows membership', async () => {
   const a = await freshEnv('Ada');
+  // A REAL actor with a published profile - re-encrypting the channel
+  // document for a new reader (see channel-service.js's own "RESTRICTED
+  // CHANNELS" doc comment) needs a resolvable X key, `resolveReaderXKeys()`'s
+  // own fail-closed contract - a bare made-up pubkey with no profile can no
+  // longer stand in for "someone to invite" here.
+  const bob = await freshEnv('Bob');
+  await a.qu.putSealed(actorPath(bob.myPub, 'profile'), await bob.qu.get(actorPath(bob.myPub, 'profile')));
+
   const openChannel = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Open' });
   const restrictedChannel = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Closed', restricted: true, memberPubs: [] });
 
@@ -1720,7 +1891,7 @@ test('channel view: an OPEN channel shows no invite form; a RESTRICTED one does,
 
     await waitFor(() => containerRestricted.querySelector('.qu-forum-invite-form') !== null);
     const pubInput = containerRestricted.querySelector('.qu-forum-invite-form input[type="text"]');
-    pubInput.value = 'some-actor-pub-1234567890';
+    pubInput.value = bob.myPub;
     containerRestricted.querySelector('.qu-forum-invite-form button').click();
 
     // waitFor()'s predicate is never awaited (see @qu/ui/testing's own
@@ -1729,7 +1900,7 @@ test('channel view: an OPEN channel shows no invite form; a RESTRICTED one does,
     let invited = false;
     for (let i = 0; i < 200 && !invited; i++) {
       const channel = await a.services.channels.getChannel(FORUM_SPACE_ID, restrictedChannel._id);
-      invited = channel.memberPubs.includes('some-actor-pub-1234567890');
+      invited = channel.memberPubs.includes(bob.myPub);
       if (!invited) await new Promise((resolve) => setTimeout(resolve, 5));
     }
     assert.ok(invited, 'expected addChannelMember() to have run by now');

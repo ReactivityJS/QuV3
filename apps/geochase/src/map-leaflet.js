@@ -1,7 +1,7 @@
 import * as L from 'leaflet';
 import { injectStyle } from '@qu/ui';
 import { LEAFLET_CSS } from './map-leaflet-css.js';
-import { colorFor } from './map-canvas.js';
+import { PLAYER_COLORS, colorFor } from './map-canvas.js';
 
 /**
  * REAL MAP — `mapMode: 'osm'`'s renderer: an actual interactive, pannable/
@@ -44,12 +44,10 @@ import { colorFor } from './map-canvas.js';
 
 const CSS_ID = 'qu-geochase-leaflet-style';
 
-const PLAYER_COLORS = { chased: '#e5484d', self: '#12a594', chaser: '#5b5bd6' };
-
 /**
  * @param {HTMLElement} container - Gets Leaflet's own map DOM mounted directly into it.
  * @returns {{
- *   update: (state: {players: Array<{actorPub: string, position: {lat: number, lng: number}}>, chasedPub: string, selfPub: string, radiusMeters?: number, labelFor?: (actorPub: string) => string, trails?: Map<string, Array<{lat: number, lng: number}>>}) => void,
+ *   update: (state: {players: Array<{actorPub: string, position: {lat: number, lng: number}}>, chasedPub: string, selfPub: string, radiusMeters?: number, labelFor?: (actorPub: string) => string, extraCircles?: Array<{radiusMeters: number, color: string}>, tracks?: Map<string, Array<{lat: number, lng: number}>>}) => void,
  *   centerOn: (target: 'chased'|'self') => void,
  *   destroy: () => void,
  * }}
@@ -64,13 +62,14 @@ export function mountLeafletMap(container) {
   }).addTo(map);
 
   const markers = new Map(); // actorPub -> L.CircleMarker
-  const trailLines = new Map(); // actorPub -> L.Polyline
+  const trackLines = new Map(); // actorPub -> L.Polyline - req. 5/6's persisted route history
   let radiusCircle = null;
+  let extraCircleLayers = []; // req. 8's proximity/catch-range rings
   let hasFitOnce = false; // auto-center/zoom ONCE, on the first real position - never again, so it never yanks the view out from under someone who's since panned/zoomed to look at something specific (same "initial center, then hands-off" convention most map apps use)
   let lastChasedPub = null;
   let lastSelfPub = null;
 
-  function update({ players, chasedPub, selfPub, radiusMeters = 0, labelFor = (pub) => pub.slice(0, 6), trails = new Map() }) {
+  function update({ players, chasedPub, selfPub, radiusMeters = 0, labelFor = (pub) => pub.slice(0, 6), extraCircles = [], tracks = null }) {
     lastChasedPub = chasedPub;
     lastSelfPub = selfPub;
     const seen = new Set();
@@ -96,27 +95,27 @@ export function mountLeafletMap(container) {
       markers.delete(actorPub);
     }
 
-    // Trails - one faint polyline per player, same color as their marker.
-    // `client.js` owns accumulating/capping the point history; this only
-    // ever renders whatever it's handed.
-    const seenTrails = new Set();
-    for (const [actorPub, points] of trails) {
-      if (points.length < 2) continue;
-      seenTrails.add(actorPub);
-      const latlngs = points.map((p) => [p.lat, p.lng]);
-      let line = trailLines.get(actorPub);
-      if (!line) {
-        line = L.polyline(latlngs, { color: colorFor(actorPub, chasedPub, selfPub), weight: 3, opacity: 0.4 }).addTo(map);
-        trailLines.set(actorPub, line);
-      } else {
-        line.setLatLngs(latlngs);
-        line.setStyle({ color: colorFor(actorPub, chasedPub, selfPub) });
+    if (tracks) {
+      const seenTracks = new Set();
+      for (const [actorPub, points] of tracks) {
+        seenTracks.add(actorPub);
+        if (points.length < 2) continue;
+        const latlngs = points.map((p) => [p.lat, p.lng]);
+        const color = colorFor(actorPub, chasedPub, selfPub);
+        let line = trackLines.get(actorPub);
+        if (!line) {
+          line = L.polyline(latlngs, { color, weight: 2, opacity: 0.5, dashArray: '2,4' }).addTo(map);
+          trackLines.set(actorPub, line);
+        } else {
+          line.setLatLngs(latlngs);
+          line.setStyle({ color });
+        }
       }
-    }
-    for (const [actorPub, line] of trailLines) {
-      if (seenTrails.has(actorPub)) continue;
-      line.remove();
-      trailLines.delete(actorPub);
+      for (const [actorPub, line] of trackLines) {
+        if (seenTracks.has(actorPub)) continue;
+        line.remove();
+        trackLines.delete(actorPub);
+      }
     }
 
     const chased = players.find((p) => p.actorPub === chasedPub);
@@ -131,6 +130,16 @@ export function mountLeafletMap(container) {
     } else if (radiusCircle) {
       radiusCircle.remove();
       radiusCircle = null;
+    }
+
+    extraCircleLayers.forEach((layer) => layer.remove());
+    extraCircleLayers = [];
+    if (chased) {
+      const center = [chased.position.lat, chased.position.lng];
+      for (const circle of extraCircles) {
+        if (!(circle.radiusMeters > 0)) continue;
+        extraCircleLayers.push(L.circle(center, { radius: circle.radiusMeters, color: circle.color, weight: 2, dashArray: '6,4', fillOpacity: 0.05 }).addTo(map));
+      }
     }
 
     if (!hasFitOnce && players.length > 0) {

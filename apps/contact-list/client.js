@@ -30,7 +30,7 @@
 import { createI18n } from '@qu/i18n';
 import { formatActorLabel, paths, createPrivateStore } from '@qu/services';
 import { actionsForSlot, resolveActionHref } from '@qu/foundation';
-import { renderAvatarOrAsset, injectStyle, ensureTheme } from '@qu/ui';
+import { renderAvatarOrAsset, injectStyle, ensureTheme, mountAppTemplate } from '@qu/ui';
 import { QuCrypto } from '@qu/core';
 
 const DICT = {
@@ -79,7 +79,7 @@ export function mount(container, { qu, identity, services, apps, syncFetch }) {
   search.addEventListener('input', () => applyFilter(search.value));
 
   const listRoot = document.createElement('div');
-  container.append(heading, search, listRoot);
+  mountAppTemplate(container, { render: (content) => content.append(heading, search, listRoot) });
 
   function applyFilter(query) {
     const q = query.trim().toLowerCase();
