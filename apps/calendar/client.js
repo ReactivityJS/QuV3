@@ -828,6 +828,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
         badge.className = 'qu-cal-shared-badge';
         badge.textContent = '🔗';
         badge.title = t('sharedBadge');
+        badge.setAttribute('aria-label', t('sharedBadge'));
         row.appendChild(badge);
       } else {
         const titleSpan = document.createElement('span');
@@ -840,12 +841,14 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
         const shareLink = document.createElement('a');
         shareLink.href = shareHash(info.id);
         shareLink.title = t('share');
+        shareLink.setAttribute('aria-label', t('share'));
         shareLink.textContent = '👥';
         row.appendChild(shareLink);
 
         const deleteBtn = document.createElement('button');
         deleteBtn.type = 'button';
         deleteBtn.title = t('deleteCalendar');
+        deleteBtn.setAttribute('aria-label', t('deleteCalendar'));
         deleteBtn.textContent = '🗑';
         deleteBtn.addEventListener('click', async () => {
           if (!window.confirm(t('deleteCalendarConfirm', { title: info.meta.title || t('untitled') }))) return;
@@ -857,6 +860,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
         const leaveBtn = document.createElement('button');
         leaveBtn.type = 'button';
         leaveBtn.title = t('leave');
+        leaveBtn.setAttribute('aria-label', t('leave'));
         leaveBtn.textContent = '✕';
         leaveBtn.addEventListener('click', async () => {
           if (!window.confirm(t('leaveConfirm', { title: info.meta.title || t('untitled') }))) return;
@@ -944,11 +948,13 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
       prevBtn.type = 'button';
       prevBtn.textContent = '←';
       prevBtn.title = t('prev');
+      prevBtn.setAttribute('aria-label', t('prev'));
       prevBtn.addEventListener('click', () => { shiftCursor(-1); renderMain(); });
       const nextBtn = document.createElement('button');
       nextBtn.type = 'button';
       nextBtn.textContent = '→';
       nextBtn.title = t('next');
+      nextBtn.setAttribute('aria-label', t('next'));
       nextBtn.addEventListener('click', () => { shiftCursor(1); renderMain(); });
       nav.append(prevBtn, nextBtn);
     }

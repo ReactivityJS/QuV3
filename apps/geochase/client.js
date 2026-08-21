@@ -31,11 +31,20 @@
  * 2 - only "Create game" actually persists, see `renderNewGamePage()`),
  * `#/geochase/<gameId>` (the game itself - role- and status-aware, see
  * `renderGameView()`).
+ *
+ * NAVIGATION STANDARD (docs/app-navigation-standard.md): the main list view
+ * (`renderGameListPage()`) goes through `@qu/ui`'s `mountAppTemplate()` per
+ * Rule 5, with "Start a game" as its `primaryAction` - no
+ * `shell.headerNavPoints` contribution and no second, inline "Start a game"
+ * link in the page body (this app used to have both). The two subpages
+ * (`new`, `<gameId>`) stay on `renderSubpage({ showBackLink: false })` per
+ * Rule 1 - the shell header's own Back/Forward already covers returning to
+ * the list.
  */
 import { createI18n } from '@qu/i18n';
 import { watch } from '@qu/reactive';
 import { paths, matchesActorQuery, formatActorLabel } from '@qu/services';
-import { injectStyle, ensureTheme, renderSubpage, mountAppHeaderAction, renderNavPointsMenu, mountActorPicker, mountWakeLock } from '@qu/ui';
+import { injectStyle, ensureTheme, renderSubpage, mountAppTemplate, mountActorPicker, mountWakeLock } from '@qu/ui';
 import { copyToClipboard } from '@qu/thread-ui';
 import { startLocationSharing } from './src/location.js';
 import {
@@ -206,22 +215,6 @@ const BEARING_LABELS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
 function bearingLabel(deg) { return BEARING_LABELS[Math.round(deg / 45) % 8]; }
 
 // ===========================================================================
-// Header nav points - "Start a game" (see docs/app-navigation-standard.md
-// Rule 2). Routes to #/geochase/new - a draft settings form, NOT an
-// immediate create-and-redirect (see req. 2 / renderNewGamePage()'s own doc
-// comment) - so merely opening this link never persists anything on its own.
-// ===========================================================================
-export function renderHeaderNavPoints(container, { getContext, onContextChange }) {
-  mountAppHeaderAction(container, {
-    appId: 'geochase', getContext, onContextChange,
-    render: (wrap) => {
-      renderNavPointsMenu(wrap, { items: [{ label: t('startGame'), href: '#/geochase/new' }] });
-      return () => {};
-    },
-  });
-}
-
-// ===========================================================================
 // mount()
 // ===========================================================================
 export function mount(container, ctx) {
@@ -349,23 +342,19 @@ export function mount(container, ctx) {
     }
     if (stopped) return;
 
-    renderSubpage(container, {
-      showBackLink: false,
+    mountAppTemplate(container, {
+      // Rule 5 (docs/app-navigation-standard.md) - "Start a game" is this
+      // app's one create action, so it lives here as the App Template's
+      // `primaryAction` instead of a `shell.headerNavPoints` contribution
+      // AND a second, inline link buried in the page body (the two used to
+      // duplicate each other here).
+      primaryAction: { label: t('startGame'), href: '#/geochase/new', icon: '🏁' },
       render: (content) => {
         const page = document.createElement('div');
         page.className = 'qu-geochase-page';
         const h1 = document.createElement('h1');
         h1.textContent = t('title');
         page.appendChild(h1);
-
-        const actions = document.createElement('div');
-        actions.className = 'qu-geochase-actions';
-        const startLink = document.createElement('a');
-        startLink.className = 'qu-geochase-btn-primary';
-        startLink.href = '#/geochase/new';
-        startLink.textContent = t('startGame');
-        actions.appendChild(startLink);
-        page.appendChild(actions);
 
         if (infos.length === 0) {
           const empty = document.createElement('p');

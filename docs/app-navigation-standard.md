@@ -572,9 +572,14 @@ needs its first reply typed separately.
   for its `settings` gear — "Kalender verwalten" reaches `#/calendar/manage`
   from there instead of the old inline "„Kalender" ›" title-row link, which is
   now suppressed via `mountContextSwitcher()`'s new `hideTitleLink` option.
-- **Pins, Reactions, Search, Relay Admin** are unchanged. Pins/Reactions
-  contribute to other apps' extension points and have no `mount()` UI of
-  their own; Search's own `mount()` view and Relay Admin (a single settings
-  form with no natural `navigation`/`views`/`primaryAction`) haven't been
-  migrated yet — both are candidates whenever someone picks them up,
-  following this doc and `apps/_template/`.
+- **Pins, Reactions** are unchanged — both only contribute to other apps'
+  extension points and have no `mount()` UI of their own, so `mountAppTemplate()`
+  doesn't apply. **Search and Relay Admin are now also on `mountAppTemplate()`**
+  (chrome-less — `render` only, since neither has a natural `navigation`/
+  `views`/`primaryAction`/`settings`), completing this doc's own migration
+  checklist for every app under `apps/*`. **Geo Chase** (`apps/geochase`) was
+  built after this doc's first pass, on the older pre-`mountAppTemplate()`
+  toolkit; it's since been migrated too — the game list (`#/geochase`) is the
+  one `mountAppTemplate()` call, `primaryAction: "Start a game"` replacing
+  both its old `shell.headerNavPoints` contribution and a second, duplicate
+  inline link in the page body.

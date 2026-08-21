@@ -45,7 +45,7 @@
  * needs to be shareable/bookmarkable, not WHAT was typed.
  */
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme } from '@qu/ui';
+import { injectStyle, ensureTheme, mountAppTemplate } from '@qu/ui';
 
 const DICT = {
   en: {
@@ -173,7 +173,17 @@ export function mount(container, ctx) {
   const resultsRoot = document.createElement('div');
   resultsRoot.className = 'qu-search-results';
 
-  container.append(heading, tabs, controls, resultsRoot);
+  // Rule 5 (docs/app-navigation-standard.md) - the app's one, chrome-less
+  // main view still routes through `mountAppTemplate()`, same as every other
+  // app's MAIN view: none of `navigation`/`views`/`primaryAction`/`settings`
+  // fit this single-view, tab-switched-via-hash-route app, so `render` is
+  // all that's passed - zero visible chrome change, content still gets 100%
+  // of the container.
+  mountAppTemplate(container, {
+    render: (content) => {
+      content.append(heading, tabs, controls, resultsRoot);
+    },
+  });
 
   function renderHint(text) {
     resultsRoot.textContent = '';

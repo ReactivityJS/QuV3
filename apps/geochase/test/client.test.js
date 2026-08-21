@@ -10,7 +10,7 @@ import { listMyGames } from '../src/game-service.js';
 
 installFakeRTCPeerConnection();
 installDom();
-const { mount, renderHeaderNavPoints } = await import('../client.js');
+const { mount } = await import('../client.js');
 
 const SPACE_ID = '65a3739c-e0a5-443b-a5ef-4005c8412659'; // real UUID from apps/geochase/manifest.quapp
 const APPS = [{ name: 'geochase', spaceId: SPACE_ID }];
@@ -291,19 +291,27 @@ test('the "Copy link" button copies an absolute, shareable game URL', async () =
   }
 });
 
-test('renderHeaderNavPoints(): hidden while another app is active, shows "Start a game" -> #/geochase/new once Geo Chase is active', async () => {
-  const container = makeContainer();
-  let appId = 'chat';
-  const listeners = [];
-  renderHeaderNavPoints(container, {
-    getContext: () => ({ appId, segments: [appId] }),
-    onContextChange: (cb) => listeners.push(cb),
-  });
-  const wrap = container.querySelector('.qu-app-header-action');
-  assert.equal(wrap.hidden, true);
+/**
+ * "Start a game" now lives as the game-list view's own `mountAppTemplate()`
+ * `primaryAction` (docs/app-navigation-standard.md Rule 5) instead of a
+ * `shell.headerNavPoints` contribution AND a duplicate inline link in the
+ * page body - see client.js's own top doc comment. On mobile this renders as
+ * a circular FAB (`.qu-apptpl-fab`); on desktop, a prominent link at the top
+ * of the sidebar (`.qu-apptpl-primary-desktop`) - either is enough to prove
+ * the action is wired up.
+ */
+function primaryActionLink(container) {
+  return container.querySelector('.qu-apptpl-fab, .qu-apptpl-primary-desktop');
+}
 
-  appId = 'geochase';
-  listeners.forEach((cb) => cb());
-  assert.equal(wrap.hidden, false);
-  assert.equal(wrap.querySelector('a')?.getAttribute('href'), '#/geochase/new');
+test('the game list\'s own primaryAction is "Start a game", pointing at #/geochase/new', async () => {
+  const { qu, services } = await freshEnv();
+  const container = makeContainer();
+  const stop = mount(container, { qu, services, apps: APPS, segments: ['geochase'], subscribe: noopSubscribe });
+  try {
+    await waitFor(() => primaryActionLink(container) !== null);
+    assert.equal(primaryActionLink(container).getAttribute('href'), '#/geochase/new');
+  } finally {
+    stop();
+  }
 });

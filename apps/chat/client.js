@@ -198,7 +198,7 @@ import { watch, watchChildren } from '@qu/reactive';
 import { paths, formatActorLabel, getPrivate, putPrivate, getPrivateChildren, detectLinks, ChatService } from '@qu/services';
 import { rankFor } from '@qu/foundation';
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage, mountAppTemplate } from '@qu/ui';
+import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage, mountAppTemplate, createIconButton } from '@qu/ui';
 import {
   renderEmojiPicker, renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, insertAtCursor, copyToClipboard,
   mountComposerAutogrow, COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS, flipUpIfNeeded,
@@ -1081,6 +1081,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   headerMutedIcon.className = 'qu-chat-header-muted';
   headerMutedIcon.textContent = '🔕';
   headerMutedIcon.title = t('muteChat');
+  headerMutedIcon.setAttribute('aria-label', t('muteChat'));
   headerMutedIcon.hidden = true;
   headerNameLine.append(headerNameEl, headerMutedIcon);
   const headerStatusEl = document.createElement('div');
@@ -1270,6 +1271,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   voiceDiscardBtn.className = 'qu-chat-tool-btn qu-chat-voice-discard-btn';
   voiceDiscardBtn.textContent = '🗑️';
   voiceDiscardBtn.title = t('voiceDiscard');
+  voiceDiscardBtn.setAttribute('aria-label', t('voiceDiscard'));
   const voiceRecorderDot = document.createElement('span');
   voiceRecorderDot.className = 'qu-chat-voice-recorder-dot';
   const voiceRecorderTime = document.createElement('span');
@@ -1286,11 +1288,13 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   voiceFinishBtn.className = 'qu-chat-tool-btn qu-chat-voice-finish-btn';
   voiceFinishBtn.textContent = '⏹';
   voiceFinishBtn.title = t('voiceFinish');
+  voiceFinishBtn.setAttribute('aria-label', t('voiceFinish'));
   const voiceSendBtn = document.createElement('button');
   voiceSendBtn.type = 'button';
   voiceSendBtn.className = 'qu-chat-composer-action qu-chat-voice-send-btn';
   voiceSendBtn.textContent = '➤';
   voiceSendBtn.title = t('send');
+  voiceSendBtn.setAttribute('aria-label', t('send'));
   voiceRecorderEl.append(
     voiceDiscardBtn, voiceRecorderDot, voiceRecorderTime, voicePreviewPlayer,
     voicePauseBtn, voiceFinishBtn, voiceSendBtn,
@@ -1534,11 +1538,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     pendingAttachmentEl.hidden = false;
     const label = document.createElement('span');
     label.textContent = `📎 ${pendingAttachment.name}`;
-    const removeBtn = document.createElement('button');
-    removeBtn.type = 'button';
-    removeBtn.textContent = '✕';
-    removeBtn.title = t('attachRemove');
-    removeBtn.addEventListener('click', clearPendingAttachment);
+    const removeBtn = createIconButton({ icon: '✕', label: t('attachRemove'), onClick: clearPendingAttachment });
     pendingAttachmentEl.append(label, removeBtn);
     updateActionBtn(); // an attachment alone is now enough to make the action button "Send", not just typed text
   });
@@ -1551,10 +1551,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     replyBanner.hidden = false;
     const label = document.createElement('span');
     label.textContent = t('replyingTo', { name: authorLabel });
-    const cancelBtn = document.createElement('button');
-    cancelBtn.type = 'button';
-    cancelBtn.textContent = '✕';
-    cancelBtn.addEventListener('click', () => setReplyingTo(null));
+    const cancelBtn = createIconButton({ icon: '✕', label: t('cancel'), onClick: () => setReplyingTo(null) });
     replyBanner.append(label, cancelBtn);
   }
 
@@ -1662,9 +1659,11 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     if (recorderState === 'paused') {
       voicePauseBtn.textContent = '▶️';
       voicePauseBtn.title = t('voiceResume');
+      voicePauseBtn.setAttribute('aria-label', t('voiceResume'));
     } else {
       voicePauseBtn.textContent = '⏸️';
       voicePauseBtn.title = t('voicePause');
+      voicePauseBtn.setAttribute('aria-label', t('voicePause'));
     }
   }
 
@@ -1686,9 +1685,11 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     if (composerInput.value.trim() || pendingAttachment) {
       actionBtn.textContent = '➤';
       actionBtn.title = t('send');
+      actionBtn.setAttribute('aria-label', t('send'));
     } else {
       actionBtn.textContent = '🎙️';
       actionBtn.title = t('recordVoice');
+      actionBtn.setAttribute('aria-label', t('recordVoice'));
     }
   }
   composerInput.addEventListener('input', updateActionBtn);
@@ -2078,6 +2079,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     }
     glyph.textContent = isRead ? '✓✓' : '✓';
     el.title = isRead ? t('read') : t('sent');
+    el.setAttribute('aria-label', isRead ? t('read') : t('sent'));
     el.classList.toggle('qu-chat-bubble-tick-read', isRead);
     // Rebinding onclick (not addEventListener) on every render/refresh is
     // deliberate - it always closes over the CURRENT `readers`, and never

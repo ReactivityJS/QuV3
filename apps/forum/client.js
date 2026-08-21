@@ -201,7 +201,7 @@ import { watchChildren, watch } from '@qu/reactive';
 import { rankFor } from '@qu/foundation';
 import { paths, formatActorLabel, detectLinks } from '@qu/services';
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage, mountAppTemplate } from '@qu/ui';
+import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage, mountAppTemplate, createIconButton } from '@qu/ui';
 import {
   renderEmojiPicker, renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, insertAtCursor, copyToClipboard,
   mountComposerAutogrow, COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS,
@@ -1164,11 +1164,7 @@ function mountNewTopicView(container, { services, SPACE_ID, channelId }) {
     pendingAttachmentEl.hidden = false;
     const label = document.createElement('span');
     label.textContent = `📎 ${pendingAttachment.name}`;
-    const removeBtn = document.createElement('button');
-    removeBtn.type = 'button';
-    removeBtn.textContent = '✕';
-    removeBtn.title = t('attachRemove');
-    removeBtn.addEventListener('click', clearPendingAttachment);
+    const removeBtn = createIconButton({ icon: '✕', label: t('attachRemove'), onClick: clearPendingAttachment });
     pendingAttachmentEl.append(label, removeBtn);
   });
   form.append(attachUpload, pendingAttachmentEl);
@@ -1354,6 +1350,7 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
   actionBtn.className = 'qu-forum-composer-action';
   actionBtn.textContent = '➤';
   actionBtn.title = t('send');
+  actionBtn.setAttribute('aria-label', t('send'));
 
   composerRow.append(composerTools, inputWrap, actionBtn);
 
@@ -1607,11 +1604,7 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     pendingAttachmentEl.hidden = false;
     const label = document.createElement('span');
     label.textContent = `📎 ${pendingAttachment.name}`;
-    const removeBtn = document.createElement('button');
-    removeBtn.type = 'button';
-    removeBtn.textContent = '✕';
-    removeBtn.title = t('attachRemove');
-    removeBtn.addEventListener('click', clearPendingAttachment);
+    const removeBtn = createIconButton({ icon: '✕', label: t('attachRemove'), onClick: clearPendingAttachment });
     pendingAttachmentEl.append(label, removeBtn);
   });
 
@@ -1634,10 +1627,7 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     replyBanner.hidden = false;
     const label = document.createElement('span');
     label.textContent = t('replyingTo', { name: authorLabel });
-    const cancelBtn = document.createElement('button');
-    cancelBtn.type = 'button';
-    cancelBtn.textContent = '✕';
-    cancelBtn.addEventListener('click', () => setReplyingTo(null));
+    const cancelBtn = createIconButton({ icon: '✕', label: t('cancel'), onClick: () => setReplyingTo(null) });
     replyBanner.append(label, cancelBtn);
   }
 
