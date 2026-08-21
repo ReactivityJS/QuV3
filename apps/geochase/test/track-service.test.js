@@ -5,7 +5,7 @@ import { QuIdentityEngine, actorPath } from '@qu/identity';
 import { AccessEngine, ThreadEngine } from '@qu/engines';
 import { ListService, AccessService, SharingService, MessageService, FlagService, ActorService } from '@qu/services';
 import { createGame, inviteChaser, gameThreadId } from '../src/game-service.js';
-import { recordTrackPoint, listTrackPoints } from '../src/track-service.js';
+import { recordTrackPoint, listTrackPoints, watchLatestPositions } from '../src/track-service.js';
 
 const SPACE_ID = 'test-geochase-space';
 
@@ -113,4 +113,86 @@ test('listTrackPoints(): a stranger who was never invited cannot decrypt the cha
 
   const points = await listTrackPoints(strangerQu, strangerIdentity, strangerServices, SPACE_ID, 'g1', chasedPub);
   assert.deepEqual(points, []); // undecryptable entries are silently dropped, not thrown
+});
+
+/** Mirrors one member's newest track point(s) + the thread ACL into a peer's own store, the way a real relay sync would - the deliberate replacement for the old WebRTC mesh (see track-service.js's own top doc comment). */
+async function mirrorTrackAndAcl(fromQu, toQu, spaceId, threadId, actorPub) {
+  const aclPath = `/store/${spaceId}/acl/threads/${threadId}`;
+  const aclBit = await fromQu.get(aclPath);
+  if (aclBit) await toQu.putSealed(aclPath, aclBit);
+  const trackParent = `/store/${spaceId}/threads/${threadId}/track/${actorPub}`;
+  for (const { path, quBit } of await fromQu.getChildren(trackParent)) await toQu.putSealed(path, quBit);
+}
+
+function waitATick() {
+  return new Promise((resolve) => setTimeout(resolve, 20));
+}
+
+test('watchLatestPositions(): delivers a chased player\'s position to an invited chaser via ordinary relay sync - no WebRTC/P2P mesh required, and reliably updates on each new ping', async () => {
+  const { qu: ownerQu, identity: ownerIdentity, services: ownerServices, myPub: chasedPub } = await freshEnv();
+  const { qu: chaserQu, identity: chaserIdentity, myPub: chaserPub } = await createPeer(ownerQu, { alias: 'Chaser' });
+  await chaserQu.putSealed(actorPath(chasedPub, 'profile'), await ownerQu.get(actorPath(chasedPub, 'profile')));
+
+  await createGame(ownerServices, SPACE_ID, 'g1');
+  await inviteChaser(ownerQu, ownerIdentity, ownerServices, SPACE_ID, 'g1', chaserPub);
+  const threadId = gameThreadId('g1');
+
+  const updates = [];
+  const stop = watchLatestPositions(chaserQu, chaserIdentity, SPACE_ID, 'g1', [chasedPub, chaserPub], {
+    onChange: (players) => updates.push(players),
+  });
+  try {
+    await recordTrackPoint(ownerQu, ownerIdentity, ownerServices, SPACE_ID, 'g1', { lat: 1, lng: 1, ts: 1000 });
+    await mirrorTrackAndAcl(ownerQu, chaserQu, SPACE_ID, threadId, chasedPub);
+    await waitATick();
+
+    let latest = updates.at(-1)?.find((p) => p.actorPub === chasedPub);
+    assert.ok(latest, 'expected the chaser to have received the chased player\'s position');
+    assert.deepEqual([latest.position.lat, latest.position.lng], [1, 1]);
+
+    // A second, newer ping supersedes the first - reliably, on every tick, not just the first one.
+    await recordTrackPoint(ownerQu, ownerIdentity, ownerServices, SPACE_ID, 'g1', { lat: 2, lng: 2, ts: 2000 });
+    await mirrorTrackAndAcl(ownerQu, chaserQu, SPACE_ID, threadId, chasedPub);
+    await waitATick();
+
+    latest = updates.at(-1)?.find((p) => p.actorPub === chasedPub);
+    assert.deepEqual([latest.position.lat, latest.position.lng], [2, 2]);
+  } finally {
+    stop();
+  }
+});
+
+test('watchLatestPositions(): the emitted position is always the highest-ts point known, regardless of the ORDER two points arrive in (an out-of-order relay delivery)', async () => {
+  const { qu: ownerQu, identity: ownerIdentity, services: ownerServices, myPub: chasedPub } = await freshEnv();
+  const { qu: chaserQu, identity: chaserIdentity, myPub: chaserPub } = await createPeer(ownerQu, { alias: 'Chaser' });
+  await chaserQu.putSealed(actorPath(chasedPub, 'profile'), await ownerQu.get(actorPath(chasedPub, 'profile')));
+
+  await createGame(ownerServices, SPACE_ID, 'g1');
+  await inviteChaser(ownerQu, ownerIdentity, ownerServices, SPACE_ID, 'g1', chaserPub);
+  const threadId = gameThreadId('g1');
+
+  await recordTrackPoint(ownerQu, ownerIdentity, ownerServices, SPACE_ID, 'g1', { lat: 1, lng: 1, ts: 1000 });
+  await recordTrackPoint(ownerQu, ownerIdentity, ownerServices, SPACE_ID, 'g1', { lat: 2, lng: 2, ts: 2000 });
+  const trackParent = `/store/${SPACE_ID}/threads/${threadId}/track/${chasedPub}`;
+  const [olderEntry, newerEntry] = (await ownerQu.getChildren(trackParent, { sort: 'ts', order: 'asc' }));
+
+  const aclBit = await ownerQu.get(`/store/${SPACE_ID}/acl/threads/${threadId}`);
+  await chaserQu.putSealed(`/store/${SPACE_ID}/acl/threads/${threadId}`, aclBit);
+
+  const updates = [];
+  const stop = watchLatestPositions(chaserQu, chaserIdentity, SPACE_ID, 'g1', [chasedPub, chaserPub], {
+    onChange: (players) => updates.push(players),
+  });
+  try {
+    // Deliver the NEWER point first (a real out-of-order relay delivery), then the older one arrives late.
+    await chaserQu.putSealed(newerEntry.path, newerEntry.quBit);
+    await waitATick();
+    await chaserQu.putSealed(olderEntry.path, olderEntry.quBit);
+    await waitATick();
+
+    const latest = updates.at(-1)?.find((p) => p.actorPub === chasedPub);
+    assert.deepEqual([latest.position.lat, latest.position.lng], [2, 2]); // never regressed to the older [1, 1]
+  } finally {
+    stop();
+  }
 });

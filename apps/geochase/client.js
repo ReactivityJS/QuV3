@@ -12,12 +12,15 @@
  *     RELAY-backed `qu`/`services` (a Thread's own meta document, reusing
  *     `services.sharing`'s existing "starred private list" +
  *     `discoverPendingInvites()` machinery unchanged).
- *   - `src/mesh.js` - this app's own pre-existing WebRTC-mesh pilot
- *     (unchanged): live positions ride a SEPARATE, ephemeral p2p `QuStore`,
- *     never the relay - see that file's own doc comment for why. Reused
- *     here as-is, just pointed at the game's own thread id for signaling
- *     (safe - see `setupLiveMesh()`'s own doc comment) instead of the
- *     pilot's hardcoded 'lobby'.
+ *   - `src/track-service.js` - BOTH the persisted route history AND the
+ *     live "who's currently where" channel, one encrypted QuBit per ping
+ *     under the game thread's own `track/<actorPub>/<pointId>` namespace,
+ *     riding the SAME relay-backed sync every other live thing in this app
+ *     (chat, thread meta) already relies on. Replaced the older WebRTC-mesh
+ *     pilot (`src/mesh.js`, kept but no longer used here) as the live
+ *     position channel - see track-service.js's own top doc comment for why
+ *     a P2P mesh turned out to be an unreliable foundation for something
+ *     the game itself depends on working.
  *   - `src/geometry.js`/`src/map-canvas.js`/`src/map-leaflet.js` - pure math
  *     + an abstract canvas renderer (`mapMode: 'plane'`) + a real
  *     interactive Leaflet/OpenStreetMap-tiles map (`mapMode: 'osm'`).
@@ -34,13 +37,12 @@ import { watch } from '@qu/reactive';
 import { paths, matchesActorQuery, formatActorLabel } from '@qu/services';
 import { injectStyle, ensureTheme, renderSubpage, mountAppHeaderAction, renderNavPointsMenu, mountActorPicker, mountWakeLock } from '@qu/ui';
 import { copyToClipboard } from '@qu/thread-ui';
-import { createGeochaseMesh } from './src/mesh.js';
 import { startLocationSharing } from './src/location.js';
 import {
   createGame, readGame, inviteChaser, updateGame, listMyGames, discoverInvites, gameThreadId,
   archiveGame, isArchivable, DEFAULT_SETTINGS,
 } from './src/game-service.js';
-import { recordTrackPoint, listTrackPoints } from './src/track-service.js';
+import { recordTrackPoint, listTrackPoints, watchLatestPositions } from './src/track-service.js';
 import { createProximityWatcher } from './src/proximity.js';
 import { possibleRadiusMeters, haversineMeters, bearingDegrees } from './src/geometry.js';
 import { renderPlaneMap } from './src/map-canvas.js';
@@ -225,7 +227,7 @@ export function renderHeaderNavPoints(container, { getContext, onContextChange }
 export function mount(container, ctx) {
   ensureTheme();
   injectStyle(STYLE_ID, STYLE);
-  const { qu, identity, services, apps, segments = [], iceServers, subscribe, syncFetch } = ctx;
+  const { qu, identity, services, apps, segments = [], subscribe, syncFetch } = ctx;
   const SPACE_ID = apps?.find((a) => a.name === 'geochase')?.spaceId;
   if (!SPACE_ID) throw new Error('[geochase] no "spaceId" found in the apps catalog for "geochase" - check manifest.quapp');
 
@@ -235,21 +237,48 @@ export function mount(container, ctx) {
   let myPub = null;
   let unwatches = [];
   let pickerCleanups = [];
-  let mesh = null;
   let stopLocation = null;
-  let stopWatchPlayers = null;
-  let meshStarted = false; // guards setupLiveMesh() against re-running on every meta-triggered re-render
-  let releaseWakeLock = null; // see setupLiveMesh()'s own doc comment - held for as long as a game is actively being tracked
+  let stopPositionWatch = null; // stops watchLatestPositions() - see setupLiveView()'s own doc comment
+  let liveViewStarted = false; // guards setupLiveView() against re-running on every meta-triggered re-render
+  let releaseWakeLock = null; // see setupLiveView()'s own doc comment - held for as long as a game is actively being tracked
   let leafletMap = null; // mapMode: 'osm' only - see updateLiveView()'s own doc comment
   let leafletMapContainer = null;
   let nearestChaserInCatchRange = null; // actorPub|null - kept fresh by updateLiveView(), read by the chased player's own End-game button to auto-attribute a catch (see that button's own doc comment for why ONLY the chased side ever computes/writes this)
-  let stopTrackRefresh = null; // clears the periodic listTrackPoints() poll setupLiveMesh() starts
+  let stopTrackRefresh = null; // clears the periodic listTrackPoints() poll setupLiveView() starts
+  const labelCache = new Map(); // actorPub -> resolved display label (alias, falling back to a truncated pub) - see resolveLabels()'s own doc comment
 
   function clearWatches() {
     for (const u of unwatches) u();
     unwatches = [];
     for (const c of pickerCleanups) c();
     pickerCleanups = [];
+  }
+
+  /**
+   * Resolves every given pubkey's own display alias via
+   * `services.profile.getPublicProfile()` (with its own syncFetch backfill
+   * for a peer this session hasn't synced yet) and caches it in
+   * `labelCache`, so every player-facing label (participant list, live
+   * player list, map dots/tooltips, the ended-game summary) shows the
+   * person's actual alias instead of a truncated pubkey - the pub itself
+   * only ever shows as the fallback `shortPerson()`/`formatActorLabel()`
+   * already produce when no alias is published. Safe to call repeatedly -
+   * already-cached pubs are skipped, so re-running this on every
+   * `renderGameView()` (a meta change - e.g. a new invite) only ever
+   * resolves the NEW member's own alias.
+   * @param {string[]} actorPubs
+   */
+  async function resolveLabels(actorPubs) {
+    await Promise.all(actorPubs.map(async (actorPub) => {
+      if (actorPub === myPub || labelCache.has(actorPub)) return;
+      const profile = await services.profile?.getPublicProfile(actorPub).catch(() => null);
+      labelCache.set(actorPub, shortPerson(actorPub, profile));
+    }));
+  }
+
+  /** Synchronous read of `labelCache` - see `resolveLabels()`'s own doc comment. Falls back to a truncated-pub placeholder for a pub not resolved (yet). */
+  function cachedLabel(actorPub) {
+    return actorPub === myPub ? t('you') : (labelCache.get(actorPub) ?? shortPerson(actorPub, null));
   }
 
   (async () => {
@@ -425,6 +454,8 @@ export function mount(container, ctx) {
       return;
     }
     await services.sharing.starIfMember('geochase', 'game', gameId, meta); // no-op once already starred - handles a fresh invite click-through, same as apps/todo's own renderListPage()
+    await resolveLabels(meta.members.map((m) => m.actorPub));
+    if (stopped) return;
 
     const role = services.sharing.roleOf(meta, myPub);
     if (!role) {
@@ -511,7 +542,7 @@ export function mount(container, ctx) {
           page.appendChild(alertBanner);
 
           if (meta.settings.mapMode === 'osm') {
-            // A real Leaflet map, mounted/updated by setupLiveMesh()'s own
+            // A real Leaflet map, mounted/updated by setupLiveView()'s own
             // updateLiveView() the moment at least one position is known -
             // see that function's own doc comment for why the map INSTANCE
             // (not just its markers) is recreated whenever this container
@@ -539,7 +570,7 @@ export function mount(container, ctx) {
               endBtn.disabled = true;
               // Auto-attributes the catch to whichever chaser is currently
               // within catch range on THIS (the chased player's own) device
-              // - see `setupLiveMesh()`'s own `nearestChaserInCatchRange`
+              // - see `setupLiveView()`'s own `nearestChaserInCatchRange`
               // doc comment for why only the chased side ever writes this
               // (the ACL, not a UI choice).
               await updateGame(qu, identity, services, SPACE_ID, gameId, { status: 'ended', caughtBy: nearestChaserInCatchRange });
@@ -552,58 +583,49 @@ export function mount(container, ctx) {
       },
     });
 
-    if (meta.status === 'active' && !meshStarted) {
-      meshStarted = true;
-      setupLiveMesh(gameId, meta, isChased);
+    if (meta.status === 'active' && !liveViewStarted) {
+      liveViewStarted = true;
+      setupLiveView(gameId, meta, isChased);
     }
   }
 
   /**
-   * Builds the game's own live mesh + location sharing exactly ONCE per
-   * mount (guarded by `meshStarted` in the caller) - `renderGameView()`
+   * Wires the game's own live position feed + location sharing exactly ONCE
+   * per mount (guarded by `liveViewStarted` in the caller) - `renderGameView()`
    * re-runs on every meta change (an invite, a setting, status itself), but
-   * a live WebRTC mesh/geolocation watch must NOT be torn down and rebuilt
-   * on each of those, only ever started once the game is first seen active
-   * and kept running until this app unmounts (or the game ends - see the
-   * status watch below). `updateLiveView()` queries the CURRENT map
+   * the live geolocation watch/position feed must NOT be torn down and
+   * rebuilt on each of those, only ever started once the game is first seen
+   * active and kept running until this app unmounts (or the game ends - see
+   * the status watch below). `updateLiveView()` queries the CURRENT map
    * canvas/player-list DOM fresh on every position tick instead of holding
    * a stale reference across `renderGameView()`'s own DOM rebuilds.
    *
    * Also where the Wake Lock (`@qu/ui`'s `mountWakeLock()`) gets acquired -
-   * a chase is worthless if the phone's screen locks mid-run (geolocation
-   * watches and the WebRTC mesh both keep running in the background for a
-   * while on most platforms, but the live map/radius circle a chaser
-   * actually needs to LOOK AT obviously can't render on a locked screen).
-   * Held for as long as this mount's own live view is - released in the
-   * mount's own teardown (`return () => {...}` below), never per-render.
+   * a chase is worthless if the phone's screen locks mid-run (the live
+   * map/radius circle a chaser actually needs to LOOK AT obviously can't
+   * render on a locked screen). Held for as long as this mount's own live
+   * view is - released in the mount's own teardown (`return () => {...}`
+   * below), never per-render.
    */
-  async function setupLiveMesh(gameId, meta, isChased) {
+  async function setupLiveView(gameId, meta, isChased) {
     releaseWakeLock = mountWakeLock(); // req. 3 - held for this whole active-game view's lifetime, released only in this mount's own teardown below
     const liveStorageKey = `${LIVE_STORAGE_KEY_PREFIX}${gameId}`;
-    const readyMesh = await createGeochaseMesh({
-      qu, identity, services, spaceId: SPACE_ID, threadId: gameThreadId(gameId), gameId, iceServers, subscribe, syncFetch,
-    });
-    if (stopped) { readyMesh.close(); return; }
-    mesh = readyMesh;
-
     const memberPubs = meta.members.map((m) => m.actorPub);
-    for (const pub of memberPubs) {
-      if (pub === myPub) continue;
-      mesh.connectToPeer(pub, memberPubs).catch((err) => console.error('[geochase] connectToPeer() failed:', err));
-    }
 
     const intervalMs = isChased ? meta.settings.chasedIntervalMs : meta.settings.chaserIntervalMs;
-    stopLocation = startLocationSharing(mesh, {
+    stopLocation = startLocationSharing({
       minIntervalMs: intervalMs,
-      // req. 5/6/7: persist an ENCRYPTED track point at the same throttled
-      // cadence the mesh already uses - see location.js's own doc comment.
+      // req. 5/6/7 AND the live channel itself (see track-service.js's own
+      // top doc comment) - ONE relay-backed, encrypted write per ping,
+      // reliably reaching every game member instead of depending on a
+      // direct P2P connection ever forming.
       onPosition: (point) => {
         recordTrackPoint(qu, identity, services, SPACE_ID, gameId, point).catch((err) => console.error('[geochase] recordTrackPoint() failed:', err));
       },
     });
 
     // req. 8 - edge-triggered "getting close"/"catch range" alerts, purely
-    // client-computed from the same live mesh positions the map already
+    // client-computed from the same live positions the map already
     // uses - see proximity.js's own doc comment.
     const proximityWatcher = createProximityWatcher({
       selfPub: myPub, chasedPub: meta.chasedPub,
@@ -614,7 +636,7 @@ export function mount(container, ctx) {
     // trailing line under the live dots (see map-canvas.js's/map-leaflet.js's
     // own `tracks` param). Fetched once up front, then refreshed on a slow
     // poll (new points arrive one per configured interval anyway, no point
-    // re-fetching on every live position tick) rather than on every mesh
+    // re-fetching on every live position tick) rather than on every live
     // update.
     const tracks = new Map();
     let lastPlayers = readSessionJson(liveStorageKey) ?? []; // req. 4 - survive an accidental reload with the last known positions instead of a blank map until the next live tick
@@ -650,7 +672,7 @@ export function mount(container, ctx) {
         { radiusMeters: meta.settings.proximityAlertMeters, color: '#f5a623' },
         { radiusMeters: meta.settings.catchRangeMeters, color: '#e5484d' },
       ];
-      const labelFor = (pub) => (pub === myPub ? t('you') : pub.slice(0, 6));
+      const labelFor = cachedLabel;
 
       if (canvas) {
         renderPlaneMap(canvas, { players, chasedPub: meta.chasedPub, selfPub: myPub, radiusMeters, labelFor, extraCircles, tracks });
@@ -725,7 +747,7 @@ export function mount(container, ctx) {
 
       const alert = proximityWatcher.evaluate(players);
       if (alert) {
-        const otherName = alert.otherPub === myPub ? t('you') : shortPerson(alert.otherPub, null);
+        const otherName = cachedLabel(alert.otherPub);
         const isCatch = alert.level === 'catch';
         const title = isCatch ? t('catchAlertTitle') : t('proximityAlertTitle');
         const body = isCatch
@@ -744,7 +766,7 @@ export function mount(container, ctx) {
           const name = document.createElement('span');
           name.className = 'qu-geochase-player-name';
           const roleLabel = member.role === 'chased' ? t('chasedBadge') : t('chaserBadge');
-          name.textContent = member.actorPub === myPub ? `${t('you')} (${roleLabel})` : `${member.actorPub.slice(0, 8)}… (${roleLabel})`;
+          name.textContent = `${cachedLabel(member.actorPub)} (${roleLabel})`;
           li.appendChild(name);
 
           const metaEl = document.createElement('span');
@@ -765,8 +787,14 @@ export function mount(container, ctx) {
       }
     }
 
-    stopWatchPlayers = mesh.watchPlayers(updateLiveView);
-    updateLiveView(await mesh.listPlayers());
+    // The live position feed itself - see track-service.js's own top doc
+    // comment for why this rides the relay-backed store instead of a WebRTC
+    // mesh. Render immediately with whatever's already known (the
+    // sessionStorage buffer from `lastPlayers`, req. 4) rather than waiting
+    // for the first live tick, which can take a while at a multi-minute
+    // ping interval.
+    stopPositionWatch = watchLatestPositions(qu, identity, SPACE_ID, gameId, memberPubs, { syncFetch, onChange: updateLiveView });
+    updateLiveView(lastPlayers);
   }
 
   // ---------------------------------------------------------------------
@@ -869,12 +897,12 @@ export function mount(container, ctx) {
     }
     if (meta.caughtBy) {
       const p = document.createElement('p');
-      p.textContent = t('caughtLabel', { name: shortPerson(meta.caughtBy, null) });
+      p.textContent = t('caughtLabel', { name: cachedLabel(meta.caughtBy) });
       wrap.appendChild(p);
     }
     for (const [chaserPub, meters] of Object.entries(meta.startDistances ?? {})) {
       const p = document.createElement('p');
-      const name = chaserPub === myPub ? t('you') : shortPerson(chaserPub, null);
+      const name = cachedLabel(chaserPub);
       p.textContent = `${name}: ${t('startDistanceLabel', { distance: formatDistance(meters) })}`;
       wrap.appendChild(p);
     }
@@ -927,7 +955,7 @@ export function mount(container, ctx) {
       const name = document.createElement('span');
       name.className = 'qu-geochase-player-name';
       const roleLabel = member.role === 'chased' ? t('chasedBadge') : t('chaserBadge');
-      name.textContent = member.actorPub === myPub ? `${t('you')} (${roleLabel})` : `${member.actorPub.slice(0, 8)}… (${roleLabel})`;
+      name.textContent = `${cachedLabel(member.actorPub)} (${roleLabel})`;
       li.appendChild(name);
       ul.appendChild(li);
     }
@@ -938,9 +966,8 @@ export function mount(container, ctx) {
     stopped = true;
     clearWatches();
     stopLocation?.();
-    stopWatchPlayers?.();
+    stopPositionWatch?.();
     stopTrackRefresh?.();
-    mesh?.close();
     releaseWakeLock?.();
     leafletMap?.destroy();
   };

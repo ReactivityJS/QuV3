@@ -1,5 +1,6 @@
 import { QuCrypto } from '@qu/core';
 import { isEncryptedEnvelope, decryptEnvelope } from '@qu/services';
+import { watchChildren } from '@qu/reactive';
 import { gameThreadId } from './game-service.js';
 
 /**
@@ -31,6 +32,26 @@ import { gameThreadId } from './game-service.js';
  * already document for message bodies: a track point recorded BEFORE a
  * chaser was invited stays encrypted for the reader set at write time, never
  * re-keyed after the fact.
+ *
+ * THIS IS ALSO NOW THE LIVE "CURRENT POSITION" CHANNEL, not just history -
+ * `watchLatestPositions()` below. Geo Chase originally exchanged LIVE
+ * positions over a separate, ephemeral WebRTC mesh (`mesh.js`) and only
+ * ever wrote here for the persisted trail - two independent channels for
+ * what is fundamentally the same data. That mesh depends on a direct P2P
+ * connection actually forming between every pair of devices (ICE/NAT
+ * traversal, TURN availability, browser quirks) - unreliable enough in
+ * practice ("Position wird nicht zuverlässig übermittelt") to make the game
+ * itself unplayable when it fails, with no fallback. The relay-backed store
+ * every OTHER live thing in this app (chat messages, thread meta, presence)
+ * already rides reliably has no such requirement - a write just needs to
+ * reach the relay once, the same `subscribe(paths.spacePath(SPACE_ID))` this
+ * app's own `client.js` already does at mount covers this nested `track/...`
+ * path for free (it's a plain prefix), and `SyncEngine`'s own reconnect
+ * catch-up means a temporarily offline player's positions simply arrive once
+ * they're back, rather than being lost. `client.js` no longer creates a
+ * WebRTC mesh for gameplay at all - `mesh.js` remains as a tested, reusable
+ * building block for a future feature that genuinely wants P2P (e.g. voice),
+ * just no longer this one's only path to a working game.
  */
 
 let localSeq = 0;
@@ -44,6 +65,23 @@ function trackParentPath(spaceId, threadId, actorPub) {
 }
 function trackPointPath(spaceId, threadId, actorPub, pointId) {
   return `${trackParentPath(spaceId, threadId, actorPub)}/${pointId}`;
+}
+
+/**
+ * @param {import('@qu/identity').QuIdentityEngine} identity
+ * @param {(path: string) => Promise<object|null>} [syncFetch] - Backfills a
+ *   reader/sender profile this session hasn't synced yet, same convention
+ *   every other Service's own internal `#getProfile()` uses (see
+ *   `message-service.js`'s own constructor doc comment).
+ * @returns {(actorPub: string) => Promise<object|null>}
+ */
+function buildGetProfile(identity, syncFetch) {
+  return async (pub) => {
+    const local = await identity.getProfile(pub);
+    if (local || !syncFetch) return local;
+    await syncFetch(`/store/actors/~${pub}/profile`).catch(() => {});
+    return identity.getProfile(pub);
+  };
 }
 
 /**
@@ -89,12 +127,7 @@ export async function listTrackPoints(qu, identity, services, spaceId, gameId, a
   const parentPath = trackParentPath(spaceId, threadId, actorPub);
   if (syncFetch) await syncFetch(parentPath).catch(() => {});
   const entries = await qu.getChildren(parentPath, { sort: 'ts', order: 'asc', limit });
-  const getProfile = async (pub) => {
-    const local = await identity.getProfile(pub);
-    if (local || !syncFetch) return local;
-    await syncFetch(`/store/actors/~${pub}/profile`).catch(() => {});
-    return identity.getProfile(pub);
-  };
+  const getProfile = buildGetProfile(identity, syncFetch);
   const points = [];
   for (const { quBit } of entries) {
     if (quBit.val == null) continue;
@@ -102,4 +135,57 @@ export async function listTrackPoints(qu, identity, services, spaceId, gameId, a
     if (val) points.push(val);
   }
   return points;
+}
+
+/**
+ * The LIVE position feed - see this file's own top doc comment for why this
+ * replaced the WebRTC mesh as Geo Chase's live channel. Watches each given
+ * member's own track path directly (`watchChildren(..., {limit: 1, order:
+ * 'desc'})` - the single newest point, `paths.js`-style "one item per path
+ * under a shared parent" already sorted by the store's own write-time `ts`,
+ * no need to fetch/decrypt a member's whole history just to find their
+ * latest position), decrypts whichever point actually changed, and reports
+ * the FULL current snapshot (every member's latest known position) on every
+ * update - the same `players` shape `client.js`'s map renderers/player list
+ * already expect, so no caller-side reshaping is needed at the call site
+ * this replaces.
+ * @param {import('@qu/core').QuStore} qu @param {import('@qu/identity').QuIdentityEngine} identity
+ * @param {string|number} spaceId @param {string} gameId @param {string[]} memberPubs
+ * @param {{syncFetch?: (path: string) => Promise<object|null>, onChange: (players: Array<{actorPub: string, position: object}>) => void}} options
+ * @returns {() => void} Stop function - tears down every member's own watcher.
+ */
+export function watchLatestPositions(qu, identity, spaceId, gameId, memberPubs, { syncFetch = null, onChange }) {
+  const threadId = gameThreadId(gameId);
+  const getProfile = buildGetProfile(identity, syncFetch);
+  const latest = new Map(); // actorPub -> decrypted position
+  let stopped = false;
+
+  function emit() {
+    if (stopped) return;
+    onChange([...latest].map(([actorPub, position]) => ({ actorPub, position })));
+  }
+
+  const unwatches = memberPubs.map((actorPub) =>
+    watchChildren(
+      qu,
+      trackParentPath(spaceId, threadId, actorPub),
+      (entries) => {
+        const newest = entries[0]; // order: 'desc', limit: 1 below
+        if (!newest || newest.quBit.val == null) return;
+        decryptPoint(newest.quBit, identity, getProfile).then((val) => {
+          if (stopped || !val) return;
+          const current = latest.get(actorPub);
+          if (current && current.ts >= val.ts) return; // an older/duplicate delivery racing a newer one already applied - never regress
+          latest.set(actorPub, val);
+          emit();
+        });
+      },
+      { limit: 1, order: 'desc', syncFetch }
+    )
+  );
+
+  return () => {
+    stopped = true;
+    for (const u of unwatches) u();
+  };
 }
