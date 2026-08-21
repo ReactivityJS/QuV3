@@ -54,6 +54,10 @@ export class FakeRTCPeerConnection {
   /** Test-only: records call ORDER (not just occurrence) of the methods a reliability test cares about - see `getCallLog()`. */
   #callLog = [];
   connectionState = 'new';
+  /** Mirrors the real `RTCPeerConnection.remoteDescription` - null until `setRemoteDescription()` resolves. `PeerConnection`'s own trickle-ICE queueing (see `peer-connection.js`'s `#pendingCandidates`) reads exactly this property, so a test can prove that behavior against the fake the same way production code observes it. */
+  remoteDescription = null;
+  /** Test-only: every candidate actually handed to `addIceCandidate()`, in order - see `getAppliedCandidates()`. */
+  #appliedCandidates = [];
   onicecandidate = null;
   onconnectionstatechange = null;
   ondatachannel = null;
@@ -111,6 +115,7 @@ export class FakeRTCPeerConnection {
   async setLocalDescription(_desc) {}
 
   async setRemoteDescription(desc) {
+    this.remoteDescription = desc;
     if (desc.type === 'offer') {
       const offererTag = desc.sdp.slice('offer:'.length);
       // A RENEGOTIATION offer (mid-call, e.g. PeerConnection.addTrack())
@@ -136,7 +141,15 @@ export class FakeRTCPeerConnection {
     }
   }
 
-  async addIceCandidate(_candidate) {}
+  async addIceCandidate(candidate) {
+    this.#callLog.push('addIceCandidate');
+    this.#appliedCandidates.push(candidate);
+  }
+
+  /** Test-only: every candidate actually applied via `addIceCandidate()`, in order. */
+  getAppliedCandidates() {
+    return [...this.#appliedCandidates];
+  }
 
   /** @param {MediaStreamTrack} track @param {MediaStream} stream */
   #deliverTrack(track, stream) {

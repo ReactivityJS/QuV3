@@ -1,6 +1,7 @@
 import * as L from 'leaflet';
 import { injectStyle } from '@qu/ui';
 import { LEAFLET_CSS } from './map-leaflet-css.js';
+import { PLAYER_COLORS, colorFor } from './map-canvas.js';
 
 /**
  * REAL MAP — `mapMode: 'osm'`'s renderer: an actual interactive, pannable/
@@ -43,11 +44,13 @@ import { LEAFLET_CSS } from './map-leaflet-css.js';
 
 const CSS_ID = 'qu-geochase-leaflet-style';
 
-const PLAYER_COLORS = { chased: '#e5484d', self: '#12a594', chaser: '#5b5bd6' };
-
 /**
  * @param {HTMLElement} container - Gets Leaflet's own map DOM mounted directly into it.
- * @returns {{update: (state: {players: Array<{actorPub: string, position: {lat: number, lng: number}}>, chasedPub: string, selfPub: string, radiusMeters?: number, labelFor?: (actorPub: string) => string, extraCircles?: Array<{radiusMeters: number, color: string}>, tracks?: Map<string, Array<{lat: number, lng: number}>>}) => void, destroy: () => void}}
+ * @returns {{
+ *   update: (state: {players: Array<{actorPub: string, position: {lat: number, lng: number}}>, chasedPub: string, selfPub: string, radiusMeters?: number, labelFor?: (actorPub: string) => string, extraCircles?: Array<{radiusMeters: number, color: string}>, tracks?: Map<string, Array<{lat: number, lng: number}>>}) => void,
+ *   centerOn: (target: 'chased'|'self') => void,
+ *   destroy: () => void,
+ * }}
  */
 export function mountLeafletMap(container) {
   injectStyle(CSS_ID, LEAFLET_CSS);
@@ -63,14 +66,18 @@ export function mountLeafletMap(container) {
   let radiusCircle = null;
   let extraCircleLayers = []; // req. 8's proximity/catch-range rings
   let hasFitOnce = false; // auto-center/zoom ONCE, on the first real position - never again, so it never yanks the view out from under someone who's since panned/zoomed to look at something specific (same "initial center, then hands-off" convention most map apps use)
+  let lastChasedPub = null;
+  let lastSelfPub = null;
 
   function update({ players, chasedPub, selfPub, radiusMeters = 0, labelFor = (pub) => pub.slice(0, 6), extraCircles = [], tracks = null }) {
+    lastChasedPub = chasedPub;
+    lastSelfPub = selfPub;
     const seen = new Set();
     for (const player of players) {
       seen.add(player.actorPub);
       const latlng = [player.position.lat, player.position.lng];
       const isChased = player.actorPub === chasedPub;
-      const color = isChased ? PLAYER_COLORS.chased : (player.actorPub === selfPub ? PLAYER_COLORS.self : PLAYER_COLORS.chaser);
+      const color = colorFor(player.actorPub, chasedPub, selfPub);
       let marker = markers.get(player.actorPub);
       if (!marker) {
         marker = L.circleMarker(latlng, { radius: isChased ? 9 : 7, color: '#ffffff', weight: 2, fillColor: color, fillOpacity: 1 })
@@ -94,7 +101,7 @@ export function mountLeafletMap(container) {
         seenTracks.add(actorPub);
         if (points.length < 2) continue;
         const latlngs = points.map((p) => [p.lat, p.lng]);
-        const color = actorPub === chasedPub ? PLAYER_COLORS.chased : (actorPub === selfPub ? PLAYER_COLORS.self : PLAYER_COLORS.chaser);
+        const color = colorFor(actorPub, chasedPub, selfPub);
         let line = trackLines.get(actorPub);
         if (!line) {
           line = L.polyline(latlngs, { color, weight: 2, opacity: 0.5, dashArray: '2,4' }).addTo(map);
@@ -141,9 +148,24 @@ export function mountLeafletMap(container) {
     }
   }
 
+  /**
+   * A one-shot pan/zoom to `target`'s CURRENT known position (the last
+   * `update()` call's own `players`/`chasedPub`/`selfPub`) - unlike
+   * `hasFitOnce`'s automatic, only-ever-once fit above, this is an explicit
+   * user action (client.js's own "center map" buttons) and can be invoked
+   * repeatedly. A no-op if that target's position isn't known yet.
+   * @param {'chased'|'self'} target
+   */
+  function centerOn(target) {
+    const targetPub = target === 'self' ? lastSelfPub : lastChasedPub;
+    const marker = targetPub ? markers.get(targetPub) : null;
+    if (!marker) return;
+    map.setView(marker.getLatLng(), Math.max(map.getZoom(), 15));
+  }
+
   function destroy() {
     map.remove();
   }
 
-  return { update, destroy };
+  return { update, centerOn, destroy };
 }
