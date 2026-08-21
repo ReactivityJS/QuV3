@@ -545,19 +545,19 @@ needs its first reply typed separately.
 
 ## What's explicitly out of scope (for now)
 
-- **ToDo has no room/list switcher yet** — the same gap Chat used to have:
-  switching lists means going back to `#/todo` and picking a different row,
-  with no way to jump straight from one open list to a sibling. ToDo still
-  contributes its "+ New task" action via the older `shell.headerNavPoints`
-  slot (Rule 2) rather than `mountAppTemplate()`'s `primaryAction` (Rule 5)
-  — migrating it is the natural next candidate, following `apps/chat/
-  client.js`'s own `mountRoomView()` as the working reference: a
-  `navigation` section built from the same list-fetching logic its `#/todo`
-  (list picker + create form) and `#/todo/manage` (rename/share/delete/
-  leave) pages already need, `stopTemplate.update(...)` once that async
-  fetch resolves (see `@qu/ui`'s `app-template.js` own "LATE-ARRIVING CHROME
-  DATA" doc comment), and `fullHeight: true` only if ToDo's own task view
-  ever grows a messenger-style fixed layout of its own (it doesn't today).
+- **ToDo and Calendar are now on `mountAppTemplate()` too** — ToDo's list
+  picker/list page/"Mir zugewiesen" aggregate route through it with a
+  `navigation` switcher (built from the same list-fetching logic every page
+  already needed), a per-route `primaryAction` ("New list" everywhere, "New
+  task" only once a specific editable list is open) replacing the older
+  `shell.headerNavPoints` contribution entirely, and a `settings` entry for
+  "Listen verwalten" (`#/todo/manage` — previously unreachable from any link
+  in the app). Calendar's own calendars sidebar stays `mountContextSwitcher()`
+  (its per-item show/hide+share+delete UI still doesn't fit a plain link
+  list), but the whole view is now ALSO wrapped in `mountAppTemplate()` purely
+  for its `settings` gear — "Kalender verwalten" reaches `#/calendar/manage`
+  from there instead of the old inline "„Kalender" ›" title-row link, which is
+  now suppressed via `mountContextSwitcher()`'s new `hideTitleLink` option.
 - **Pins, Reactions, Search, Relay Admin** are unchanged. Pins/Reactions
   contribute to other apps' extension points and have no `mount()` UI of
   their own; Search's own `mount()` view and Relay Admin (a single settings

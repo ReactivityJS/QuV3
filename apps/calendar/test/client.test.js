@@ -170,7 +170,7 @@ test('creating a calendar via the sidebar form shows it under "My calendars" and
   }
 });
 
-test('the main view has exactly one back/switch affordance (mountContextSwitcher\'s titlebar link) - no bespoke hamburger/off-canvas drawer', async () => {
+test('the main view has exactly one way to reach "Kalender verwalten" (mountAppTemplate\'s settings gear) - no inline title-row link, no bespoke hamburger/off-canvas drawer', async () => {
   const { qu, services } = await freshEnv();
   const container = makeContainer();
   const stop = mount(container, { qu, services, segments: ['calendar'], subscribe: noopSubscribe });
@@ -178,9 +178,12 @@ test('the main view has exactly one back/switch affordance (mountContextSwitcher
     await waitFor(() => container.querySelector('.qu-ctxswitch-root') !== null);
     assert.equal(container.querySelector('.qu-cal-menu-btn'), null);
     assert.equal(container.querySelector('.qu-cal-scrim'), null);
-    const titleLink = container.querySelector('.qu-ctxswitch-title-link');
-    assert.ok(titleLink);
-    assert.equal(titleLink.getAttribute('href'), '#/calendar/manage');
+    // mountContextSwitcher's own inline "„Kalender" ›" title-row link is
+    // hidden now (hideTitleLink: true) - reaching #/calendar/manage happens
+    // through mountAppTemplate's settings gear instead, never both at once.
+    assert.equal(container.querySelector('.qu-ctxswitch-title-link'), null);
+    const settingsLink = container.querySelector('.qu-apptpl-section--settings a[href="#/calendar/manage"]');
+    assert.ok(settingsLink);
   } finally {
     stop();
   }

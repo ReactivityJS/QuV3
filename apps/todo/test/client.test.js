@@ -11,7 +11,7 @@ import { AssetEngine } from '@qu/engines';
 import { installDom, waitFor } from '@qu/ui/testing';
 
 installDom();
-const { mount, renderHeaderNavPoints } = await import('../client.js');
+const { mount } = await import('../client.js');
 
 const TODO_SPACE_ID = '63f5cc6f-62f6-4a43-a889-33900138f8b0'; // real UUID from apps/todo/manifest.quapp
 
@@ -504,36 +504,54 @@ test('the returned stop function tears down cleanly - no error thrown', async ()
   assert.doesNotThrow(() => stop());
 });
 
-function navPointLink(wrap, label) {
-  return [...wrap.querySelectorAll('a')].find((a) => a.textContent === label);
+/**
+ * "New list"/"New task" now live as each route's own `mountAppTemplate()`
+ * `primaryAction` (docs/app-navigation-standard.md Rule 5) instead of the
+ * older `shell.headerNavPoints` slot - the same move `apps/chat/client.js`
+ * already made for "+ New group". On mobile this renders as a circular FAB
+ * (`.qu-apptpl-fab`); on desktop, a prominent link at the top of
+ * the sidebar (`.qu-apptpl-primary-desktop`) - either is enough to prove the
+ * action is wired up.
+ */
+function primaryActionLink(container) {
+  return container.querySelector('.qu-apptpl-fab, .qu-apptpl-primary-desktop');
 }
 
-test('renderHeaderNavPoints(): hidden while another app is active; shown as a "New list"/"New task" dropdown once ToDo becomes active, "New task" upgraded to the first editable list\'s New Task page', async () => {
+test('#/todo\'s own primaryAction is always "New list", and the settings gear always reaches "Listen verwalten" (#/todo/manage)', async () => {
   const { qu, services } = await freshEnv();
   const container = makeContainer();
-  const stopMain = mount(makeContainer(), { qu, services, segments: ['todo'], subscribe: noopSubscribe });
-  await createListViaForm(document.body.lastElementChild);
+  const stop = mount(container, { qu, services, segments: ['todo'], subscribe: noopSubscribe });
+  try {
+    await waitFor(() => primaryActionLink(container) !== null);
+    assert.equal(primaryActionLink(container).getAttribute('href'), '#/todo/new');
+    const settingsLink = [...container.querySelectorAll('a')].find((a) => a.getAttribute('href') === '#/todo/manage');
+    assert.ok(settingsLink, 'expected a "Listen verwalten" settings link pointing at #/todo/manage');
+  } finally {
+    stop();
+  }
+});
+
+test('an open list\'s own primaryAction is "New task" once the list is editable, pointing straight at that list\'s New Task page', async () => {
+  const { qu, services } = await freshEnv();
+  const setupContainer = makeContainer();
+  let stop = mount(setupContainer, { qu, services, segments: ['todo'], subscribe: noopSubscribe });
+  await createListViaForm(setupContainer);
   const [{ id: listId }] = await services.sharing.listMine('todo', 'list');
-  stopMain();
+  stop();
 
-  let appId = 'chat';
-  const listeners = [];
-  renderHeaderNavPoints(container, {
-    getContext: () => ({ appId, segments: [appId] }),
-    onContextChange: (cb) => listeners.push(cb),
-    services, qu,
-  });
-  const wrap = container.querySelector('.qu-app-header-action');
-  assert.equal(wrap.hidden, true);
-
-  appId = 'todo';
-  listeners.forEach((cb) => cb());
-  assert.equal(wrap.hidden, false);
-  // 2 always-present items (see renderHeaderNavPoints()'s own doc comment) -
-  // renderNavPointsMenu() renders these as a real dropdown, not a plain link.
-  assert.equal(navPointLink(wrap, 'New list')?.getAttribute('href'), '#/todo/new');
-  assert.equal(navPointLink(wrap, 'New task')?.getAttribute('href'), '#/todo');
-  await waitFor(() => navPointLink(wrap, 'New task')?.getAttribute('href') === `#/todo/${listId}/new`);
+  // A fresh container (not a re-mount over `setupContainer`) - #/todo's own
+  // "New list" primaryAction would otherwise still be sitting in the DOM
+  // until the list page's OWN mountAppTemplate() call clears it, racing
+  // ahead of this still-in-flight render (see the "Copy link" test below's
+  // own doc comment for the same reasoning).
+  const container = makeContainer();
+  stop = mount(container, { qu, services, segments: segmentsFor(`#/todo/${listId}`), subscribe: noopSubscribe });
+  try {
+    await waitFor(() => primaryActionLink(container) !== null);
+    assert.equal(primaryActionLink(container).getAttribute('href'), `#/todo/${listId}/new`);
+  } finally {
+    stop();
+  }
 });
 
 test('"Mir zugewiesen"/Assigned-to-me: each row can be checked off directly (dropping out immediately, since this view is not-done-only) and links back to its own list', async () => {
@@ -572,11 +590,11 @@ test('"Mir zugewiesen"/Assigned-to-me: each row can be checked off directly (dro
   stop();
 });
 
-test('list page and "Mir zugewiesen" both render a Lists <-> Mir-zugewiesen switcher (sidebar items + a mobile switch link) and a "Copy link" button for an absolute, shareable URL', async () => {
+test('list page and "Mir zugewiesen" both render a Lists <-> Mir-zugewiesen switcher (mountAppTemplate\'s desktop-only navigation sidebar) and a "Copy link" button for an absolute, shareable URL', async () => {
   const { qu, services } = await freshEnv();
-  const container = makeContainer();
-  let stop = mount(container, { qu, services, segments: ['todo'], subscribe: noopSubscribe });
-  await createListViaForm(container);
+  const setupContainer = makeContainer();
+  let stop = mount(setupContainer, { qu, services, segments: ['todo'], subscribe: noopSubscribe });
+  await createListViaForm(setupContainer);
   const [{ id: listId }] = await services.sharing.listMine('todo', 'list');
   stop();
 
@@ -584,12 +602,17 @@ test('list page and "Mir zugewiesen" both render a Lists <-> Mir-zugewiesen swit
   const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
   Object.defineProperty(globalThis, 'navigator', { value: { clipboard: { writeText: async (text) => { written.push(text); } } }, configurable: true });
   try {
+    // A fresh container (not a re-mount over `setupContainer`) - #/todo's own
+    // mountAppTemplate() sidebar (settings only, no navigation) would
+    // otherwise still be sitting in the DOM until the list page's OWN
+    // mountAppTemplate() call clears it, racing ahead of this still-in-flight
+    // render (same reasoning the "mine" container below already documents).
+    const container = makeContainer();
     stop = mount(container, { qu, services, segments: segmentsFor(`#/todo/${listId}`), subscribe: noopSubscribe });
-    await waitFor(() => container.querySelector('.qu-ctxswitch-sidebar') !== null);
-    const sidebarLinks = [...container.querySelectorAll('.qu-ctxswitch-sidebar a')].map((a) => a.textContent);
+    await waitFor(() => container.querySelector('.qu-apptpl-sidebar') !== null);
+    const sidebarLinks = [...container.querySelectorAll('.qu-apptpl-sidebar a')].map((a) => a.textContent);
     assert.ok(sidebarLinks.includes('Assigned to me'), 'expected "Mir zugewiesen" in the switcher sidebar');
     assert.ok(sidebarLinks.includes('Groceries'), 'expected the list itself in the switcher sidebar');
-    assert.equal(container.querySelector('.qu-ctxswitch-title-link')?.getAttribute('href'), '#/todo', 'the mobile "{list} ›" link must point at the shared #/todo picker page');
 
     container.querySelector('.qu-todo-copy-link').click();
     await waitFor(() => written.length === 1);
@@ -603,7 +626,7 @@ test('list page and "Mir zugewiesen" both render a Lists <-> Mir-zugewiesen swit
     // racing ahead of the mine page's real (still in-flight) render.
     const mineContainer = makeContainer();
     stop = mount(mineContainer, { qu, services, segments: ['todo', 'mine'], subscribe: noopSubscribe });
-    await waitFor(() => mineContainer.querySelector('.qu-ctxswitch-sidebar') !== null);
+    await waitFor(() => mineContainer.querySelector('.qu-apptpl-sidebar') !== null);
     mineContainer.querySelector('.qu-todo-copy-link').click();
     await waitFor(() => written.length === 2);
     assert.equal(written[1], 'http://localhost/#/todo/mine');

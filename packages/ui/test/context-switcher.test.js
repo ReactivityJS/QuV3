@@ -65,6 +65,20 @@ test('variant "page": renders a titlebar link pointing at switchHref with the ac
   assert.equal(sidebar.dataset.variant, 'page');
 });
 
+test('variant "page" with hideTitleLink: true renders no titlebar link, but the sidebar (and switchHref-independent content) is unaffected', () => {
+  const container = document.createElement('div');
+  mountContextSwitcher(container, {
+    items: ITEMS, activeId: 'general', heading: 'Calendars', variant: 'page',
+    switchHref: '#/calendar/manage', activeLabel: 'Allgemein', hideTitleLink: true,
+    render: () => {},
+  });
+
+  assert.equal(container.querySelector('.qu-ctxswitch-title-link'), null);
+  assert.equal(container.querySelector('.qu-ctxswitch-titlebar'), null);
+  const sidebar = container.querySelector('.qu-ctxswitch-sidebar');
+  assert.equal(sidebar.dataset.variant, 'page');
+});
+
 test('renderSidebar overrides the default items list entirely', () => {
   const container = document.createElement('div');
   let sawHost = null;

@@ -57,7 +57,7 @@
 import { watch } from '@qu/reactive';
 import { paths, THREAD_PRESETS, formatActorLabel, matchesActorQuery } from '@qu/services';
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme, renderSubpage, mountAppHeaderAction, renderNavPointsMenu, mountActorPicker, mountContextSwitcher } from '@qu/ui';
+import { injectStyle, ensureTheme, renderSubpage, mountActorPicker, mountAppTemplate } from '@qu/ui';
 import { copyToClipboard } from '@qu/thread-ui';
 
 const SPACE_ID = '63f5cc6f-62f6-4a43-a889-33900138f8b0'; // this app's own manifest.spaceId - see index.js's own copy of this constant
@@ -67,7 +67,7 @@ const DICT = {
     title: 'ToDo', myTasks: 'Assigned to me', noAssignedTasks: 'Nothing assigned to you right now.',
     newListPlaceholder: 'New list name…', create: 'Create', noLists: 'No lists yet — create one below, or wait for an invite.',
     untitled: 'Untitled list', sharedBadge: 'Shared', manageLists: 'Manage lists',
-    newList: 'New list', newActions: 'Create new…', listsMenu: 'Lists',
+    newList: 'New list', listsMenu: 'Lists',
     copyLink: 'Copy link', linkCopied: 'Link copied',
     share: 'Share', delete: 'Delete', leave: 'Leave',
     deleteListConfirm: 'Delete "{title}"? This removes it for everyone and cannot be undone.',
@@ -93,7 +93,7 @@ const DICT = {
     title: 'ToDo', myTasks: 'Mir zugewiesen', noAssignedTasks: 'Dir ist gerade nichts zugewiesen.',
     newListPlaceholder: 'Name der neuen Liste…', create: 'Erstellen', noLists: 'Noch keine Listen — unten eine anlegen oder auf eine Einladung warten.',
     untitled: 'Unbenannte Liste', sharedBadge: 'Geteilt', manageLists: 'Listen verwalten',
-    newList: 'Neue Liste', newActions: 'Neu erstellen…', listsMenu: 'Listen',
+    newList: 'Neue Liste', listsMenu: 'Listen',
     copyLink: 'Link kopieren', linkCopied: 'Link kopiert',
     share: 'Teilen', delete: 'Löschen', leave: 'Verlassen',
     deleteListConfirm: '"{title}" löschen? Dies entfernt sie für alle und kann nicht rückgängig gemacht werden.',
@@ -204,59 +204,15 @@ function copyLinkButton(hash) {
 }
 
 // ===========================================================================
-// Header nav points - "New list"/"New task" (see docs/app-navigation-standard.md
-// Rule 2). Always 2 items while ToDo is active - unlike Forum's "New topic"
-// (only meaningful once a channel is open), BOTH of ToDo's own actions are
-// always reachable, so this is a real, always-present dropdown (the "▾"
-// caret + menuLabel tooltip renderNavPointsMenu() already draws once there
-// are 2+ items - see that file's own doc comment) rather than a bare "+"
-// that only sometimes turns into a menu. List creation moving here (out of
-// the old inline "+ New list" form at the bottom of #/todo/#/todo/manage -
-// see renderNewListPage() below) is the direct fix for that anti-pattern,
-// same move Forum already made for "+ New channel".
+// "New list"/"New task" now live as each ROUTE's own `mountAppTemplate()`
+// `primaryAction` (docs/app-navigation-standard.md Rule 5), not the older
+// `shell.headerNavPoints` slot (Rule 2) - the same move `apps/chat/client.js`
+// already made for "+ New group". "New list" is always reachable (every
+// list-picker-ish page's own primaryAction); "New task" only appears once a
+// specific EDITABLE list is actually open (`renderListPage()`'s own
+// `primaryAction`), same as it only used to resolve once an editable list was
+// found - see that function below.
 // ===========================================================================
-export function renderHeaderNavPoints(container, { getContext, onContextChange, services, qu }) {
-  mountAppHeaderAction(container, {
-    appId: 'todo', getContext, onContextChange,
-    render: (wrap) => {
-      let stopped = false;
-      // "New task" starts pointing at the list picker (#/todo) - unlike
-      // Calendar's "+ New event" (which needs an editable CALENDAR to exist
-      // first), a user with no editable list yet can still use this to reach
-      // the page where they create one - then upgrades in place to the
-      // resolved list's own new-task route once/if an editable list is found.
-      let newTaskHref = '#/todo';
-      function update() {
-        if (stopped) return;
-        wrap.textContent = '';
-        renderNavPointsMenu(wrap, {
-          items: [
-            { label: t('newList'), href: '#/todo/new' },
-            { label: t('newTask'), href: newTaskHref },
-          ],
-          menuLabel: t('newActions'),
-        });
-      }
-      update();
-
-      (async () => {
-        const myPub = await services.actors.whoAmI();
-        const mine = await services.sharing.listMine('todo', 'list');
-        for (const l of mine) {
-          if (stopped) return;
-          const quBit = await qu.get(paths.documentPath(SPACE_ID, metaResourceId(l.id)));
-          const role = quBit?.val?.members?.find((m) => m.actorPub === myPub)?.role;
-          if (role === 'owner' || role === 'editor') {
-            newTaskHref = newTaskHash(l.id, null);
-            update();
-            return;
-          }
-        }
-      })();
-      return () => { stopped = true; };
-    },
-  });
-}
 
 // ===========================================================================
 // mount()
@@ -350,17 +306,19 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
   }
 
   /**
-   * The Lists <-> "Mir zugewiesen" switcher's own sidebar items - "Mir
-   * zugewiesen" first, then every list this identity is a member of. Used
-   * by both renderListPage() and renderMyTasksPage() (see their own
-   * mountContextSwitcher() calls) so a mobile user viewing one list, or
-   * their assigned-to-me aggregate, has a direct way to jump to another one
-   * - the same "esoTalk-style persistent switcher" idiom apps/forum's own
-   * channel sidebar and apps/calendar's own calendars sidebar already use
-   * (see docs/app-navigation-standard.md Rule 3). Deliberately a plain,
-   * unwatched read (unlike loadListInfos() above) - it must NOT call
-   * clearWatches() itself, which would wipe out whichever page-specific
-   * watch(es) the caller already pushed for ITS OWN list/task data.
+   * The Lists <-> "Mir zugewiesen" switcher's own nav items - "Mir
+   * zugewiesen" first, then every list this identity is a member of. Fed
+   * straight into `mountAppTemplate()`'s own `navigation.items` (already the
+   * exact `{id, label, href, badge}` shape it expects - see `@qu/ui`'s
+   * `app-template.js` `AppTemplateLinkItem` typedef) by both
+   * `renderListPage()` and `renderMyTasksPage()`, following
+   * `apps/chat/client.js`'s own `roomsToNavItems()`/`stopTemplate.update()`
+   * pattern (docs/app-navigation-standard.md Rule 5), so a user viewing one
+   * list, or their assigned-to-me aggregate, has a direct way to jump to
+   * another one. Deliberately a plain, unwatched read (unlike
+   * loadListInfos() above) - it must NOT call clearWatches() itself, which
+   * would wipe out whichever page-specific watch(es) the caller already
+   * pushed for ITS OWN list/task data.
    */
   async function fetchSwitcherItems() {
     const mine = await listMine();
@@ -380,10 +338,10 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
 
   /**
    * The "create a list" form itself - shared by the dedicated `#/todo/new`
-   * page below (reachable from the shell header's App Navigation Points
-   * Slot - see renderHeaderNavPoints()'s own doc comment, the SAME "Rule 2"
-   * move apps/forum/client.js's own "+ New channel" already made) AND the
-   * inline copy still sitting at the bottom of `#/todo`/`#/todo/manage` -
+   * page below (also reachable as `primaryAction` on every list-picker-ish
+   * route - see renderMain()'s own `mountAppTemplate()` call, the SAME
+   * "Rule 5" move `apps/chat/client.js` already made for "+ New group") AND
+   * the inline copy still sitting at the bottom of `#/todo`/`#/todo/manage` -
    * list creation was deliberately made reachable from BOTH places rather
    * than moved wholesale, unlike Forum's channel creation, since a list
    * (unlike a channel) is something users create far more casually/often
@@ -439,8 +397,9 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     if (stopped) return;
     const infos = await loadListInfos(renderMain);
     if (!infos) return;
-    renderSubpage(container, {
-      showBackLink: false,
+    mountAppTemplate(container, {
+      primaryAction: { label: t('newList'), href: '#/todo/new', icon: '✏️' },
+      settings: { items: [{ label: t('manageLists'), href: '#/todo/manage' }] },
       render: (content) => {
         const page = document.createElement('div');
         page.className = 'qu-todo-page';
@@ -579,14 +538,10 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     const switcherItems = await fetchSwitcherItems();
     if (stopped) return;
 
-    mountContextSwitcher(container, {
-      items: switcherItems,
-      activeId: 'mine',
-      heading: t('listsMenu'),
-      variant: 'page',
-      switchHref: '#/todo',
-      activeLabel: t('myTasks'),
-      newItem: { label: `+ ${t('newList')}`, href: '#/todo/new' },
+    mountAppTemplate(container, {
+      primaryAction: { label: t('newList'), href: '#/todo/new', icon: '✏️' },
+      navigation: { items: switcherItems, activeId: 'mine', heading: t('listsMenu'), desktopOnly: true },
+      settings: { items: [{ label: t('manageLists'), href: '#/todo/manage' }] },
       render: (content) => {
         const page = document.createElement('div');
         page.className = 'qu-todo-page';
@@ -737,14 +692,15 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     const switcherItems = await fetchSwitcherItems();
     if (stopped) return;
 
-    mountContextSwitcher(container, {
-      items: switcherItems,
-      activeId: id,
-      heading: t('listsMenu'),
-      variant: 'page',
-      switchHref: '#/todo',
-      activeLabel: meta.title || t('untitled'),
-      newItem: { label: `+ ${t('newList')}`, href: '#/todo/new' },
+    // "New task" is this route's own `primaryAction` (Rule 5) once the list
+    // is editable - not an inline link inside `actions` below anymore, same
+    // move Calendar's own "+ New event" already made (there via the global
+    // header; here via mountAppTemplate(), since ToDo's own chrome is
+    // per-route/per-list rather than a single always-editable target).
+    mountAppTemplate(container, {
+      primaryAction: editable ? { label: t('newTask'), href: newTaskHash(id, null), icon: '✏️' } : null,
+      navigation: { items: switcherItems, activeId: id, heading: t('listsMenu'), desktopOnly: true },
+      settings: { items: [{ label: t('manageLists'), href: '#/todo/manage' }] },
       render: (content) => {
         const page = document.createElement('div');
         page.className = 'qu-todo-page';
@@ -754,12 +710,6 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
 
         const actions = document.createElement('div');
         actions.className = 'qu-todo-list-actions';
-        if (editable) {
-          const newTaskLink = document.createElement('a');
-          newTaskLink.href = newTaskHash(id, null);
-          newTaskLink.textContent = t('newTask');
-          actions.appendChild(newTaskLink);
-        }
         if (canManage(role)) {
           const shareLink = document.createElement('a');
           shareLink.href = shareHash(id);
