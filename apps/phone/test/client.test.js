@@ -195,12 +195,17 @@ test('hanging up AFTER connecting shows a summary (contact, date, duration, back
     await waitFor(() => container.querySelector('.qu-phone-status').textContent.match(/connected|verbunden/i) !== null);
     await new Promise((resolve) => setTimeout(resolve, 50)); // a non-zero, assertable call duration
 
-    const originalHash = window.location.hash;
     const [, , hangupBtn] = container.querySelectorAll('.qu-phone-controls button');
     hangupBtn.click();
 
     await waitFor(() => container.querySelector('.qu-phone-summary') !== null);
-    assert.equal(window.location.hash, originalHash); // no navigation yet - the summary replaced the view in place
+    // history.replaceState() to a distinct "ended" marker hash - not a real
+    // navigation (no hashchange, the summary replaced the view in place) -
+    // see showEndScreen()'s own doc comment for why this matters: without
+    // it, the SAME peer calling again while still on this exact summary
+    // would find "Annehmen" pointing at this now-STALE, unchanged accept
+    // URL, a no-op click that silently never places the new call.
+    assert.equal(window.location.hash, `#/phone/${callee.pub}/ended`);
     assert.ok(container.querySelector('.qu-phone-summary-name').textContent.length > 0);
     assert.match(container.querySelector('.qu-phone-summary-meta').textContent, /\d+:\d{2}/); // m:ss duration
     assert.equal(container.querySelector('.qu-phone-controls'), null); // old call controls are gone
@@ -231,6 +236,83 @@ test('the end-of-call screen links BOTH the alias and the raw pub to the profile
     assert.equal(pubLink.tagName, 'A');
     assert.equal(pubLink.getAttribute('href'), `#/~${contactPub}`);
     assert.equal(pubLink.textContent, contactPub);
+  } finally {
+    stop();
+  }
+});
+
+test('REGRESSION: a NEW call from the SAME peer, accepted while still on that peer\'s own end-of-call screen, actually mounts - the "Annehmen no-op" bug this ended-marker hash exists to prevent', async () => {
+  const network = new TestNetwork();
+  const relayQu = new QuStore();
+  relayQu.mount('store', new MemoryStoreAdapter());
+  new SyncEngine(relayQu, new RelayTransport(network));
+
+  const caller = await freshParticipant('repeat-caller', network);
+  const callee = await freshParticipant('repeat-callee', network);
+  const calleeContainer = makeContainer();
+
+  // Call #1: callee accepts, then hangs up - lands on the end screen,
+  // still at the SAME #/phone/<caller.pub>/accept hash it accepted from,
+  // UNTIL showEndScreen() replaceState()s it to the "ended" marker.
+  const callerContainer1 = makeContainer();
+  const stopCallee1 = mount(calleeContainer, {
+    qu: callee.qu, identity: callee.identity, services: callee.services, apps: callee.apps,
+    segments: ['phone', caller.pub, 'accept'], subscribe: callee.subscribe, syncFetch: callee.syncFetch,
+  });
+  const stopCaller1 = mount(callerContainer1, {
+    qu: caller.qu, identity: caller.identity, services: caller.services, apps: caller.apps,
+    segments: ['phone', callee.pub], subscribe: caller.subscribe, syncFetch: caller.syncFetch,
+  });
+  try {
+    await waitFor(() => calleeContainer.querySelector('.qu-phone-status').textContent.match(/connected|verbunden/i) !== null);
+    const [, , hangupBtn] = calleeContainer.querySelectorAll('.qu-phone-controls button');
+    hangupBtn.click();
+    await waitFor(() => calleeContainer.querySelector('.qu-phone-summary') !== null);
+    assert.equal(window.location.hash, `#/phone/${caller.pub}/ended`);
+    // Also wait for the CALLER's own side to receive the hangup signal and
+    // reach ITS OWN end screen (real-world equivalent: the caller notices
+    // and reacts, at least a moment later - not the SAME instant) before
+    // tearing its view down - matters because tearing it down BEFORE this
+    // signal round-trip completes would itself send a REDUNDANT hangup
+    // write (call.js's own `hangUp()`/`ended` guard's own doc comment).
+    await waitFor(() => callerContainer1.querySelector('.qu-phone-summary') !== null);
+  } finally {
+    stopCallee1();
+    stopCaller1();
+  }
+
+  // A real shell would now see a NEW toast for a second incoming call from
+  // the SAME peer (the SAME caller identity/pub calling again), and its
+  // "Annehmen" link targets this EXACT SAME #/phone/<caller.pub>/accept URL
+  // - but since the address bar is now at the DIFFERENT "ended" marker (not
+  // still stuck on that same accept URL, which is the bug this whole
+  // mechanism prevents), a real click there fires a genuine 'hashchange',
+  // which is what mounting fresh here stands in for - proving call #2
+  // actually connects, not silently doing nothing.
+  const calleeContainer2 = makeContainer();
+  const stopCallee2 = mount(calleeContainer2, {
+    qu: callee.qu, identity: callee.identity, services: callee.services, apps: callee.apps,
+    segments: ['phone', caller.pub, 'accept'], subscribe: callee.subscribe, syncFetch: callee.syncFetch,
+  });
+  const stopCaller2 = mount(makeContainer(), {
+    qu: caller.qu, identity: caller.identity, services: caller.services, apps: caller.apps,
+    segments: ['phone', callee.pub], subscribe: caller.subscribe, syncFetch: caller.syncFetch,
+  });
+  try {
+    await waitFor(() => calleeContainer2.querySelector('.qu-phone-status').textContent.match(/connected|verbunden/i) !== null);
+  } finally {
+    stopCallee2();
+    stopCaller2();
+  }
+});
+
+test('landing directly on the "/ended" marker hash (e.g. a page reload) falls back to the call-starter, never silently placing an outgoing call', async () => {
+  const { qu, identity, services, apps } = await freshEnv();
+  const container = makeContainer();
+  const stop = mount(container, { qu, identity, services, apps, segments: ['phone', 'some-pub', 'ended'] });
+  try {
+    await waitFor(() => container.querySelector('.qu-phone-contacts, .qu-phone-empty') !== null);
+    assert.equal(container.querySelector('.qu-phone-call-view'), null); // never mounted an active call
   } finally {
     stop();
   }

@@ -135,6 +135,10 @@ export async function createPhoneCall({ qu, identity, services, spaceId, remoteP
   // addTrackToPeer doc comments: renegotiation reuses the same connection,
   // it never re-fires onPeerConnected), so this is never overwritten mid-call.
   let connectedAt = null;
+  // Set the instant THIS side learns (via any of the three signals below)
+  // that the call is already over - see hangUp()'s own doc comment for why
+  // it checks this before ever sending its own hangupCall() write.
+  let ended = false;
   const unsubTrack = webrtcTransport.onTrack((peerId, stream) => {
     if (peerId === remotePub) onTrack?.(stream);
   });
@@ -158,11 +162,13 @@ export async function createPhoneCall({ qu, identity, services, spaceId, remoteP
   // listener).
   const unsubDeclined = signalService.onDeclined((peerId) => {
     if (peerId !== remotePub) return;
+    ended = true;
     cleanupLocal();
     onDeclined?.();
   });
   const unsubHangup = signalService.onHangup((peerId) => {
     if (peerId !== remotePub) return;
+    ended = true;
     cleanupLocal();
     onHungUp?.();
   });
@@ -173,6 +179,7 @@ export async function createPhoneCall({ qu, identity, services, spaceId, remoteP
   // state - see this plan's own "Bugfix: Keine WebRTC-Verbindung..." section.
   const unsubTimeout = signalService.onTimeout((peerId) => {
     if (peerId !== remotePub) return;
+    ended = true;
     cleanupLocal();
     onTimeout?.();
   });
@@ -236,12 +243,25 @@ export async function createPhoneCall({ qu, identity, services, spaceId, remoteP
     // while still "Rufe an…"/"Klingelt…" is already covered by
     // declineCall()/the negotiation timeout, and the other side may not
     // even have a signaling pair registered yet to receive this against.
+    // `!ended` guards against a REDUNDANT write: `client.js`'s own
+    // `mount()` teardown calls `call?.hangUp()` on route/view teardown, and
+    // that can race ahead of the OTHER side's own termination signal
+    // actually being received and processed (`ended` is set the instant
+    // one of onDeclined/onHangup/onTimeout above fires) - without this
+    // guard, hangUp() would send its OWN hangupCall() write for a call
+    // THIS side already knows is over. That write's own `qu.put()` is never
+    // awaited and can land late (after real signing/network delay) - a
+    // real, reported bug: pair-scoped signaling paths are reused across
+    // separate call attempts between the same two people (see
+    // `WebRtcSignalService`'s own `webrtcHangupPath()` doc comment), so a
+    // late, redundant hangup from a call that's ALREADY over can get
+    // misread as ending a BRAND NEW call attempt to the same peer.
     // Fire-and-forget (not awaited - hangUp() itself stays synchronous, same
     // "local teardown must never wait on a network write" reasoning as the
     // announcement postMessage() above) - a failed write here just means the
     // other side falls back to noticing via the ICE connection eventually
     // going stale, same as before this signal existed.
-    if (connectedAt != null) {
+    if (connectedAt != null && !ended) {
       signalService.hangupCall(spaceId, threadId, remotePub)
         .catch((err) => log.warn('hangupCall() failed (other side may not learn the call ended):', err.message));
     }

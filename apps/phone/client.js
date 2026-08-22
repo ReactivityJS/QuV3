@@ -33,6 +33,14 @@
  *     can only ever open a URL - see `apps/shell/sw.js`'s own
  *     `notificationclick` handler). The IN-APP toast's own "Ablehnen" button
  *     does NOT use this route - see `handleNotificationAction()` below.
+ *   `#/phone/<remotePub>/ended` - a MARKER, not a real destination - never
+ *     linked to or navigated to directly. `showEndScreen()` (below)
+ *     `history.replaceState()`s the URL to this the moment a call ends,
+ *     silently (no `hashchange`, no remount - see that function's own doc
+ *     comment) so it never actually renders anything of its own; landing on
+ *     it directly (e.g. a page reload while looking at a call summary) falls
+ *     back to the call-starter, same as any other route this router
+ *     doesn't recognize - see `mount()`'s own dispatch below.
  */
 import { createI18n } from '@qu/i18n';
 import { formatActorLabel } from '@qu/services';
@@ -131,6 +139,11 @@ export function mount(container, ctx) {
 
   if (!remotePub) return mountCallStarter(container, ctx);
   if (mode === 'decline') return mountDecline(container, ctx, SPACE_ID, remotePub);
+  // A marker hash only (see this file's own top doc comment's "Routes"
+  // section) - landing on it directly (e.g. a reload) must never fall
+  // through to the "else" below, which would silently PLACE a new outgoing
+  // call to remotePub (initiator: true).
+  if (mode === 'ended') return mountCallStarter(container, ctx);
   // Audio is the default for BOTH roles - only an explicit `/video` segment
   // (the caller's own choice) starts with a video track already attached.
   // See this file's own top doc comment's "Routes" section.
@@ -337,9 +350,26 @@ function mountActiveCall(container, ctx, spaceId, remotePub, { initiator, callMo
    * Never shown for a call hung up while still "Rufe an…"/"Klingelt…" by
    * THIS side - see the hangupBtn handler below, which goes straight back
    * instead (nothing connected, nothing worth summarizing).
+   *
+   * `history.replaceState()`s the URL to `#/phone/<remotePub>/ended` FIRST -
+   * this view never otherwise navigates away on its own (the summary just
+   * replaces the current view's DOM in place), so without this, the URL
+   * stays exactly where the ORIGINAL call left it (`#/phone/<remotePub>`
+   * or `.../accept`). A real, reported bug: the same peer calling again
+   * while the callee is still looking at THIS exact summary screen made the
+   * new call's "Annehmen" toast link (targeting that SAME, unchanged
+   * `.../accept` URL) a no-op - assigning `location.hash` to its own CURRENT
+   * value never fires `hashchange` in any browser, so nothing renders the
+   * new call at all. `replaceState()`, unlike a `location.hash` assignment,
+   * never fires `hashchange`/`popstate` itself and doesn't push a new
+   * history entry - it silently gives this screen its OWN distinct hash so
+   * a LATER, real accept navigation is guaranteed to differ from whatever
+   * is currently in the address bar, without disturbing this already-
+   * rendered summary or `goBack()`'s own history-entry-count assumption.
    * @param {{title: string, connectedAt?: number|null}} options
    */
   function showEndScreen({ title, connectedAt = null }) {
+    window.history.replaceState(null, '', `#/phone/${remotePub}/ended`);
     view.textContent = '';
     const summary = document.createElement('div');
     summary.className = 'qu-phone-summary';
