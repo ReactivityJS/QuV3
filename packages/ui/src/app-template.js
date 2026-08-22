@@ -75,12 +75,24 @@ import { injectStyle } from './style.js';
 
 /**
  * @typedef {Object} AppConfig
- * @property {{label: string, href: string, icon?: string}} [primaryAction] -
- *   The one, always-in-the-same-place "create new X" action (Rule 2's
+ * @property {{label: string, href: string, icon?: string}|Array<{label: string, href: string, icon?: string}>} [primaryAction] -
+ *   The always-in-the-same-place "create new X" action(s) (Rule 2's
  *   dedicated-route reasoning applies here too - always a real `href`, never
- *   an `onClick`). Rendered as a prominent button: top of the sidebar on
- *   wide screens, a circular button at the end of the footer (or floating
- *   alone, if nothing else is present) on narrow ones.
+ *   an `onClick`). A single object is the common case: one prominent button,
+ *   top of the sidebar on wide screens, a circular FAB at the end of the
+ *   footer (or floating alone, if nothing else is present) on narrow ones.
+ *   An ARRAY is for the app declaring more than one candidate create-action
+ *   (e.g. a plugin extending an app with a second kind of "new X") and
+ *   letting this template decide how to present N of them, same "app
+ *   declares WHAT, template decides HOW" split as the rest of this file -
+ *   the app never picks "single button" vs. "expandable menu" itself. On
+ *   wide screens each candidate still gets its own prominent sidebar button
+ *   (there's room); on narrow screens 2+ candidates collapse into one FAB
+ *   that opens a small popup of real links (`buildPopupTrigger()`, the SAME
+ *   anchored-popup-of-real-`<a href>`-links convention this file already
+ *   uses for the nav/views/settings pills in the same footer - not a second
+ *   interaction pattern). A single-item array renders identically to
+ *   passing that one object directly.
  * @property {{items: AppTemplateLinkItem[], activeId?: string|null, heading?: string, desktopOnly?: boolean, filter?: boolean}} [navigation] -
  *   "Where am I / where can I go" - a channel, a calendar, a folder. Omit
  *   (or pass an empty `items`) if your app has nothing to switch between.
@@ -184,7 +196,12 @@ function styleFor(breakpoint) {
     .qu-apptpl-popup a { display: flex; align-items: center; gap: 0.4rem; padding: 0.45rem 0.6rem; border-radius: var(--qu-radius-sm, 0.3rem); text-decoration: none; color: inherit; font: inherit; }
     .qu-apptpl-popup a:hover { background: var(--qu-color-surface, #8882); }
 
-    .qu-apptpl-fab { display: inline-flex; align-items: center; justify-content: center; width: 3.2rem; height: 3.2rem; flex-shrink: 0; border-radius: 999px; background: var(--qu-color-accent, #5b5bd6); color: #fff; text-decoration: none; font-size: 1.4em; box-shadow: 0 0.3rem 0.9rem rgba(0,0,0,0.25); pointer-events: auto; }
+    .qu-apptpl-fab { display: inline-flex; align-items: center; justify-content: center; width: 3.2rem; height: 3.2rem; flex-shrink: 0; border: none; border-radius: 999px; background: var(--qu-color-accent, #5b5bd6); color: #fff; text-decoration: none; font-size: 1.4em; box-shadow: 0 0.3rem 0.9rem rgba(0,0,0,0.25); pointer-events: auto; cursor: pointer; position: relative; }
+    /* Same "a small caret marks a MENU trigger, not a direct link" cue
+       docs/app-navigation-standard.md Rule 2 already establishes for
+       renderNavPointsMenu()'s 2+-item dropdown - here for 2+ primaryAction
+       candidates collapsed into one FAB. */
+    .qu-apptpl-fab-multi::after { content: '▾'; position: absolute; right: -0.15rem; bottom: -0.15rem; width: 1.1rem; height: 1.1rem; display: flex; align-items: center; justify-content: center; font-size: 0.55rem; border-radius: 999px; background: var(--qu-color-surface, #fff); color: var(--qu-color-text, #000); box-shadow: 0 0 0 0.1rem var(--qu-color-accent, #5b5bd6); }
 
     /* FULL HEIGHT MODE - see this file's own top "FULL HEIGHT MODE" doc
        comment for the full "why fixed, not calc(100vh)" reasoning. */
@@ -286,6 +303,17 @@ export function normalizeAppConfig(config) {
   };
 }
 
+// `cfg.primaryAction` is a single `{label, href, icon?}` (the common case,
+// kept untouched for the ~6 existing call sites) or an array of candidates
+// (see `AppConfig.primaryAction`'s own doc comment) - this is the one place
+// that normalizes either shape into a plain array, an empty array counting
+// as "nothing" (guards a caller accidentally passing `primaryAction: []`,
+// which is otherwise truthy and would fool a bare `!!cfg.primaryAction` check).
+function primaryActionItems(primaryAction) {
+  if (!primaryAction) return [];
+  return Array.isArray(primaryAction) ? primaryAction : [primaryAction];
+}
+
 function buildLinkList(items, { activeId, className = 'qu-apptpl-list', itemActiveClass = 'qu-apptpl-item-active' } = {}) {
   const ul = document.createElement('ul');
   ul.className = className;
@@ -319,17 +347,20 @@ function buildDesktopSidebar(cfg) {
   const sidebar = document.createElement('aside');
   sidebar.className = 'qu-apptpl-sidebar';
 
-  if (cfg.primaryAction) {
+  // Wide screens have room for every candidate as its own prominent button
+  // (unlike the mobile FAB below, nothing needs to collapse into a popup
+  // here) - stacked in the order the app declared them.
+  for (const action of primaryActionItems(cfg.primaryAction)) {
     const link = document.createElement('a');
     link.className = 'qu-apptpl-primary-desktop';
-    link.href = cfg.primaryAction.href;
-    if (cfg.primaryAction.icon) {
+    link.href = action.href;
+    if (action.icon) {
       const icon = document.createElement('span');
-      icon.textContent = cfg.primaryAction.icon;
+      icon.textContent = action.icon;
       link.appendChild(icon);
     }
     const label = document.createElement('span');
-    label.textContent = cfg.primaryAction.label;
+    label.textContent = action.label;
     link.appendChild(label);
     sidebar.appendChild(link);
   }
@@ -455,8 +486,11 @@ function buildMobileFooter(cfg, { fabOnly, mobileNav, mobileViews, mobileSetting
   const cleanupFns = [];
 
   if (fabOnly) {
-    if (cfg.primaryAction) {
-      footer.appendChild(buildFab(cfg.primaryAction));
+    const primaryItems = primaryActionItems(cfg.primaryAction);
+    if (primaryItems.length > 0) {
+      const { el, cleanup } = buildFab(primaryItems);
+      footer.appendChild(el);
+      return { el: footer, cleanup };
     }
     return { el: footer, cleanup: () => {} };
   }
@@ -487,8 +521,11 @@ function buildMobileFooter(cfg, { fabOnly, mobileNav, mobileViews, mobileSetting
     end.appendChild(el);
     cleanupFns.push(cleanup);
   }
-  if (cfg.primaryAction) {
-    end.appendChild(buildFab(cfg.primaryAction));
+  const primaryItems = primaryActionItems(cfg.primaryAction);
+  if (primaryItems.length > 0) {
+    const { el, cleanup } = buildFab(primaryItems);
+    end.appendChild(el);
+    cleanupFns.push(cleanup);
   }
 
   footer.append(start, document.createElement('div'), end);
@@ -497,14 +534,33 @@ function buildMobileFooter(cfg, { fabOnly, mobileNav, mobileViews, mobileSetting
   return { el: footer, cleanup: () => { for (const fn of cleanupFns) fn(); } };
 }
 
-function buildFab(primaryAction) {
-  const fab = document.createElement('a');
-  fab.className = 'qu-apptpl-fab';
-  fab.href = primaryAction.href;
-  fab.textContent = primaryAction.icon ?? '+';
-  fab.title = primaryAction.label;
-  fab.setAttribute('aria-label', primaryAction.label);
-  return fab;
+/**
+ * @param {Array<{label: string, href: string, icon?: string}>} items - always
+ *   ≥1 (callers only invoke this once `primaryActionItems(...)` is non-empty).
+ * @returns {{el: HTMLElement, cleanup: () => void}}
+ */
+function buildFab(items) {
+  if (items.length === 1) {
+    const fab = document.createElement('a');
+    fab.className = 'qu-apptpl-fab';
+    fab.href = items[0].href;
+    fab.textContent = items[0].icon ?? '+';
+    fab.title = items[0].label;
+    fab.setAttribute('aria-label', items[0].label);
+    return { el: fab, cleanup: () => {} };
+  }
+  // 2+ candidates: the FAB itself becomes the trigger for a small popup of
+  // real links - `buildPopupTrigger()`, the exact same anchored-popup
+  // mechanism the nav/views/settings pills in this same footer already use
+  // (no drawer/scrim, real `<a href>`s, open/close/outside-click/Escape),
+  // not a second, FAB-specific menu implementation.
+  const trigger = document.createElement('button');
+  trigger.type = 'button';
+  trigger.className = 'qu-apptpl-fab qu-apptpl-fab-multi';
+  trigger.textContent = '+';
+  trigger.title = 'Create new…';
+  trigger.setAttribute('aria-label', 'Create new…');
+  return buildPopupTrigger({ triggerEl: trigger, items, popupPosition: 'right' });
 }
 
 /**
@@ -548,12 +604,13 @@ export function mountAppTemplate(container, config) {
     // `desktopOnly` or not. The mobile footer only cares about sections
     // that AREN'T `desktopOnly` - see this file's own `navigation` doc
     // comment above for why a section opts out of the footer entirely.
-    const hasChrome = !!(cfg.primaryAction || cfg.navigation || cfg.views || cfg.settings);
+    const hasPrimaryAction = primaryActionItems(cfg.primaryAction).length > 0;
+    const hasChrome = !!(hasPrimaryAction || cfg.navigation || cfg.views || cfg.settings);
     const mobileNav = cfg.navigation && !cfg.navigation.desktopOnly ? cfg.navigation : null;
     const mobileViews = cfg.views && !cfg.views.desktopOnly ? cfg.views : null;
     const mobileSettings = cfg.settings && !cfg.settings.desktopOnly ? cfg.settings : null;
-    const hasMobileFooterContent = !!(cfg.primaryAction || mobileNav || mobileViews || mobileSettings);
-    const fabOnly = hasMobileFooterContent && !mobileNav && !mobileViews && !mobileSettings && !!cfg.primaryAction;
+    const hasMobileFooterContent = !!(hasPrimaryAction || mobileNav || mobileViews || mobileSettings);
+    const fabOnly = hasMobileFooterContent && !mobileNav && !mobileViews && !mobileSettings && hasPrimaryAction;
 
     root.className = cfg.fullHeight ? 'qu-apptpl-root qu-apptpl-root--full-height' : 'qu-apptpl-root';
     if (cfg.fullHeight && hasMobileFooterContent && !fabOnly) root.classList.add('qu-apptpl-root--has-footer-bar');
