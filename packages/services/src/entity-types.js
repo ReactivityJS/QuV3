@@ -99,7 +99,7 @@ defaultEntityTypes.register('message', {
   fields: {},
   content: true,
   capabilities: ['reactable', 'attachable', 'mentionable'],
-  contentFormat: 'plain', // matches THREAD_PRESETS.chat()'s formatting: ['mentions'] only, no markdown
+  contentFormat: 'markdown', // matches THREAD_PRESETS.chat()/.group()'s formatting: ['markdown', 'mentions']
 });
 
 defaultEntityTypes.register('article', {

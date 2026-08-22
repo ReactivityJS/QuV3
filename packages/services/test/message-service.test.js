@@ -84,6 +84,19 @@ test('postMessage() applies markdown + mentions formatting per the thread config
   assert.deepEqual(message.mentions, ['a'.repeat(20)]);
 });
 
+test('postMessage() applies markdown formatting for THREAD_PRESETS.chat()/.group() too (Chat-migration round - these used to be mentions-only)', async () => {
+  const { identity, messages } = await freshSetup();
+  const myPub = QuCrypto.toBase64Url((await identity.getMainKey()).publicKey);
+  await identity.publishMainProfile({ name: 'Me' }); // reader-restricted threads need each reader's own published X key to encrypt for them
+  await messages.createThread('board', 'dm', THREAD_PRESETS.chat([myPub]));
+  const dm = await messages.postMessage('board', 'dm', { body: '**bold**' });
+  assert.ok(dm.formattedHtml.includes('<strong>bold</strong>'));
+
+  await messages.createThread('board', 'group', THREAD_PRESETS.group([myPub], 'Group'));
+  const group = await messages.postMessage('board', 'group', { body: '*italic*' });
+  assert.ok(group.formattedHtml.includes('<em>italic</em>'));
+});
+
 test('postMessage() to a nonexistent thread throws', async () => {
   const { messages } = await freshSetup();
   await assert.rejects(() => messages.postMessage('board', 'nope', { body: 'hi' }));

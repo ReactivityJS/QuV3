@@ -54,10 +54,15 @@ function formatVoiceElapsed(ms) {
 }
 
 /**
- * @param {{assetService: object, spaceId: string|number, readerPubs?: string[], asSpaceId?: string|number, trigger?: string, triggerTitle?: string}} options
+ * @param {{assetService: object, spaceId: string|number, readerPubs?: string[], asSpaceId?: string|number, trigger?: string, triggerTitle?: string, labels?: {discard?: string, pause?: string, resume?: string, finish?: string, send?: string}}} options
+ *   `labels` - overrides the recorder panel's own button titles (defaults to
+ *   English, same as before this option existed) - a caller with its own
+ *   i18n dictionary (e.g. `apps/chat/client.js`) passes its own strings
+ *   here instead of forking this file for translated titles.
  * @returns {{id: string, mount: (ctx: object) => (() => void)}}
  */
-export function voiceExtension({ assetService, spaceId, readerPubs, asSpaceId, trigger = '🎙️', triggerTitle = 'Record a voice message' } = {}) {
+export function voiceExtension({ assetService, spaceId, readerPubs, asSpaceId, trigger = '🎙️', triggerTitle = 'Record a voice message', labels = {} } = {}) {
+  const L = { discard: 'Discard recording', pause: 'Pause recording', resume: 'Resume recording', finish: 'Finish recording', send: 'Send', ...labels };
   return {
     id: 'voice',
     mount(ctx) {
@@ -69,7 +74,7 @@ export function voiceExtension({ assetService, spaceId, readerPubs, asSpaceId, t
       const discardBtn = document.createElement('button');
       discardBtn.type = 'button';
       discardBtn.textContent = '🗑️';
-      discardBtn.title = 'Discard recording';
+      discardBtn.title = L.discard;
       const dot = document.createElement('span');
       dot.className = 'qu-content-ui-voice-dot';
       const timeEl = document.createElement('span');
@@ -83,11 +88,11 @@ export function voiceExtension({ assetService, spaceId, readerPubs, asSpaceId, t
       const finishBtn = document.createElement('button');
       finishBtn.type = 'button';
       finishBtn.textContent = '⏹';
-      finishBtn.title = 'Finish recording';
+      finishBtn.title = L.finish;
       const sendBtn = document.createElement('button');
       sendBtn.type = 'button';
       sendBtn.textContent = '➤';
-      sendBtn.title = 'Send';
+      sendBtn.title = L.send;
       panel.append(discardBtn, dot, timeEl, previewPlayer, pauseBtn, finishBtn, sendBtn);
 
       // ---- state (ported essentially verbatim from apps/chat/client.js) --
@@ -123,7 +128,7 @@ export function voiceExtension({ assetService, spaceId, readerPubs, asSpaceId, t
         finishBtn.hidden = isPreview;
         sendBtn.hidden = !isPreview;
         pauseBtn.textContent = recorderState === 'paused' ? '▶️' : '⏸️';
-        pauseBtn.title = recorderState === 'paused' ? 'Resume recording' : 'Pause recording';
+        pauseBtn.title = recorderState === 'paused' ? L.resume : L.pause;
       }
       function resetRecorder() {
         if (recordedObjectUrl) URL.revokeObjectURL(recordedObjectUrl);

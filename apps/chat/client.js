@@ -8,6 +8,17 @@
  * substitute rather than re-implementing the same feature twice - see SCOPE
  * below for exactly what that trades away.
  *
+ * CHAT-MIGRATION ROUND: the composer is now `@qu/content-ui`'s
+ * `mountContentComposer()` - the SAME primitive `apps/forum/client.js`'s own
+ * composers use - instead of a hand-assembled textarea + `<qu-asset-upload>` +
+ * `MediaRecorder` state machine. `THREAD_PRESETS.chat()`/`.group()` now
+ * include `'markdown'` formatting (previously `['mentions']` only), so
+ * messages render real bold/italic/links and a resolved `@mention` alias -
+ * see `renderMessageText()`. `message.attachments` is now a plural array
+ * (was singular `message.attachment`) - the "clean schema" adoption this
+ * round chose deliberately, matching `createContent()`'s own shape, over a
+ * compatibility-preserving wrapper around the old singular field.
+ *
  * ENCRYPTION IS THE DEFAULT for both room kinds, not an opt-in: a 1:1 room
  * (`THREAD_PRESETS.chat`, via `ChatService.ensureRoom()`) and a group
  * (`THREAD_PRESETS.group`, via `ChatService.createGroup()`) both set
@@ -49,17 +60,19 @@
  *     "📌 Pinned" bar (`content.topicToolbar`) is the same story, once per
  *     room instead of once per message - see `mountRoomView()`'s own
  *     `toolbarRoot` for where this app renders that slot.
- *   - Mention/emoji autocomplete reuse `@qu/thread-ui`'s
- *     `mountMentionAutocomplete()`/`mountEmojiAutocomplete()`/
- *     `renderEmojiPicker()`/`insertAtCursor()` unchanged - the exact
- *     primitives `apps/forum`'s own composer already uses, and the reason
- *     that package's own doc comment names "a future apps/chat port" as
- *     its second real consumer.
- *   - Attachments reuse `@qu/ui`'s `<qu-asset-upload>`/`<qu-asset>` over
- *     `services.assets` unchanged - same pattern as `apps/forum`'s own
- *     attachment integration, with this room's `readers` passed as
- *     `readerPubs` so an attachment gets the SAME end-to-end encryption as
- *     the message body sitting next to it.
+ *   - Mention/emoji autocomplete, markdown toolbar, attachment/location/voice
+ *     capture are now `@qu/content-ui`'s `mentionExtension()`/
+ *     `emojiExtension()`/`markdownToolbarExtension()`/`attachmentExtension()`/
+ *     `locationExtension()`/`voiceExtension()` - the exact `EditorExtension`s
+ *     `apps/forum`'s own composers already use (mention/emoji/markdown
+ *     toolbar) or were originally GENERALIZED FROM this file's own earlier,
+ *     hand-rolled implementations (attachment/location/voice) - adopted here
+ *     as-is rather than kept as a second, diverging implementation. This
+ *     room's `readers` is passed through as each extension's own
+ *     `readerPubs` so an attachment/voice recording gets the SAME end-to-end
+ *     encryption as the message body sitting next to it - see
+ *     `mountRoomView()`'s own doc comment on why the composer is built only
+ *     once `memberPubs` actually resolves, not before.
  *   - Per-user settings (see `renderChatSettings()` at the bottom of this
  *     file) are contributed to `apps/profile`'s `userSettings.contributions`
  *     extension point instead of a chat-local settings screen QuV2 had to
@@ -132,41 +145,40 @@
  * without disturbing the current scroll position (incremental append, not
  * a full rebuild, for the common case).
  *
- * COMPOSER: a rounded "pill" (textarea + emoji trigger) plus a "+" action-
- * menu trigger (`content.composerActions` - Attach/Share location, plus
- * whatever plugin apps contribute, e.g. a Calendar/Gallery app's own entry
- * or a game's own "share a challenge" - see that menu's own doc comment in
- * `mountRoomView()`) and ONE circular action button that MORPHS between
- * 🎙️ (composer empty) and ➤ send (composer has text) - Telegram/WhatsApp's
- * own composer language, not a flat text-input row with a line of plain
- * buttons after it. See `updateActionBtn()`. The textarea itself starts at
- * ONE visual line and grows up to `COMPOSER_MAX_ROWS` before scrolling
- * internally (`@qu/thread-ui`'s `mountComposerAutogrow()`), rather than
- * opening two lines tall by default the way an un-sized `<textarea>`'s own
- * UA-default `rows="2"` otherwise would.
+ * COMPOSER: `@qu/content-ui`'s `mountContentComposer()` - a markdown
+ * formatting toolbar, an emoji/mention/attach/location/voice leading-action
+ * row (collapsing into a "⋯ More" menu past a threshold, same Presentation
+ * Resolver `apps/forum`'s own composers use), and a submit control that
+ * morphs into `voiceExtension()`'s own 🎙️ trigger while the composer is
+ * otherwise empty. The textarea itself starts at ONE visual line and grows
+ * up to `mountContentEditor()`'s own `COMPOSER_MAX_ROWS` default before
+ * scrolling internally, same as before this round.
  *
- * VOICE MESSAGES: `MediaRecorder` (feature-detected - silently falls back
- * to a `voiceNotSupported` hint on a browser/device without it), with a real
- * Start/Pause/Resume/Finish/Preview/Send flow ported from QuV2
- * (https://github.com/ReactivityJS/QuV2) - tapping the mic starts recording
- * and swaps the whole composer row for `voiceRecorderEl` (a pause/resume
- * toggle, a finish button, a live elapsed-time readout, and a discard
- * escape hatch); Finish does NOT send immediately, it stops into a PREVIEW
- * state with a real `<audio controls>` player over the recorded `Blob` so
- * the user can listen back before committing, with Send and Discard as the
- * only two ways out. See the state machine starting at `recorderState`
- * (near `startRecording()`). Only on Send is the `Blob` uploaded, through
- * the EXACT SAME `services.assets.upload()` + `message.extra.attachment`
- * shape a file attachment already uses (see `attachUpload`'s own
- * `qu-asset-uploaded` handler) - so `<qu-asset kind="auto">`'s existing MIME
- * sniff (`@qu/ui`'s `asset-components.js`) picks `audio` and renders a
- * native `<audio controls>` player for the SENT message too, zero new
- * rendering code needed there. `message.extra.voice: true` only suppresses
- * the redundant placeholder body text (`t('voiceMessage')`) next to the
- * player - see `renderMessageText()`.
+ * VOICE MESSAGES: `@qu/content-ui`'s `voiceExtension()` (`MediaRecorder`,
+ * feature-detected - silently no-ops on a browser/device without it), a
+ * real Start/Pause/Resume/Finish/Preview/Send flow - originally ported from
+ * QuV2 (https://github.com/ReactivityJS/QuV2) into THIS file, then
+ * generalized into that extension in a later round; this file now just
+ * configures it (German button titles via its `labels` option). Finish does
+ * NOT send immediately - it stops into a PREVIEW state with a real
+ * `<audio controls>` player over the recorded `Blob` so the user can listen
+ * back before committing, Send and Discard the only two ways out. Send
+ * uploads the `Blob` via `services.assets.upload()` then submits it as a
+ * SINGLE-ITEM `message.attachments` array with an EMPTY body - `<qu-asset
+ * kind="auto">`'s existing MIME sniff (`@qu/ui`'s `asset-components.js`)
+ * picks `audio` and renders a native `<audio controls>` player for the SENT
+ * message too, zero new rendering code needed there;
+ * `renderMessageText()`/`classifyMessageContentType()` both detect "this is
+ * a voice message" the same way (`isVoiceMessage()`, a lone audio-mime
+ * attachment) rather than a dedicated flag, since there's no body text left
+ * to hang one off. The room list's own last-message preview synthesizes a
+ * `t('voiceMessage')` label for exactly this case - see `previewLabelFor()`.
  *
- * LOCATION SHARING: one-time position (`navigator.geolocation`, also
- * feature-detected), sent as `message.extra.location: {lat, lng}` - a
+ * LOCATION SHARING: `@qu/content-ui`'s `locationExtension()` - one-time
+ * position (`navigator.geolocation`, also feature-detected), contributed to
+ * the composer and sent as `message.location: {lat, lng}` on the user's own
+ * explicit Send (a deliberate improvement over this file's own earlier
+ * immediate-send behavior - see that extension's own doc comment) - a
  * message-list entry like any other, not a special view. Deliberately NO
  * embedded map-TILE preview image: rendering one would mean fetching from a
  * third-party tile server on every view of the message, leaking this room's
@@ -183,11 +195,16 @@
  * playback position, both live during recording/preview and once sent) and
  * no press-and-hold-to-record/slide-to-cancel gesture (tap-to-start, plus
  * explicit Pause/Finish/Discard buttons, instead) - both real, valid
- * follow-ups, not attempted half-way here. Visual `@mention` highlighting inside a
- * message body is also not rendered (the underlying `mentions` field still
- * drives push notification routing via this app's own `pushActions`, which
- * is the part that actually matters functionally) - bare `http(s)://` links
- * are auto-linked via `@qu/services`' shared `detectLinks()`, and the FIRST
+ * follow-ups, not attempted half-way here. Visual `@mention` highlighting
+ * (Chat-migration round) now renders a clickable link resolving to the
+ * mentioned identity's current alias, same as `apps/forum`'s own messages -
+ * see `renderMessageText()`'s `resolveMentionLabels()`; the underlying
+ * `mentions` field still separately drives push notification routing via
+ * this app's own `pushActions`, unchanged. Bare `http(s)://` links are still
+ * auto-linked via `@qu/services`' shared `detectLinks()` (now ALSO picked up
+ * by `formatMarkdown()`'s own auto-linker inside `message.formattedHtml` -
+ * `detectLinks()` here is only for finding the one link worth a preview
+ * card, not for building the paragraph's own markup anymore), and the FIRST
  * link in a message also gets a preview card (`<qu-link-preview>`, `@qu/ui`'s
  * `link-preview-components.js`) fetched relay-side from `@qu/relay`'s own
  * `/link-preview` route - see that route's own doc comment
@@ -195,14 +212,15 @@
  * Open Graph unfurling this is built on.
  */
 import { watch, watchChildren } from '@qu/reactive';
-import { paths, formatActorLabel, getPrivate, putPrivate, getPrivateChildren, detectLinks, ChatService } from '@qu/services';
+import { paths, formatActorLabel, getPrivate, putPrivate, getPrivateChildren, detectLinks, ChatService, resolveContentFormat } from '@qu/services';
 import { rankFor } from '@qu/foundation';
 import { createI18n } from '@qu/i18n';
 import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage, mountAppTemplate, createIconButton } from '@qu/ui';
+import { renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, copyToClipboard, flipUpIfNeeded } from '@qu/thread-ui';
 import {
-  renderEmojiPicker, renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, insertAtCursor, copyToClipboard,
-  mountComposerAutogrow, COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS, flipUpIfNeeded,
-} from '@qu/thread-ui';
+  mountContentComposer, attachmentExtension, locationExtension, voiceExtension,
+  mentionExtension, emojiExtension, markdownToolbarExtension,
+} from '@qu/content-ui';
 
 // See this file's own top doc comment's "MESSAGE CHROME" section - the
 // SAME two default-order maps `apps/forum/client.js` uses (keep both files'
@@ -211,11 +229,13 @@ import {
 // before an admin configures relay-settings' own `extensionOrder`.
 const FOOTER_ORDER_DEFAULT = { reactions: 0, 'core.menu': 10, 'core.timestamp': 20, 'core.readReceipt': 30 };
 const MENU_ORDER_DEFAULT = { edit: 0, reply: 5, pin: 10, bookmark: 20, copyText: 30, copyLink: 40 };
-// The composer's own "+" action menu (content.composerActions - see this
-// file's own top doc comment) - SAME default-order convention as the two
-// maps above, kept identical to apps/forum/client.js's own copy (minus
-// 'location', which forum's composer has no equivalent of).
-const COMPOSER_ACTIONS_ORDER_DEFAULT = { attach: 0, location: 10 };
+// The composer's own leading-slot action row (content.composerActions - see
+// this file's own top doc comment) - now ranks only PLUGIN-contributed
+// items among themselves (attach/location/voice are independent
+// EditorExtensions, registered directly, not routed through this map
+// anymore - see composerActionsExtension() below, ported from
+// apps/forum/client.js's own identical helper).
+const COMPOSER_ACTIONS_ORDER_DEFAULT = {};
 
 const DICT = {
   en: {
@@ -238,8 +258,6 @@ const DICT = {
     deleteChatConfirmGroup: 'members',
     copyText: 'Copy text',
     copyLink: 'Copy link',
-    attachRemove: 'Remove attachment',
-    addAttachment: 'Add',
     attachFile: 'Attach file',
     insertEmoji: 'Insert emoji',
     recordVoice: 'Record a voice message',
@@ -247,10 +265,10 @@ const DICT = {
     voiceResume: 'Resume recording',
     voiceFinish: 'Finish recording',
     voiceDiscard: 'Discard recording',
-    voiceNotSupported: 'Voice messages aren\'t supported in this browser.',
     voiceMessage: '🎙️ Voice message',
     shareLocation: 'Share my location',
     locationMessage: 'Location',
+    attachmentMessage: '📎 Attachment',
     newChatGroup: 'New chat group',
     createGroup: 'Create group',
     groupName: 'Group name',
@@ -291,8 +309,6 @@ const DICT = {
     deleteChatConfirmGroup: 'Mitglieder',
     copyText: 'Text kopieren',
     copyLink: 'Link kopieren',
-    attachRemove: 'Anhang entfernen',
-    addAttachment: 'Hinzufügen',
     attachFile: 'Datei anhängen',
     insertEmoji: 'Emoji einfügen',
     recordVoice: 'Sprachnachricht aufnehmen',
@@ -300,10 +316,10 @@ const DICT = {
     voiceResume: 'Aufnahme fortsetzen',
     voiceFinish: 'Aufnahme abschließen',
     voiceDiscard: 'Aufnahme verwerfen',
-    voiceNotSupported: 'Sprachnachrichten werden in diesem Browser nicht unterstützt.',
     voiceMessage: '🎙️ Sprachnachricht',
     shareLocation: 'Meinen Standort teilen',
     locationMessage: 'Standort',
+    attachmentMessage: '📎 Anhang',
     newChatGroup: 'Neue Chat-Gruppe',
     createGroup: 'Gruppe erstellen',
     groupName: 'Gruppenname',
@@ -459,50 +475,14 @@ const STYLE = `
      .qu-forum-reply-banner[hidden] (forum never had this bug - chat did). */
   .qu-chat-reply-banner[hidden] { display: none; }
   .qu-chat-composer-wrap { flex-shrink: 0; display: flex; flex-direction: column; gap: 0.4rem; padding: 0.6rem 1rem; border-top: 1px solid var(--qu-color-border, #8884); background: var(--qu-color-surface, #ffffff); }
-  /* The composer: a "+" action-menu trigger (Attach/Share location/plugin
-     items - content.composerActions, see mountRoomView()'s own doc comment -
-     rather than always-visible icons per action), a rounded PILL holding the
-     textarea + emoji trigger, and one circular action button that morphs
-     mic <-> send (see updateActionBtn() in mountRoomView()) - Telegram/
-     WhatsApp's own composer language, not a single flat text-input row with
-     a row of plain buttons after it. */
-  .qu-chat-composer { display: flex; align-items: flex-end; gap: 0.4rem; position: relative; }
-  .qu-chat-composer-tools { display: flex; align-items: center; gap: 0.2rem; padding-bottom: 0.35rem; }
-  .qu-chat-tool-btn { background: none; border: none; cursor: pointer; font-size: 1.1em; padding: 0.3rem; border-radius: 999px; opacity: 0.75; }
-  .qu-chat-tool-btn:hover { opacity: 1; background: var(--qu-color-border, #8884); }
-  .qu-chat-tool-btn:disabled { opacity: 0.35; cursor: default; }
-  /* Sized to match .qu-chat-tool-btn (the button it replaced) - @qu/thread-ui's
-     own .qu-thread-ui-context-menu-trigger default is tuned for the smaller
-     per-message "⋮" menu, not a composer-height tool cluster. */
-  .qu-chat-composer-plus .qu-thread-ui-context-menu-trigger { font-size: 1.1em; padding: 0.3rem; border-radius: 999px; opacity: 0.75; }
-  .qu-chat-composer-plus .qu-thread-ui-context-menu-trigger:hover { opacity: 1; background: var(--qu-color-border, #8884); }
-  /* min-height/max-height are a defensive fallback only (e.g. before
-     mountComposerAutogrow()'s first synchronous resize() call) - the actual
-     1-to-COMPOSER_MAX_ROWS growth is driven by @qu/thread-ui's
-     mountComposerAutogrow(), not this CSS. */
-  .qu-chat-composer-input-wrap { flex: 1; min-width: 0; display: flex; align-items: flex-end; gap: 0.3rem; background: var(--qu-color-surface, #8882); border: 1px solid var(--qu-color-border, #8884); border-radius: 1.3rem; padding: 0.4rem 0.6rem; }
-  .qu-chat-composer-input-wrap textarea { flex: 1; min-width: 0; font: inherit; border: none; background: transparent; resize: none; min-height: 1.4rem; max-height: 8rem; padding: 0.15rem 0; }
-  .qu-chat-composer-input-wrap textarea:focus { outline: none; }
-  .qu-chat-composer-action { flex-shrink: 0; width: 2.6rem; height: 2.6rem; border-radius: 50%; border: none; background: var(--qu-color-accent, #5b5bd6); color: white; cursor: pointer; font-size: 1.1em; line-height: 1; }
-  .qu-chat-composer-action:disabled { opacity: 0.6; cursor: default; }
-  .qu-chat-pending-attachment { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85em; opacity: 0.85; }
-  .qu-chat-pending-attachment[hidden] { display: none; }
-  .qu-chat-pending-attachment button { background: none; border: none; cursor: pointer; opacity: 0.7; font: inherit; padding: 0; }
-  /* Voice recorder panel - REPLACES .qu-chat-composer (see mountRoomView()'s
-     own syncVoiceRecorderUI()) while recording/paused/previewing, same row
-     height/alignment as the normal composer so nothing jumps when it swaps
-     in and back out. */
-  .qu-chat-voice-recorder { display: flex; align-items: center; gap: 0.6rem; }
-  .qu-chat-voice-recorder[hidden] { display: none; }
-  .qu-chat-voice-recorder-dot { width: 0.6rem; height: 0.6rem; border-radius: 50%; background: var(--qu-color-danger, #d64545); flex-shrink: 0; animation: qu-chat-voice-dot-pulse 1.2s ease-in-out infinite; }
-  .qu-chat-voice-recorder-dot[hidden] { display: none; }
-  @keyframes qu-chat-voice-dot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
-  .qu-chat-voice-recorder-time { font-variant-numeric: tabular-nums; opacity: 0.8; min-width: 2.6em; }
-  .qu-chat-voice-recorder-time[hidden] { display: none; }
-  .qu-chat-voice-preview-player { flex: 1; min-width: 0; height: 2.2rem; }
-  .qu-chat-voice-preview-player[hidden] { display: none; }
-  .qu-chat-voice-recorder .qu-chat-tool-btn[hidden] { display: none; }
-  .qu-chat-voice-recorder .qu-chat-composer-action[hidden] { display: none; }
+  /* The composer itself is @qu/content-ui's mountContentComposer() (Chat-
+     migration round) - it ships its own .qu-content-editor* styling;
+     .qu-chat-composer-wrap here is just this app's own thin wrapper class
+     (spacing/border only), no longer a bespoke pill/tools/action-button
+     layout. See apps/forum/client.js's own identical .qu-forum-composer
+     comment. */
+  .qu-chat-composer-error { color: var(--qu-color-danger, #c00); font-size: 0.85em; margin: 0; }
+  .qu-chat-composer-error[hidden] { display: none; }
   .qu-chat-new-group-form { display: flex; flex-direction: column; gap: 0.5rem; max-width: 26rem; }
   .qu-chat-new-group-form input[type="text"] { font: inherit; padding: 0.4rem 0.6rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); }
   .qu-chat-member-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; max-height: 16rem; overflow-y: auto; }
@@ -871,7 +851,7 @@ function mountRoomListView(container, { qu, services, subscribe, syncFetch, SPAC
     }
     const preview = document.createElement('div');
     preview.className = 'qu-chat-room-preview';
-    preview.textContent = room.lastMessage?.body ?? '';
+    preview.textContent = previewLabelFor(room.lastMessage);
     main.append(nameRow, preview);
     a.appendChild(main);
 
@@ -1038,6 +1018,40 @@ function mountNewGroupView(container, { services, SPACE_ID }) {
   return () => { stopped = true; };
 }
 
+/**
+ * The composer's `content.composerActions` plugin items (Attach/Share
+ * location/voice are now independent, native `EditorExtension`s registered
+ * directly - see `mountRoomView()`'s own composer construction below) -
+ * ported near-verbatim from `apps/forum/client.js`'s own identical helper
+ * (see that file's own doc comment for the full "why `mount()` stays
+ * synchronous" reasoning). Registers into the SAME leading slot
+ * `attachmentExtension()`/`locationExtension()`/`voiceExtension()` already
+ * use, via `ctx.registerAction()`.
+ */
+function composerActionsExtension({ services, qu, syncFetch, spaceId, threadId, extensionPoints }) {
+  return {
+    id: 'composerActions',
+    mount(ctx) {
+      let stopped = false;
+      const registeredIds = [];
+      if (extensionPoints) {
+        (async () => {
+          const payload = { services, qu, syncFetch, spaceId, threadId };
+          const items = await extensionPoints.collect('content.composerActions', payload);
+          if (stopped) return;
+          const ranked = [...items].sort((a, b) => rankFor(extensionPoints.order, 'content.composerActions', a.id, COMPOSER_ACTIONS_ORDER_DEFAULT[a.id] ?? 50)
+            - rankFor(extensionPoints.order, 'content.composerActions', b.id, COMPOSER_ACTIONS_ORDER_DEFAULT[b.id] ?? 50));
+          for (const item of ranked) { ctx.registerAction(item); registeredIds.push(item.id); }
+        })();
+      }
+      return () => {
+        stopped = true;
+        for (const id of registeredIds) ctx.unregisterAction(id);
+      };
+    },
+  };
+}
+
 // ===================================================================
 // ROOM VIEW - #/chat/<peerPub> (1:1) / #/chat/g/<groupId> (group)
 // ===================================================================
@@ -1183,133 +1197,35 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   replyBanner.className = 'qu-chat-reply-banner';
   replyBanner.hidden = true;
 
-  // The composer is a rounded "pill" (textarea + emoji trigger) plus a
-  // tool cluster (attach/location) and one circular action button on the
-  // right that MORPHS between mic (empty composer) and send (composer has
-  // text) - see this file's own top doc comment's "COMPOSER" section.
-  const composerRow = document.createElement('div');
-  composerRow.className = 'qu-chat-composer';
-  const composerTools = document.createElement('div');
-  composerTools.className = 'qu-chat-composer-tools';
-  const attachUpload = document.createElement('qu-asset-upload');
-  attachUpload.setAttribute('space-id', SPACE_ID);
-  attachUpload.setAttribute('hide-picker', ''); // its own picker button is replaced by the "+" action menu below
-  // The composer's "+" action menu (content.composerActions) - Attach/
-  // Share location plus whatever plugin apps contribute (a Calendar/
-  // Gallery app's own entry, a game's own "share a challenge", ...),
-  // behind ONE trigger instead of always-visible icons - same trigger/
-  // panel/outside-click-close shape as the message "⋮" menu
-  // (buildMessageFooter()'s own `content.messageMenu`), just for the
-  // composer instead of a message.
-  const composerActionsBtn = renderContextMenu({
-    trigger: '+',
-    triggerTitle: t('addAttachment'),
-    getItems: async () => {
-      const nativeItems = [
-        { id: 'attach', label: t('attachFile'), icon: '📎', onClick: () => attachUpload.openPicker() },
-        { id: 'location', label: t('shareLocation'), icon: '📍', onClick: shareLocation },
-      ];
-      // Built fresh on each open (not hoisted to a captured const) - roomId
-      // isn't resolved yet at composer-build time (see mountRoomView()'s own
-      // async room-resolution below), same "getItems is a function, not a
-      // plain array, so it's built lazily every open" reasoning
-      // context-menu.js's own doc comment already gives for messageMenu.
-      const payload = { services, qu, syncFetch, spaceId: SPACE_ID, threadId: roomId };
-      const pluginItems = extensionPoints ? await extensionPoints.collect('content.composerActions', payload) : [];
-      return [...nativeItems, ...pluginItems].sort(
-        (a, b) => rankFor(extensionPoints?.order, 'content.composerActions', a.id, COMPOSER_ACTIONS_ORDER_DEFAULT[a.id] ?? 50)
-          - rankFor(extensionPoints?.order, 'content.composerActions', b.id, COMPOSER_ACTIONS_ORDER_DEFAULT[b.id] ?? 50)
-      );
-    },
-  });
-  composerActionsBtn.classList.add('qu-chat-composer-plus');
-  composerTools.append(composerActionsBtn, attachUpload);
+  // The composer itself (`@qu/content-ui`'s `mountContentComposer()`, the
+  // SAME primitive `apps/forum/client.js`'s own composers use) is built
+  // further down, inside the async room-resolution IIFE, AFTER `memberPubs`
+  // resolves - not here, synchronously. This is deliberate, not an
+  // oversight: `attachmentExtension()`/`voiceExtension()` capture
+  // `readerPubs` once, at construction time, with no live-update path (the
+  // OLD `attachUpload.readerPubs = memberPubs` line was a live property
+  // mutation on an already-built element, which no longer exists once the
+  // composer's own upload element is built and owned by the extension
+  // itself) - constructing the composer before `memberPubs` is known would
+  // silently upload every attachment/voice message UNENCRYPTED
+  // (`AssetService.upload()` treats an empty `readerPubs` as public, no
+  // error - see this file's own top doc comment's encryption guarantee).
+  // `composer` stays `null` until then; `composerRoot` is just an empty
+  // mount point reserved in the DOM now so the overall layout doesn't shift
+  // once it's filled in.
+  const composerRoot = document.createElement('div');
+  const composerErrorEl = document.createElement('p');
+  composerErrorEl.className = 'qu-chat-composer-error';
+  composerErrorEl.hidden = true;
+  let composer = null;
 
-  const inputWrap = document.createElement('div');
-  inputWrap.className = 'qu-chat-composer-input-wrap';
-  const composerInput = document.createElement('textarea');
-  composerInput.placeholder = t('composerPlaceholder');
-  const stopComposerAutogrow = mountComposerAutogrow(composerInput, { minRows: COMPOSER_MIN_ROWS, maxRows: COMPOSER_MAX_ROWS });
-  const emojiPicker = renderEmojiPicker({
-    onPick: (emoji) => insertAtCursor(composerInput, emoji),
-    trigger: '😀',
-    triggerTitle: t('insertEmoji'),
-  });
-  inputWrap.append(composerInput, emojiPicker);
-
-  const actionBtn = document.createElement('button');
-  actionBtn.type = 'button';
-  actionBtn.className = 'qu-chat-composer-action';
-
-  composerRow.append(composerTools, inputWrap, actionBtn);
-  const pendingAttachmentEl = document.createElement('div');
-  pendingAttachmentEl.className = 'qu-chat-pending-attachment';
-  pendingAttachmentEl.hidden = true;
-  // ABOVE the input row, not below it - a pending attachment is context
-  // for what's about to be sent, not a footnote after the fact; keeping it
-  // above also means it never visually competes with (or gets squeezed by)
-  // the input row itself the way <qu-asset-upload>'s own IN-PROGRESS status
-  // used to (see that element's own doc comment in @qu/ui's
-  // asset-components.js for the "text input barely visible" bug this and
-  // that fix together close).
-
-  // ---- voice recorder panel: REPLACES composerRow (not layered over it)
-  // while recording/paused/previewing - see the "voice messages" section
-  // below (near startRecording()) for the actual MediaRecorder state
-  // machine this panel is just the view for. Ported UX from QuV2
-  // (https://github.com/ReactivityJS/QuV2): Start (the normal mic
-  // actionBtn), Pause/Resume, Finish (stop into a PREVIEW, not an
-  // immediate send), a real playback preview, and an explicit Discard -
-  // never V3's old tap-to-record/tap-to-stop-and-send-immediately, which
-  // gave no chance to listen back or bail out before something already
-  // went out.
-  const voiceRecorderEl = document.createElement('div');
-  voiceRecorderEl.className = 'qu-chat-voice-recorder';
-  voiceRecorderEl.hidden = true;
-  const voiceDiscardBtn = document.createElement('button');
-  voiceDiscardBtn.type = 'button';
-  voiceDiscardBtn.className = 'qu-chat-tool-btn qu-chat-voice-discard-btn';
-  voiceDiscardBtn.textContent = '🗑️';
-  voiceDiscardBtn.title = t('voiceDiscard');
-  voiceDiscardBtn.setAttribute('aria-label', t('voiceDiscard'));
-  const voiceRecorderDot = document.createElement('span');
-  voiceRecorderDot.className = 'qu-chat-voice-recorder-dot';
-  const voiceRecorderTime = document.createElement('span');
-  voiceRecorderTime.className = 'qu-chat-voice-recorder-time';
-  voiceRecorderTime.textContent = '00:00';
-  const voicePreviewPlayer = document.createElement('audio');
-  voicePreviewPlayer.className = 'qu-chat-voice-preview-player';
-  voicePreviewPlayer.controls = true;
-  const voicePauseBtn = document.createElement('button');
-  voicePauseBtn.type = 'button';
-  voicePauseBtn.className = 'qu-chat-tool-btn qu-chat-voice-pause-btn';
-  const voiceFinishBtn = document.createElement('button');
-  voiceFinishBtn.type = 'button';
-  voiceFinishBtn.className = 'qu-chat-tool-btn qu-chat-voice-finish-btn';
-  voiceFinishBtn.textContent = '⏹';
-  voiceFinishBtn.title = t('voiceFinish');
-  voiceFinishBtn.setAttribute('aria-label', t('voiceFinish'));
-  const voiceSendBtn = document.createElement('button');
-  voiceSendBtn.type = 'button';
-  voiceSendBtn.className = 'qu-chat-composer-action qu-chat-voice-send-btn';
-  voiceSendBtn.textContent = '➤';
-  voiceSendBtn.title = t('send');
-  voiceSendBtn.setAttribute('aria-label', t('send'));
-  voiceRecorderEl.append(
-    voiceDiscardBtn, voiceRecorderDot, voiceRecorderTime, voicePreviewPlayer,
-    voicePauseBtn, voiceFinishBtn, voiceSendBtn,
-  );
-
-  composerWrap.append(replyBanner, pendingAttachmentEl, composerRow, voiceRecorderEl);
+  composerWrap.append(replyBanner, composerErrorEl, composerRoot);
 
   roomView.append(heading, toolbarRoot, messagesScroll, composerWrap);
   const stopTemplate = mountAppTemplate(container, {
     fullHeight: true,
     render: (content) => content.appendChild(roomView),
   });
-
-  const stopComposerMentions = mountMentionAutocomplete(composerInput, { services, subscribe });
-  const stopComposerEmoji = mountEmojiAutocomplete(composerInput);
 
   let roomId = null;
   let memberPubs = [];
@@ -1525,24 +1441,6 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     syncScrollToBottomButton();
   });
 
-  let pendingAttachment = null;
-  function clearPendingAttachment() {
-    pendingAttachment = null;
-    pendingAttachmentEl.hidden = true;
-    pendingAttachmentEl.textContent = '';
-    updateActionBtn();
-  }
-  attachUpload.addEventListener('qu-asset-uploaded', (e) => {
-    pendingAttachment = { assetId: e.detail.assetId, ...e.detail.meta };
-    pendingAttachmentEl.textContent = '';
-    pendingAttachmentEl.hidden = false;
-    const label = document.createElement('span');
-    label.textContent = `📎 ${pendingAttachment.name}`;
-    const removeBtn = createIconButton({ icon: '✕', label: t('attachRemove'), onClick: clearPendingAttachment });
-    pendingAttachmentEl.append(label, removeBtn);
-    updateActionBtn(); // an attachment alone is now enough to make the action button "Send", not just typed text
-  });
-
   let replyingTo = null; // {id, author, body} or null
   function setReplyingTo(message, authorLabel) {
     replyingTo = message ? { id: message.id, body: message.body } : null;
@@ -1561,273 +1459,21 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     return profileCache.get(pub);
   }
 
-  async function sendTextMessage() {
-    if (!roomReady) return;
-    const body = composerInput.value.trim();
-    // A caption is optional whenever there's an attachment to send instead
-    // - the same "content doesn't have to be text" rule voice messages
-    // already get (see sendVoiceRecording()); only a genuinely empty
-    // send (no text AND no attachment) is refused.
-    if (!body && !pendingAttachment) return;
-    actionBtn.disabled = true;
-    try {
-      const attachment = pendingAttachment;
-      const extra = attachment ? { attachment } : {};
-      stuckToBottom = true; // sending a message always means "show me what I just sent" - see the scroll-follow doc comment above
-      await services.messages.postMessage(SPACE_ID, roomId, { body, replyTo: replyingTo?.id ?? null, extra });
-      composerInput.value = '';
-      clearPendingAttachment();
-      setReplyingTo(null);
-      updateActionBtn();
-      // Only now, once the attachment is genuinely part of a sent message,
-      // does the (deferred) sync-out verification phase start - see
-      // <qu-asset-upload>'s own doc comment on confirmSent() for why.
-      if (attachment) attachUpload.confirmSent(attachment.assetId);
-    } finally {
-      actionBtn.disabled = false;
-    }
-  }
-
-  // ---- voice messages: MediaRecorder -> the SAME AssetService upload +
-  // message.extra.attachment shape a file attachment already uses, so
-  // <qu-asset>'s own kind="auto" MIME sniff (AssetService.download()'s
-  // meta.mime, see @qu/ui's asset-components.js) picks "audio" and renders
-  // a native <audio controls> player - zero new rendering code needed.
-  //
-  // STATE MACHINE (ported UX from QuV2 - see voiceRecorderEl's own doc
-  // comment above): 'idle' -> 'recording' -> 'paused' <-> 'recording' ->
-  // (finish) -> 'preview' -> (send, which posts the message, or discard)
-  // -> 'idle'. 'recording'/'paused' can also go straight to 'idle' via
-  // discard, bypassing 'preview' entirely - the whole point of Pause/Stop
-  // being SEPARATE actions is that finishing a recording no longer sends
-  // it immediately; the user always gets a listen-back-or-bail-out step
-  // first. ----
-  let recorderState = 'idle'; // 'idle' | 'recording' | 'paused' | 'preview'
-  let mediaRecorder = null;
-  let mediaStream = null;
-  let recordedChunks = [];
-  let recordedBlob = null;
-  let recordedObjectUrl = null;
-  // Elapsed recording time is tracked as (accumulated ms from prior
-  // recording spans) + (time since the CURRENT span started), rather than
-  // just "time since start()", so pausing genuinely freezes the displayed
-  // timer instead of it continuing to climb while paused.
-  let recordingElapsedMs = 0;
-  let recordingSpanStartedAt = 0;
-  let recordingTimerHandle = null;
-  // Set right before calling mediaRecorder.stop() to discard the in-progress
-  // take entirely (see discardVoiceRecording()) - distinguishes that from a
-  // normal "finish -> preview" stop() inside the shared onstop handler,
-  // since MediaRecorder only ever exposes the one event either way.
-  let discardingOnStop = false;
-
-  function formatVoiceElapsed(ms) {
-    const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-    const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, '0');
-    const seconds = String(totalSeconds % 60).padStart(2, '0');
-    return `${minutes}:${seconds}`;
-  }
-
-  function currentVoiceElapsedMs() {
-    return recordingElapsedMs + (recorderState === 'recording' ? Date.now() - recordingSpanStartedAt : 0);
-  }
-
-  function startVoiceTimer() {
-    stopVoiceTimer();
-    voiceRecorderTime.textContent = formatVoiceElapsed(currentVoiceElapsedMs());
-    recordingTimerHandle = setInterval(() => {
-      voiceRecorderTime.textContent = formatVoiceElapsed(currentVoiceElapsedMs());
-    }, 250);
-  }
-
-  function stopVoiceTimer() {
-    clearInterval(recordingTimerHandle);
-    recordingTimerHandle = null;
-  }
-
-  function syncVoiceRecorderUI() {
-    const active = recorderState !== 'idle';
-    voiceRecorderEl.hidden = !active;
-    composerRow.hidden = active;
-    const isPreview = recorderState === 'preview';
-    voiceRecorderDot.hidden = recorderState !== 'recording';
-    voiceRecorderTime.hidden = isPreview;
-    voicePreviewPlayer.hidden = !isPreview;
-    voicePauseBtn.hidden = isPreview;
-    voiceFinishBtn.hidden = isPreview;
-    voiceSendBtn.hidden = !isPreview;
-    if (recorderState === 'paused') {
-      voicePauseBtn.textContent = '▶️';
-      voicePauseBtn.title = t('voiceResume');
-      voicePauseBtn.setAttribute('aria-label', t('voiceResume'));
-    } else {
-      voicePauseBtn.textContent = '⏸️';
-      voicePauseBtn.title = t('voicePause');
-      voicePauseBtn.setAttribute('aria-label', t('voicePause'));
-    }
-  }
-
-  function resetVoiceRecorder() {
-    if (recordedObjectUrl) URL.revokeObjectURL(recordedObjectUrl);
-    recordedObjectUrl = null;
-    recordedBlob = null;
-    recordedChunks = [];
-    recordingElapsedMs = 0;
-    mediaRecorder = null;
-    voicePreviewPlayer.removeAttribute('src');
-    voiceRecorderTime.textContent = '00:00';
-    stopVoiceTimer();
-    recorderState = 'idle';
-    syncVoiceRecorderUI();
-  }
-
-  function updateActionBtn() {
-    if (composerInput.value.trim() || pendingAttachment) {
-      actionBtn.textContent = '➤';
-      actionBtn.title = t('send');
-      actionBtn.setAttribute('aria-label', t('send'));
-    } else {
-      actionBtn.textContent = '🎙️';
-      actionBtn.title = t('recordVoice');
-      actionBtn.setAttribute('aria-label', t('recordVoice'));
-    }
-  }
-  composerInput.addEventListener('input', updateActionBtn);
-  updateActionBtn();
-
-  async function startRecording() {
-    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
-      pendingAttachmentEl.hidden = false;
-      pendingAttachmentEl.textContent = t('voiceNotSupported');
-      return;
-    }
-    let stream;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch {
-      return; // permission denied / no device - stays idle, nothing to recover
-    }
-    mediaStream = stream;
-    recordedChunks = [];
-    recordingElapsedMs = 0;
-    mediaRecorder = new MediaRecorder(stream);
-    mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunks.push(e.data); };
-    mediaRecorder.onstop = () => {
-      for (const track of mediaStream.getTracks()) track.stop();
-      mediaStream = null;
-      if (discardingOnStop) {
-        discardingOnStop = false;
-        resetVoiceRecorder();
-        return;
-      }
-      recordedBlob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
-      if (recordedBlob.size === 0) {
-        resetVoiceRecorder();
-        return;
-      }
-      recordedObjectUrl = URL.createObjectURL(recordedBlob);
-      voicePreviewPlayer.src = recordedObjectUrl;
-      stopVoiceTimer();
-      recorderState = 'preview';
-      syncVoiceRecorderUI();
-    };
-    mediaRecorder.start();
-    recordingSpanStartedAt = Date.now();
-    recorderState = 'recording';
-    startVoiceTimer();
-    syncVoiceRecorderUI();
-  }
-
-  function togglePauseRecording() {
-    if (recorderState === 'recording') {
-      recordingElapsedMs += Date.now() - recordingSpanStartedAt;
-      mediaRecorder?.pause();
-      stopVoiceTimer();
-      recorderState = 'paused';
-      syncVoiceRecorderUI();
-    } else if (recorderState === 'paused') {
-      recordingSpanStartedAt = Date.now();
-      mediaRecorder?.resume();
-      recorderState = 'recording';
-      startVoiceTimer();
-      syncVoiceRecorderUI();
-    }
-  }
-
-  function finishRecording() {
-    if (recorderState !== 'recording' && recorderState !== 'paused') return;
-    mediaRecorder?.stop(); // onstop above moves recorderState to 'preview'
-  }
-
-  function discardVoiceRecording() {
-    if (recorderState === 'recording' || recorderState === 'paused') {
-      discardingOnStop = true;
-      stopVoiceTimer();
-      mediaRecorder?.stop();
-      return;
-    }
-    if (recorderState === 'preview') resetVoiceRecorder();
-  }
-
-  async function sendVoiceRecording() {
-    if (recorderState !== 'preview' || !recordedBlob || !roomReady) return;
-    voiceSendBtn.disabled = true;
-    try {
-      const assetId = globalThis.crypto.randomUUID();
-      const file = new File([recordedBlob], `voice-${Date.now()}.webm`, { type: recordedBlob.type });
-      const meta = await services.assets.upload(SPACE_ID, assetId, file, { readerPubs: memberPubs });
-      stuckToBottom = true;
-      await services.messages.postMessage(SPACE_ID, roomId, {
-        body: t('voiceMessage'), replyTo: replyingTo?.id ?? null,
-        extra: { attachment: { assetId, ...meta }, voice: true },
+  // Resolves each `a.qu-mention[data-pub]` anchor under `root` to the
+  // mentioned identity's CURRENT alias, once its profile resolves - ported
+  // verbatim from apps/forum/client.js's own identical helper (same
+  // resolveAuthor() cache above, same formatActorLabel() fallback). A
+  // genuinely new visible feature for Chat (mentions were never rendered as
+  // links at all before this round) now that `THREAD_PRESETS.chat()`/
+  // `.group()` include 'markdown' formatting.
+  function resolveMentionLabels(root) {
+    for (const link of root.querySelectorAll('a.qu-mention')) {
+      const pub = link.dataset.pub;
+      if (!pub) continue;
+      resolveAuthor(pub).then((profile) => {
+        link.textContent = `@${formatActorLabel(pub, profile)}`;
       });
-      setReplyingTo(null);
-      resetVoiceRecorder();
-    } finally {
-      voiceSendBtn.disabled = false;
     }
-  }
-
-  voicePauseBtn.addEventListener('click', togglePauseRecording);
-  voiceFinishBtn.addEventListener('click', finishRecording);
-  voiceDiscardBtn.addEventListener('click', discardVoiceRecording);
-  voiceSendBtn.addEventListener('click', sendVoiceRecording);
-
-  actionBtn.addEventListener('click', () => {
-    if (composerInput.value.trim() || pendingAttachment) { sendTextMessage(); return; }
-    startRecording();
-  });
-
-  // ---- location sharing: one-time position, sent as its own message.extra
-  // field - deliberately no embedded map-tile PREVIEW image (that would mean
-  // fetching from a third-party tile server on every render, leaking this
-  // room's location data to a party beyond the relay/its members) - just a
-  // link out to OpenStreetMap plus the raw coordinates, see
-  // renderMessageText(). Invoked from the composer's "+" action menu (see
-  // that menu's own doc comment) rather than its own always-visible button -
-  // `shareLocationBusy` replaces the old per-button `.disabled` toggle as the
-  // re-entrancy guard against a second click firing while a position request
-  // is already in flight, since a closed menu has no button left to disable. ----
-  let shareLocationBusy = false;
-  function shareLocation() {
-    if (!roomReady || !navigator.geolocation || shareLocationBusy) return;
-    shareLocationBusy = true;
-    navigator.geolocation.getCurrentPosition(
-      async (position) => {
-        try {
-          stuckToBottom = true;
-          await services.messages.postMessage(SPACE_ID, roomId, {
-            body: t('locationMessage'),
-            replyTo: replyingTo?.id ?? null,
-            extra: { location: { lat: position.coords.latitude, lng: position.coords.longitude } },
-          });
-          setReplyingTo(null);
-        } finally {
-          shareLocationBusy = false;
-        }
-      },
-      () => { shareLocationBusy = false; }
-    );
   }
 
   const editingDrafts = new Map();
@@ -2231,7 +1877,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
                 onClick: async () => {
                   const authorLabel = mine ? t('you') : formatActorLabel(message.author, await resolveAuthor(message.author));
                   setReplyingTo(message, authorLabel);
-                  composerInput.focus();
+                  composer?.editor.focus();
                 },
               });
               nativeItems.push({ id: 'copyText', label: t('copyText'), icon: '📋', onClick: () => copyToClipboard(message.body) });
@@ -2292,46 +1938,47 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
 
   function renderMessageText(root, message) {
     root.textContent = '';
-    // A voice message's `body` is just the placeholder t('voiceMessage')
-    // string (see startRecording()'s own onstop handler) - the <audio>
-    // player below is the actual content, so the redundant text line is
-    // skipped entirely, same reasoning a location message's own coordinate
-    // block below replaces its placeholder body text rather than showing both.
-    if (!message.voice && !message.location && message.body) {
+    const attachments = message.attachments ?? [];
+    // A voice message's `body` is empty (`voiceExtension()` submits with no
+    // text at all - see this file's own top doc comment) - the <audio>
+    // player below (in the attachments loop) is the actual content, so
+    // there's nothing to render here; `!message.body` already covers that on
+    // its own. Same reasoning a location message's own coordinate block
+    // below replaces its placeholder body text rather than showing both.
+    if (!message.location && message.body) {
       const p = document.createElement('p');
       p.className = 'qu-chat-bubble-text';
-      const linkSegments = detectLinks(message.body);
-      for (const segment of linkSegments) {
-        if (segment.type === 'link') {
-          const a = document.createElement('a');
-          a.href = segment.value;
-          a.target = '_blank';
-          a.rel = 'noopener noreferrer';
-          a.textContent = segment.value;
-          p.appendChild(a);
-        } else {
-          p.appendChild(document.createTextNode(segment.value));
-        }
+      if (message.formattedHtml) {
+        p.innerHTML = message.formattedHtml; // escaped/whitelisted server-side, safe - see thread-formatting.js
+      } else {
+        // Defensive fallback - `formattedHtml` is only ever set when the
+        // room's own thread config includes 'markdown' formatting
+        // (THREAD_PRESETS.chat()/.group(), both now do) - see
+        // apps/forum/client.js's own identical guard.
+        p.textContent = message.body;
       }
       root.appendChild(p);
-      // Only the FIRST link in a message gets a preview card - Telegram/
-      // Slack/etc. all do this too, never one card per link (a message with
-      // several links would otherwise turn into a wall of cards). Renders
-      // nothing at all if the relay has nothing preview-worthy for it - see
-      // <qu-link-preview>'s own doc comment (@qu/ui's
-      // link-preview-components.js).
-      const firstLink = linkSegments.find((seg) => seg.type === 'link');
-      if (firstLink) {
-        const preview = document.createElement('qu-link-preview');
-        preview.setAttribute('url', firstLink.value);
-        root.appendChild(preview);
-      }
+      resolveMentionLabels(p);
     }
-    if (message.attachment) {
+    // Only the FIRST link in a message gets a preview card - Telegram/
+    // Slack/etc. all do this too, never one card per link. `message.body`
+    // (the raw, pre-formatting text), not `formattedHtml` - `detectLinks()`
+    // needs the raw URL text, and this is the exact same source
+    // `classifyMessageContentType()` already reads for its own 'link'
+    // classification. Renders nothing at all if the relay has nothing
+    // preview-worthy for it - see <qu-link-preview>'s own doc comment
+    // (@qu/ui's link-preview-components.js).
+    const firstLink = detectLinks(message.body ?? '').find((seg) => seg.type === 'link');
+    if (firstLink) {
+      const preview = document.createElement('qu-link-preview');
+      preview.setAttribute('url', firstLink.value);
+      root.appendChild(preview);
+    }
+    for (const attachment of attachments) {
       const assetEl = document.createElement('qu-asset');
       assetEl.className = 'qu-chat-bubble-attachment';
       assetEl.setAttribute('space-id', SPACE_ID);
-      assetEl.setAttribute('asset-id', message.attachment.assetId);
+      assetEl.setAttribute('asset-id', attachment.assetId);
       root.appendChild(assetEl);
     }
     if (message.location) {
@@ -2410,7 +2057,6 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
       roomId = await services.chat.ensureRoom(SPACE_ID, target.peerPub);
       if (stopped) return;
       memberPubs = [myPub, target.peerPub];
-      attachUpload.readerPubs = memberPubs;
       const profile = await resolveAuthor(target.peerPub);
       if (stopped) return;
       headerNameEl.textContent = formatActorLabel(target.peerPub, profile);
@@ -2428,11 +2074,51 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
         return;
       }
       memberPubs = Array.isArray(config.readers) ? config.readers : [];
-      attachUpload.readerPubs = memberPubs;
       headerNameEl.textContent = config.name ?? roomId;
       headerAvatarSlot.appendChild(renderAvatarOrAsset(roomId, headerNameEl.textContent, null, { size: '2.6rem' }));
     }
     roomReady = true;
+
+    // Built HERE, only now that `memberPubs` is genuinely resolved - see
+    // `composerRoot`'s own creation-site doc comment above for why this
+    // can't happen any earlier (encryption correctness, not style).
+    composer = mountContentComposer(composerRoot, {
+      format: resolveContentFormat('message'),
+      placeholder: t('composerPlaceholder'),
+      submitIcon: '➤', // compact icon - submitLabel stays the real tooltip text
+      submitLabel: t('send'),
+      extensions: [
+        markdownToolbarExtension(),
+        emojiExtension({ triggerTitle: t('insertEmoji') }),
+        mentionExtension({ services, subscribe }),
+        attachmentExtension({ assetService: services.assets, spaceId: SPACE_ID, readerPubs: memberPubs, triggerTitle: t('attachFile') }),
+        locationExtension({ triggerTitle: t('shareLocation'), label: t('locationMessage') }),
+        voiceExtension({
+          assetService: services.assets, spaceId: SPACE_ID, readerPubs: memberPubs, triggerTitle: t('recordVoice'),
+          labels: { discard: t('voiceDiscard'), pause: t('voicePause'), resume: t('voiceResume'), finish: t('voiceFinish'), send: t('send') },
+        }),
+        composerActionsExtension({ services, qu, syncFetch, spaceId: SPACE_ID, threadId: roomId, extensionPoints }),
+      ],
+      onSubmit: async (content) => {
+        composerErrorEl.hidden = true;
+        const extra = {};
+        if (content.attachments.length) extra.attachments = content.attachments;
+        if (content.location) extra.location = content.location;
+        try {
+          stuckToBottom = true; // sending a message always means "show me what I just sent" - see the scroll-follow doc comment above
+          await services.messages.postMessage(SPACE_ID, roomId, { body: content.text, replyTo: replyingTo?.id ?? null, extra });
+          setReplyingTo(null);
+        } catch (err) {
+          // Same restore-on-failure guarantee as apps/forum/client.js's own
+          // reply composer - mountContentComposer() already clears the draft
+          // SYNCHRONOUSLY on any normal submit, unconditionally, before it
+          // can know this callback will go on to fail.
+          composer.editor.setValue(content.text);
+          composerErrorEl.textContent = err.message;
+          composerErrorEl.hidden = false;
+        }
+      },
+    });
     // `content.topicToolbar` (Pins' own "📌 Pinned" bar) - `roomId` only
     // resolves here, not at `toolbarRoot`'s own creation site above, so this
     // is the earliest point it can render. `messagePermalink` wraps this
@@ -2505,14 +2191,9 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     offReadReceipts();
     stopHeartbeat?.();
     if (presenceTimer) clearInterval(presenceTimer);
-    stopComposerMentions();
-    stopComposerEmoji();
-    stopComposerAutogrow();
+    composer?.stop(); // may never have been constructed - e.g. a group that turned out not to exist (roomReady never became true)
     resizeObserver?.disconnect();
     viewportResizeTarget.removeEventListener('resize', onViewportResize);
-    stopVoiceTimer();
-    for (const track of mediaStream?.getTracks() ?? []) track.stop();
-    if (recordedObjectUrl) URL.revokeObjectURL(recordedObjectUrl);
     stopTemplate();
   };
 }
@@ -2535,13 +2216,48 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
 // content, not just Forum's.
 // ===================================================================
 
+/**
+ * A voice message is just a lone audio attachment with no caption -
+ * `voiceExtension()` (`@qu/content-ui`) submits with no text at all, so
+ * there's no separate marker field to read; this mime check (the same one
+ * `<qu-asset kind="auto">`'s own MIME sniff runs, `@qu/ui`'s
+ * asset-components.js) is the ONE place that distinguishes it, reused by
+ * `classifyMessageContentType()` below and `previewLabelFor()`
+ * (`mountRoomListView()`'s own room-list preview).
+ * @param {object} message @returns {boolean}
+ */
+function isVoiceMessage(message) {
+  const attachments = message.attachments ?? [];
+  return attachments.length === 1 && !!attachments[0].mime?.startsWith('audio/');
+}
+
+/**
+ * The room list's own last-message preview line (`roomRow()`,
+ * `mountRoomListView()`) - a voice/location/attachment-only message has an
+ * empty `body` (no placeholder text survives the migration onto
+ * `@qu/content-ui`'s generic extensions, see this file's own top doc
+ * comment), so this synthesizes a short label instead of leaving the row
+ * blank, same idea as Telegram/WhatsApp's own "📷 Photo"-style previews.
+ * @param {object|null|undefined} message
+ * @returns {string}
+ */
+function previewLabelFor(message) {
+  if (!message) return '';
+  if (message.body) return message.body;
+  if (message.location) return `📍 ${t('locationMessage')}`;
+  if (isVoiceMessage(message)) return t('voiceMessage');
+  if (message.attachments?.length) return t('attachmentMessage');
+  return '';
+}
+
 /** @param {object} message @returns {'post'|'image'|'video'|'audio'|'file'|'link'} */
 function classifyMessageContentType(message) {
-  const mime = message.attachment?.mime ?? '';
+  const attachment = message.attachments?.[0];
+  const mime = attachment?.mime ?? '';
   if (mime.startsWith('image/')) return 'image';
   if (mime.startsWith('video/')) return 'video';
   if (mime.startsWith('audio/')) return 'audio';
-  if (message.attachment) return 'file';
+  if (attachment) return 'file';
   if (detectLinks(message.body ?? '').some((seg) => seg.type === 'link')) return 'link';
   return 'post';
 }
@@ -2598,8 +2314,12 @@ export async function searchChat({ services, apps, myPub, query, types, scope, s
         href: `${href}/m/${message.id}`, roomId, roomName,
         // See apps/forum/client.js's own identical fields on its own
         // messagesOfTopic() - carried through so renderSearchResult() below
-        // can render a real <qu-asset> preview/player, not just text.
-        spaceId: SPACE_ID, attachment: message.attachment ?? null,
+        // can render a real <qu-asset> preview/player, not just text. First
+        // attachment only (a search-result row is a preview, same
+        // first-of-array reduction Forum's own singular storage already
+        // gets elsewhere) - the message bubble itself (renderMessageText())
+        // still renders every one of `message.attachments`.
+        spaceId: SPACE_ID, attachment: message.attachments?.[0] ?? null,
       });
     }
     return out;
@@ -2671,7 +2391,7 @@ export async function resolveChatReference({ services, syncFetch, myPub, spaceId
     contentType: classifyMessageContentType(message), ts: message.ts, author: message.author,
     snippet: buildSnippet(message.body, ''),
     href, roomId: threadId, roomName,
-    spaceId, attachment: message.attachment ?? null,
+    spaceId, attachment: message.attachments?.[0] ?? null, // first-of-array - see searchChat()'s own identical reduction
   };
 }
 
