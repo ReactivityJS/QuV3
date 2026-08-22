@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { QuStore, MemoryStoreAdapter, QuCrypto } from '@qu/core';
-import { AccessEngine, ThreadEngine, CollectionEngine } from '@qu/engines';
+import { AccessEngine, ThreadEngine, CollectionEngine, EntityEngine } from '@qu/engines';
 import { QuIdentityEngine } from '@qu/identity';
 import { ListService } from '../src/list-service.js';
 import { AccessService } from '../src/access-service.js';
@@ -21,6 +21,7 @@ async function freshSetup() {
   new AccessEngine(qu);
   new ThreadEngine(qu);
   new CollectionEngine(qu); // resolves ListService's curated {$list} documents
+  new EntityEngine(qu); // Quniverse V4: a Topic is now an Entity, see ChannelService's own "QUNIVERSE V4" doc comment
   const identity = await freshIdentity(qu);
   const list = new ListService(qu);
   const access = new AccessService(qu, identity);
@@ -75,6 +76,40 @@ test('createTopic() on an open channel creates a public thread anyone can post t
   const config = await messages.getConfig(SPACE, topic._id);
   assert.equal(config.writers, '*');
   assert.equal(config.readers, '*');
+});
+
+test('createTopic() stores its own content field as an Entity - not posted into its comment thread', async () => {
+  const { channels, messages } = await freshSetup();
+  const channel = await channels.createChannel(SPACE, { title: 'General' });
+  const topic = await channels.createTopic(SPACE, channel._id, { title: 'Hello world', content: { text: 'the opening post' } });
+  assert.equal(topic._type, 'topic');
+  assert.equal(topic.content.text, 'the opening post');
+  assert.equal(topic.content.format, 'plain');
+
+  // The comment thread starts EMPTY - the opening post lives in the Entity's
+  // own `content` field, never posted as message #1 (Quniverse V4 - fixes
+  // the historical "replyCount double-counts the opening post" inaccuracy).
+  const { messages: comments } = await messages.listMessages(SPACE, topic._id);
+  assert.deepEqual(comments, []);
+});
+
+test('getTopic() returns a single topic by id; updateTopic() merge-writes its content in place', async () => {
+  const { channels } = await freshSetup();
+  const channel = await channels.createChannel(SPACE, { title: 'General' });
+  const topic = await channels.createTopic(SPACE, channel._id, { title: 'v1', content: { text: 'v1 body' } });
+
+  const fetched = await channels.getTopic(SPACE, topic._id);
+  assert.equal(fetched.title, 'v1');
+
+  const updated = await channels.updateTopic(SPACE, topic._id, { title: 'v2' });
+  assert.equal(updated.title, 'v2');
+  assert.equal(updated.content.text, 'v1 body'); // untouched fields survive the merge
+  assert.equal((await channels.getTopic(SPACE, topic._id)).title, 'v2');
+});
+
+test('getTopic() returns null for an unknown topic id', async () => {
+  const { channels } = await freshSetup();
+  assert.equal(await channels.getTopic(SPACE, 'nope'), null);
 });
 
 test('listTopics() reports a live reply count and last-activity, newest activity first', async () => {
@@ -151,6 +186,7 @@ test('a restricted channel genuinely encrypts its topics\' messages - only a syn
   new AccessEngine(bobQu);
   new ThreadEngine(bobQu);
   new CollectionEngine(bobQu);
+  new EntityEngine(bobQu); // Quniverse V4: a Topic is now an Entity, see ChannelService's own "QUNIVERSE V4" doc comment
   const bobIdentity = await freshIdentity(bobQu);
   await bobIdentity.publishMainProfile({ alias: 'Bob' });
   const bobPub = QuCrypto.toBase64Url((await bobIdentity.getMainKey()).publicKey);
@@ -182,6 +218,23 @@ test('a restricted channel genuinely encrypts its topics\' messages - only a syn
   assert.deepEqual(messages.map((m) => m.body), ['top secret']);
 });
 
+test('updateTopic() on a restricted channel\'s topic stays genuine ciphertext at rest, and correctly re-encrypted (not corrupted) for the SAME members', async () => {
+  const ada = await freshSetup();
+  await ada.identity.publishMainProfile({ alias: 'Ada' });
+  const channel = await ada.channels.createChannel(SPACE, { title: 'Private board', restricted: true, memberPubs: [] });
+  const topic = await ada.channels.createTopic(SPACE, channel._id, { title: 'v1', content: { text: 'v1 body' } });
+
+  const updated = await ada.channels.updateTopic(SPACE, topic._id, { title: 'v2' });
+  assert.equal(updated.title, 'v2');
+  assert.equal(updated.content.text, 'v1 body'); // untouched field survives a correct decrypt-merge-encrypt round-trip
+
+  const raw = await ada.qu.get(`/store/${SPACE}/entities/${topic._id}`);
+  assert.notEqual(raw.val.title, 'v2'); // still genuine ciphertext, not silently downgraded to plaintext
+  assert.equal(typeof raw.val.iv, 'string');
+
+  assert.equal((await ada.channels.getTopic(SPACE, topic._id)).title, 'v2'); // Ada herself can still decrypt it back
+});
+
 test('addChannelMember() grows a restricted channel\'s membership - EXISTING topics become visible to the new member going forward, past messages stay theirs to prove non-retroactively (encryption target unchanged for already-posted ones)', async () => {
   const ada = await freshSetup();
   await ada.identity.publishMainProfile({ alias: 'Ada' });
@@ -191,6 +244,7 @@ test('addChannelMember() grows a restricted channel\'s membership - EXISTING top
   new AccessEngine(carolQu);
   new ThreadEngine(carolQu);
   new CollectionEngine(carolQu);
+  new EntityEngine(carolQu); // Quniverse V4: a Topic is now an Entity, see ChannelService's own "QUNIVERSE V4" doc comment
   const carolIdentity = await freshIdentity(carolQu);
   await carolIdentity.publishMainProfile({ alias: 'Carol' });
   const carolPub = QuCrypto.toBase64Url((await carolIdentity.getMainKey()).publicKey);
@@ -232,6 +286,7 @@ test('addChannelMember(): one topic failing to grow does not stop the OTHERS fro
   new AccessEngine(newMemberQu);
   new ThreadEngine(newMemberQu);
   new CollectionEngine(newMemberQu);
+  new EntityEngine(newMemberQu); // Quniverse V4: a Topic is now an Entity, see ChannelService's own "QUNIVERSE V4" doc comment
   const newMemberIdentity = await freshIdentity(newMemberQu);
   await newMemberIdentity.publishMainProfile({ alias: 'New Member' });
   const newMemberPub = QuCrypto.toBase64Url((await newMemberIdentity.getMainKey()).publicKey);
@@ -297,6 +352,7 @@ test('listChannels()/listTopics() backfill each individually-referenced document
   new AccessEngine(bQu);
   new ThreadEngine(bQu);
   new CollectionEngine(bQu);
+  new EntityEngine(bQu); // Quniverse V4: a Topic is now an Entity, see ChannelService's own "QUNIVERSE V4" doc comment
   const bIdentity = await freshIdentity(bQu);
   const bList = new ListService(bQu);
   const bAccess = new AccessService(bQu, bIdentity);
@@ -342,6 +398,7 @@ test('listChannels()/listTopics() backfill each individually-referenced document
   new AccessEngine(freshBQu);
   new ThreadEngine(freshBQu);
   new CollectionEngine(freshBQu);
+  new EntityEngine(freshBQu); // Quniverse V4: a Topic is now an Entity, see ChannelService's own "QUNIVERSE V4" doc comment
   const directLinkFetch = (path) => rawCopy(a.qu, freshBQu, path);
   const directLinkChannels = new ChannelService(freshBQu, bIdentity, new ListService(freshBQu), new AccessService(freshBQu, bIdentity), bMessages, directLinkFetch);
   const viaDirectLink = await directLinkChannels.getChannel('forum-space', channel._id);
@@ -373,6 +430,7 @@ test('a restricted channel\'s own title/description document is genuine cipherte
   new AccessEngine(bobQu);
   new ThreadEngine(bobQu);
   new CollectionEngine(bobQu);
+  new EntityEngine(bobQu); // Quniverse V4: a Topic is now an Entity, see ChannelService's own "QUNIVERSE V4" doc comment
   const bobIdentity = await freshIdentity(bobQu);
   await bobIdentity.publishMainProfile({ alias: 'Bob' });
   const bobPub = QuCrypto.toBase64Url((await bobIdentity.getMainKey()).publicKey);
@@ -408,6 +466,7 @@ test('a restricted channel\'s own title/description document is genuine cipherte
   new AccessEngine(carolQu);
   new ThreadEngine(carolQu);
   new CollectionEngine(carolQu);
+  new EntityEngine(carolQu); // Quniverse V4: a Topic is now an Entity, see ChannelService's own "QUNIVERSE V4" doc comment
   const carolIdentity = await freshIdentity(carolQu);
   await carolIdentity.publishMainProfile({ alias: 'Carol' });
   await copyQuBit(ada.qu, carolQu, `/store/${SPACE}/docs/${channel._id}`);
@@ -428,7 +487,7 @@ test('a restricted channel\'s topic TITLE is genuine ciphertext too - listTopics
   const channel = await ada.channels.createChannel(SPACE, { title: 'Board', restricted: true, memberPubs: [] });
   const topic = await ada.channels.createTopic(SPACE, channel._id, { title: 'Confidential Topic' });
 
-  const rawTopic = await ada.qu.get(`/store/${SPACE}/docs/${topic._id}`);
+  const rawTopic = await ada.qu.get(`/store/${SPACE}/entities/${topic._id}`);
   assert.notEqual(rawTopic.val.title, 'Confidential Topic');
   assert.equal(typeof rawTopic.val.iv, 'string');
 
@@ -437,10 +496,11 @@ test('a restricted channel\'s topic TITLE is genuine ciphertext too - listTopics
   new AccessEngine(carolQu);
   new ThreadEngine(carolQu);
   new CollectionEngine(carolQu);
+  new EntityEngine(carolQu); // Quniverse V4: a Topic is now an Entity, see ChannelService's own "QUNIVERSE V4" doc comment
   const carolIdentity = await freshIdentity(carolQu);
   await carolIdentity.publishMainProfile({ alias: 'Carol' });
   await copyQuBit(ada.qu, carolQu, `/store/${SPACE}/docs/${channel._id}`);
-  await copyQuBit(ada.qu, carolQu, `/store/${SPACE}/docs/${topic._id}`);
+  await copyQuBit(ada.qu, carolQu, `/store/${SPACE}/entities/${topic._id}`);
   await rawCopy(ada.qu, carolQu, `/store/${SPACE}/lists/topics-${channel._id}`);
   await copyQuBit(ada.qu, carolQu, `/store/actors/~${ada.myPub}/profile`);
   const carolAccess = new AccessService(carolQu, carolIdentity);
@@ -459,6 +519,7 @@ test('addChannelMember() lets a newly-added member decrypt an EXISTING topic\'s 
   new AccessEngine(carolQu);
   new ThreadEngine(carolQu);
   new CollectionEngine(carolQu);
+  new EntityEngine(carolQu); // Quniverse V4: a Topic is now an Entity, see ChannelService's own "QUNIVERSE V4" doc comment
   const carolIdentity = await freshIdentity(carolQu);
   await carolIdentity.publishMainProfile({ alias: 'Carol' });
   const carolPub = QuCrypto.toBase64Url((await carolIdentity.getMainKey()).publicKey);
@@ -473,7 +534,7 @@ test('addChannelMember() lets a newly-added member decrypt an EXISTING topic\'s 
   // ciphertext Ada originally wrote) - addChannelMember() must have
   // re-encrypted it in place for her to read it at all now.
   await copyQuBit(ada.qu, carolQu, `/store/${SPACE}/docs/${channel._id}`);
-  await copyQuBit(ada.qu, carolQu, `/store/${SPACE}/docs/${topic._id}`);
+  await copyQuBit(ada.qu, carolQu, `/store/${SPACE}/entities/${topic._id}`);
   await rawCopy(ada.qu, carolQu, `/store/${SPACE}/lists/topics-${channel._id}`);
   await copyQuBit(ada.qu, carolQu, `/store/actors/~${ada.myPub}/profile`);
   const carolAccess = new AccessService(carolQu, carolIdentity);

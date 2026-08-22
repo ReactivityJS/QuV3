@@ -1,50 +1,66 @@
 import { QuCrypto, isEncryptedEnvelope } from '@qu/core';
-import { documentPath, listPath, threadMetaPath } from './paths.js';
+import { documentPath, listPath, entityPath, threadMetaPath } from './paths.js';
 import { THREAD_PRESETS } from './message-service.js';
 import { decryptEnvelope } from './crypto-envelope.js';
+import { EntityService } from './entity-service.js';
+import { CommentableService } from './commentable-service.js';
 
 /**
- * CHANNEL SERVICE — Forum's Channel -> Topic -> per-Topic-Thread hierarchy
+ * CHANNEL SERVICE — Forum's Channel -> Topic -> per-Topic-Comments hierarchy
  * (esoTalk-styled, QuV2's own Forum shape), rebuilt on V3's primitives
  * instead of QuV2's `DocumentService`/`CollectionService` pair (neither
  * exists in V3 - superseded by `ListService`, see `DirectoryService`'s own
- * doc comment for the same substitution). A Channel and a Topic are both
- * plain, unencrypted-metadata Documents (`documentPath()`); a Topic's
- * actual message content lives in a real `MessageService` Thread keyed by
- * the topic's own id - "a Topic IS its Thread," no separate concept.
+ * doc comment for the same substitution). A Channel is still a plain,
+ * unencrypted-metadata Document (`documentPath()`), unchanged.
+ *
+ * QUNIVERSE V4 (Forum-migration round, docs/v4-concept.md §9/§10): a Topic
+ * is now an `EntityService`-created Entity (type `'topic'`, `entityPath()`),
+ * carrying its OWN `content` field (its opening post) - NOT "the thread's
+ * first message" the way it briefly was pre-V4 ("a Topic IS its Thread, same
+ * id, no separate concept"). Its REPLIES are a separate, attached
+ * `CommentableService` comment Thread, still keyed at the topic's own id -
+ * that "same id, no separate concept" convention now applies one layer
+ * DOWN, to comments rather than to the topic's own content (see
+ * `commentable-service.js`'s own doc comment). This Service constructs its
+ * own internal `EntityService`/`CommentableService` (both effectively
+ * stateless wrappers over `qu`/`identity`/`messageService`, already
+ * available here - no new constructor dependency, no call-site churn at
+ * `relay.js`/`apps/shell/src/services.js`).
  *
  * TWO curated lists per space (`ListService.createCurated()`/`addCurated()`,
  * the SAME hardened, retry-on-conflict primitive every other list in this
  * codebase uses - not QuV2's unprotected `documents.create()` +
  * `collections.addItem()` pair): `listPath(spaceId, 'channels')` (every
  * channel), and one `listPath(spaceId, 'topics-<channelId>')` per channel
- * (that channel's own topics). This is what actually fixes the "double-
+ * (that channel's own topics, now referencing each topic's `entityPath()`,
+ * not a `documentPath()`). This is what actually fixes the "double-
  * clicking Create sometimes makes two boards" class of bug QuV2 had -
  * `ListService.addCurated()`'s own lock+retry already exists; the OTHER
  * half of that fix (disabling the submit button while a create is in
  * flight) is the client's job, not this Service's.
  *
  * RESTRICTED CHANNELS - real end-to-end encryption, not a UI-only filter:
- * the channel Document AND every Topic Document created under it are
+ * the channel Document AND every Topic Entity created under it are
  * protected via `AccessService.protect()` with BOTH `writers` AND `readers`
- * set to `memberPubs` - unlike most `kind: 'docs'` resources elsewhere in
- * this codebase (which deliberately leave `readers: '*'`, see
+ * set to `memberPubs` - unlike most `kind: 'docs'`/`'entities'` resources
+ * elsewhere in this codebase (which deliberately leave `readers: '*'`, see
  * `AccessService.writeOptionsFor()`'s own "GOTCHA for docs/lists" doc
- * comment - nothing generic decrypts a plain Document read back), THIS
- * Service is decrypt-aware for its own two doc shapes (`#decrypt()` below,
+ * comment - nothing generic decrypts a plain Document/Entity read back),
+ * THIS Service is decrypt-aware for its own two shapes (`#decrypt()` below,
  * the same `isEncryptedEnvelope()`/`decryptEnvelope()` pair `MessageService`/
  * `AssetService` already use internally) - so a restricted channel's title
- * AND description, and every one of its topics' own titles, are genuinely
- * ciphertext at rest, not just access-controlled. `#resolveItems()`'s
+ * AND description, and every one of its topics' own title/content, are
+ * genuinely ciphertext at rest, not just access-controlled. `#resolveItems()`'s
  * existing "drop anything unresolvable" behavior means `decryptEnvelope()`
  * returning `null` for a non-member (see its own doc comment - no listed
  * reader entry, no throw) makes `listChannels()`/`listTopics()` filter
- * themselves by membership for free, no separate check needed; `getChannel()`
- * returns `null` for a non-member even via a direct/bookmarked board URL.
- * Every Topic CREATED under a restricted channel also gets
- * `THREAD_PRESETS.chat(memberPubs)` instead of the public
- * `THREAD_PRESETS.forum()` for its own message THREAD - the relay, and any
- * non-member, sees ciphertext only, for metadata and content alike.
+ * themselves by membership for free, no separate check needed; `getChannel()`/
+ * `getTopic()` return `null` for a non-member even via a direct/bookmarked
+ * URL. Every Topic CREATED under a restricted channel also gets
+ * `{writers: memberPubs, readers: memberPubs, ...}` instead of the public
+ * `THREAD_PRESETS.forum()` for its own attached COMMENTS thread - the relay,
+ * and any non-member, sees ciphertext only, for metadata, content, and
+ * comments alike.
  *
  * WHAT'S STILL NOT HIDDEN (accepted, documented trade-off - a bigger
  * invite-mailbox redesign like Chat's own group rooms was explicitly
@@ -60,14 +76,14 @@ import { decryptEnvelope } from './crypto-envelope.js';
  * GROWING MEMBERSHIP (`addChannelMember()`) - not something QuV2 ever
  * shipped ("creator-only at creation, no UI wired up" was its own
  * documented v1 gap). `MessageService.addReader()` alone isn't enough here:
- * it only grows a thread's `readers`, but `THREAD_PRESETS.chat()` uses the
- * SAME list for `writers` too, and `MessageService` has no `addWriter()` -
- * so this Service grows both fields on the thread's own config document in
- * one write (mirroring exactly what `addReader()` does internally, just for
- * both fields at once) rather than risking two separate calls racing each
- * other's `access.protect()` overwrite. Same non-retroactive trade-off
- * `addReader()` itself documents: a newly added member sees every topic
- * going forward, nothing posted before they joined.
+ * it only grows a thread's `readers`, but a restricted comment thread uses
+ * the SAME list for `writers` too, and `MessageService` has no
+ * `addWriter()` - so this Service grows both fields on the thread's own
+ * config document in one write (mirroring exactly what `addReader()` does
+ * internally, just for both fields at once) rather than risking two
+ * separate calls racing each other's `access.protect()` overwrite. Same
+ * non-retroactive trade-off `addReader()` itself documents: a newly added
+ * member sees every topic going forward, nothing posted before they joined.
  */
 export class ChannelService {
   /**
@@ -99,6 +115,13 @@ export class ChannelService {
     this.access = accessService;
     this.messages = messageService;
     this.syncFetch = syncFetch;
+    // A Topic's own Entity API + its attached Comments' API - see class doc
+    // comment's "QUNIVERSE V4" section for why these are constructed
+    // INTERNALLY rather than injected: both are effectively stateless
+    // wrappers over `qu`/`identity`/`messageService`, already available
+    // here, so no caller of THIS class's own constructor needs to change.
+    this.entities = new EntityService(qu, identityEngine);
+    this.commentable = new CommentableService(messageService);
   }
 
   async #myActorPub() {
@@ -178,11 +201,26 @@ export class ChannelService {
   }
 
   /**
-   * Resolves each referenced document path to its plain value, backfilling
-   * via `this.syncFetch` on a local miss before giving up - see the
-   * constructor's own doc comment for exactly why this can't just be
-   * `ListService.listCurated()` (which stops at "ask a peer for the LIST
-   * document itself," never each thing IT references).
+   * Resolves ONE referenced path (a channel Document or a topic Entity) to
+   * its plain, decrypted value, backfilling via `this.syncFetch` on a local
+   * miss before giving up - see the constructor's own doc comment for
+   * exactly why this can't just be `ListService.listCurated()` (which stops
+   * at "ask a peer for the LIST document itself," never each thing IT
+   * references).
+   * @param {string} path
+   * @returns {Promise<object|null>}
+   */
+  async #resolveEntity(path) {
+    let quBit = await this.qu.get(path);
+    if (!quBit?.val && this.syncFetch) {
+      await this.syncFetch(path).catch(() => {});
+      quBit = await this.qu.get(path);
+    }
+    if (!quBit?.val) return null;
+    return this.#decrypt(quBit);
+  }
+
+  /**
    * @param {string[]} itemPaths
    * @returns {Promise<object[]>} Resolved values only - a path that's still
    *   unresolvable after the backfill attempt is silently dropped, not
@@ -190,15 +228,7 @@ export class ChannelService {
    *   we could actually find," not a same-length array with gaps).
    */
   async #resolveItems(itemPaths) {
-    const resolved = await Promise.all(itemPaths.map(async (path) => {
-      let quBit = await this.qu.get(path);
-      if (!quBit?.val && this.syncFetch) {
-        await this.syncFetch(path).catch(() => {});
-        quBit = await this.qu.get(path);
-      }
-      if (!quBit?.val) return null;
-      return this.#decrypt(quBit);
-    }));
+    const resolved = await Promise.all(itemPaths.map((path) => this.#resolveEntity(path)));
     return resolved.filter(Boolean);
   }
 
@@ -225,11 +255,19 @@ export class ChannelService {
 
   /**
    * @param {string|number} spaceId @param {string} channelId
-   * @param {{title: string}} options
-   * @returns {Promise<object>} The stored topic.
+   * @param {{title: string, content?: object}} options - `content` is the
+   *   topic's own opening post (`createContent()`'s shape, or a plain
+   *   `{text, format}` - `EntityService`'s own `#normalizeFields()`
+   *   normalizes it) - the Entity's OWN field, NOT posted as a message into
+   *   its attached comment thread (see class doc comment's "QUNIVERSE V4"
+   *   section). Optional, matching `createContent()`'s own "content is a
+   *   field an EntityType MAY declare" posture - an empty-content topic is
+   *   allowed, not validated against here.
+   * @returns {Promise<object>} The stored topic (an Entity - `_id`/`_type`/
+   *   `_created` plus `title`/`content`/`channelId`/`author`/`createdAt`).
    * @throws {Error} If the channel doesn't exist.
    */
-  async createTopic(spaceId, channelId, { title }) {
+  async createTopic(spaceId, channelId, { title, content } = {}) {
     const channel = await this.getChannel(spaceId, channelId);
     if (!channel) throw new Error(`ChannelService.createTopic: no channel "${channelId}" in space "${spaceId}"`);
 
@@ -237,39 +275,76 @@ export class ChannelService {
     const myPub = await this.#myActorPub();
     const mainKey = await this.identity.getMainKey();
     let topicWriteOptions = { signWith: mainKey.privateKeyPkcs8, writerPub: mainKey.publicKey };
-    // A restricted channel's topic TITLE gets the exact same treatment as
-    // the channel's own title (see class doc comment's "RESTRICTED
-    // CHANNELS" section) - protected AND encrypted, not just access-
-    // controlled, so it's genuine ciphertext to a non-member, same as the
-    // channel doc itself.
+    // A restricted channel's topic (title AND content) gets the exact same
+    // treatment as the channel's own title (see class doc comment's
+    // "RESTRICTED CHANNELS" section) - protected AND encrypted, not just
+    // access-controlled, so it's genuine ciphertext to a non-member, same
+    // as the channel doc itself. Protected BEFORE the entity write itself
+    // (this Service still generates `id` up front, unlike
+    // `EntityService.createEntity()`'s own default) - `writeOptionsFor()`
+    // needs the ACL already in place to compute `encryptWith`.
     if (channel.restricted) {
-      await this.access.protect(spaceId, 'docs', id, { writers: channel.memberPubs, readers: channel.memberPubs });
-      topicWriteOptions = await this.access.writeOptionsFor(spaceId, 'docs', id);
+      await this.access.protect(spaceId, 'entities', id, { writers: channel.memberPubs, readers: channel.memberPubs });
+      topicWriteOptions = await this.access.writeOptionsFor(spaceId, 'entities', id);
     }
-    const topic = { _id: id, title, channelId, author: myPub, createdAt: Date.now() };
-    await this.qu.put(documentPath(spaceId, id), topic, topicWriteOptions);
-    await this.list.addCurated(this.#topicsListPath(spaceId, channelId), documentPath(spaceId, id), {
+    const topic = await this.entities.createEntity(spaceId, 'topic', { title, content, channelId, author: myPub, createdAt: Date.now() }, {
+      id, writeOptions: topicWriteOptions,
+    });
+    await this.list.addCurated(this.#topicsListPath(spaceId, channelId), entityPath(spaceId, id), {
       signWith: mainKey.privateKeyPkcs8, writerPub: mainKey.publicKey,
     });
-    // A Topic IS its Thread - same id, no separate concept (see class doc
-    // comment). Deliberately NOT `THREAD_PRESETS.chat(memberPubs)` verbatim
-    // for a restricted topic - `chat()` is QuV2's own messenger-style
-    // preset, `formatting: ['mentions']` only, no markdown (a 1:1/group chat
-    // was never meant to render as forum prose). A restricted BOARD is
-    // still a forum topic, just encrypted - the encryption/membership shape
-    // is exactly `chat()`'s (`writers`/`readers` both the member list), but
-    // formatting must stay `forum()`'s own (`markdown` + `mentions`), or
-    // every message renders with an empty body: `apps/forum/client.js`
-    // unconditionally inserts `message.formattedHtml`, which is `null`
-    // (and `[LegacyNullToEmptyString]` on `.innerHTML` silently renders as
-    // nothing, not even the word "null") whenever `markdown` isn't in a
-    // thread's `formatting` list - confirmed live, a real bug caught by
-    // this feature's own end-to-end verification, not a hypothetical.
+    // The topic's own REPLIES (comments), attached at the SAME id - see
+    // class doc comment. Deliberately NOT `THREAD_PRESETS.chat(memberPubs)`
+    // verbatim for a restricted topic - `chat()` is QuV2's own messenger-
+    // style preset, `formatting: ['mentions']` only, no markdown (a 1:1/
+    // group chat was never meant to render as forum prose). A restricted
+    // BOARD is still a forum topic, just encrypted - the encryption/
+    // membership shape is exactly `chat()`'s (`writers`/`readers` both the
+    // member list), but formatting must stay `forum()`'s own (`markdown` +
+    // `mentions`), or every comment renders with an empty body:
+    // `apps/forum/client.js` unconditionally inserts `message.formattedHtml`,
+    // which is `null` (and `[LegacyNullToEmptyString]` on `.innerHTML`
+    // silently renders as nothing, not even the word "null") whenever
+    // `markdown` isn't in a thread's `formatting` list - confirmed live, a
+    // real bug caught by this feature's own end-to-end verification, not a
+    // hypothetical.
     const threadConfig = channel.restricted
       ? { writers: channel.memberPubs, readers: channel.memberPubs, replyMode: 'flat', formatting: ['markdown', 'mentions'] }
       : THREAD_PRESETS.forum();
-    await this.messages.createThread(spaceId, id, threadConfig);
+    await this.commentable.enableComments(spaceId, id, threadConfig);
     return topic;
+  }
+
+  /**
+   * Updates a topic's own content (title/content/etc - NOT its comments,
+   * see `CommentableService.editComment()` for those). Correctly
+   * re-encrypts for a restricted channel's own member list:
+   * `EntityService.updateEntity()`'s own merge-read is not decrypt-aware by
+   * itself (see that method's own doc comment) - this method supplies its
+   * OWN `#decrypt()` as the read-side hook, the same scoped, per-Service fix
+   * this class's own "RESTRICTED CHANNELS" doc comment already establishes.
+   * @param {string|number} spaceId @param {string} topicId @param {object} patch
+   * @param {{asSpaceId?: string|number}} [options]
+   * @returns {Promise<object>} The updated topic.
+   * @throws {Error} If no topic exists at this id yet.
+   */
+  async updateTopic(spaceId, topicId, patch, options = {}) {
+    const writeOptions = await this.access.writeOptionsFor(spaceId, 'entities', topicId, { asSpaceId: options.asSpaceId });
+    return this.entities.updateEntity(spaceId, topicId, patch, { ...options, writeOptions, decrypt: (quBit) => this.#decrypt(quBit) });
+  }
+
+  /**
+   * A single topic by id - the decrypt-aware counterpart to
+   * `getChannel()`, for a caller (e.g. a topic's own detail view) that
+   * already knows exactly which one it wants rather than resolving the
+   * whole per-channel list first.
+   * @param {string|number} spaceId @param {string} topicId
+   * @returns {Promise<object|null>} `null` if missing, or genuinely
+   *   undecryptable for this identity (a restricted channel this identity
+   *   isn't a member of - see class doc comment's "RESTRICTED CHANNELS" section).
+   */
+  async getTopic(spaceId, topicId) {
+    return this.#resolveEntity(entityPath(spaceId, topicId));
   }
 
   /**
@@ -278,7 +353,11 @@ export class ChannelService {
    *   Newest activity first - cheap at community-forum scale (one
    *   `listMessages()` per topic, no pagination), same accepted cost model
    *   `apps/forum/client.js`'s own per-message watchers already use.
-   *   `unreadCount` - this identity's own count of THIS topic's messages
+   *   `replyCount` now genuinely means "number of comments" (Quniverse V4:
+   *   the topic's own opening post lives in its `content` field, not as
+   *   message #1 of its attached comment thread - previously this counted
+   *   the opening post too, an acknowledged, now-fixed inaccuracy).
+   *   `unreadCount` - this identity's own count of THIS topic's comments
    *   posted by someone else since its own `MessageService.markRead()`
    *   marker (0 if never marked, i.e. everyone else's posts count) - the
    *   same "unread-by-me" definition `apps/forum/client.js`'s own per-
@@ -309,16 +388,16 @@ export class ChannelService {
   }
 
   /**
-   * Grows BOTH `writers` and `readers` on a topic's thread config in one
-   * write - see class doc comment on why not `MessageService.addReader()`
-   * alone - AND, separately, the topic's own TITLE Document: adding a
-   * reader to the ACL alone doesn't let them decrypt ciphertext that was
-   * already encrypted for the OLD member list, so the title has to be
-   * re-read (plaintext, since this identity - already a member - can
-   * decrypt it) and re-written with a freshly resolved `encryptWith` that
-   * now includes the new member's key too - same "grow the ACL, then
-   * re-encrypt" two-step `addChannelMember()` itself already does for the
-   * channel document below.
+   * Grows BOTH `writers` and `readers` on a topic's COMMENT thread config in
+   * one write - see class doc comment on why not `MessageService.
+   * addReader()` alone - AND, separately, the topic's own Entity (title +
+   * content): adding a reader to the ACL alone doesn't let them decrypt
+   * ciphertext that was already encrypted for the OLD member list, so the
+   * entity has to be re-read (plaintext, since this identity - already a
+   * member - can decrypt it) and re-written with a freshly resolved
+   * `encryptWith` that now includes the new member's key too - same "grow
+   * the ACL, then re-encrypt" two-step `addChannelMember()` itself already
+   * does for the channel document below.
    */
   async #growTopicMembership(spaceId, topicId, actorPub) {
     const config = await this.messages.getConfig(spaceId, topicId);
@@ -333,14 +412,14 @@ export class ChannelService {
       }
     }
 
-    const docAcl = await this.access.getAcl(spaceId, 'docs', topicId);
-    if (docAcl && Array.isArray(docAcl.readers) && !docAcl.readers.includes(actorPub)) {
-      const [topic] = await this.#resolveItems([documentPath(spaceId, topicId)]);
+    const entityAcl = await this.access.getAcl(spaceId, 'entities', topicId);
+    if (entityAcl && Array.isArray(entityAcl.readers) && !entityAcl.readers.includes(actorPub)) {
+      const topic = await this.#resolveEntity(entityPath(spaceId, topicId));
       if (topic) {
-        await this.access.addWriter(spaceId, 'docs', topicId, actorPub);
-        await this.access.addReader(spaceId, 'docs', topicId, actorPub);
-        const writeOptions = await this.access.writeOptionsFor(spaceId, 'docs', topicId);
-        await this.qu.put(documentPath(spaceId, topicId), topic, writeOptions);
+        await this.access.addWriter(spaceId, 'entities', topicId, actorPub);
+        await this.access.addReader(spaceId, 'entities', topicId, actorPub);
+        const writeOptions = await this.access.writeOptionsFor(spaceId, 'entities', topicId);
+        await this.qu.put(entityPath(spaceId, topicId), topic, writeOptions);
       }
     }
   }

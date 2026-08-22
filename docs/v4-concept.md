@@ -499,6 +499,10 @@ V4-Rewrite jetzt anders aufziehen") to what's already real in this repo:
 3. **Migrate one existing app** (Forum is the best candidate — already Thread + Comments +
    Reactions + Attachments, per §0.1) onto the Entity/Capability/ContentEditor contracts, to
    prove the composition holds under a real, already-shipped app before any other app moves.
+   **Done (Forum-migration round):** `ChannelService`'s Topic is now an `EntityService`-created
+   Entity (its own `content` field, not "the thread's first message"), with a
+   `CommentableService`-attached comment Thread at the same id — see §10's own "Forum
+   migration" entry for the details.
 4. **Migrate the remaining existing apps** (Chat, Notifications, Todo, Calendar) once step 3
    holds.
 5. **Build the genuinely new apps** the model newly makes cheap — Blog, CMS/Pages, Stream —
@@ -543,3 +547,30 @@ Phase 1 explicitly did **not** migrate any app (Forum's `ChannelService` "a Topi
 Thread" pattern is untouched) — see the Phase 1 implementation plan's own Non-Goals for what
 Phase 2+ still needs to cover (Follow/Tag/generalized-Reaction/Mention capabilities, the
 Forum migration itself, and all `ContentEditor`/Slot/UI work from §5-§6 above).
+
+- **Forum migration — resolved and implemented (build order step 3, above).**
+  `ChannelService.createTopic(spaceId, channelId, {title, content})` now creates an Entity
+  (type `'topic'`, `EntityService`) instead of a plain Document — the topic's own opening post
+  lives in its `content` field. Its REPLIES are a `CommentableService`-attached comment Thread
+  at the SAME id (`enableComments()`/`postComment()`/`editComment()`/`listComments()`) — the
+  "a Topic IS its Thread, same id, no separate concept" convention now applies one layer down,
+  to comments rather than to the topic's own content. New `ChannelService.updateTopic()`/
+  `getTopic()` round out the API (decrypt-aware for a restricted channel's topic, mirroring
+  `getChannel()`). `EntityEngine` is now registered on both the relay (`packages/relay/src/
+  relay.js`) and the client (`apps/shell/src/services.js`) — its first real wiring into a
+  running app; a genuine, now-fixed bug surfaced by that first real use is recorded in the
+  `EntityEngine`/`EntityService` doc comments themselves (a segment-match false-positive
+  against `acl/entities/<id>` paths, and `EntityService` previously returning `qu.put()`'s raw,
+  possibly-ciphertext QuBit instead of the plaintext it already built).
+  - **Reactions/Bookmarks on the topic's own content — resolved: configurable, not fixed** (a
+    later, explicit user decision — see this section's own framing: "not FIX, sondern
+    konfigurierbar"). New `content.entityFooter`/`content.entityMenu` extension points (§6),
+    contributed by `apps/reactions`/`apps/bookmarks` alongside their existing message-level
+    ones, admin-togglable via the same `disabledApps` mechanism.
+  - **Pin — scope cut, documented, not silently dropped.** `PinService` is NOT generalized this
+    round: the topic's own opening post loses pin-ability after migration (only comments keep
+    it, via the existing `content.topicToolbar`/message-scoped mechanism, unchanged).
+  - **No data migration.** This branch has no deployed production Forum data to preserve —
+    treated as a clean rebuild (`apps/forum/index.js`'s own "General" channel/topic creation
+    just uses the new shape directly), not a live migration. A real deployment would need a
+    real migration plan, explicitly out of scope here.
