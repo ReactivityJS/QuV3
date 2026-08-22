@@ -22,6 +22,20 @@ test('renders a textarea and a submit button', () => {
   assert.ok(submitBtn(host));
 });
 
+test('submitLabel alone sets both the button text and its tooltip (backward compatible default)', () => {
+  const host = makeHost();
+  mountContentEditor(host, { submitLabel: 'Send' });
+  assert.equal(submitBtn(host).textContent, 'Send');
+  assert.equal(submitBtn(host).title, 'Send');
+});
+
+test('submitIcon decouples the button text from submitLabel, which stays the tooltip', () => {
+  const host = makeHost();
+  mountContentEditor(host, { submitIcon: '➤', submitLabel: 'Send' });
+  assert.equal(submitBtn(host).textContent, '➤');
+  assert.equal(submitBtn(host).title, 'Send');
+});
+
 test('getValue()/setValue() round-trip', () => {
   const host = makeHost();
   const editor = mountContentEditor(host);

@@ -581,3 +581,32 @@ Forum migration itself, and all `ContentEditor`/Slot/UI work from §5-§6 above)
     treated as a clean rebuild (`apps/forum/index.js`'s own "General" channel/topic creation
     just uses the new shape directly), not a live migration. A real deployment would need a
     real migration plan, explicitly out of scope here.
+
+### 10.1 Backlog from live-testing (recorded, not implemented)
+
+The Forum migration's first live test against a real deployed relay (2 real users) surfaced
+four concrete UI bugs, fixed in a follow-up round (composer width, submit-icon/tooltip
+decoupling in `mountContentEditor()`, composer default row counts, mention alias resolution
+in `apps/forum/client.js`/`thread-formatting.js`). That same round, the user explicitly
+flagged four larger platform ideas as "für die Zukunft" — future work, deliberately not
+implemented alongside the bug fixes. Recorded here so they aren't lost, not as a committed
+roadmap:
+
+- **Granular notification preferences.** Mentions, watched posts, own posts, followed
+  people, and calendar changes/invites should be separately configurable notification
+  categories, not one on/off switch — in-app (toast/badge) when the relevant app is open,
+  push otherwise. No notification-preferences model exists yet to extend.
+- **A clear, global filtering concept for in-app lists.** Channel/chat lists and/or
+  participant lists across apps (Forum's channel list, Chat's conversation list, etc.) want
+  one shared, platform-level filtering concept instead of each app inventing its own ad hoc
+  filter UI.
+- **Global search with context restriction, usable from inside apps.** Beyond today's
+  standalone `apps/search`, a search primitive triggerable from within an app's own context
+  (e.g. "search this channel" from Forum), with hooks/overrides so an app can restrict or
+  extend what's searched, rather than always searching everything globally.
+- **Reaffirmed platform principle: UI is governed centrally; apps only fill Slots.** Not a
+  new idea — this is the `mountAppTemplate()`/Slot-taxonomy pattern (§5-§6) already in place —
+  but the user explicitly called it out as the guiding constraint for all of the above: layout
+  and UI conventions should stay adjustable centrally, with apps contributing content into
+  slots rather than owning layout decisions themselves. Recorded here as a written decision,
+  not just an implicit pattern, for whoever builds the items above.

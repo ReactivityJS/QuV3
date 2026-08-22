@@ -64,10 +64,10 @@ test('formatMarkdown() does not treat a URL fragment (#section) as a hashtag', (
   assert.ok(!html.includes('qu-hashtag'));
 });
 
-test('formatMarkdown() renders a mention as a profile link', () => {
+test('formatMarkdown() renders a mention as a profile link, carrying the raw pub in data-pub for render-time alias resolution', () => {
   const pub = 'a'.repeat(20);
   const html = formatMarkdown(`hi @${pub}`);
-  assert.ok(html.includes(`<a href="#/~${pub}" class="qu-mention">`));
+  assert.ok(html.includes(`<a href="#/~${pub}" class="qu-mention" data-pub="${pub}">`));
 });
 
 test('formatMarkdown() converts newlines to <br>', () => {

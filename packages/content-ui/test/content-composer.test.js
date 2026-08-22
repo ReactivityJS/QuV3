@@ -15,6 +15,13 @@ function submitBtn(host) {
   return host.querySelector('.qu-content-editor-submit-slot button');
 }
 
+test('submitIcon/submitLabel pass through to the underlying ContentEditor unchanged', () => {
+  const host = makeHost();
+  mountContentComposer(host, { submitIcon: '➤', submitLabel: 'Send' });
+  assert.equal(submitBtn(host).textContent, '➤');
+  assert.equal(submitBtn(host).title, 'Send');
+});
+
 test('submitting calls onSubmit() with a createContent()-shaped object matching the typed text/format', () => {
   const host = makeHost();
   const submitted = [];

@@ -43,7 +43,8 @@ import { mountContentEditor } from './content-editor.js';
  * @param {number} [options.minRows]
  * @param {number} [options.maxRows]
  * @param {Array<object>} [options.extensions] - See `mountContentEditor()`'s own doc comment for the `EditorExtension` contract.
- * @param {string} [options.submitLabel]
+ * @param {string} [options.submitLabel] - See `mountContentEditor()`'s own doc comment.
+ * @param {string} [options.submitIcon] - See `mountContentEditor()`'s own doc comment.
  * @param {object} [options.leadingSlot] - See `mountContentEditor()`'s own doc comment.
  * @returns {{editor: ReturnType<typeof mountContentEditor>, stop: () => void}}
  */

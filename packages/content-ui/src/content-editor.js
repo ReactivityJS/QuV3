@@ -79,7 +79,13 @@ function ensureStyle() {
  * @param {number} [options.minRows]
  * @param {number} [options.maxRows]
  * @param {Array<object>} [options.extensions] - See class doc comment for the `EditorExtension` contract.
- * @param {string} [options.submitLabel]
+ * @param {string} [options.submitLabel='Send'] - The submit control's
+ *   accessible title/tooltip text.
+ * @param {string} [options.submitIcon] - The submit control's VISIBLE text
+ *   (a short glyph, e.g. '➤') - defaults to `submitLabel` itself when
+ *   omitted, so a caller passing only `submitLabel` behaves exactly as
+ *   before this option existed. Pass both to get a compact icon button with
+ *   a real, readable tooltip instead of the icon glyph doubling as both.
  * @param {boolean} [options.requireText=true] - When `false`, submitting with
  *   empty text is always allowed (even with no contribution). When `true`
  *   (default), an empty submit is only allowed once some extension has
@@ -104,6 +110,7 @@ export function mountContentEditor(container, {
   maxRows = COMPOSER_MAX_ROWS,
   extensions = [],
   submitLabel = 'Send',
+  submitIcon = submitLabel,
   requireText = true,
   leadingSlot: leadingSlotOptions = {},
 } = {}) {
@@ -196,7 +203,14 @@ export function mountContentEditor(container, {
   }
 
   const extraSubmitCandidates = [];
-  const sendItem = { id: 'send', icon: submitLabel, label: submitLabel, onClick: submit }; // no `when` - the unconditional "else", must stay last
+  // `icon` (rendered as the button's visible text - see slot-resolver.js's
+  // own renderInlineItem()) and `label` (rendered as its title/tooltip only)
+  // are DECOUPLED via `submitIcon`/`submitLabel` - a caller wanting a
+  // compact icon button (e.g. Forum's reply/new-topic composers, both '➤')
+  // still gets a real, readable tooltip instead of the icon glyph itself.
+  // `submitIcon` defaults to `submitLabel` (see this function's own params)
+  // so a caller passing only `submitLabel` behaves exactly as before.
+  const sendItem = { id: 'send', icon: submitIcon, label: submitLabel, onClick: submit }; // no `when` - the unconditional "else", must stay last
   const submitSlotHandle = mountResolvedSlot(submitContainer, [...extraSubmitCandidates, sendItem], { strategy: 'switch' });
   function resolveSubmitSlot() {
     submitSlotHandle.resolve({ hasText: !!textarea.value.trim(), hasContribution: hasContribution() });
