@@ -123,6 +123,13 @@
  * composers get this now, including the topic's own opening post (which
  * never had either before this round).
  *
+ * MARKDOWN TOOLBAR (Editor/Toolbar-foundation round) - `@qu/content-ui`'s
+ * `markdownToolbarExtension()` (Bold/Italic/Link/Code/Spoiler, matching
+ * exactly the markdown subset `formatMarkdown()` renders), registered on
+ * both composers - both already resolve `format: 'markdown'` via
+ * `resolveContentFormat('topic')`, so the toolbar's output always matches
+ * what actually gets rendered.
+ *
  * REACTIONS/PINS/BOOKMARKS are NOT built into this file at all - they're
  * admin-toggleable plugins (`apps/reactions`, `apps/pins`, `apps/bookmarks`),
  * reached only through the extension points below (`content.messageFooter`,
@@ -227,7 +234,7 @@ import { paths, formatActorLabel, detectLinks, resolveContentFormat, renderConte
 import { createI18n } from '@qu/i18n';
 import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage, mountAppTemplate, createIconButton } from '@qu/ui';
 import { renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, copyToClipboard } from '@qu/thread-ui';
-import { mountContentComposer, emojiExtension, mentionExtension, attachmentExtension } from '@qu/content-ui';
+import { mountContentComposer, emojiExtension, mentionExtension, attachmentExtension, markdownToolbarExtension } from '@qu/content-ui';
 
 // Default fallback order for `content.messageFooter`/`content.messageMenu`
 // items when an admin hasn't configured `relay-settings`' `extensionOrder`
@@ -1227,6 +1234,7 @@ function mountNewTopicView(container, { services, subscribe, SPACE_ID, channelId
     minRows: 3, maxRows: 10, // a topic's opening post deserves more room than a quick reply
     requireText: false, // a topic's opening post can be title-only, same as before (body/attachment were both optional)
     extensions: [
+      markdownToolbarExtension(),
       emojiExtension({ triggerTitle: t('insertEmoji') }),
       mentionExtension({ services, subscribe }),
       attachmentExtension({ assetService: services.assets, spaceId: SPACE_ID }),
@@ -1415,6 +1423,7 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     submitLabel: t('send'),
     minRows: 2, maxRows: 6,
     extensions: [
+      markdownToolbarExtension(),
       emojiExtension({ triggerTitle: t('insertEmoji') }),
       mentionExtension({ services, subscribe }),
       attachmentExtension({ assetService: services.assets, spaceId: SPACE_ID, triggerTitle: t('attachFile') }),

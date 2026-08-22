@@ -13,10 +13,15 @@ import { renderEmojiPicker, mountMentionAutocomplete } from '@qu/thread-ui';
  * Attachment/Location/Voice live in their own files (`attachment-extension.js`/
  * `location-extension.js`/`voice-extension.js`) given their real size -
  * generalized from `apps/chat/client.js`'s own proven implementations, see
- * each file's own doc comment. A Markdown-toolbar extension is still
- * deliberately NOT included - blocked on a real gap this codebase doesn't
- * have a fix for yet (no precise caret/selection-coordinate measurement
- * utility - see `mention-autocomplete.js`'s own doc comment).
+ * each file's own doc comment. A Markdown-toolbar extension now also lives
+ * in its own file (`markdown-toolbar-extension.js`) - an earlier version of
+ * this comment said one was blocked on "no precise caret/selection-
+ * coordinate measurement utility" (`mention-autocomplete.js`'s own doc
+ * comment); that gap is real but only applies to a FLOATING popup tracking
+ * the caret's exact pixel position - a fixed-row toolbar (what that file
+ * builds, registered via `content-editor.js`'s own toolbar slot) only ever
+ * needs `textarea.selectionStart`/`selectionEnd` plus the existing
+ * `insertAtCursor()` primitive, neither of which was ever missing.
  */
 
 /**

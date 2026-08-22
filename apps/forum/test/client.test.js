@@ -308,6 +308,61 @@ test('the composer textarea starts at its configured TWO visual lines (minRows: 
   }
 });
 
+test('the reply composer has a Markdown formatting toolbar (Bold/Italic/Link/Code/Spoiler)', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => container.querySelector('textarea') !== null);
+    const toolbarBtns = [...container.querySelectorAll('.qu-content-editor-toolbar .qu-slot-resolver-item')];
+    assert.deepEqual(toolbarBtns.map((btn) => btn.title), ['Bold', 'Italic', 'Link', 'Code', 'Spoiler']);
+  } finally {
+    stop();
+  }
+});
+
+test('the new-topic composer also has the Markdown formatting toolbar', async () => {
+  const a = await freshEnv('Ada');
+  const channel = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Announcements' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', channel._id, 'new-topic'] });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-new-topic-composer') !== null);
+    const toolbarBtns = container.querySelectorAll('.qu-forum-new-topic-composer .qu-content-editor-toolbar .qu-slot-resolver-item');
+    assert.equal(toolbarBtns.length, 5);
+  } finally {
+    stop();
+  }
+});
+
+test('selecting text and clicking Bold in the reply composer wraps it, and the posted message renders <strong>', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => container.querySelector('textarea') !== null);
+    const textarea = container.querySelector('textarea');
+    textarea.value = 'this is important';
+    textarea.focus();
+    textarea.selectionStart = 8; // "important"
+    textarea.selectionEnd = 18;
+
+    const boldBtn = [...container.querySelectorAll('.qu-content-editor-toolbar .qu-slot-resolver-item')].find((btn) => btn.title === 'Bold');
+    boldBtn.click();
+    assert.equal(textarea.value, 'this is **important**');
+
+    container.querySelector('.qu-content-editor-submit-slot button').click();
+    await waitFor(() => container.querySelector('.qu-forum-message-text strong')?.textContent === 'important');
+  } finally {
+    stop();
+  }
+});
+
 test('the composer\'s leading action slot includes Attach natively, plus any plugin-contributed content.composerActions item', async () => {
   const a = await freshEnv('Ada');
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
