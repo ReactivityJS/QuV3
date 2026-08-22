@@ -35,6 +35,19 @@ import { mountResolvedSlot } from '@qu/ui';
  *     presented per `options.leadingSlot`'s configured strategy (inline,
  *     collapsed into a menu, or a hybrid threshold) - an extension never
  *     knows or cares which; that's the resolver's job, not the extension's.
+ *   - `registerToolbarItem(item)` / `unregisterToolbarItem(id)` - contributes
+ *     a `SlotItem` to a SEPARATE row above the textarea, its own
+ *     `mountResolvedSlot()` instance (own overflow threshold, own "more"
+ *     menu) - deliberately NOT the same slot as `registerAction()`: that one
+ *     already carries `attachmentExtension()`'s trigger and any
+ *     `content.composerActions` plugin items in Forum's composers, and
+ *     mixing text-formatting controls into that same resolver would overflow
+ *     it into one menu blending file-attach with Bold/Italic (and reintroduce
+ *     the composer-row squeeze a previous round fixed). Empty (no row
+ *     rendered) until at least one item is registered, so a plain-format
+ *     composer that never adds a toolbar extension shows no empty space.
+ *     What `markdownToolbarExtension()` (`markdown-toolbar-extension.js`)
+ *     uses.
  *   - `registerSubmitCandidate(item)` / `unregisterSubmitCandidate(id)` -
  *     contributes a CONDITIONAL alternative to the submit button itself
  *     (a `SlotItem` with a `when(state)`), checked BEFORE the built-in
@@ -56,8 +69,8 @@ import { mountResolvedSlot } from '@qu/ui';
 
 const STYLE_ID = 'qu-content-ui-editor-style';
 const STYLE = `
-  .qu-content-editor { display: flex; align-items: flex-end; gap: 0.4rem; position: relative; }
-  .qu-content-editor-row { display: flex; align-items: flex-end; gap: 0.4rem; flex: 1; min-width: 0; }
+  .qu-content-editor { display: flex; flex-direction: column; gap: 0.3rem; position: relative; }
+  .qu-content-editor-row { display: flex; align-items: flex-end; gap: 0.4rem; }
   .qu-content-editor-input-wrap { flex: 1; min-width: 0; display: flex; align-items: flex-end; gap: 0.3rem; }
   .qu-content-editor-input-wrap textarea { flex: 1; min-width: 0; font: inherit; resize: none; padding: 0.15rem 0; }
   .qu-content-editor-actions { display: flex; align-items: center; gap: 0.2rem; }
@@ -79,7 +92,13 @@ function ensureStyle() {
  * @param {number} [options.minRows]
  * @param {number} [options.maxRows]
  * @param {Array<object>} [options.extensions] - See class doc comment for the `EditorExtension` contract.
- * @param {string} [options.submitLabel]
+ * @param {string} [options.submitLabel='Send'] - The submit control's
+ *   accessible title/tooltip text.
+ * @param {string} [options.submitIcon] - The submit control's VISIBLE text
+ *   (a short glyph, e.g. '➤') - defaults to `submitLabel` itself when
+ *   omitted, so a caller passing only `submitLabel` behaves exactly as
+ *   before this option existed. Pass both to get a compact icon button with
+ *   a real, readable tooltip instead of the icon glyph doubling as both.
  * @param {boolean} [options.requireText=true] - When `false`, submitting with
  *   empty text is always allowed (even with no contribution). When `true`
  *   (default), an empty submit is only allowed once some extension has
@@ -87,6 +106,7 @@ function ensureStyle() {
  *   generalizing `apps/chat/client.js`'s own already-proven "a caption is
  *   optional whenever there's an attachment to send instead" rule.
  * @param {{strategy?: string, threshold?: number, moreIcon?: string, moreLabel?: string}} [options.leadingSlot]
+ * @param {{strategy?: string, threshold?: number, moreIcon?: string, moreLabel?: string}} [options.toolbarSlot] - See `ctx.registerToolbarItem()` in the class doc comment.
  * @returns {{
  *   textarea: HTMLTextAreaElement,
  *   actionsEl: HTMLElement,
@@ -104,13 +124,19 @@ export function mountContentEditor(container, {
   maxRows = COMPOSER_MAX_ROWS,
   extensions = [],
   submitLabel = 'Send',
+  submitIcon = submitLabel,
   requireText = true,
   leadingSlot: leadingSlotOptions = {},
+  toolbarSlot: toolbarSlotOptions = {},
 } = {}) {
   ensureStyle();
 
   const root = document.createElement('div');
   root.className = 'qu-content-editor';
+
+  const toolbarContainer = document.createElement('div');
+  toolbarContainer.className = 'qu-content-editor-toolbar';
+  toolbarContainer.hidden = true; // shown only once a first item is registered - see registerToolbarItem() below
 
   const normalRow = document.createElement('div');
   normalRow.className = 'qu-content-editor-row';
@@ -137,7 +163,7 @@ export function mountContentEditor(container, {
   const chromeContainer = document.createElement('div');
   chromeContainer.hidden = true;
 
-  root.append(normalRow, chromeContainer);
+  root.append(toolbarContainer, normalRow, chromeContainer);
   container.appendChild(root);
 
   // ===== leading action slot (docs/v4-concept.md §6 Presentation Resolver) ==
@@ -150,6 +176,26 @@ export function mountContentEditor(container, {
   function unregisterAction(id) {
     leadingActions.delete(id);
     leadingSlotHandle.setItems([...leadingActions.values()]);
+  }
+
+  // ===== toolbar slot (own resolver instance - see this file's own doc =====
+  // comment on `registerToolbarItem` for why it's separate from the leading
+  // slot above, not a shared one.
+  const toolbarItems = new Map();
+  // threshold 8: comfortably above markdownToolbarExtension()'s own 5 buttons
+  // (Bold/Italic/Link/Code/Spoiler) - those should always render inline, not
+  // collapse into a "More" menu on first mount; still collapses further
+  // toolbar extensions stacked on top, same mechanism as the leading slot.
+  const toolbarSlotHandle = mountResolvedSlot(toolbarContainer, [], { strategy: 'inline-then-menu', threshold: 8, ...toolbarSlotOptions });
+  function registerToolbarItem(item) {
+    toolbarItems.set(item.id, item);
+    toolbarSlotHandle.setItems([...toolbarItems.values()]);
+    toolbarContainer.hidden = false;
+  }
+  function unregisterToolbarItem(id) {
+    toolbarItems.delete(id);
+    toolbarSlotHandle.setItems([...toolbarItems.values()]);
+    toolbarContainer.hidden = toolbarItems.size === 0;
   }
 
   // ===== content contributions (attachments/location - non-text submit data) =
@@ -196,7 +242,14 @@ export function mountContentEditor(container, {
   }
 
   const extraSubmitCandidates = [];
-  const sendItem = { id: 'send', icon: submitLabel, label: submitLabel, onClick: submit }; // no `when` - the unconditional "else", must stay last
+  // `icon` (rendered as the button's visible text - see slot-resolver.js's
+  // own renderInlineItem()) and `label` (rendered as its title/tooltip only)
+  // are DECOUPLED via `submitIcon`/`submitLabel` - a caller wanting a
+  // compact icon button (e.g. Forum's reply/new-topic composers, both '➤')
+  // still gets a real, readable tooltip instead of the icon glyph itself.
+  // `submitIcon` defaults to `submitLabel` (see this function's own params)
+  // so a caller passing only `submitLabel` behaves exactly as before.
+  const sendItem = { id: 'send', icon: submitIcon, label: submitLabel, onClick: submit }; // no `when` - the unconditional "else", must stay last
   const submitSlotHandle = mountResolvedSlot(submitContainer, [...extraSubmitCandidates, sendItem], { strategy: 'switch' });
   function resolveSubmitSlot() {
     submitSlotHandle.resolve({ hasText: !!textarea.value.trim(), hasContribution: hasContribution() });
@@ -256,6 +309,7 @@ export function mountContentEditor(container, {
     const result = ext.mount({
       textarea, actionsEl, insertText,
       registerAction, unregisterAction,
+      registerToolbarItem, unregisterToolbarItem,
       registerSubmitCandidate, unregisterSubmitCandidate,
       contributeContent, retractContent,
       setChrome, submitNow,
@@ -288,6 +342,7 @@ export function mountContentEditor(container, {
     stop: () => {
       stopAutogrow();
       leadingSlotHandle.stop();
+      toolbarSlotHandle.stop();
       submitSlotHandle.stop();
       for (const stopFn of stopFns) stopFn();
     },

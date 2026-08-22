@@ -294,7 +294,7 @@ test('the composer posts a message and clears the input afterward', async () => 
   }
 });
 
-test('the composer textarea starts at ONE visual line (rows=1) - regression: an un-sized <textarea> defaults to the UA\'s own rows=2', async () => {
+test('the composer textarea starts at its configured TWO visual lines (minRows: 2) - a real forum reply deserves more than one line by default', async () => {
   const a = await freshEnv('Ada');
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
 
@@ -302,7 +302,62 @@ test('the composer textarea starts at ONE visual line (rows=1) - regression: an 
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
   try {
     await waitFor(() => container.querySelector('textarea') !== null);
-    assert.equal(container.querySelector('.qu-content-editor-input-wrap textarea').rows, 1);
+    assert.equal(container.querySelector('.qu-content-editor-input-wrap textarea').rows, 2);
+  } finally {
+    stop();
+  }
+});
+
+test('the reply composer has a Markdown formatting toolbar (Bold/Italic/Link/Code/Spoiler)', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => container.querySelector('textarea') !== null);
+    const toolbarBtns = [...container.querySelectorAll('.qu-content-editor-toolbar .qu-slot-resolver-item')];
+    assert.deepEqual(toolbarBtns.map((btn) => btn.title), ['Bold', 'Italic', 'Link', 'Code', 'Spoiler']);
+  } finally {
+    stop();
+  }
+});
+
+test('the new-topic composer also has the Markdown formatting toolbar', async () => {
+  const a = await freshEnv('Ada');
+  const channel = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Announcements' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', channel._id, 'new-topic'] });
+  try {
+    await waitFor(() => container.querySelector('.qu-forum-new-topic-composer') !== null);
+    const toolbarBtns = container.querySelectorAll('.qu-forum-new-topic-composer .qu-content-editor-toolbar .qu-slot-resolver-item');
+    assert.equal(toolbarBtns.length, 5);
+  } finally {
+    stop();
+  }
+});
+
+test('selecting text and clicking Bold in the reply composer wraps it, and the posted message renders <strong>', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => container.querySelector('textarea') !== null);
+    const textarea = container.querySelector('textarea');
+    textarea.value = 'this is important';
+    textarea.focus();
+    textarea.selectionStart = 8; // "important"
+    textarea.selectionEnd = 18;
+
+    const boldBtn = [...container.querySelectorAll('.qu-content-editor-toolbar .qu-slot-resolver-item')].find((btn) => btn.title === 'Bold');
+    boldBtn.click();
+    assert.equal(textarea.value, 'this is **important**');
+
+    container.querySelector('.qu-content-editor-submit-slot button').click();
+    await waitFor(() => container.querySelector('.qu-forum-message-text strong')?.textContent === 'important');
   } finally {
     stop();
   }
@@ -558,6 +613,43 @@ test('the composer\'s @mention autocomplete inserts a full pub, and the posted m
 
     const { messages } = await b.services.messages.listMessages(FORUM_SPACE_ID, 'general');
     assert.deepEqual(messages[0].mentions, [a.myPub]);
+  } finally {
+    stop();
+  }
+});
+
+test('a mention of a profile-published identity renders as their CURRENT alias, not a truncated pubkey', async () => {
+  const a = await freshEnv('Ada'); // freshEnv() already publishes a main profile with this alias
+  const b = await freshEnv('Bob');
+  await b.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  // Mirror Ada's profile into Bob's store, same "already synced in" technique the sibling mention test above uses.
+  await b.qu.putSealed(actorPath(a.myPub, 'profile'), await a.qu.get(actorPath(a.myPub, 'profile')));
+  await b.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: `hey @${a.myPub}`, extra: {} });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: b.qu, services: b.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => container.querySelector('a.qu-mention') !== null);
+    await waitFor(() => container.querySelector('a.qu-mention').textContent === '@Ada');
+    assert.equal(container.querySelector('a.qu-mention').getAttribute('href'), `#/~${a.myPub}`);
+  } finally {
+    stop();
+  }
+});
+
+test('a mention with no resolvable profile falls back to the truncated-pubkey display, unchanged', async () => {
+  const a = await freshEnv('Ada');
+  await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  const strangerPub = 'z'.repeat(20); // no profile ever published for this token - nobody can resolve an alias for it
+  await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: `hey @${strangerPub}` });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  try {
+    await waitFor(() => container.querySelector('a.qu-mention') !== null);
+    // Give the async resolveAuthor()/formatActorLabel() pass a real chance to run before asserting it made no change.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.match(container.querySelector('a.qu-mention').textContent, /^@~/);
   } finally {
     stop();
   }

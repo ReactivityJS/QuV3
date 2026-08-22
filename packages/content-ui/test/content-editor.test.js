@@ -22,6 +22,20 @@ test('renders a textarea and a submit button', () => {
   assert.ok(submitBtn(host));
 });
 
+test('submitLabel alone sets both the button text and its tooltip (backward compatible default)', () => {
+  const host = makeHost();
+  mountContentEditor(host, { submitLabel: 'Send' });
+  assert.equal(submitBtn(host).textContent, 'Send');
+  assert.equal(submitBtn(host).title, 'Send');
+});
+
+test('submitIcon decouples the button text from submitLabel, which stays the tooltip', () => {
+  const host = makeHost();
+  mountContentEditor(host, { submitIcon: '➤', submitLabel: 'Send' });
+  assert.equal(submitBtn(host).textContent, '➤');
+  assert.equal(submitBtn(host).title, 'Send');
+});
+
 test('getValue()/setValue() round-trip', () => {
   const host = makeHost();
   const editor = mountContentEditor(host);
@@ -160,6 +174,78 @@ test('multiple leading actions past the configured threshold collapse into a "Mo
   mountContentEditor(host, { extensions: [extension], leadingSlot: { strategy: 'inline-then-menu', threshold: 2 } });
   assert.equal(leadingItems(host).length, 2);
   assert.ok(host.querySelector('.qu-content-editor-leading .qu-thread-ui-context-menu-trigger'));
+});
+
+// ===== toolbar slot (registerToolbarItem) ======================================
+
+function toolbarEl(host) {
+  return host.querySelector('.qu-content-editor-toolbar');
+}
+function toolbarItems(host) {
+  return host.querySelectorAll('.qu-content-editor-toolbar .qu-slot-resolver-item');
+}
+
+test('the toolbar row is hidden until a first item is registered', () => {
+  const host = makeHost();
+  mountContentEditor(host, {});
+  assert.equal(toolbarEl(host).hidden, true);
+});
+
+test('registerToolbarItem() renders the item and unhides the toolbar row', () => {
+  const host = makeHost();
+  const extension = {
+    id: 'test-ext',
+    mount: (ctx) => { ctx.registerToolbarItem({ id: 'b', icon: 'B', label: 'Bold', onClick: () => {} }); },
+  };
+  mountContentEditor(host, { extensions: [extension] });
+  assert.equal(toolbarEl(host).hidden, false);
+  assert.equal(toolbarItems(host).length, 1);
+});
+
+test('unregisterToolbarItem() removes the item and re-hides an empty toolbar row', () => {
+  const host = makeHost();
+  let unregister;
+  const extension = {
+    id: 'test-ext',
+    mount: (ctx) => {
+      ctx.registerToolbarItem({ id: 'b', icon: 'B', onClick: () => {} });
+      unregister = () => ctx.unregisterToolbarItem('b');
+    },
+  };
+  mountContentEditor(host, { extensions: [extension] });
+  assert.equal(toolbarItems(host).length, 1);
+  unregister();
+  assert.equal(toolbarItems(host).length, 0);
+  assert.equal(toolbarEl(host).hidden, true);
+});
+
+test('toolbar items are a SEPARATE resolver instance from the leading slot - registering one never touches the other', () => {
+  const host = makeHost();
+  const extension = {
+    id: 'test-ext',
+    mount: (ctx) => {
+      ctx.registerAction({ id: 'attach', icon: '📎', onClick: () => {} });
+      ctx.registerToolbarItem({ id: 'b', icon: 'B', onClick: () => {} });
+    },
+  };
+  mountContentEditor(host, { extensions: [extension] });
+  assert.equal(leadingItems(host).length, 1);
+  assert.equal(toolbarItems(host).length, 1);
+});
+
+test('toolbar items past the configured threshold collapse into a "More" menu, same mechanism as the leading slot', () => {
+  const host = makeHost();
+  const extension = {
+    id: 'test-ext',
+    mount: (ctx) => {
+      ctx.registerToolbarItem({ id: 'a', icon: 'a', onClick: () => {} });
+      ctx.registerToolbarItem({ id: 'b', icon: 'b', onClick: () => {} });
+      ctx.registerToolbarItem({ id: 'c', icon: 'c', onClick: () => {} });
+    },
+  };
+  mountContentEditor(host, { extensions: [extension], toolbarSlot: { strategy: 'inline-then-menu', threshold: 2 } });
+  assert.equal(toolbarItems(host).length, 2);
+  assert.ok(host.querySelector('.qu-content-editor-toolbar .qu-thread-ui-context-menu-trigger'));
 });
 
 // ===== submit slot candidates (registerSubmitCandidate) =======================

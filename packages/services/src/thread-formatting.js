@@ -100,9 +100,15 @@ export function formatMarkdown(body) {
 
   // Mentions - same pattern extractMentions() finds, rendered as a link to
   // that identity's public profile route using a short pub - not a
-  // live-resolved alias: the message body is immutable once posted, same as
-  // every other part of its rendered text.
-  html = html.replace(MENTION_RE, (_m, pub) => protect(`<a href="#/~${pub}" class="qu-mention">@${pub.slice(0, 10)}…</a>`));
+  // live-resolved alias: the message body is immutable once posted, and
+  // alias resolution is inherently async (a profile lookup), while this
+  // function is deliberately synchronous/pure (see this file's own doc
+  // comment) - it cannot look one up itself. `data-pub` carries the raw pub
+  // as a stable, direct attribute (rather than a caller re-parsing it back
+  // out of `href`) for exactly this: a render-time DOM post-pass in an app's
+  // own client can resolve it to a CURRENT alias and swap the link's text,
+  // without this function needing to know anything about profiles.
+  html = html.replace(MENTION_RE, (_m, pub) => protect(`<a href="#/~${pub}" class="qu-mention" data-pub="${pub}">@${pub.slice(0, 10)}…</a>`));
 
   // Hashtags - styled only, not linked: no search-by-tag feature exists to
   // link TO yet (see this file's own "honest subset" philosophy above).

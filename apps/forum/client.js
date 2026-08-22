@@ -123,6 +123,13 @@
  * composers get this now, including the topic's own opening post (which
  * never had either before this round).
  *
+ * MARKDOWN TOOLBAR (Editor/Toolbar-foundation round) - `@qu/content-ui`'s
+ * `markdownToolbarExtension()` (Bold/Italic/Link/Code/Spoiler, matching
+ * exactly the markdown subset `formatMarkdown()` renders), registered on
+ * both composers - both already resolve `format: 'markdown'` via
+ * `resolveContentFormat('topic')`, so the toolbar's output always matches
+ * what actually gets rendered.
+ *
  * REACTIONS/PINS/BOOKMARKS are NOT built into this file at all - they're
  * admin-toggleable plugins (`apps/reactions`, `apps/pins`, `apps/bookmarks`),
  * reached only through the extension points below (`content.messageFooter`,
@@ -227,7 +234,7 @@ import { paths, formatActorLabel, detectLinks, resolveContentFormat, renderConte
 import { createI18n } from '@qu/i18n';
 import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage, mountAppTemplate, createIconButton } from '@qu/ui';
 import { renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, copyToClipboard } from '@qu/thread-ui';
-import { mountContentComposer, emojiExtension, mentionExtension, attachmentExtension } from '@qu/content-ui';
+import { mountContentComposer, emojiExtension, mentionExtension, attachmentExtension, markdownToolbarExtension } from '@qu/content-ui';
 
 // Default fallback order for `content.messageFooter`/`content.messageMenu`
 // items when an admin hasn't configured `relay-settings`' `extensionOrder`
@@ -469,15 +476,27 @@ const STYLE = `
   .qu-forum-scroll-bottom-btn:hover { filter: brightness(1.08); }
   .qu-forum-scroll-bottom-btn[hidden] { display: none; }
   .qu-forum-scroll-bottom-btn-unseen { background: var(--qu-color-danger, #d64545); }
-  .qu-forum-new-channel-form, .qu-forum-new-topic-form, .qu-forum-invite-form { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.6rem; max-width: 26rem; }
+  /* .qu-forum-new-topic-form deliberately does NOT share max-width with the
+     two forms below - it now holds a full mountContentComposer(), not just
+     a title input, and needs to span the available width the same way
+     .qu-forum-composer-wrap (the topic view's own reply composer) already
+     does, unconstrained. .qu-forum-new-channel-form/.qu-forum-invite-form
+     stay short, deliberately narrow forms. */
+  .qu-forum-new-channel-form, .qu-forum-invite-form { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.6rem; max-width: 26rem; }
+  .qu-forum-new-topic-form { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.6rem; }
   .qu-forum-invite-error, .qu-forum-new-channel-error, .qu-forum-new-topic-error, .qu-forum-composer-error { color: var(--qu-color-danger, #c00); font-size: 0.85em; margin: 0; }
   .qu-forum-invite-error[hidden], .qu-forum-new-channel-error[hidden], .qu-forum-new-topic-error[hidden], .qu-forum-composer-error[hidden] { display: none; }
   .qu-forum-new-channel-form input[type="text"], .qu-forum-new-topic-form input[type="text"], .qu-forum-invite-form input[type="text"] { font: inherit; padding: 0.4rem 0.6rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); }
   .qu-forum-new-channel-form label, .qu-forum-new-topic-form label { display: flex; align-items: center; gap: 0.4rem; font-size: 0.9em; }
   .qu-forum-new-topic-form select { font: inherit; padding: 0.4rem 0.6rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); flex: 1; min-width: 0; }
-  .qu-forum-new-topic-body { font: inherit; padding: 0.4rem 0.6rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); resize: vertical; min-height: 6rem; }
-  .qu-forum-new-channel-form button, .qu-forum-new-topic-form button, .qu-forum-invite-form button { align-self: flex-start; padding: 0.4rem 1rem; border-radius: var(--qu-radius-md, 0.4rem); border: none; background: var(--qu-color-accent, #5b5bd6); color: white; cursor: pointer; font: inherit; }
-  .qu-forum-new-channel-form button:disabled, .qu-forum-new-topic-form button:disabled, .qu-forum-invite-form button:disabled { opacity: 0.6; cursor: default; }
+  /* .qu-forum-new-topic-form/.qu-forum-invite-form's own submit buttons are
+     still DIRECT children of the form (unchanged) - the DIRECT-CHILD
+     combinator here is what matters: .qu-forum-new-topic-form now also
+     contains a whole mountContentComposer() nested a few levels deep (attach
+     trigger, submit icon, ...), and a plain descendant button selector
+     would incorrectly re-style those too. */
+  .qu-forum-new-channel-form > button, .qu-forum-new-topic-form > button, .qu-forum-invite-form > button { align-self: flex-start; padding: 0.4rem 1rem; border-radius: var(--qu-radius-md, 0.4rem); border: none; background: var(--qu-color-accent, #5b5bd6); color: white; cursor: pointer; font: inherit; }
+  .qu-forum-new-channel-form > button:disabled, .qu-forum-new-topic-form > button:disabled, .qu-forum-invite-form > button:disabled { opacity: 0.6; cursor: default; }
   .qu-forum-topics { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
   .qu-forum-topic-row a { display: block; padding: 0.5rem 0.7rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); text-decoration: none; color: inherit; }
   .qu-forum-topic-row a:hover { background: var(--qu-color-border, #8884); }
@@ -1210,9 +1229,12 @@ function mountNewTopicView(container, { services, subscribe, SPACE_ID, channelId
   const composer = mountContentComposer(composerRoot, {
     format: resolveContentFormat('topic'),
     placeholder: t('composerPlaceholder'),
+    submitIcon: '➤', // compact icon, matching the reply composer - submitLabel stays the real tooltip text
     submitLabel: t('createTopic'),
+    minRows: 3, maxRows: 10, // a topic's opening post deserves more room than a quick reply
     requireText: false, // a topic's opening post can be title-only, same as before (body/attachment were both optional)
     extensions: [
+      markdownToolbarExtension(),
       emojiExtension({ triggerTitle: t('insertEmoji') }),
       mentionExtension({ services, subscribe }),
       attachmentExtension({ assetService: services.assets, spaceId: SPACE_ID }),
@@ -1397,8 +1419,11 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
   const composer = mountContentComposer(composerRoot, {
     format: resolveContentFormat('topic'), // comments share the topic's own format - both render through the SAME thread `formatting` config
     placeholder: t('composerPlaceholder'),
-    submitLabel: '➤',
+    submitIcon: '➤', // compact icon - submitLabel stays the real tooltip text (was also '➤' before, an unreadable tooltip)
+    submitLabel: t('send'),
+    minRows: 2, maxRows: 6,
     extensions: [
+      markdownToolbarExtension(),
       emojiExtension({ triggerTitle: t('insertEmoji') }),
       mentionExtension({ services, subscribe }),
       attachmentExtension({ assetService: services.assets, spaceId: SPACE_ID, triggerTitle: t('attachFile') }),
@@ -1684,6 +1709,33 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
       profileCache.set(pub, services.profile.getPublicProfile(pub).catch(() => null));
     }
     return profileCache.get(pub);
+  }
+
+  /**
+   * A render-time post-pass over an already-inserted message body
+   * (`renderMessageText()`'s own `p.innerHTML = message.formattedHtml`):
+   * `formatMarkdown()` (`@qu/services`) can only ever render a mention as a
+   * link to a truncated pubkey (`data-pub="<pub>"`, see that function's own
+   * doc comment) - it's a synchronous, pure function with no profile access
+   * of its own, and the message body is immutable once posted. Alias
+   * resolution is inherently async, so it happens HERE instead, swapping
+   * each mention link's visible text for the mentioned identity's CURRENT
+   * alias (falls straight through to `formatActorLabel()`'s own truncated-
+   * pubkey fallback until/unless a profile resolves, or forever if it never
+   * does - no flash of broken content either way, same as any other author
+   * label in this file). Reuses the SAME memoizing `resolveAuthor()` cache
+   * every author name already goes through - a mention of someone who also
+   * authored a nearby post costs nothing extra.
+   * @param {HTMLElement} root - Scoped to one message's own rendered body.
+   */
+  function resolveMentionLabels(root) {
+    for (const link of root.querySelectorAll('a.qu-mention')) {
+      const pub = link.dataset.pub;
+      if (!pub) continue;
+      resolveAuthor(pub).then((profile) => {
+        link.textContent = `@${formatActorLabel(pub, profile)}`;
+      });
+    }
   }
 
   // Reply-to state, mirroring apps/chat/client.js's own setReplyingTo() -
@@ -2040,6 +2092,7 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
         p.textContent = message.body;
       }
       root.appendChild(p);
+      resolveMentionLabels(p);
     }
     // Only the FIRST link in a post gets a preview card - see
     // <qu-link-preview>'s own doc comment (@qu/ui's

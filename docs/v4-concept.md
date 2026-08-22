@@ -581,3 +581,102 @@ Forum migration itself, and all `ContentEditor`/Slot/UI work from §5-§6 above)
     treated as a clean rebuild (`apps/forum/index.js`'s own "General" channel/topic creation
     just uses the new shape directly), not a live migration. A real deployment would need a
     real migration plan, explicitly out of scope here.
+
+### 10.1 Backlog from live-testing (recorded, not implemented)
+
+The Forum migration's first live test against a real deployed relay (2 real users) surfaced
+four concrete UI bugs, fixed in a follow-up round (composer width, submit-icon/tooltip
+decoupling in `mountContentEditor()`, composer default row counts, mention alias resolution
+in `apps/forum/client.js`/`thread-formatting.js`). That same round, the user explicitly
+flagged four larger platform ideas as "für die Zukunft" — future work, deliberately not
+implemented alongside the bug fixes. Recorded here so they aren't lost, not as a committed
+roadmap:
+
+- **Granular notification preferences.** Mentions, watched posts, own posts, followed
+  people, and calendar changes/invites should be separately configurable notification
+  categories, not one on/off switch — in-app (toast/badge) when the relevant app is open,
+  push otherwise. No notification-preferences model exists yet to extend.
+- **A clear, global filtering concept for in-app lists.** Channel/chat lists and/or
+  participant lists across apps (Forum's channel list, Chat's conversation list, etc.) want
+  one shared, platform-level filtering concept instead of each app inventing its own ad hoc
+  filter UI.
+- **Global search with context restriction, usable from inside apps.** Beyond today's
+  standalone `apps/search`, a search primitive triggerable from within an app's own context
+  (e.g. "search this channel" from Forum), with hooks/overrides so an app can restrict or
+  extend what's searched, rather than always searching everything globally.
+- **Reaffirmed platform principle: UI is governed centrally; apps only fill Slots.** Not a
+  new idea — this is the `mountAppTemplate()`/Slot-taxonomy pattern (§5-§6) already in place —
+  but the user explicitly called it out as the guiding constraint for all of the above: layout
+  and UI conventions should stay adjustable centrally, with apps contributing content into
+  slots rather than owning layout decisions themselves. Recorded here as a written decision,
+  not just an implicit pattern, for whoever builds the items above.
+
+### 10.2 Editor/Toolbar foundation round — assessment and the Chat/CMS roadmap
+
+The user asked a strategic question after the previous two rounds: is the Entity/ContentEditor/
+Slot foundation robust enough for further apps, which Editor/Toolbar features are still
+missing, and — looking ahead — Chat becoming a second app plus a CMS for both relay-admin-owned
+global content and user-owned content under each user's own space. Three parallel Explore
+passes (architecture robustness, Chat-migration readiness, CMS readiness) and three explicit
+user decisions produced this round's scope and the roadmap below.
+
+**Foundation verdict.** Solid, but proven by exactly one app so far. `EntityEngine`/
+`EntityService`/`EntityTypeRegistry`, the Capability services (Follow/Tag/Reaction/Mention/
+Commentable/Bookmarks), `ContentEditor`/`ContentComposer`, and `mountResolvedSlot()` contain
+nothing Forum-specific — decent unit coverage on the primitives themselves, but no test yet
+exercises a *second* app built on them. Documented, not-yet-built gaps: a `Notifiable`
+capability, a multi-candidate `primaryAction`/nav resolver, a richtext `ContentRenderer`, and
+the full content-format resolution chain (global→per-device→user-preference).
+
+**Editor/Toolbar foundation — implemented this round.** `mountContentEditor()`
+(`packages/content-ui/src/content-editor.js`) gained a dedicated toolbar row (its own
+`mountResolvedSlot()` instance, `ctx.registerToolbarItem()`/`unregisterToolbarItem()`) and a
+first module using it, `markdownToolbarExtension()` (Bold/Italic/Link/Code/Spoiler — exactly
+`formatMarkdown()`'s own rendered subset), wired into both of Forum's composers. An earlier
+doc comment in `extensions.js` had called a markdown toolbar blocked on "no precise
+caret/selection-coordinate measurement utility" — that gap (`mention-autocomplete.js`) is real
+but only applies to a *floating* popup tracking the caret's pixel position; a fixed toolbar row
+needed nothing more than `textarea.selectionStart`/`selectionEnd` plus the existing
+`insertAtCursor()`, both already present.
+
+**Editor/toolbar configurability — explicit user decision, not yet built.** The user was clear
+that today's markdown toolbar must not become "the" editor by default forever: which
+`EditorExtension`s a composer loads should later be configurable, both by the relay admin (a
+default/allowed set) and by the individual user (an override among admin-allowed
+alternatives) — mirroring the `disabledApps`/`extensionOrder` mechanism already used for
+`content.messageFooter`/`messageMenu` (`packages/relay/src/relay-settings.js`), generalized to
+also cover which `EditorExtension` modules load, not just which Slot items appear and in what
+order. This round ships `markdownToolbarExtension()` as exactly one independent, swappable
+module — nothing hardcodes it as the only option — but the actual selection mechanism (admin
+default + user override, persisted config, resolution order) is real, separate design work,
+not built yet.
+
+**Sequencing decision.** Editor/Toolbar foundation (this round) → Chat composer migration →
+CMS, as the user explicitly chose over doing Chat or CMS first.
+
+**Chat migration — roadmap, not built.** NOT a repeat of Forum's "Topic becomes an Entity"
+playbook — every chat message is a symmetric peer, with no distinguished "opening content" to
+promote to an Entity. The right-sized move for that round: adopt
+`mountContentComposer()`/`mountContentEditor()` (including this round's toolbar) for
+`apps/chat/client.js`'s composer only; add `'markdown'` to `THREAD_PRESETS.chat`/`.group`'s
+`formatting` list (`message-service.js`) so `formatMarkdown()` actually runs; replace
+`renderMessageText()`'s hand-rolled link detection with the shared renderer, matching Forum.
+Explicitly NOT migrating: `ChatService`, `PresenceService`, `MessageService`/`ThreadService`,
+1:1/group room derivation — none of these have (or need) an Entity-layer equivalent.
+
+**CMS — roadmap, not built.** The storage/addressing substrate is already CMS-shaped:
+`entity-types.js` has a `'page'` EntityType registered today (`contentFormat: 'markdown'`), and
+`AccessEngine`'s per-entity ACL scheme (`acl/entities/<id>`) is generic enough to express
+"admin-writable" vs. "user-writable" — neither exists yet, though. Two user decisions for that
+round: markdown-lite (already proven by Forum/Chat) stays the content format — no
+richtext/WYSIWYG editor is needed now (`renderContent()`'s `'richtext'` path still throws); and
+the CMS admin model extends the existing relay `adminPubs` (currently relay-settings-only,
+`packages/relay/src/relay.js`/`admin-http.js`) rather than introducing a new generic role
+system — the exact `AccessEngine` mechanism (ACL seeding at creation vs. a relay-admin
+fallback check in `access-engine.js`) is left as a decision for that round. Also needed: a new
+per-user personal `spaceId` convention (keyed off the owning identity's own pubkey, mirroring
+`paths.js`'s existing per-actor `privateFlagPath()` pattern) so user-owned pages live separately
+from the relay-admin-owned global space, and a new `apps/cms`-style app with two views —
+relay-admin-managed global pages, and "my pages" scoped to the signed-in identity — built on
+`EntityService` + `mountContentComposer()` (including the toolbar) + Forum's existing
+`content.entityFooter`/`entityMenu` extension points.
