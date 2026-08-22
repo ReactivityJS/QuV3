@@ -31,6 +31,16 @@ test('createContent() passes attachments through unchanged', () => {
   assert.deepEqual(content.attachments, attachments);
 });
 
+test('createContent() defaults location to null', () => {
+  const content = createContent({ text: 'x' });
+  assert.equal(content.location, null);
+});
+
+test('createContent() passes a location through unchanged', () => {
+  const content = createContent({ text: 'x', location: { lat: 52.52, lng: 13.405 } });
+  assert.deepEqual(content.location, { lat: 52.52, lng: 13.405 });
+});
+
 // ===== renderContent() =====================================================
 
 test('renderContent() escapes HTML and converts newlines to <br> for "plain"', () => {

@@ -15,10 +15,13 @@
  * own `formatMarkdown()`) and lives here, not in `packages/content-ui` -
  * only the EDITOR half genuinely needs a browser.
  *
- * `extensions[]` (inline semantic content - emoji, mentions, link previews,
- * location) is deliberately NOT included yet - docs/v4-concept.md §3.2
- * explicitly defers it until at least two real cases need it, to avoid
- * building a generic registry ahead of a real caller.
+ * A concrete `location` field is included (`{lat, lng}` or `null`) -
+ * generalized from `apps/chat/client.js`'s own already-proven
+ * `message.extra.location` shape. This is deliberately a NAMED field, not
+ * the generic `extensions[]` registry docs/v4-concept.md §3.2 defers until
+ * ≥2 real cases exist (emoji, mentions, link previews are the other named
+ * candidates) - location is still the only one actually built, so there is
+ * still nothing to generalize.
  */
 import { escapeHtml, formatMarkdown } from './thread-formatting.js';
 
@@ -26,19 +29,19 @@ import { escapeHtml, formatMarkdown } from './thread-formatting.js';
 export const CONTENT_FORMATS = ['plain', 'markdown', 'richtext'];
 
 /**
- * @param {{text: string, format?: string, attachments?: Array<object>}} input
- * @returns {{text: string, format: string, attachments: Array<object>}}
+ * @param {{text: string, format?: string, attachments?: Array<object>, location?: {lat: number, lng: number}|null}} input
+ * @returns {{text: string, format: string, attachments: Array<object>, location: {lat: number, lng: number}|null}}
  * @throws {Error} If `format` is set but not one of `CONTENT_FORMATS`, or
  *   `attachments` is set but not an array.
  */
-export function createContent({ text, format = 'plain', attachments = [] }) {
+export function createContent({ text, format = 'plain', attachments = [], location = null }) {
   if (!CONTENT_FORMATS.includes(format)) {
     throw new Error(`createContent: unknown format "${format}" - expected one of ${CONTENT_FORMATS.join(', ')}`);
   }
   if (!Array.isArray(attachments)) {
     throw new Error('createContent: attachments must be an array');
   }
-  return { text, format, attachments };
+  return { text, format, attachments, location };
 }
 
 /**

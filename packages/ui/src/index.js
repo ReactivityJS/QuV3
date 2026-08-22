@@ -15,3 +15,4 @@ export { QuLinkPreviewElement } from './link-preview-components.js';
 export { mountActorPicker, looksLikeActorPub } from './actor-picker.js';
 export { mountToastHost } from './toast.js';
 export { mountWakeLock } from './wake-lock.js';
+export { mountResolvedSlot } from './slot-resolver.js';

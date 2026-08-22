@@ -10,9 +10,13 @@ import { renderEmojiPicker, mountMentionAutocomplete } from '@qu/thread-ui';
  * is what lets a NEW composer opt into the same behavior with one entry in
  * an `extensions[]` array instead of repeating that hand-assembly.
  *
- * Attachments/Voice/Location/Markdown-toolbar extensions are deliberately
- * NOT included yet - see docs/v4-concept.md's ContentEditor-layer plan for
- * why each is a separate, later decision, not bundled into this file.
+ * Attachment/Location/Voice live in their own files (`attachment-extension.js`/
+ * `location-extension.js`/`voice-extension.js`) given their real size -
+ * generalized from `apps/chat/client.js`'s own proven implementations, see
+ * each file's own doc comment. A Markdown-toolbar extension is still
+ * deliberately NOT included - blocked on a real gap this codebase doesn't
+ * have a fix for yet (no precise caret/selection-coordinate measurement
+ * utility - see `mention-autocomplete.js`'s own doc comment).
  */
 
 /**

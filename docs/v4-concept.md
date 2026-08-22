@@ -361,26 +361,50 @@ ContentRenderer`/`ContentEditor` split diagrammed above:
   richtext Content in the first place, an honest gap, not a silent wrong-looking fallback).
 - `ContentEditor` = `mountContentEditor()` (`packages/content-ui/src/content-editor.js`) — a
   `<textarea>` (wired through `@qu/thread-ui`'s existing `mountComposerAutogrow()`, built in,
-  not optional) + submit + an `actionsEl` slot, exactly the "text input + submit + slots"
-  primitive this section calls for.
-- `EditorExtension` contract = `{id, mount(ctx) -> stopFn|void}`,
-  `ctx = {textarea, actionsEl, insertText}` — realized by two extensions
-  (`emojiExtension()`/`mentionExtension()`, `packages/content-ui/src/extensions.js`), thin
-  adapters over `@qu/thread-ui`'s existing `renderEmojiPicker()`/`mountMentionAutocomplete()`,
-  not reimplementations. Attachments/Voice/Location/Markdown-toolbar extensions are
-  deliberately **not** built yet — Attachments specifically needs a real decision about
-  whether `@qu/ui`'s `<qu-asset-upload>` Custom Element becomes a `content-ui` dependency,
-  intentionally not bundled into this round; Voice/Location have no existing UI to wrap yet.
+  not optional), a leading action slot AND the submit control both rendered through `@qu/ui`'s
+  `mountResolvedSlot()` (§6 Presentation Resolver — implemented, see below), plus the
+  unmanaged, raw-DOM trailing `actionsEl` slot from the first round. `requireText` (default
+  `true`) generalizes `apps/chat/client.js`'s own already-proven "a caption is optional
+  whenever there's an attachment to send instead" rule.
+- `EditorExtension` contract, extended: `{id, mount(ctx) -> stopFn|void}`, `ctx = {textarea,
+  actionsEl, insertText, registerAction, unregisterAction, registerSubmitCandidate,
+  unregisterSubmitCandidate, contributeContent, retractContent, setChrome, submitNow}`.
+  `registerAction()`/`registerSubmitCandidate()` contribute `SlotItem`s to the two resolved
+  slots; `contributeContent()`/`retractContent()` carry non-text submission data
+  (`{attachments?, location?}`), merged into `onSubmit(text, extras, meta)`; `setChrome()`
+  temporarily replaces the whole editor row (Voice's recorder panel); `submitNow()` submits
+  immediately with empty text and ONLY its own `extraPartial`, `meta.immediate = true`,
+  never touching the typed draft or standing contributions (Voice's independent Send).
+- Five real `EditorExtension`s (`packages/content-ui/src/`): `emojiExtension`/
+  `mentionExtension` (unchanged, trailing `actionsEl`), and — **resolved, no longer
+  deferred** — `attachmentExtension`/`locationExtension`/`voiceExtension`, all three
+  generalized from `apps/chat/client.js`'s own already-proven implementations (its
+  `<qu-asset-upload hide-picker>` usage, `shareLocation()`, and the complete
+  Start→Pause⇄Resume→Finish→Preview→Send/Discard `MediaRecorder` state machine), not
+  reinvented. `voiceExtension` registers BOTH a leading-slot trigger AND a
+  `registerSubmitCandidate()` (`when: !hasText && !hasContribution`) — the mic-morph the
+  brainstorming's original Voice discussion wanted, now a normal, general submit-slot
+  candidate instead of a one-off boundary violation.
 - `ContentComposer` = `mountContentComposer()` (`packages/content-ui/src/content-composer.js`)
-  — wraps `mountContentEditor()`, builds `createContent({text, format})` on submit, calls
-  `onSubmit(content)`, clears the editor. `format` is still a plain, explicit option, NOT yet
-  resolved through the global/per-EntityType/per-device/user-preference chain described
-  above — there is no persisted config store yet for a resolver to read from (`EntityType` is
-  still static-only, §10), so that resolution chain remains the real, still-open next step.
-- **Not migrated yet**: `apps/forum/client.js` keeps its own hand-wired composer (the exact
-  five-function assembly `ContentEditor`/`EditorExtension` generalizes) — swapping it for
-  `mountContentComposer()` is real app-migration work, verified live, deliberately kept
-  separate from proving the contract itself (same discipline Phase 1/2 already followed).
+  — wraps `mountContentEditor()`, builds `createContent({text, format, attachments:
+  extras.attachments, location: extras.location})` on submit, calls `onSubmit(content)`, and
+  clears the draft + contributions ONLY for a normal submit (`meta.immediate === false`) —
+  never for a `submitNow()`-driven one, which has nothing of its own to clear. `format` is
+  still a plain, explicit option, NOT yet resolved through the global/per-EntityType/
+  per-device/user-preference chain described above — there is no persisted config store yet
+  for a resolver to read from (`EntityType` is still static-only, §10), so that resolution
+  chain remains the real, still-open next step.
+- **Still not migrated**: `apps/chat/client.js` keeps its own hand-wired implementations —
+  this round generalized their PROVEN LOGIC into `content-ui`, it did not yet swap Chat itself
+  over to consume the generalized version. `apps/forum/client.js` likewise keeps its own
+  composer. Both are real app-migration work, deliberately kept separate from proving the
+  contracts themselves (same discipline every round has followed).
+- **Deliberately not built**: a Markdown toolbar (blocked on a real gap — no precise
+  caret/selection-coordinate measurement utility exists in this codebase yet, per
+  `mention-autocomplete.js`'s own doc comment); a "+"-menu that groups Attachment/Location/
+  Voice into one further-collapsed trigger beyond what `'inline-then-menu'` already gives —
+  each is independently registered via `registerAction()`, deliberately not coupled to each
+  other, so a future grouping change only touches call sites, not the extensions themselves.
 
 ## 6. Slot taxonomy — one consolidated table
 
@@ -393,17 +417,32 @@ The brainstorming's insight that Navigation and FAB are themselves just Slots wi
 | Per-app `contributes` points (e.g. `contact-row` action) | `ExtensionPointHost` / `actionsForSlot()` | already real |
 | App navigation (`navigation`, `views`, `settings` sections) | `mountAppTemplate`'s `AppConfig` | already real, but currently a static link list, not ranked/grouped contributions from multiple sources |
 | Primary create action (FAB) | `mountAppTemplate`'s `primaryAction` | already real for **one** static action; no resolver for multiple candidate actions |
-| `content-editor.actions`, `content-editor.attachments` | new `ExtensionPointHost`-style slots inside `ContentEditor` (§5) | **new** |
+| `content-editor` leading slot / submit control | `mountResolvedSlot()` (`@qu/ui`, see below) — **implemented** | `registerAction()`/`registerSubmitCandidate()` (§5) |
 | `entity-item.actions`, `entity-detail.context` | new slots any EntityType's list/detail template exposes, generalizing the per-Thread-message context menu already in `packages/thread-ui/src/context-menu.js` | **new**, direct generalization of existing code |
 
-**Presentation Resolver (new, §17 of the brainstorming, correctly identified as missing):**
-an app declares one or more candidate primary actions with a `priority`/`preferred`
-hint (`fab`, `toolbar`, `menu`); a resolver — living in `packages/ui` beside
-`app-template.js`, not a new package — decides, from viewport/device/action count, whether
-to render a single FAB, an expandable FAB, an action sheet, or a desktop toolbar/menu. This
-replaces `app-template.js`'s current single-`primaryAction` link with a list-aware version;
-existing single-action callers keep working unchanged (a list of one collapses to today's
-behavior exactly).
+**Presentation Resolver — implemented**: `mountResolvedSlot()`
+(`packages/ui/src/slot-resolver.js`), exactly the concept §17 of the brainstorming named as
+missing, now a real, reusable Core primitive rather than only a documented aspiration. Lives
+in `packages/ui` beside `app-template.js` as originally planned. A consumer declares
+candidate `SlotItem`s (`{id, icon?, label?, order?, onClick?, mount?, when?}`); the resolver
+decides HOW they're presented:
+
+- `'inline'` — every item its own button/widget.
+- `'menu'` — all items collapse into one `@qu/thread-ui` `renderContextMenu()` trigger (not a
+  second menu implementation — reuses the exact mechanism `apps/chat/client.js`'s own "+"
+  button already uses).
+- `'inline-then-menu'` — first `threshold` items inline, the rest collapse into one "More"
+  trigger — the concrete answer to "ab X Items als Menü, Rest zusammengeklappt."
+- `'switch'` — exactly one item renders, the first whose `when(state)` is true (IF/ELSE,
+  generalized to N candidates) — what makes the ContentEditor's Send/Voice mic-morph (§5) a
+  normal mechanism instead of a special case.
+
+**First real consumer**: `ContentEditor`'s leading action slot (`'inline-then-menu'`,
+configurable) and its submit control (`'switch'`) — see §5. **Scoped for now**: this round
+wires the resolver into `ContentEditor` only; `app-template.js`'s FAB/Nav still use their
+original mechanism (`primaryAction`'s single-link shape unchanged) — the resolver is built
+generically enough to serve that later (same `SlotItem`/strategy shape), per this section's
+original plan, but that wiring is separate, not-yet-done work.
 
 ## 7. Domain Services — kept as real domain logic
 

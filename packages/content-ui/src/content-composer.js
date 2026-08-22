@@ -17,27 +17,46 @@ import { mountContentEditor } from './content-editor.js';
  * config store yet for a resolver to read from (`EntityType` is still
  * static-only, see docs/v4-concept.md §10), so building that resolution
  * chain now would be speculative ahead of a real caller.
+ *
+ * `ContentEditor`'s `extras` (attachments/location, contributed by
+ * extensions via `contributeContent()`/`submitNow()` - see
+ * `content-editor.js`'s own doc comment) are folded straight into the
+ * `createContent()` call, so `onSubmit` always receives one complete,
+ * storage-ready `Content` object regardless of whether it came from typed
+ * text, a picked attachment, a shared location, or (Voice) an
+ * attachment-only `submitNow()` call with no text at all.
+ *
+ * The draft/standing contributions are only cleared after a NORMAL submit
+ * (`meta.immediate === false`) - an `submitNow()`-driven submit
+ * (`meta.immediate === true`, Voice's own independent Send) has nothing of
+ * its own to clear and must NOT wipe an unrelated typed draft or a pending
+ * attachment meant for the next, separate normal submit.
  */
 
 /**
  * @param {HTMLElement} container
  * @param {object} [options]
  * @param {string} [options.format='plain'] - One of `CONTENT_FORMATS` (`@qu/services`).
- * @param {(content: {text: string, format: string, attachments: object[]}) => void} [options.onSubmit]
+ * @param {boolean} [options.requireText=true] - See `mountContentEditor()`'s own doc comment.
+ * @param {(content: {text: string, format: string, attachments: object[], location: object|null}) => void} [options.onSubmit]
  * @param {string} [options.placeholder]
  * @param {number} [options.minRows]
  * @param {number} [options.maxRows]
  * @param {Array<object>} [options.extensions] - See `mountContentEditor()`'s own doc comment for the `EditorExtension` contract.
  * @param {string} [options.submitLabel]
+ * @param {object} [options.leadingSlot] - See `mountContentEditor()`'s own doc comment.
  * @returns {{editor: ReturnType<typeof mountContentEditor>, stop: () => void}}
  */
 export function mountContentComposer(container, { format = 'plain', onSubmit, ...editorOptions } = {}) {
   const editor = mountContentEditor(container, editorOptions);
 
-  editor.onSubmit((text) => {
-    const content = createContent({ text, format });
+  editor.onSubmit((text, extras, meta) => {
+    const content = createContent({ text, format, attachments: extras.attachments, location: extras.location });
     onSubmit?.(content);
-    editor.setValue('');
+    if (!meta.immediate) {
+      editor.setValue('');
+      editor.clearContributions();
+    }
   });
 
   return { editor, stop: () => editor.stop() };
