@@ -76,6 +76,24 @@ function freshQu() {
   return qu;
 }
 
+/**
+ * Writes a signed QuBit with an EXPLICIT `ts` (not `Date.now()`) - stands in
+ * for a `declined`/`hungup` signal from a call attempt that ended a while
+ * ago, arriving late (see the staleness tests below). `qu.put()` itself has
+ * no way to override `ts` (`createQuBit()` always stamps `Date.now()`), so
+ * this builds and signs the QuBit by hand, matching `QuStore#seal()`'s own
+ * payload shape exactly, then uses `putSealed()` (bypasses SEAL, stores
+ * as-is) to land it with the chosen `ts`.
+ */
+async function putStaleSigned(qu, path, val, ts, identity) {
+  const signKey = await identity.getMainKey();
+  const quBit = { path, val, ts, pub: QuCrypto.toBase64(signKey.publicKey), sig: null };
+  const payload = JSON.stringify({ path: quBit.path, val: quBit.val, ts: quBit.ts, pub: quBit.pub });
+  const sigBytes = await QuCrypto.sign(new TextEncoder().encode(payload), signKey.privateKeyPkcs8);
+  quBit.sig = QuCrypto.toBase64(sigBytes);
+  await qu.putSealed(path, quBit);
+}
+
 test('connectPeer() calls transport.addPeer() with the remote pubkey', async () => {
   const qu = freshQu();
   const { identity: identityA, pub: pubA } = await freshIdentity();
@@ -498,6 +516,28 @@ test('a decline signed by a non-member is ignored', async () => {
   assert.equal(declined.length, 0);
 });
 
+test('a decline signal older than connectPeer() itself is ignored (and re-tombstoned) - same staleness guard as hungup', async () => {
+  const qu = freshQu();
+  const { identity: identityA, pub: pubA } = await freshIdentity();
+  const { identity: identityB, pub: pubB } = await freshIdentity();
+  const pairKey = webrtcPairKey(pubA, pubB);
+
+  const transportA = new FakeWebRTCTransport();
+  const serviceA = new WebRtcSignalService(qu, identityA, transportA);
+  const declined = [];
+  serviceA.onDeclined((remotePub) => declined.push(remotePub));
+
+  await serviceA.connectPeer('space1', 'thread1', pubB, [pubA, pubB], { initiator: true }); // stamps this pair's own startedAt
+
+  // Arrives AFTER connectPeer() (a live push) but carries an OLD `ts` -
+  // same reasoning as the matching hangup staleness test below.
+  await putStaleSigned(qu, webrtcDeclinePath('space1', 'thread1', pairKey), { declined: true, from: pubB }, Date.now() - 60_000, identityB);
+
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(declined.length, 0);
+  await waitUntil(async () => (await qu.get(webrtcDeclinePath('space1', 'thread1', pairKey)))?.val === null, 500);
+});
+
 // ===== hangupCall()/onHangup() =====
 
 test('hangupCall() writes a signed hangup QuBit without requiring connectPeer() to have been called first', async () => {
@@ -566,4 +606,56 @@ test('a hangup signed by a non-member is ignored', async () => {
 
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal(hungUp.length, 0);
+});
+
+test('a hangup signal older than connectPeer() itself is ignored (and re-tombstoned), not treated as ending the CURRENT attempt', async () => {
+  // The real, reported bug this guards: pair-scoped signaling paths are
+  // reused across separate call attempts between the same two people (see
+  // webrtcHangupPath()'s own doc comment) - a REDUNDANT hangup write left
+  // over from an already-ended PREVIOUS call attempt (e.g. apps/phone's own
+  // call.js hangUp(), torn down before it learned the call already ended -
+  // see that function's own `ended` guard doc comment) must never be
+  // misread as ending a brand NEW attempt just because it happens to land
+  // late, during that new attempt's own connectPeer().
+  const qu = freshQu();
+  const { identity: identityA, pub: pubA } = await freshIdentity();
+  const { identity: identityB, pub: pubB } = await freshIdentity();
+  const pairKey = webrtcPairKey(pubA, pubB);
+
+  const transportA = new FakeWebRTCTransport();
+  const serviceA = new WebRtcSignalService(qu, identityA, transportA);
+  const hungUp = [];
+  serviceA.onHangup((remotePub) => hungUp.push(remotePub));
+
+  await serviceA.connectPeer('space1', 'thread1', pubB, [pubA, pubB], { initiator: true }); // stamps this pair's own startedAt
+
+  // Arrives AFTER connectPeer() (a live push, same delivery timing every
+  // other test in this file uses) but carries an OLD `ts` - exactly what a
+  // real, delayed redundant hangup write looks like: written by B's OWN
+  // call.js a while ago, only actually landing here just now.
+  await putStaleSigned(qu, webrtcHangupPath('space1', 'thread1', pairKey), { hungUp: true, from: pubB }, Date.now() - 60_000, identityB);
+
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(hungUp.length, 0); // NOT treated as this attempt ending
+  // Re-tombstoned so it doesn't linger to confuse a THIRD attempt either.
+  await waitUntil(async () => (await qu.get(webrtcHangupPath('space1', 'thread1', pairKey)))?.val === null, 500);
+});
+
+test('a hangup signal NEWER than connectPeer() (the ordinary case) still fires normally - the staleness guard does not break real hangups', async () => {
+  const qu = freshQu();
+  const { identity: identityA, pub: pubA } = await freshIdentity();
+  const { identity: identityB, pub: pubB } = await freshIdentity();
+  const transportA = new FakeWebRTCTransport();
+  const serviceA = new WebRtcSignalService(qu, identityA, transportA, { cleanupDelayMs: 10, negotiationTimeoutMs: 100_000 });
+  await serviceA.connectPeer('space1', 'thread1', pubB, [pubA, pubB], { initiator: true });
+  transportA.emitPeerConnected(pubB);
+
+  const hungUp = [];
+  serviceA.onHangup((remotePub) => hungUp.push(remotePub));
+
+  const pairKey = webrtcPairKey(pubA, pubB);
+  await putStaleSigned(qu, webrtcHangupPath('space1', 'thread1', pairKey), { hungUp: true, from: pubB }, Date.now() + 1000, identityB); // AFTER connectPeer()'s own startedAt
+
+  await waitUntil(() => hungUp.length > 0);
+  assert.equal(hungUp[0], pubB);
 });

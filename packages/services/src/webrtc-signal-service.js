@@ -39,6 +39,18 @@ const DEFAULT_NEGOTIATION_TIMEOUT_MS = 20_000;
  * show a visible "couldn't connect" state instead of silently hanging - the
  * exact gap a symmetric-NAT/no-TURN failure used to fall into unnoticed.
  *
+ * STALE `declined`/`hungup` SIGNALS: these two paths are one-shot/terminal -
+ * their only meaning is "a specific past call attempt already ended" - so
+ * `connectPeer()` stamps a `startedAt` on each pair, and `#handleStorageChange()`
+ * ignores (and re-tombstones) any `declined`/`hungup` write older than that -
+ * see `#tombstoneStaleSignal()`'s own doc comment for the real, reported bug
+ * this closes (a redundant, delayed `hangupCall()` write from a call that
+ * already ended landing during a BRAND NEW call attempt between the same two
+ * people). offer/answer/ICE are deliberately NOT filtered this way - they
+ * legitimately predate the READER's own `connectPeer()` call in the ordinary
+ * case (see that method's own doc comment on why backfilling them is the
+ * whole point).
+ *
  * CALLER-INITIATED CALLS (`apps/phone`): `connectPeer()`'s deterministic
  * initiator tie-break (see `WebRTCTransport`'s own doc comment) is right for
  * a mesh where every peer eventually connects to every other one (Geochase),
@@ -157,7 +169,7 @@ export class WebRtcSignalService {
     const selfPub = await this.#myActorPub();
     const pairKey = webrtcPairKey(selfPub, remotePub);
     if (!this.#pairs.has(pairKey)) {
-      this.#pairs.set(pairKey, { spaceId, threadId, remotePub, memberPubs, selfPub, iceSeq: 0, timeoutTimer: null });
+      this.#pairs.set(pairKey, { spaceId, threadId, remotePub, memberPubs, selfPub, iceSeq: 0, timeoutTimer: null, startedAt: Date.now() });
       this.#armTimeout(pairKey);
       const prefix = `/store/${spaceId}/threads/${threadId}/webrtc/${pairKey}/`;
       this.#subscribe?.(prefix);
@@ -337,14 +349,50 @@ export class WebRtcSignalService {
       } else if (rel.startsWith('ice/') && val?.candidate) {
         this.#transport.handleIncomingSignal(pair.remotePub, { type: 'ice', candidate: val.candidate });
       } else if (rel === 'declined' && val?.declined) {
+        if (quBit.ts < pair.startedAt) { this.#tombstoneStaleSignal(path); return; }
         for (const cb of this.#declinedCallbacks) cb(pair.remotePub);
         this.#cleanup(pairKey).catch((err) => console.error('[WebRtcSignalService] cleanup after decline failed:', err));
       } else if (rel === 'hungup' && val?.hungUp) {
+        if (quBit.ts < pair.startedAt) { this.#tombstoneStaleSignal(path); return; }
         for (const cb of this.#hangupCallbacks) cb(pair.remotePub);
         this.#cleanup(pairKey).catch((err) => console.error('[WebRtcSignalService] cleanup after hangup failed:', err));
       }
       return;
     }
+  }
+
+  /**
+   * A `declined`/`hungup` write that predates `connectPeer()` being called
+   * for THIS attempt (`quBit.ts < pair.startedAt`) is a leftover from a
+   * PREVIOUS, already-ended call attempt between this same pair - these two
+   * signal types are one-shot/terminal (their only meaning is "a specific
+   * past attempt is over"), unlike offer/answer/ICE, which legitimately
+   * predate the READER's own `connectPeer()` call in the ordinary case (the
+   * caller writes the offer before the callee ever opens the call view -
+   * see `connectPeer()`'s own doc comment) and must never be filtered this
+   * way. A real, reported gap this closes: a call's `hangUp()` sends its
+   * `hangupCall()` write fire-and-forget (`call.js`'s own doc comment) -
+   * if THIS side's own view is torn down (e.g. navigating away) before the
+   * OTHER side's termination signal has been received and acknowledged
+   * (`call = null`), the teardown's own `call?.hangUp()` still fires,
+   * writing a REDUNDANT hangup to the SAME pair-scoped path (paths are not
+   * per-call-attempt, see `webrtcHangupPath()`'s own doc comment) - which,
+   * delayed, can land during a BRAND NEW call attempt between the same two
+   * people and get misread as ending THAT one instead. Tombstoned here
+   * (not just ignored) so it doesn't linger to confuse a THIRD attempt.
+   *
+   * Clock-skew caveat, accepted not solved: `quBit.ts`/`pair.startedAt` are
+   * each stamped by their own device's local clock - a large skew between
+   * the two peers' clocks could theoretically misjudge a genuinely-current
+   * signal as stale. Not solved here (same "honest subset" trade-off this
+   * whole call-timing model already makes elsewhere, e.g. the fixed
+   * `negotiationTimeoutMs` ring duration) - the gap this closes is a
+   * previous, CLEARLY-ended call's signal arriving late, not a close race.
+   * @param {string} path
+   */
+  async #tombstoneStaleSignal(path) {
+    const signKey = await this.#identity.getMainKey();
+    await this.#qu.put(path, null, { signWith: signKey.privateKeyPkcs8, writerPub: signKey.publicKey }).catch(() => {});
   }
 
   /**
