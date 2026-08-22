@@ -342,11 +342,45 @@ Content  ←──────────────┐
   the resolution order the brainstorming specifies in its §7. A Chat message can stay
   `plain`/`markdown` while a CMS Page defaults to `richtext`/`wysiwyg`, with zero app code
   change, because the app only ever asked for "a ContentEditor for this EntityType," never
-  for a concrete editor implementation.
+  for a concrete editor implementation. **Not yet implemented** — see "Resolved" below for
+  what's real today versus this eventual goal.
 - Package placement: a new `packages/content-ui` sits beside existing `packages/thread-ui`
   and `packages/ui`; `packages/thread-ui`'s existing composer plugins are re-exported from
   (or migrated into) it as the first three `EditorExtension` implementations, so nothing
   built on them today breaks.
+
+**Resolved (implemented):** `packages/content-ui` is real, with the exact `Content ↔
+ContentRenderer`/`ContentEditor` split diagrammed above:
+
+- `ContentRenderer` = `renderContent(content)` (`packages/services/src/content.js`) —
+  deliberately DOM-free, living beside `createContent()` rather than in `content-ui`, same
+  reasoning `thread-formatting.js`'s own `formatMarkdown()` is already DOM-free. Dispatches on
+  `content.format`: `'plain'` (HTML-escape + `<br>`, reusing `thread-formatting.js`'s newly
+  exported `escapeHtml()`), `'markdown'` (delegates to `formatMarkdown()`), `'richtext'`
+  (throws a documented error — no WYSIWYG editor exists in this codebase yet to have produced
+  richtext Content in the first place, an honest gap, not a silent wrong-looking fallback).
+- `ContentEditor` = `mountContentEditor()` (`packages/content-ui/src/content-editor.js`) — a
+  `<textarea>` (wired through `@qu/thread-ui`'s existing `mountComposerAutogrow()`, built in,
+  not optional) + submit + an `actionsEl` slot, exactly the "text input + submit + slots"
+  primitive this section calls for.
+- `EditorExtension` contract = `{id, mount(ctx) -> stopFn|void}`,
+  `ctx = {textarea, actionsEl, insertText}` — realized by two extensions
+  (`emojiExtension()`/`mentionExtension()`, `packages/content-ui/src/extensions.js`), thin
+  adapters over `@qu/thread-ui`'s existing `renderEmojiPicker()`/`mountMentionAutocomplete()`,
+  not reimplementations. Attachments/Voice/Location/Markdown-toolbar extensions are
+  deliberately **not** built yet — Attachments specifically needs a real decision about
+  whether `@qu/ui`'s `<qu-asset-upload>` Custom Element becomes a `content-ui` dependency,
+  intentionally not bundled into this round; Voice/Location have no existing UI to wrap yet.
+- `ContentComposer` = `mountContentComposer()` (`packages/content-ui/src/content-composer.js`)
+  — wraps `mountContentEditor()`, builds `createContent({text, format})` on submit, calls
+  `onSubmit(content)`, clears the editor. `format` is still a plain, explicit option, NOT yet
+  resolved through the global/per-EntityType/per-device/user-preference chain described
+  above — there is no persisted config store yet for a resolver to read from (`EntityType` is
+  still static-only, §10), so that resolution chain remains the real, still-open next step.
+- **Not migrated yet**: `apps/forum/client.js` keeps its own hand-wired composer (the exact
+  five-function assembly `ContentEditor`/`EditorExtension` generalizes) — swapping it for
+  `mountContentComposer()` is real app-migration work, verified live, deliberately kept
+  separate from proving the contract itself (same discipline Phase 1/2 already followed).
 
 ## 6. Slot taxonomy — one consolidated table
 

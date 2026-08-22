@@ -25,6 +25,7 @@ gives you.
 9. [Styling](#9-styling) — `injectStyle()` convention
 10. [Templating](#10-templating) — `apps/profile`'s `template`/`style` system, worked example
 11. [`@qu/thread-ui`](#11-quthread-ui) — `insertAtCursor()`, `renderEmojiPicker()`, `mountMentionAutocomplete()`
+12. [`@qu/content-ui`](#12-qucontent-ui) — `mountContentEditor()`, `mountContentComposer()`, `EditorExtension`s
 
 ---
 
@@ -579,7 +580,7 @@ this class's internals, never a call site (see the file's own doc comment).
 `docs/v4-concept.md` §3.3 specifies: `topic`, `message`, `article`, `page`,
 `notification`, `task`, `event`.
 
-#### `createContent(...)` / `CONTENT_FORMATS` (`content.js`)
+#### `createContent(...)` / `renderContent(...)` / `CONTENT_FORMATS` (`content.js`)
 
 `createContent({ text, format = 'plain', attachments = [] })` — the
 universal, persisted Content shape (`docs/v4-concept.md` §3.2/§5),
@@ -588,6 +589,13 @@ unknown `format` (one of `CONTENT_FORMATS`: `'plain'`, `'markdown'`,
 `'richtext'`) or non-array `attachments`. Content is a field embedded in
 whatever Entity/Thread-message document carries it — it has no storage path
 of its own.
+
+`renderContent(content)` — the `ContentRenderer` (§5/§12 below): pure,
+DOM-free Content → HTML, dispatched on `content.format`. `'plain'` HTML-
+escapes and converts newlines to `<br>` (reusing `thread-formatting.js`'s own
+`escapeHtml()`); `'markdown'` delegates to `formatMarkdown()`; `'richtext'`
+throws a documented error — no WYSIWYG editor exists in this codebase yet to
+have produced richtext Content in the first place.
 
 #### `BookmarksService`, generalized
 
@@ -1061,6 +1069,50 @@ insert the right one instead of typing a 16–64 character pub blind.
   complete, not pixel-perfect (a precise caret-coordinate measurement needs
   a hidden mirror-div technique this repo has no precedent for).
 - Returns a stop function — removes listeners, closes any open dropdown.
+
+---
+
+## 12. `@qu/content-ui`
+
+Quniverse V4's ContentEditor layer (`docs/v4-concept.md` §5): `mountContentEditor()`, the
+smallest reusable editor primitive, and `mountContentComposer()`, which wraps it for a
+posting context and produces `@qu/services`' `createContent()`-shaped `Content` on submit.
+Same "plain functions, no Custom Elements" philosophy as `@qu/thread-ui` — in fact it's built
+directly ON `@qu/thread-ui`'s existing primitives, not a reimplementation of any of them.
+
+### `mountContentEditor(container, { placeholder, minRows, maxRows, extensions = [], submitLabel = 'Send' } = {})`
+
+Renders a `<textarea>` (wired through `@qu/thread-ui`'s `mountComposerAutogrow()` — every
+editor gets this, it's not optional) + a submit button + an `actionsEl` row `extensions[]`
+mount their own UI into. Enter submits (Shift+Enter inserts a real newline); submitting an
+empty/whitespace-only value is a no-op.
+
+Returns `{ textarea, actionsEl, getValue(), setValue(text), focus(), onSubmit(handler), stop() }`.
+
+**The `EditorExtension` contract**: `{ id, mount(ctx) }`, where `ctx = { textarea, actionsEl,
+insertText }` (`insertText` wraps `@qu/thread-ui`'s `insertAtCursor()`). A `mount()` that
+returns a function is treated as a stop function, collected and called by the editor's own
+`stop()`. Two kinds, per `docs/v4-concept.md` §5/§12:
+
+- **UI-slot extension** — has a visible control, appends into `ctx.actionsEl` (e.g. `emojiExtension`).
+- **Input-hook extension** — a pure textarea-level behavior with no button of its own, only
+  ever touches `ctx.textarea` (e.g. `mentionExtension`).
+
+### `emojiExtension({ trigger = '😀', triggerTitle } = {})` / `mentionExtension({ services, subscribe } = {})`
+
+Thin `EditorExtension` adapters over `@qu/thread-ui`'s `renderEmojiPicker()`/
+`mountMentionAutocomplete()` — the exact two primitives `apps/forum/client.js` already calls
+by hand for its own composer today. Attachments/Voice/Location/Markdown-toolbar extensions
+are deliberately not built yet (see `docs/v4-concept.md`'s ContentEditor-layer plan).
+
+### `mountContentComposer(container, { format = 'plain', onSubmit, ...editorOptions } = {})`
+
+Wraps `mountContentEditor()` for an interactive posting context: on submit, builds
+`createContent({ text, format })` (`@qu/services`), calls `onSubmit(content)`, and clears the
+editor. `format` is a plain, explicit option for now — not yet resolved through the
+global/per-context/per-device/user-preference chain `docs/v4-concept.md` §5 describes as the
+eventual goal, since there is no persisted config store yet for a resolver to read from.
+Returns `{ editor, stop() }` (`editor` is `mountContentEditor()`'s own return value).
 
 ---
 

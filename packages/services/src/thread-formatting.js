@@ -55,7 +55,14 @@ export function extractMentions(body) {
   return [...found];
 }
 
-function escapeHtml(text) {
+/**
+ * HTML-escapes `text` - exported (not just an internal `formatMarkdown()`
+ * step) so Quniverse V4's `renderContent()` (`content.js`) can reuse the
+ * SAME escaping for its `'plain'` format renderer instead of a second,
+ * independently-maintained copy of the same security-sensitive logic.
+ * @param {string} text @returns {string}
+ */
+export function escapeHtml(text) {
   return text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
