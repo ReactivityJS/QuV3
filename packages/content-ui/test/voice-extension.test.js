@@ -43,8 +43,8 @@ function fakeAssetService(uploadResult = { name: 'voice.webm', mime: 'audio/webm
   };
 }
 
-function triggerBtn(host) {
-  return host.querySelector('.qu-content-editor-leading button');
+function submitBtn(host) {
+  return host.querySelector('.qu-content-editor-submit-slot button');
 }
 function normalRowHidden(host) {
   return host.querySelector('.qu-content-editor-row').hidden;
@@ -53,10 +53,10 @@ function panel(host) {
   return host.querySelector('.qu-content-ui-voice-recorder');
 }
 
-test('registers a 🎙️ leading trigger', () => {
+test('the submit button shows 🎙️ when the composer is empty (the only way to start a recording)', () => {
   const host = makeHost();
   mountContentEditor(host, { extensions: [voiceExtension({ assetService: fakeAssetService(), spaceId: 'space1' })] });
-  assert.equal(triggerBtn(host).textContent, '🎙️');
+  assert.equal(submitBtn(host).textContent, '🎙️');
 });
 
 test('labels overrides the recorder panel\'s button titles (defaults to English otherwise)', async () => {
@@ -70,7 +70,7 @@ test('labels overrides the recorder panel\'s button titles (defaults to English 
     })],
   });
 
-  triggerBtn(host).click();
+  submitBtn(host).click();
   await new Promise((resolve) => setTimeout(resolve, 0));
   const buttons = [...panel(host).querySelectorAll('button')];
   assert.ok(buttons.some((b) => b.title === 'Verwerfen'));
@@ -95,12 +95,12 @@ test('the submit button shows 🎙️ when the composer is empty, and reverts to
   assert.equal(submitBtn().textContent, '🎙️');
 });
 
-test('starting a recording (via the leading trigger) swaps the chrome to the recorder panel', async () => {
+test('starting a recording via the empty-composer submit slot swaps the chrome to the recorder panel', async () => {
   installVoiceMocks();
   const host = makeHost();
   const editor = mountContentEditor(host, { extensions: [voiceExtension({ assetService: fakeAssetService(), spaceId: 'space1' })] });
 
-  triggerBtn(host).click();
+  submitBtn(host).click(); // shows 🎙️ when empty - click it
   await new Promise((resolve) => setTimeout(resolve, 0)); // getUserMedia() resolves async
   assert.equal(normalRowHidden(host), true);
   assert.ok(panel(host));
@@ -109,24 +109,12 @@ test('starting a recording (via the leading trigger) swaps the chrome to the rec
   editor.stop(); // discards the still-live recording - see stop()'s own doc comment; leaving the elapsed-time interval running would hang node --test after this file finishes
 });
 
-test('starting a recording via the empty-composer submit slot works the same way', async () => {
-  installVoiceMocks();
-  const host = makeHost();
-  const editor = mountContentEditor(host, { extensions: [voiceExtension({ assetService: fakeAssetService(), spaceId: 'space1' })] });
-
-  host.querySelector('.qu-content-editor-submit-slot button').click(); // shows 🎙️ when empty - click it
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(normalRowHidden(host), true);
-
-  editor.stop();
-});
-
 test('pause -> resume -> finish reaches PREVIEW (not an immediate send), with a real <audio> src', async () => {
   installVoiceMocks();
   const host = makeHost();
   mountContentEditor(host, { extensions: [voiceExtension({ assetService: fakeAssetService(), spaceId: 'space1' })] });
 
-  triggerBtn(host).click();
+  submitBtn(host).click();
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   const buttons = panel(host).querySelectorAll('button');
@@ -153,9 +141,9 @@ test('Send in preview uploads the recording and calls onSubmit via submitNow (in
   const submitted = [];
   editor.onSubmit((text, extras) => submitted.push({ text, extras }));
 
-  editor.setValue('an unrelated draft'); // must survive untouched
-  triggerBtn(host).click();
+  submitBtn(host).click(); // only reachable while the composer is empty - start recording first
   await new Promise((resolve) => setTimeout(resolve, 0));
+  editor.setValue('an unrelated draft'); // typed while recording - must survive untouched
   panel(host).querySelectorAll('button')[2].click(); // finish -> preview
   await panel(host).querySelectorAll('button')[3].click(); // send
 
@@ -174,7 +162,7 @@ test('Discard from a live recording returns to the normal composer with nothing 
   const submitted = [];
   editor.onSubmit((text, extras) => submitted.push(extras));
 
-  triggerBtn(host).click();
+  submitBtn(host).click();
   await new Promise((resolve) => setTimeout(resolve, 0));
   panel(host).querySelectorAll('button')[0].click(); // discard while recording
   assert.equal(normalRowHidden(host), false);
@@ -188,7 +176,7 @@ test('Discard from PREVIEW also returns to the normal composer with nothing sent
   const submitted = [];
   editor.onSubmit((text, extras) => submitted.push(extras));
 
-  triggerBtn(host).click();
+  submitBtn(host).click();
   await new Promise((resolve) => setTimeout(resolve, 0));
   panel(host).querySelectorAll('button')[2].click(); // finish -> preview
   panel(host).querySelectorAll('button')[0].click(); // discard from preview
@@ -202,18 +190,18 @@ test('unsupported MediaRecorder/getUserMedia degrades silently - trigger present
   const host = makeHost();
   mountContentEditor(host, { extensions: [voiceExtension({ assetService: fakeAssetService(), spaceId: 'space1' })] });
 
-  assert.ok(triggerBtn(host));
-  assert.doesNotThrow(() => triggerBtn(host).click());
+  assert.ok(submitBtn(host));
+  assert.doesNotThrow(() => submitBtn(host).click());
   assert.equal(normalRowHidden(host), false);
 });
 
-test('stop() while a recording is active discards it and unregisters the trigger/submit candidate', async () => {
+test('stop() while a recording is active discards it and tears down cleanly', async () => {
   installVoiceMocks();
   const host = makeHost();
   const editor = mountContentEditor(host, { extensions: [voiceExtension({ assetService: fakeAssetService(), spaceId: 'space1' })] });
 
-  triggerBtn(host).click();
+  submitBtn(host).click();
   await new Promise((resolve) => setTimeout(resolve, 0));
-  editor.stop();
-  assert.equal(triggerBtn(host), null);
+  assert.doesNotThrow(() => editor.stop());
+  assert.equal(submitBtn(host), null); // whole editor torn down
 });

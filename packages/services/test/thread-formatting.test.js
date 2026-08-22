@@ -74,6 +74,54 @@ test('formatMarkdown() converts newlines to <br>', () => {
   assert.equal(formatMarkdown('line one\nline two'), 'line one<br>line two');
 });
 
+test('formatMarkdown() renders strikethrough', () => {
+  assert.equal(formatMarkdown('~~gone~~'), '<s>gone</s>');
+});
+
+test('formatMarkdown() groups consecutive "1. " lines into one <ol>', () => {
+  const html = formatMarkdown('1. first\n2. second\n3. third');
+  assert.equal(html, '<ol><li>first</li><li>second</li><li>third</li></ol>');
+});
+
+test('formatMarkdown() groups consecutive "*"/"-" lines into one <ul>, merging both markers', () => {
+  const html = formatMarkdown('* first\n- second\n* third');
+  assert.equal(html, '<ul><li>first</li><li>second</li><li>third</li></ul>');
+});
+
+test('formatMarkdown() renders inline formatting inside a list item', () => {
+  const html = formatMarkdown('1. **bold** item');
+  assert.equal(html, '<ol><li><strong>bold</strong> item</li></ol>');
+});
+
+test('formatMarkdown() joins a list to surrounding plain text lines via <br>', () => {
+  const html = formatMarkdown('intro\n1. item\noutro');
+  assert.equal(html, 'intro<br><ol><li>item</li></ol><br>outro');
+});
+
+test('formatMarkdown() splits two list groups separated by a blank line into two lists', () => {
+  const html = formatMarkdown('1. a\n\n1. b');
+  const matches = html.match(/<ol>/g) || [];
+  assert.equal(matches.length, 2);
+});
+
+test('formatMarkdown() switching from ordered to unordered starts a new list group', () => {
+  const html = formatMarkdown('1. a\n* b');
+  assert.equal(html, '<ol><li>a</li></ol><br><ul><li>b</li></ul>');
+});
+
+test('formatMarkdown() never misparses "**bold**" as a list item', () => {
+  const html = formatMarkdown('**bold** line');
+  assert.ok(!html.includes('<ul>'));
+  assert.ok(!html.includes('<ol>'));
+  assert.equal(html, '<strong>bold</strong> line');
+});
+
+test('formatMarkdown() resolves a placeholder nested inside another protected segment (e.g. a link whose text contains inline code)', () => {
+  const html = formatMarkdown('[see `code`](https://example.com)');
+  assert.ok(!html.includes('&qufmt'));
+  assert.equal(html, '<a href="https://example.com" rel="noopener noreferrer">see <code class="qu-inline-code">code</code></a>');
+});
+
 test('applyFormatting() with no formatters returns null html and empty mentions', () => {
   assert.deepEqual(applyFormatting('hello @' + 'a'.repeat(20)), { formattedHtml: null, mentions: [] });
 });

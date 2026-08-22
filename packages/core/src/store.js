@@ -238,7 +238,7 @@ export class QuStore {
       const outcome = await engine.put(ctx);
       if (!outcome) continue;
       if (outcome.handled) {
-        await this.#notify.emit('storage:put', { path, quBit: outcome.result });
+        await this.#notify.emit('storage:put', { path: outcome.result.path, quBit: outcome.result });
         return outcome.result;
       }
       if ('value' in outcome) ctx.val = outcome.value;

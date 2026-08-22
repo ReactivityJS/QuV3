@@ -15,7 +15,9 @@
  *     substitutions applied in a fixed order chosen so none of them can
  *     corrupt one another: protect code spans first (nothing after this
  *     point may rewrite what's inside a code span - the same rule a real
- *     parser follows), then mentions/hashtags/spoilers/bold/italic/links/
+ *     parser follows), then lists (structural markers must be gone before
+ *     italic's `*` regex can misread one as its own delimiter), then
+ *     mentions/hashtags/spoilers/strikethrough/bold/italic/links/
  *     auto-links/line-breaks, then restore the protected code last. A real
  *     deployment wanting full Markdown support swaps this one function for
  *     a proper library; every other part of `MessageService` is unaffected
@@ -30,6 +32,12 @@ import { URL_RE_GLOBAL } from './link-detect.js';
 const MENTION_RE = /@([A-Za-z0-9_-]{16,64})/g;
 const HASHTAG_RE = /(^|\s)#(\w+)/g;
 const SPOILER_RE = /\|\|([^|]+)\|\|/g;
+const STRIKE_RE = /~~([^~]+)~~/g;
+// Consecutive `1. `/`* `/`- ` lines only - matched by renderLists() below,
+// which groups runs of these (not a single global regex, since a "run" of
+// consecutive matching lines is exactly what becomes one <ol>/<ul>).
+const ORDERED_ITEM_RE = /^\d+\.\s+(.*)$/;
+const UNORDERED_ITEM_RE = /^[*-]\s+(.*)$/;
 // Fenced code requires a newline right after the opening ``` (even with no
 // language tag) - a same-line ```like this``` is deliberately NOT treated
 // as a fenced block (falls through to inline-code handling below instead,
@@ -98,6 +106,19 @@ export function formatMarkdown(body) {
   html = html.replace(FENCED_CODE_RE, (_m, _lang, code) => protect(`<pre class="qu-code-block"><code>${code}</code></pre>`));
   html = html.replace(INLINE_CODE_RE, (_m, code) => protect(`<code class="qu-inline-code">${code}</code>`));
 
+  // Lists - structural markers (`1. `/`* `/`- ` at line-start) are stripped
+  // and replaced with `<ol>`/`<ul>`/`<li>` BEFORE bold/italic run below, not
+  // after: italic's single-`*` regex (`[^*]` spans newlines) would otherwise
+  // greedily eat a `*` list marker as its OPENING delimiter and search for
+  // the next bare `*` anywhere later in the message, mangling everything in
+  // between (confirmed live - this is not hypothetical). Each item's TEXT is
+  // left completely raw here (not protect()-wrapped) so every transform
+  // below (mentions/hashtags/spoiler/strikethrough/bold/italic/links/
+  // auto-links) still runs over it exactly as if it were unwrapped body
+  // text - only the leading marker itself is gone, which is all that needs
+  // to happen before those transforms to avoid the conflict above.
+  html = renderLists(html);
+
   // Mentions - same pattern extractMentions() finds, rendered as a link to
   // that identity's public profile route using a short pub - not a
   // live-resolved alias: the message body is immutable once posted, and
@@ -120,6 +141,10 @@ export function formatMarkdown(body) {
   // pure UI; this only marks the span.
   html = html.replace(SPOILER_RE, '<span class="qu-spoiler">$1</span>');
 
+  // Strikethrough - `<s>` ("no longer accurate"), not `<del>` (implies
+  // revision-tracking) - matches the casual-chat-emphasis use case here.
+  html = html.replace(STRIKE_RE, '<s>$1</s>');
+
   html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
   // http(s) only, on purpose - a javascript:/data: URL here would be a
@@ -135,10 +160,54 @@ export function formatMarkdown(body) {
 
   html = html.replace(/\n/g, '<br>');
 
-  // Restore every protected segment last, in one pass - after every other
-  // transform above had its chance to run on the surrounding text only.
-  html = html.replace(PLACEHOLDER_RE, (_m, i) => protectedSegments[Number(i)]);
+  // Restore every protected segment, looped to a FIXPOINT (bounded by the
+  // small, fixed number of protect() call sites above, not input size) -
+  // not just one pass. A single pass can leave a placeholder nested inside
+  // another protected segment (e.g. a markdown link whose text contains an
+  // inline code span, `[see \`code\`](url)`) unresolved as literal
+  // "&qufmtN;" text, because protect() stores whatever string it's given
+  // as-is - including any placeholder already inside it - and one `.replace()`
+  // pass never rescans its own replacement output.
+  let previous;
+  do {
+    previous = html;
+    html = html.replace(PLACEHOLDER_RE, (_m, i) => protectedSegments[Number(i)]);
+  } while (html !== previous);
   return html;
+}
+
+/**
+ * Groups consecutive `1. `/`* `/`- ` lines into one `<ol>`/`<ul>` of `<li>`s
+ * each (`*`/`-` merged as one "unordered" kind - the simpler, honest-subset
+ * choice over strict CommonMark's per-marker-character splitting). A blank
+ * line or a switch between ordered/unordered naturally starts a new group -
+ * no special-casing needed, since neither continues the current run.
+ * @param {string} html @returns {string}
+ */
+function renderLists(html) {
+  const lines = html.split('\n');
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const isOrdered = ORDERED_ITEM_RE.test(lines[i]);
+    const isUnordered = !isOrdered && UNORDERED_ITEM_RE.test(lines[i]);
+    if (!isOrdered && !isUnordered) {
+      out.push(lines[i]);
+      i++;
+      continue;
+    }
+    const itemRe = isOrdered ? ORDERED_ITEM_RE : UNORDERED_ITEM_RE;
+    const tag = isOrdered ? 'ol' : 'ul';
+    const items = [];
+    while (i < lines.length) {
+      const match = lines[i].match(itemRe);
+      if (!match) break;
+      items.push(match[1]);
+      i++;
+    }
+    out.push(`<${tag}>${items.map((item) => `<li>${item}</li>`).join('')}</${tag}>`);
+  }
+  return out.join('\n');
 }
 
 /**

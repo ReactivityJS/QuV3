@@ -60,14 +60,20 @@
  *     "📌 Pinned" bar (`content.topicToolbar`) is the same story, once per
  *     room instead of once per message - see `mountRoomView()`'s own
  *     `toolbarRoot` for where this app renders that slot.
- *   - Mention/emoji autocomplete, markdown toolbar, attachment/location/voice
- *     capture are now `@qu/content-ui`'s `mentionExtension()`/
- *     `emojiExtension()`/`markdownToolbarExtension()`/`attachmentExtension()`/
- *     `locationExtension()`/`voiceExtension()` - the exact `EditorExtension`s
- *     `apps/forum`'s own composers already use (mention/emoji/markdown
- *     toolbar) or were originally GENERALIZED FROM this file's own earlier,
- *     hand-rolled implementations (attachment/location/voice) - adopted here
- *     as-is rather than kept as a second, diverging implementation. This
+ *   - Mention/emoji autocomplete, a flying (selection-anchored) formatting
+ *     toolbar, attachment/location/voice capture are now `@qu/content-ui`'s
+ *     `mentionExtension()`/`emojiExtension()`/`flyingToolbarExtension()`/
+ *     `attachmentExtension()`/`locationExtension()`/`voiceExtension()` -
+ *     mention/emoji are the exact `EditorExtension`s `apps/forum`'s own
+ *     composers already use; attachment/location/voice were originally
+ *     GENERALIZED FROM this file's own earlier, hand-rolled implementations
+ *     - adopted here as-is rather than kept as a second, diverging
+ *     implementation. The toolbar is Chat's OWN choice, not shared with
+ *     Forum: `flyingToolbarExtension()` (Bold/Italic/Strikethrough only,
+ *     appearing at the selection) replaced `markdownToolbarExtension()`'s
+ *     fixed row here per live-testing feedback - Forum's composers keep the
+ *     fixed row unchanged, see docs/v4-concept.md §10.2 on the two being
+ *     independent, swappable peers. This
  *     room's `readers` is passed through as each extension's own
  *     `readerPubs` so an attachment/voice recording gets the SAME end-to-end
  *     encryption as the message body sitting next to it - see
@@ -219,7 +225,7 @@ import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage, mountAppT
 import { renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, copyToClipboard, flipUpIfNeeded } from '@qu/thread-ui';
 import {
   mountContentComposer, attachmentExtension, locationExtension, voiceExtension,
-  mentionExtension, emojiExtension, markdownToolbarExtension,
+  mentionExtension, emojiExtension, flyingToolbarExtension,
 } from '@qu/content-ui';
 
 // See this file's own top doc comment's "MESSAGE CHROME" section - the
@@ -2088,7 +2094,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
       submitIcon: '➤', // compact icon - submitLabel stays the real tooltip text
       submitLabel: t('send'),
       extensions: [
-        markdownToolbarExtension(),
+        flyingToolbarExtension(),
         emojiExtension({ triggerTitle: t('insertEmoji') }),
         mentionExtension({ services, subscribe }),
         attachmentExtension({ assetService: services.assets, spaceId: SPACE_ID, readerPubs: memberPubs, triggerTitle: t('attachFile') }),

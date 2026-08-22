@@ -1003,7 +1003,7 @@ test('the composer textarea starts at ONE visual line (rows=1) - regression: an 
   }
 });
 
-test('the composer\'s leading action slot includes Attach/Share location natively, plus any plugin-contributed content.composerActions item (collapsing past the threshold into a "More" menu)', async () => {
+test('the composer\'s leading action slot includes Attach/Share location natively, plus any plugin-contributed content.composerActions item', async () => {
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');
   await mirrorProfileInto(bob, alice.qu);
@@ -1027,12 +1027,13 @@ test('the composer\'s leading action slot includes Attach/Share location nativel
   });
   try {
     await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
-    // Native Attach/Location/Voice register 3 leading items; the plugin's
-    // own content.composerActions item is a 4th, arriving async (see
-    // composerActionsExtension()'s own doc comment) - with the Presentation
-    // Resolver's default 'inline-then-menu' threshold (2), only the first 2
-    // ever render inline; the rest (voice's own trigger + the plugin item)
-    // collapse into a "More" menu.
+    // Native Attach/Location register 2 leading items (voice no longer
+    // registers a leading action - see voice-extension.js's own doc comment,
+    // it's submit-slot-only now); the plugin's own content.composerActions
+    // item is a 3rd, arriving async (see composerActionsExtension()'s own
+    // doc comment) - with the Presentation Resolver's default
+    // 'inline-then-menu' threshold (2), only the first 2 ever render inline;
+    // the plugin item collapses into a "More" menu.
     await waitFor(() => container.querySelectorAll('.qu-content-editor-leading .qu-slot-resolver-item').length === 2);
     const inlineItems = [...container.querySelectorAll('.qu-content-editor-leading .qu-slot-resolver-item')];
     assert.deepEqual(inlineItems.map((btn) => btn.textContent), ['📎', '📍']);
@@ -1042,9 +1043,9 @@ test('the composer\'s leading action slot includes Attach/Share location nativel
     moreBtn().click();
     await waitFor(() => container.querySelector('.qu-thread-ui-context-menu-panel') !== null);
     const panel = container.querySelector('.qu-thread-ui-context-menu-panel');
-    await waitFor(() => panel.querySelectorAll('.qu-thread-ui-context-menu-item').length === 2);
+    await waitFor(() => panel.querySelectorAll('.qu-thread-ui-context-menu-item').length === 1);
     const menuItems = [...panel.querySelectorAll('.qu-thread-ui-context-menu-item')].map((btn) => btn.textContent);
-    assert.deepEqual(menuItems, ['🎙️Record a voice message', '🖼️Pick from Gallery']);
+    assert.deepEqual(menuItems, ['🖼️Pick from Gallery']);
 
     const composerActionsCalls = seen.filter((call) => call.point === 'content.composerActions');
     assert.equal(composerActionsCalls.length, 1);

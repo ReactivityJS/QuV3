@@ -102,6 +102,23 @@ test('a `handled: true` engine outcome skips SEAL/PERSIST and returns its own re
   assert.equal(await qu.get('/store/asset/1'), null);
 });
 
+test('a `handled: true` engine outcome notifies with the RESULT\'s own path, not the outer put() path', async () => {
+  const qu = storeWithMemoryAdapter();
+  const customResult = { path: '/store/asset/1/meta', val: 'engine-persisted-this-itself', ts: 123, pub: null, sig: null };
+  qu.registerEngine({
+    segment: 'asset',
+    put: () => ({ handled: true, result: customResult }),
+  });
+  const notifications = [];
+  qu.onStorageChange((payload) => notifications.push(payload));
+
+  await qu.put('/store/asset/1', 'ignored-by-engine');
+
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].path, customResult.path);
+  assert.equal(notifications[0].quBit, customResult);
+});
+
 test('engines run in `order` (lower first) among matches for the same path', async () => {
   const qu = storeWithMemoryAdapter();
   const calls = [];
