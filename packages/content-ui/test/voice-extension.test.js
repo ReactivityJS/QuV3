@@ -59,6 +59,27 @@ test('registers a 🎙️ leading trigger', () => {
   assert.equal(triggerBtn(host).textContent, '🎙️');
 });
 
+test('labels overrides the recorder panel\'s button titles (defaults to English otherwise)', async () => {
+  installVoiceMocks();
+  const host = makeHost();
+  const editor = mountContentEditor(host, {
+    extensions: [voiceExtension({
+      assetService: fakeAssetService(),
+      spaceId: 'space1',
+      labels: { discard: 'Verwerfen', pause: 'Pausieren', resume: 'Fortsetzen', finish: 'Fertig', send: 'Senden' },
+    })],
+  });
+
+  triggerBtn(host).click();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const buttons = [...panel(host).querySelectorAll('button')];
+  assert.ok(buttons.some((b) => b.title === 'Verwerfen'));
+  assert.ok(buttons.some((b) => b.title === 'Pausieren'));
+  assert.ok(buttons.some((b) => b.title === 'Fertig'));
+
+  editor.stop();
+});
+
 test('the submit button shows 🎙️ when the composer is empty, and reverts to Send once text is typed', () => {
   const host = makeHost();
   const editor = mountContentEditor(host, {

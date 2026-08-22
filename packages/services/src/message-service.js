@@ -447,7 +447,7 @@ export const THREAD_PRESETS = {
   forum: () => ({ writers: '*', readers: '*', replyMode: 'flat', formatting: ['markdown', 'mentions'] }),
 
   /** A shared room restricted to a fixed member list. */
-  chat: (memberPubs) => ({ writers: memberPubs, readers: memberPubs, replyMode: 'flat', formatting: ['mentions'] }),
+  chat: (memberPubs) => ({ writers: memberPubs, readers: memberPubs, replyMode: 'flat', formatting: ['markdown', 'mentions'] }),
 
   /**
    * A named multi-member room - same encrypted-for-a-fixed-member-list
@@ -457,7 +457,7 @@ export const THREAD_PRESETS = {
    * adding/removing members would mean re-keying every future message for a
    * different reader set, which is real future work, not implemented here.
    */
-  group: (memberPubs, name) => ({ writers: memberPubs, readers: memberPubs, replyMode: 'flat', formatting: ['mentions'], kind: 'group', name }),
+  group: (memberPubs, name) => ({ writers: memberPubs, readers: memberPubs, replyMode: 'flat', formatting: ['markdown', 'mentions'], kind: 'group', name }),
 
   /** A personal inbox: anyone can send TO it, only the owner can read it - exactly a mailbox. */
   mail: (ownerPub) => ({ writers: '*', readers: [ownerPub], replyMode: 'flat', formatting: ['markdown', 'mentions'] }),

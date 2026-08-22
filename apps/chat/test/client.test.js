@@ -167,7 +167,8 @@ test('a 1:1 room derives the SAME roomId for both members, and messages round-tr
 
     const textarea = container.querySelector('textarea');
     textarea.value = 'Hey Bob!';
-    const sendBtn = container.querySelector('.qu-chat-composer-action');
+    textarea.dispatchEvent(new window.Event('input', { bubbles: true })); // resolves the submit slot's mic<->send switch - see mountContentEditor()'s own doc comment
+    const sendBtn = container.querySelector('.qu-content-editor-submit-slot button');
     sendBtn.click();
 
     await waitFor(() => container.querySelector('.qu-chat-bubble-text')?.textContent.includes('Hey Bob!'));
@@ -187,7 +188,7 @@ test('a 1:1 room derives the SAME roomId for both members, and messages round-tr
   }
 });
 
-test('attaching a file via the composer\'s <qu-asset-upload> morphs the action button to Send and posts with no caption required', async () => {
+test('attaching a file via the composer\'s <qu-asset-upload> morphs the submit control to Send and posts with no caption required', async () => {
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');
   await mirrorProfileInto(bob, alice.qu);
@@ -199,11 +200,12 @@ test('attaching a file via the composer\'s <qu-asset-upload> morphs the action b
     // exist) - same convention the "derives the SAME roomId" test above
     // uses, needed here because attaching a file does real, sometimes-slow
     // crypto work that can otherwise race ahead of roomReady under a loaded
-    // full-suite run, leaving the click a silent no-op (sendTextMessage()
-    // bails out early while !roomReady).
+    // full-suite run, leaving the click a silent no-op (the composer isn't
+    // even constructed yet - see mountRoomView()'s own doc comment on why).
     await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
-    const actionBtn = container.querySelector('.qu-chat-composer-action');
-    assert.equal(actionBtn.textContent, '🎙️'); // no text, no attachment yet - mic
+    const submitBtn = () => container.querySelector('.qu-content-editor-submit-slot button');
+    await waitFor(() => submitBtn() !== null);
+    assert.equal(submitBtn().textContent, '🎙️'); // no text, no attachment yet - mic
 
     const fileInput = container.querySelector('qu-asset-upload input[type=file]');
     const file = new File(['fake image bytes'], 'photo.png', { type: 'image/png' });
@@ -211,20 +213,20 @@ test('attaching a file via the composer\'s <qu-asset-upload> morphs the action b
     fileInput.dispatchEvent(new window.Event('change'));
     // Real Ed25519/SHA-256 work under it - see apps/forum/test/client.test.js's
     // own identical timeout note on its attachment test.
-    await waitFor(() => container.querySelector('.qu-chat-pending-attachment')?.hidden === false, { timeout: 5000 });
-    assert.equal(actionBtn.textContent, '➤'); // an attachment alone is enough to morph to Send
+    await waitFor(() => container.querySelector('.qu-content-ui-attachment-chip') !== null, { timeout: 5000 });
+    assert.equal(submitBtn().textContent, '➤'); // an attachment alone is enough to morph to Send
 
-    actionBtn.click(); // no caption typed at all
+    submitBtn().click(); // no caption typed at all
     await waitFor(() => container.querySelector('.qu-chat-bubble-attachment') !== null, { timeout: 5000 });
 
     const roomId = await ChatService.roomId([alice.myPub, bob.myPub]);
     const { messages } = await alice.services.messages.listMessages(CHAT_SPACE_ID, roomId);
     assert.equal(messages[0].body, '');
-    assert.equal(messages[0].attachment.name, 'photo.png');
-    assert.equal(container.querySelector('.qu-chat-pending-attachment').hidden, true);
+    assert.equal(messages[0].attachments[0].name, 'photo.png');
+    assert.equal(container.querySelector('.qu-content-ui-attachment-chip'), null); // cleared on send
     // No stray empty bubble-text paragraph for the caption-less body.
     assert.equal(container.querySelector('.qu-chat-bubble-text'), null);
-    assert.equal(actionBtn.textContent, '🎙️'); // back to mic once the attachment was sent and cleared
+    assert.equal(submitBtn().textContent, '🎙️'); // back to mic once the attachment was sent and cleared
   } finally {
     stop();
   }
@@ -480,7 +482,8 @@ test('the "Reply" menu item (native, any message) opens the reply banner and tag
 
     const textarea = container.querySelector('textarea');
     textarea.value = 'my reply';
-    container.querySelector('.qu-chat-composer-action').click();
+    textarea.dispatchEvent(new window.Event('input', { bubbles: true })); // resolves the submit slot's mic<->send switch - see mountContentEditor()'s own doc comment
+    container.querySelector('.qu-content-editor-submit-slot button').click();
 
     await waitFor(() => [...container.querySelectorAll('.qu-chat-bubble-text')].some((el) => el.textContent.includes('my reply')));
     const { messages } = await alice.services.messages.listMessages(CHAT_SPACE_ID, roomId);
@@ -863,14 +866,14 @@ test('a message with no reply banner active posts with replyTo: null (not "undef
   const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
   try {
     // Wait for the room to actually be ready (header name resolved), not
-    // just for the textarea to exist - the composer is built synchronously,
-    // well before ensureRoom()/roomReady resolve, and the send handler
-    // silently no-ops until roomReady is true (see mountRoomView()'s own
-    // "if (!roomReady) return;" guard).
+    // just for the textarea to exist - the composer is only constructed
+    // once memberPubs/roomReady resolve (see mountRoomView()'s own doc
+    // comment on why).
     await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
     const textarea = container.querySelector('textarea');
     textarea.value = 'no reply';
-    container.querySelector('.qu-chat-composer-action').click();
+    textarea.dispatchEvent(new window.Event('input', { bubbles: true }));
+    container.querySelector('.qu-content-editor-submit-slot button').click();
     await waitFor(() => container.querySelector('.qu-chat-bubble-text')?.textContent.includes('no reply'));
     const { messages } = await alice.services.messages.listMessages(CHAT_SPACE_ID, roomId);
     assert.equal(messages.find((m) => m.body === 'no reply').replyTo, null);
@@ -879,7 +882,7 @@ test('a message with no reply banner active posts with replyTo: null (not "undef
   }
 });
 
-test('the composer action button morphs between mic (empty) and send (has text)', async () => {
+test('the composer submit control morphs between mic (empty) and send (has text)', async () => {
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');
   await mirrorProfileInto(bob, alice.qu);
@@ -888,23 +891,24 @@ test('the composer action button morphs between mic (empty) and send (has text)'
   const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
   try {
     await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
-    const actionBtn = container.querySelector('.qu-chat-composer-action');
+    const submitBtn = () => container.querySelector('.qu-content-editor-submit-slot button');
+    await waitFor(() => submitBtn() !== null);
     const textarea = container.querySelector('textarea');
-    assert.equal(actionBtn.textContent, '🎙️');
+    assert.equal(submitBtn().textContent, '🎙️');
 
     textarea.value = 'hello';
     textarea.dispatchEvent(new window.Event('input'));
-    assert.equal(actionBtn.textContent, '➤');
+    assert.equal(submitBtn().textContent, '➤');
 
     textarea.value = '';
     textarea.dispatchEvent(new window.Event('input'));
-    assert.equal(actionBtn.textContent, '🎙️');
+    assert.equal(submitBtn().textContent, '🎙️');
   } finally {
     stop();
   }
 });
 
-test('recording a voice message goes through start -> pause -> resume -> finish -> PREVIEW -> send (ported QuV2 flow), uploading it as an attachment and posting extra.voice: true, rendered as a native <qu-asset>', async () => {
+test('recording a voice message goes through start -> finish -> PREVIEW -> send, uploading it as an audio attachment and rendering as a native <qu-asset> - the pause/resume/discard state machine itself is covered by packages/content-ui/test/voice-extension.test.js', async () => {
   installVoiceMocks();
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');
@@ -914,94 +918,34 @@ test('recording a voice message goes through start -> pause -> resume -> finish 
   const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
   try {
     await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
-    const actionBtn = container.querySelector('.qu-chat-composer-action');
-    assert.equal(actionBtn.textContent, '🎙️');
-    assert.equal(container.querySelector('.qu-chat-voice-recorder').hidden, true);
+    const submitBtn = () => container.querySelector('.qu-content-editor-submit-slot button');
+    await waitFor(() => submitBtn() !== null);
+    assert.equal(submitBtn().textContent, '🎙️');
+    assert.equal(container.querySelector('.qu-content-ui-voice-recorder'), null);
 
-    actionBtn.click(); // start recording
-    await waitFor(() => container.querySelector('.qu-chat-voice-recorder').hidden === false);
-    // the normal composer (text input, mic/send button) is fully swapped
-    // out while recording - not layered underneath/alongside it.
-    assert.equal(container.querySelector('.qu-chat-composer').hidden, true);
-    assert.equal(container.querySelector('.qu-chat-voice-recorder-dot').hidden, false);
+    submitBtn().click(); // start recording
+    await waitFor(() => container.querySelector('.qu-content-ui-voice-recorder') !== null);
 
-    const pauseBtn = container.querySelector('.qu-chat-voice-pause-btn');
-    pauseBtn.click(); // pause
-    assert.equal(container.querySelector('.qu-chat-voice-recorder-dot').hidden, true); // no longer "live recording"
-    pauseBtn.click(); // resume
-    assert.equal(container.querySelector('.qu-chat-voice-recorder-dot').hidden, false);
-
-    container.querySelector('.qu-chat-voice-finish-btn').click(); // finish -> FakeMediaRecorder.stop() synchronously fires ondataavailable+onstop
-
+    container.querySelector('.qu-content-ui-voice-recorder button[title="Finish recording"]').click();
     // Finishing lands in PREVIEW, not an immediate send - a real playback
     // player appears, nothing has been posted yet.
-    await waitFor(() => container.querySelector('.qu-chat-voice-preview-player').hidden === false);
-    assert.equal(container.querySelector('.qu-chat-voice-recorder-time').hidden, true);
+    await waitFor(() => container.querySelector('.qu-content-ui-voice-preview').hidden === false);
     const roomId = await ChatService.roomId([alice.myPub, bob.myPub]);
     assert.equal((await alice.services.messages.listMessages(CHAT_SPACE_ID, roomId)).messages.length, 0);
 
-    container.querySelector('.qu-chat-voice-send-btn').click();
+    container.querySelector('.qu-content-ui-voice-recorder button[title="Send"]').click();
 
     await waitFor(() => container.querySelector('.qu-chat-bubble-attachment') !== null);
     const { messages } = await alice.services.messages.listMessages(CHAT_SPACE_ID, roomId);
     assert.equal(messages.length, 1);
-    assert.equal(messages[0].voice, true);
-    assert.ok(messages[0].attachment?.assetId);
-    // no redundant placeholder text line next to the player - see renderMessageText()'s own doc comment
+    assert.equal(messages[0].body, ''); // no separate "voice" flag/placeholder text anymore - see isVoiceMessage()'s own doc comment
+    assert.equal(messages[0].attachments.length, 1);
+    assert.ok(messages[0].attachments[0].mime.startsWith('audio/'));
+    // no redundant placeholder text line next to the player
     assert.equal(container.querySelector('.qu-chat-bubble-text'), null);
     // back to the normal composer, ready for the next message
-    assert.equal(container.querySelector('.qu-chat-voice-recorder').hidden, true);
-    assert.equal(container.querySelector('.qu-chat-composer').hidden, false);
-  } finally {
-    stop();
-  }
-});
-
-test('discarding a voice recording mid-recording cancels it - no message posted, back to the normal composer', async () => {
-  installVoiceMocks();
-  const alice = await freshEnv('Alice');
-  const bob = await freshEnv('Bob');
-  await mirrorProfileInto(bob, alice.qu);
-
-  const container = makeContainer();
-  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
-  try {
-    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
-    container.querySelector('.qu-chat-composer-action').click(); // start recording
-    await waitFor(() => container.querySelector('.qu-chat-voice-recorder').hidden === false);
-
-    container.querySelector('.qu-chat-voice-discard-btn').click();
-
-    assert.equal(container.querySelector('.qu-chat-voice-recorder').hidden, true);
-    assert.equal(container.querySelector('.qu-chat-composer').hidden, false);
-    const roomId = await ChatService.roomId([alice.myPub, bob.myPub]);
-    assert.equal((await alice.services.messages.listMessages(CHAT_SPACE_ID, roomId)).messages.length, 0);
-  } finally {
-    stop();
-  }
-});
-
-test('discarding a voice recording during PREVIEW (after finishing) also cancels it - no message posted', async () => {
-  installVoiceMocks();
-  const alice = await freshEnv('Alice');
-  const bob = await freshEnv('Bob');
-  await mirrorProfileInto(bob, alice.qu);
-
-  const container = makeContainer();
-  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
-  try {
-    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
-    container.querySelector('.qu-chat-composer-action').click(); // start recording
-    await waitFor(() => container.querySelector('.qu-chat-voice-recorder').hidden === false);
-    container.querySelector('.qu-chat-voice-finish-btn').click();
-    await waitFor(() => container.querySelector('.qu-chat-voice-preview-player').hidden === false);
-
-    container.querySelector('.qu-chat-voice-discard-btn').click();
-
-    assert.equal(container.querySelector('.qu-chat-voice-recorder').hidden, true);
-    assert.equal(container.querySelector('.qu-chat-composer').hidden, false);
-    const roomId = await ChatService.roomId([alice.myPub, bob.myPub]);
-    assert.equal((await alice.services.messages.listMessages(CHAT_SPACE_ID, roomId)).messages.length, 0);
+    assert.equal(container.querySelector('.qu-content-ui-voice-recorder'), null);
+    assert.equal(submitBtn().textContent, '🎙️');
   } finally {
     stop();
   }
@@ -1017,11 +961,18 @@ test('sharing location posts a message with extra.location, rendered as an OpenS
   const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
   try {
     await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
-    // Location sharing now lives behind the composer's own "+" action menu
-    // (content.composerActions) instead of its own always-visible button.
-    container.querySelector('.qu-chat-composer-plus .qu-thread-ui-context-menu-trigger').click();
-    await waitFor(() => container.querySelector('.qu-thread-ui-context-menu-panel') !== null);
-    menuItemButton(container.querySelector('.qu-thread-ui-context-menu-panel'), 'Share my location').click();
+    // Location sharing is now locationExtension()'s own leading-slot trigger
+    // (an icon in the composer's leading action row, not a menu item) - it
+    // CONTRIBUTES the position and waits for the user's own explicit Send
+    // (a deliberate improvement over this app's own earlier immediate-send
+    // behavior - see that extension's own doc comment), rather than posting
+    // the instant a position resolves.
+    const locationBtn = () => [...container.querySelectorAll('.qu-content-editor-leading .qu-slot-resolver-item')].find((btn) => btn.title === 'Share my location');
+    await waitFor(() => locationBtn() !== undefined);
+    locationBtn().click();
+
+    await waitFor(() => container.querySelector('.qu-content-ui-location-chip') !== null);
+    container.querySelector('.qu-content-editor-submit-slot button').click();
 
     await waitFor(() => container.querySelector('.qu-chat-bubble-location') !== null);
     const link = container.querySelector('.qu-chat-bubble-location a');
@@ -1045,13 +996,14 @@ test('the composer textarea starts at ONE visual line (rows=1) - regression: an 
   const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
   try {
     await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
-    assert.equal(container.querySelector('.qu-chat-composer-input-wrap textarea').rows, 1);
+    await waitFor(() => container.querySelector('.qu-content-editor-input-wrap textarea') !== null);
+    assert.equal(container.querySelector('.qu-content-editor-input-wrap textarea').rows, 1);
   } finally {
     stop();
   }
 });
 
-test('the composer\'s "+" action menu (content.composerActions) lists Attach/Share location natively, plus any plugin-contributed item, in rank order', async () => {
+test('the composer\'s leading action slot includes Attach/Share location natively, plus any plugin-contributed content.composerActions item (collapsing past the threshold into a "More" menu)', async () => {
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');
   await mirrorProfileInto(bob, alice.qu);
@@ -1075,14 +1027,28 @@ test('the composer\'s "+" action menu (content.composerActions) lists Attach/Sha
   });
   try {
     await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
-    container.querySelector('.qu-chat-composer-plus .qu-thread-ui-context-menu-trigger').click();
+    // Native Attach/Location/Voice register 3 leading items; the plugin's
+    // own content.composerActions item is a 4th, arriving async (see
+    // composerActionsExtension()'s own doc comment) - with the Presentation
+    // Resolver's default 'inline-then-menu' threshold (2), only the first 2
+    // ever render inline; the rest (voice's own trigger + the plugin item)
+    // collapse into a "More" menu.
+    await waitFor(() => container.querySelectorAll('.qu-content-editor-leading .qu-slot-resolver-item').length === 2);
+    const inlineItems = [...container.querySelectorAll('.qu-content-editor-leading .qu-slot-resolver-item')];
+    assert.deepEqual(inlineItems.map((btn) => btn.textContent), ['📎', '📍']);
+
+    const moreBtn = () => container.querySelector('.qu-content-editor-leading .qu-thread-ui-context-menu-trigger');
+    await waitFor(() => moreBtn() !== null);
+    moreBtn().click();
     await waitFor(() => container.querySelector('.qu-thread-ui-context-menu-panel') !== null);
     const panel = container.querySelector('.qu-thread-ui-context-menu-panel');
-    const items = [...panel.querySelectorAll('.qu-thread-ui-context-menu-item')].map((btn) => btn.textContent);
-    assert.deepEqual(items, ['📎Attach file', '📍Share my location', '🖼️Pick from Gallery']);
-    assert.equal(seen.length, 1);
-    assert.equal(seen[0].point, 'content.composerActions');
-    assert.equal(seen[0].payload.spaceId, CHAT_SPACE_ID);
+    await waitFor(() => panel.querySelectorAll('.qu-thread-ui-context-menu-item').length === 2);
+    const menuItems = [...panel.querySelectorAll('.qu-thread-ui-context-menu-item')].map((btn) => btn.textContent);
+    assert.deepEqual(menuItems, ['🎙️Record a voice message', '🖼️Pick from Gallery']);
+
+    const composerActionsCalls = seen.filter((call) => call.point === 'content.composerActions');
+    assert.equal(composerActionsCalls.length, 1);
+    assert.equal(composerActionsCalls[0].payload.spaceId, CHAT_SPACE_ID);
   } finally {
     stop();
   }
@@ -1102,7 +1068,6 @@ test('a message body URL is auto-linked AND gets a <qu-link-preview url="..."> r
     const links = [...container.querySelectorAll('.qu-chat-bubble-text a')];
     assert.equal(links.length, 2);
     assert.equal(links[0].href, 'https://example.com/a');
-    assert.equal(links[0].target, '_blank');
     assert.equal(links[0].rel, 'noopener noreferrer');
 
     const previews = container.querySelectorAll('qu-link-preview');
@@ -1125,6 +1090,129 @@ test('a message body with no URL gets no <qu-link-preview> at all', async () => 
   try {
     await waitFor(() => container.querySelector('.qu-chat-bubble-text')?.textContent.includes('no links here'));
     assert.equal(container.querySelector('qu-link-preview'), null);
+  } finally {
+    stop();
+  }
+});
+
+test('a message body renders real markdown (bold/italic) via formattedHtml - THREAD_PRESETS.chat() now includes markdown formatting', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: '**bold** and *italic*' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-bubble-text strong') !== null);
+    assert.equal(container.querySelector('.qu-chat-bubble-text strong').textContent, 'bold');
+    assert.equal(container.querySelector('.qu-chat-bubble-text em').textContent, 'italic');
+  } finally {
+    stop();
+  }
+});
+
+test('a mention of a profile-published identity renders as their CURRENT alias, not a truncated pubkey - a genuinely new feature for Chat this round', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu); // Alice's own store already needs Bob's profile/X key to encrypt for him - the same copy resolves his mention alias
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: `hey @${bob.myPub}` });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('a.qu-mention') !== null);
+    await waitFor(() => container.querySelector('a.qu-mention').textContent === '@Bob');
+    assert.equal(container.querySelector('a.qu-mention').getAttribute('href'), `#/~${bob.myPub}`);
+  } finally {
+    stop();
+  }
+});
+
+test('a mention with no resolvable profile falls back to the truncated-pubkey display, unchanged', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  const strangerPub = 'z'.repeat(20); // no profile ever published for this token - nobody can resolve an alias for it
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: `hey @${strangerPub}` });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('a.qu-mention') !== null);
+    // Give the async resolveAuthor()/formatActorLabel() pass a real chance to run before asserting it made no change.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.match(container.querySelector('a.qu-mention').textContent, /^@~/);
+  } finally {
+    stop();
+  }
+});
+
+test('two files attached in sequence both ride along on one message.attachments[] - the "clean schema" plural-attachment adoption', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
+    const fileInput = () => container.querySelector('qu-asset-upload input[type=file]');
+
+    const file1 = new File(['fake image bytes 1'], 'photo1.png', { type: 'image/png' });
+    Object.defineProperty(fileInput(), 'files', { value: [file1], configurable: true });
+    fileInput().dispatchEvent(new window.Event('change'));
+    await waitFor(() => container.querySelectorAll('.qu-content-ui-attachment-chip').length === 1, { timeout: 5000 });
+
+    const file2 = new File(['fake image bytes 2'], 'photo2.png', { type: 'image/png' });
+    Object.defineProperty(fileInput(), 'files', { value: [file2], configurable: true });
+    fileInput().dispatchEvent(new window.Event('change'));
+    await waitFor(() => container.querySelectorAll('.qu-content-ui-attachment-chip').length === 2, { timeout: 5000 });
+
+    container.querySelector('.qu-content-editor-submit-slot button').click();
+
+    await waitFor(() => container.querySelectorAll('.qu-chat-bubble-attachment').length === 2, { timeout: 5000 });
+    const roomId = await ChatService.roomId([alice.myPub, bob.myPub]);
+    const { messages } = await alice.services.messages.listMessages(CHAT_SPACE_ID, roomId);
+    assert.equal(messages[0].attachments.length, 2);
+    assert.deepEqual(messages[0].attachments.map((a) => a.name).sort(), ['photo1.png', 'photo2.png']);
+  } finally {
+    stop();
+  }
+});
+
+test('an attachment sent through the new composer is genuinely built with real readerPubs - not the stale, empty array a closure-capture bug would silently upload public with', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  // Deliberately NOT mirroring Bob's profile into Alice's own store here -
+  // `AssetService.upload()`'s encryption step (`resolveReaderXKeys()`)
+  // fails CLOSED with a specific, distinguishing error ("no published
+  // profile") when given a non-empty `readerPubs` list containing a pub it
+  // can't resolve. If the composer were (bug) constructed with a stale,
+  // empty `readerPubs: []` - the exact risk `mountRoomView()`'s own doc
+  // comment on this - `resolveReaderXKeys()` is never even called (its own
+  // `if (readerPubs.length)` guard short-circuits), and the upload would
+  // silently SUCCEED, uploading Bob's own would-be-private photo public.
+  // Seeing this specific failure is the proof `readerPubs` was genuinely
+  // `[alice.myPub, bob.myPub]` at upload time, not `[]`.
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
+    const fileInput = container.querySelector('qu-asset-upload input[type=file]');
+    const file = new File(['secret photo bytes'], 'secret.png', { type: 'image/png' });
+    Object.defineProperty(fileInput, 'files', { value: [file], configurable: true });
+    fileInput.dispatchEvent(new window.Event('change'));
+
+    await waitFor(() => container.querySelector('.qu-asset-upload-error') !== null, { timeout: 5000 });
+    assert.match(container.querySelector('.qu-asset-upload-error').textContent, /no published profile/);
+    // Nothing was silently sent public - no chip, no message.
+    assert.equal(container.querySelector('.qu-content-ui-attachment-chip'), null);
+    const roomId = await ChatService.roomId([alice.myPub, bob.myPub]);
+    assert.equal((await alice.services.messages.listMessages(CHAT_SPACE_ID, roomId)).messages.length, 0);
   } finally {
     stop();
   }
@@ -1541,7 +1629,8 @@ test('sending a message always scrolls the view to the bottom, even if the user 
 
     const textarea = container.querySelector('textarea');
     textarea.value = 'catch up to this';
-    container.querySelector('.qu-chat-composer-action').click();
+    textarea.dispatchEvent(new window.Event('input', { bubbles: true }));
+    container.querySelector('.qu-content-editor-submit-slot button').click();
 
     await waitFor(() => scrollToCalls.length > 0);
     assert.equal(scrollToCalls.at(-1).behavior, 'smooth');
@@ -1578,7 +1667,7 @@ test('searchChat(): a TYPE filter with no text query returns every locally-avail
   // An image attachment's own body is never descriptive text a query could
   // match - exactly the case a type-only filter needs to cover.
   const withImage = await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, {
-    body: '', extra: { attachment: { assetId: 'a1', mime: 'image/png', name: 'photo.png', size: 100 } },
+    body: '', extra: { attachments: [{ assetId: 'a1', mime: 'image/png', name: 'photo.png', size: 100 }] },
   });
 
   // No query at all - an empty string, matching what apps/search/client.js
@@ -1595,7 +1684,7 @@ test('searchChat(): a voice message classifies as "audio", not the generic "file
   await mirrorProfileInto(bob, alice.qu);
   const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
   await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, {
-    body: '🎙️ Voice message', extra: { attachment: { assetId: 'v1', mime: 'audio/webm', name: 'voice.webm', size: 500 }, voice: true },
+    body: '', extra: { attachments: [{ assetId: 'v1', mime: 'audio/webm', name: 'voice.webm', size: 500 }] },
   });
 
   const results = await searchChat({ services: alice.services, apps: CHAT_APPS, myPub: alice.myPub, query: '', types: ['audio'], scope: 'subpage', segments: ['chat', bob.myPub] });
@@ -1609,7 +1698,7 @@ test('renderSearchResult(): an image/video/audio/file result renders a real <qu-
   await mirrorProfileInto(bob, alice.qu);
   const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
   const withImage = await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, {
-    body: 'a caption', extra: { attachment: { assetId: 'img1', mime: 'image/png', name: 'photo.png', size: 100 } },
+    body: 'a caption', extra: { attachments: [{ assetId: 'img1', mime: 'image/png', name: 'photo.png', size: 100 }] },
   });
 
   const [entry] = await searchChat({ services: alice.services, apps: CHAT_APPS, myPub: alice.myPub, query: '', types: ['image'], scope: 'subpage', segments: ['chat', bob.myPub] });

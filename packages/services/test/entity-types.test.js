@@ -50,7 +50,7 @@ test('defaultEntityTypes: notification has no comment/reaction capabilities', ()
 
 test('defaultEntityTypes: contentFormat matches each seeded type\'s real THREAD_PRESETS precedent', () => {
   assert.equal(defaultEntityTypes.get('topic').contentFormat, 'markdown');
-  assert.equal(defaultEntityTypes.get('message').contentFormat, 'plain');
+  assert.equal(defaultEntityTypes.get('message').contentFormat, 'markdown');
   assert.equal(defaultEntityTypes.get('article').contentFormat, 'markdown');
   assert.equal(defaultEntityTypes.get('page').contentFormat, 'markdown');
   assert.equal(defaultEntityTypes.get('notification').contentFormat, 'plain');
