@@ -52,7 +52,7 @@ export class AccessService {
 
   /**
    * @param {string|number} spaceId
-   * @param {'docs'|'lists'|'assets'|'threads'} kind
+   * @param {'docs'|'lists'|'assets'|'threads'|'entities'} kind
    * @param {string} resourceId
    * @returns {Promise<{writers: '*'|string[], readers: '*'|string[]}|null>}
    *   `null` means unprotected (fully open, exactly like today's default).
@@ -77,7 +77,7 @@ export class AccessService {
    * the throw simply propagates from `qu.put()`.
    *
    * @param {string|number} spaceId
-   * @param {'docs'|'lists'|'assets'|'threads'} kind
+   * @param {'docs'|'lists'|'assets'|'threads'|'entities'} kind
    * @param {string} resourceId
    * @param {{writers?: '*'|string[], readers?: '*'|string[]}} [acl]
    *   Defaults to fully open - `protect(..., {})` (or omitting `acl`
@@ -168,7 +168,7 @@ export class AccessService {
    * decrypt-aware Entity API for every `docs`/`lists` consumer.
    *
    * @param {string|number} spaceId
-   * @param {'docs'|'lists'|'assets'|'threads'} kind
+   * @param {'docs'|'lists'|'assets'|'threads'|'entities'} kind
    * @param {string} resourceId
    * @param {{asSpaceId?: string|number}} [options]
    * @returns {Promise<object>}

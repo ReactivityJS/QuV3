@@ -41,6 +41,14 @@
  * the same decision this Engine's own pipeline hook makes, not a second,
  * divergent copy of it.
  *
+ * ENTITIES (Quniverse V4, see docs/v4-concept.md §3.1) ARE GATED THE SAME
+ * WAY, under their own `entities` kind - `ENTITY_RE` below maps
+ * `/store/<space>/entities/<id>` to `{kind: 'entities', resourceId: id}`,
+ * exactly the same convention as `docs`/`collections`/`assets`/`threads`.
+ * No special case: an Entity's ACL doc lives at `acl/entities/<id>`, same
+ * sibling-path/first-writer-wins/fully-open-by-default rules as everything
+ * else here.
+ *
  * BLOB CHUNKS ARE GATED TOO, under the SAME `assets` ACL as their asset's
  * `/store/.../assets/<id>` meta document - found and closed as a real gap:
  * `AssetEngine` writes each chunk via a genuine `qu.put()` (see its own doc
@@ -64,10 +72,11 @@ const DOC_RE = /^\/store\/([^/]+)\/docs\/([^/]+)$/;
 const COLLECTION_RE = /^\/store\/([^/]+)\/collections\/([^/]+)$/;
 const ASSET_RE = /^\/store\/([^/]+)\/assets\/([^/]+)(?:\/meta)?$/;
 const THREAD_RE = /^\/store\/([^/]+)\/threads\/([^/]+)\/(?:meta|msgs\/[^/]+)$/;
+const ENTITY_RE = /^\/store\/([^/]+)\/entities\/([^/]+)$/;
 const BLOB_RE = /^\/blob\/([^/]+)\/([^/]+)\/chunk_\d+$/;
 const ACL_RE = /^\/store\/([^/]+)\/acl\/([^/]+)\/([^/]+)$/;
 
-/** @param {string} path @returns {{spaceId: string, kind: 'docs'|'collections'|'assets'|'threads', resourceId: string}|null} */
+/** @param {string} path @returns {{spaceId: string, kind: 'docs'|'collections'|'assets'|'threads'|'entities', resourceId: string}|null} */
 function resolveResource(path) {
   let match = path.match(DOC_RE);
   if (match) return { spaceId: match[1], kind: 'docs', resourceId: match[2] };
@@ -77,6 +86,8 @@ function resolveResource(path) {
   if (match) return { spaceId: match[1], kind: 'assets', resourceId: match[2] };
   match = path.match(THREAD_RE);
   if (match) return { spaceId: match[1], kind: 'threads', resourceId: match[2] };
+  match = path.match(ENTITY_RE);
+  if (match) return { spaceId: match[1], kind: 'entities', resourceId: match[2] };
   match = path.match(BLOB_RE);
   if (match) return { spaceId: match[1], kind: 'assets', resourceId: match[2] };
   return null;

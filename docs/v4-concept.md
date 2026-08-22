@@ -168,10 +168,19 @@ Entity
 An Entity is **not** a new storage shape competing with "document" or "derived list" — it is
 a naming/typing convention layered on top of the existing `documentPath()`/list conventions
 in `packages/services/src/paths.js`, the same way `ThreadEngine`'s message stamping is a thin
-convention on top of the plain QuBit write pipeline. Placement: a new small package,
-`packages/entity`, holding the `Entity`/`EntityType` shape helpers and (if built) the
-`EntityEngine`; existing `paths.js` gains entity-oriented helpers (`entityPath()`,
-`entityChildrenPath()`) alongside, not instead of, its current thread/doc/list helpers.
+convention on top of the plain QuBit write pipeline.
+
+**Resolved (Phase 1, implemented):** no new package — placement follows this codebase's own
+Engine/Service split exactly, not a separate `packages/entity`. `EntityEngine`
+(`packages/engines/src/entity-engine.js`) is a real `QuStore` pipeline Engine from day one
+(see §10's superseded "conservative default" note): it stamps `_id`/`_created` exactly like
+`DocumentEngine`, and additionally **requires `_type`** — the one field genuinely mandatory
+for an Entity but optional for a plain Document, which is the concrete trust-boundary
+justification for an Engine here rather than a Service-layer convention (§2's decision tree).
+`@qu/engines`' `AccessEngine` gates an `entities` ACL kind the same way it already gates
+`docs`/`collections`/`assets`/`threads`. `EntityService`/`entityPath()`
+(`packages/services/src/entity-service.js`/`paths.js`) are the friendly API layer, the same
+relationship `ChannelService`/`MessageService` have to `ThreadEngine`.
 
 ### 3.2 Content
 
@@ -414,20 +423,37 @@ V4-Rewrite jetzt anders aufziehen") to what's already real in this repo:
 This is explicitly a separate future implementation task, not part of this document's
 deliverable — this document specifies the contracts and order, not the code.
 
-## 10. Open decisions for the next task (flagged, not resolved here)
+## 10. Decisions (resolved) and what's still open
 
-- Exact package boundary: does `Entity`/`EntityType` live in a new `packages/entity`, or as
-  an addition to `packages/services` (where `paths.js`/`ListService` already live)? This
-  document assumes a new package to keep Core-adjacent concerns out of the growing
-  `packages/services`, but this is a call for whoever writes the code, not settled here.
-- Does `EntityEngine` get built as a real `QuStore` pipeline Engine on day one (stamping
-  `_id`/`type`, mirroring `DocumentEngine`), or does `Entity` stay a pure Service-layer
-  convention (like today's "document"/"list" shapes) until a real pipeline-trust need
-  appears? Given §2's decision tree, the latter is the more conservative default — an Engine
-  should be added only once a concrete write needs the pipeline gate, not preemptively.
-- `EntityType` is specified here as static, code-defined composition (§3.3). Whether a CMS
-  app later needs a *persisted, admin-editable* EntityType/schema store is explicitly a CMS
-  app-layer decision, out of scope for this Core/Capability concept.
-- `extensions[]` on Content (§3.2) is deliberately deferred until ≥2 real cases exist —
-  which two (location + link preview? location + poll?) is an open call for whichever app
-  needs the first one.
+The four items below were open when this document was first written. All four are now
+decided (by the user) and, for the first three, **implemented** in Phase 1
+(`packages/engines/src/entity-engine.js`, `packages/services/src/entity-service.js`,
+`entity-types.js`, `content.js`, the generalized `bookmarks-service.js` — see
+`docs/api-reference.md` §5's "Quniverse V4: the generic Entity layer" section for the full
+API):
+
+- **Package boundary — resolved:** no new package. `EntityEngine` lives in `packages/engines`
+  (alongside `DocumentEngine`/`ThreadEngine`/`AssetEngine`/`AccessEngine`); `EntityService`/
+  `EntityTypeRegistry`/`createContent`/`entityPath()` live in `packages/services` (already
+  self-described as "the Entity API" in its own `package.json`). This follows the codebase's
+  existing Engine/Service package split exactly, rather than introducing a parallel boundary.
+- **`EntityEngine` timing — resolved: built now, as a real Engine.** Not the "conservative
+  default" this document originally leaned toward — the user explicitly chose to build it
+  immediately, and it earns Engine status on its own merits: unlike Document, an Entity has a
+  genuinely mandatory field (`_type`) that must hold regardless of caller, which is exactly
+  the kind of trust-boundary job §2's decision tree reserves for an Engine.
+- **`EntityType` persistence — resolved: static now, explicitly designed for an easy later
+  migration.** `EntityTypeRegistry` (`entity-types.js`) exposes only `register()`/`get()`/
+  `list()` as its public surface, specifically so that swapping the `Map`-backed
+  implementation for a persisted/admin-editable schema store later (a CMS app decision) never
+  requires touching a call site — the narrow surface is the mechanism, not just a promise in
+  a comment. Whether/when that persisted store gets built stays a later CMS-app decision, out
+  of scope here.
+- **`extensions[]` on Content — still open, deliberately.** Unchanged from the original
+  framing: deferred until at least two real cases exist (location + link preview? location +
+  poll?) — no app built in Phase 1 needed one, so there is still nothing to decide between.
+
+Phase 1 explicitly did **not** migrate any app (Forum's `ChannelService` "a Topic IS its
+Thread" pattern is untouched) — see the Phase 1 implementation plan's own Non-Goals for what
+Phase 2+ still needs to cover (Follow/Tag/generalized-Reaction/Mention capabilities, the
+Forum migration itself, and all `ContentEditor`/Slot/UI work from §5-§6 above).

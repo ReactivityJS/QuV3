@@ -228,6 +228,7 @@ function here is a pure string-builder — no I/O. The Entity-API surface:
 |---|---|
 | `spacePath(spaceId)` | Everything under one space — what a `subscribe()` call needs to cover it all. |
 | `documentPath(spaceId, docId)` | A single arbitrary document. |
+| `entityPath(spaceId, entityId)` | Quniverse V4's generic Entity (`EntityService`/`@qu/engines`' `EntityEngine`). |
 | `assetPath(spaceId, assetId)` | An uploaded asset's root (chunks live under it). |
 | `aclPath(spaceId, kind, resourceId)` | A resource's ACL document (what `AccessService` reads/writes). |
 | `listPath(spaceId, listId)` | A curated list document (`ListService.createCurated()`/`.listCurated()`). |
@@ -299,8 +300,10 @@ each hides its own `flagType`/`entityKind` string pair behind a narrower API:
   `list()`, `isFavorite(appId)`.
 - **`ContactsService(flagService, identityEngine)`**: `addContact(actorPub, data = {})`,
   `removeContact(actorPub)`, `listContacts()`, `isContact(actorPub)`.
-- **`BookmarksService(flagService)`**: `add(messageId, snapshot = {})`,
-  `remove(messageId)`, `isBookmarked(messageId)`, `list()`.
+- **`BookmarksService(flagService)`**: `add(messageId, snapshot = {}, entityKind)`,
+  `remove(messageId, entityKind)`, `isBookmarked(messageId, entityKind)`, `list(entityKind)` —
+  `entityKind` defaults to `'forumMessage'`; see the Quniverse V4 Entity
+  layer section below for the generalized `'entity'` case.
 
 ### `MessageService`
 
@@ -538,6 +541,60 @@ its own private document shape:
 into `/store/apps/catalog/<name>`, verifying each entry's signature against
 `relayPub` before accepting it. What `apps/app-list`'s `<qu-list parent="...">`
 and the shell's own nav (`apps/shell/src/nav.js`) both read.
+
+### Quniverse V4: the generic Entity layer (`docs/v4-concept.md`)
+
+The Entity+Content+Capability contracts Forum/Chat/Blog/CMS/Notifications are
+meant to compose from, per `docs/v4-concept.md` — Phase 1 (Core/Engines/
+Services only, no app migration yet).
+
+#### `EntityService` (`entity-service.js`)
+
+`new EntityService(qu, identityEngine, entityTypeRegistry = defaultEntityTypes)`.
+The Entity API over `@qu/engines`' `EntityEngine` (which stamps `_id`/
+`_created` and requires `_type` — see that file's own doc comment), the same
+relationship `ChannelService`/`MessageService` have to `ThreadEngine`.
+
+- `createEntity(spaceId, type, fields = {}, { asSpaceId } = {})` — stamps
+  `_type`, runs `createContent()` over a supplied `fields.content` when the
+  type declares (or doesn't know) a content field.
+- `getEntity(spaceId, entityId)` → the stored entity, or `null`.
+- `updateEntity(spaceId, entityId, patch, { asSpaceId } = {})` — merge-write;
+  `_id`/`_created`/`_type` survive even if `patch` omits them.
+
+`paths.entityPath(spaceId, entityId)` is the one new path helper this adds —
+no parent/listing path yet (see that helper's own doc comment).
+
+#### `EntityTypeRegistry` / `defaultEntityTypes` (`entity-types.js`)
+
+A static, Drupal-inspired "Content Type + Fields" registry, deliberately
+built with a narrow `register(type, definition)` / `get(type)` / `list()`
+surface so a later swap to persisted/admin-editable storage changes only
+this class's internals, never a call site (see the file's own doc comment).
+`defaultEntityTypes` is pre-seeded with the seven types
+`docs/v4-concept.md` §3.3 specifies: `topic`, `message`, `article`, `page`,
+`notification`, `task`, `event`.
+
+#### `createContent(...)` / `CONTENT_FORMATS` (`content.js`)
+
+`createContent({ text, format = 'plain', attachments = [] })` — the
+universal, persisted Content shape (`docs/v4-concept.md` §3.2/§5),
+deliberately **not** an editor: normalizes/validates only, throws on an
+unknown `format` (one of `CONTENT_FORMATS`: `'plain'`, `'markdown'`,
+`'richtext'`) or non-array `attachments`. Content is a field embedded in
+whatever Entity/Thread-message document carries it — it has no storage path
+of its own.
+
+#### `BookmarksService`, generalized
+
+`add(messageId, snapshot = {}, entityKind = 'forumMessage')` /
+`remove(messageId, entityKind)` / `isBookmarked(messageId, entityKind)` /
+`list(entityKind)` — `entityKind` is now an optional parameter (previously
+hard-coded to `'forumMessage'`), so the exact same Service can bookmark a
+generic `EntityService`-created Entity via `entityKind: 'entity'` — Phase
+1's "first capability migration" proof that one Capability implementation
+spans both the legacy Thread-message shape and the new generic Entity shape
+without forking any logic (see the file's own doc comment).
 
 ---
 

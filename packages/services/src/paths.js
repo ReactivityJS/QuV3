@@ -32,6 +32,20 @@ export function documentPath(spaceId, docId) {
 }
 
 /**
+ * One Entity's own document path (Quniverse V4, see docs/v4-concept.md
+ * §3.1/§3.3) - `@qu/engines`' `EntityEngine` stamps `_id`/`_created` and
+ * requires `_type` on writes here, same convention `documentPath()` and
+ * `EntityEngine`'s own doc comment describe for `DocumentEngine`. No
+ * parent/listing path yet - enumerating "every entity of type X" is an
+ * app-level query concern for a later phase, not added speculatively ahead
+ * of a real caller (see this file's own doc comment).
+ * @param {string|number} spaceId @param {string} entityId @returns {string}
+ */
+export function entityPath(spaceId, entityId) {
+  return `/store/${spaceId}/entities/${entityId}`;
+}
+
+/**
  * The path `AssetService`/`@qu/engines`' `AssetEngine` chunk/reassemble
  * under - see `AssetEngine`'s own doc comment for why this stays under
  * `/store` (the `assets` segment routes `put()` to it) even though the
@@ -52,7 +66,7 @@ export function assetPath(spaceId, assetId) {
  * (not the ACL document's own content) so a doc and a list that happen to
  * share the same id never collide on the same ACL entry.
  * @param {string|number} spaceId
- * @param {'docs'|'lists'|'assets'|'threads'} kind
+ * @param {'docs'|'lists'|'assets'|'threads'|'entities'} kind
  * @param {string} resourceId
  * @returns {string}
  */
