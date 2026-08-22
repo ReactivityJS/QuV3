@@ -366,15 +366,22 @@ ContentRenderer`/`ContentEditor` split diagrammed above:
   unmanaged, raw-DOM trailing `actionsEl` slot from the first round. `requireText` (default
   `true`) generalizes `apps/chat/client.js`'s own already-proven "a caption is optional
   whenever there's an attachment to send instead" rule.
-- `EditorExtension` contract, extended: `{id, mount(ctx) -> stopFn|void}`, `ctx = {textarea,
-  actionsEl, insertText, registerAction, unregisterAction, registerSubmitCandidate,
-  unregisterSubmitCandidate, contributeContent, retractContent, setChrome, submitNow}`.
-  `registerAction()`/`registerSubmitCandidate()` contribute `SlotItem`s to the two resolved
-  slots; `contributeContent()`/`retractContent()` carry non-text submission data
-  (`{attachments?, location?}`), merged into `onSubmit(text, extras, meta)`; `setChrome()`
-  temporarily replaces the whole editor row (Voice's recorder panel); `submitNow()` submits
-  immediately with empty text and ONLY its own `extraPartial`, `meta.immediate = true`,
-  never touching the typed draft or standing contributions (Voice's independent Send).
+- `EditorExtension` contract, extended: `{id, mount(ctx) -> stopFn|{stop?, reset?}|void}`,
+  `ctx = {textarea, actionsEl, insertText, registerAction, unregisterAction,
+  registerSubmitCandidate, unregisterSubmitCandidate, contributeContent, retractContent,
+  setChrome, submitNow}`. `registerAction()`/`registerSubmitCandidate()` contribute
+  `SlotItem`s to the two resolved slots; `contributeContent()`/`retractContent()` carry
+  non-text submission data (`{attachments?, location?}`), merged into
+  `onSubmit(text, extras, meta)`; `setChrome()` temporarily replaces the whole editor row
+  (Voice's recorder panel); `submitNow()` submits immediately with empty text and ONLY its
+  own `extraPartial`, `meta.immediate = true`, never touching the typed draft or standing
+  contributions (Voice's independent Send). **`reset()` (Forum-migration round)** — an
+  extension's chance to clear its OWN UI/state whenever `clearContributions()` runs (a normal
+  submit succeeded) — closes a real bug `attachmentExtension()` had until Forum became its
+  first real caller: `contributeContent()`/`retractContent()` alone only track the editor's
+  own merge-map, not whatever DOM an extension rendered for its contribution, so a sent
+  attachment's chip kept showing (and kept re-attaching itself to the NEXT, unrelated send)
+  after the message it was meant for already went out.
 - Five real `EditorExtension`s (`packages/content-ui/src/`): `emojiExtension`/
   `mentionExtension` (unchanged, trailing `actionsEl`), and — **resolved, no longer
   deferred** — `attachmentExtension`/`locationExtension`/`voiceExtension`, all three

@@ -17,7 +17,16 @@ import { mountResolvedSlot } from '@qu/ui';
  * area and the submit control itself, instead of raw, unmanaged DOM.
  *
  * THE EditorExtension CONTRACT (docs/v4-concept.md §5/§12): `{id,
- * mount(ctx) -> stopFn|void}`. `ctx`:
+ * mount(ctx) -> stopFn|{stop?, reset?}|void}` - `reset()` (Forum-migration
+ * round) is an extension's chance to clear its OWN UI/state whenever
+ * `clearContributions()` runs (a normal submit succeeded - see
+ * `mountContentComposer()`'s own doc comment), since `contributeContent()`/
+ * `retractContent()` alone only track the EDITOR's own merge-map, not
+ * whatever DOM an extension rendered for its contribution (e.g.
+ * `attachmentExtension()`'s own pending-attachment chip, which would
+ * otherwise keep showing - and keep re-attaching itself to every
+ * SUBSEQUENT send - after the message it was actually meant for already
+ * went out). `ctx`:
  *   - `textarea`, `insertText(text)` - unchanged from the previous round.
  *   - `actionsEl` - the TRAILING slot (still raw DOM - unmanaged, kept for
  *     the existing Emoji/Mention extensions exactly as before).
@@ -145,6 +154,10 @@ export function mountContentEditor(container, {
 
   // ===== content contributions (attachments/location - non-text submit data) =
   const contributions = new Map();
+  // Extensions that asked to hear about `clearContributions()` (see this
+  // file's own doc comment's `mount()` return shape) - populated below,
+  // where `extensions` are actually mounted.
+  const resetFns = [];
   function contributeContent(id, partial) {
     contributions.set(id, partial);
     resolveSubmitSlot();
@@ -238,15 +251,27 @@ export function mountContentEditor(container, {
     }
   }
 
-  const stopFns = extensions
-    .map((ext) => ext.mount({
+  const stopFns = [];
+  for (const ext of extensions) {
+    const result = ext.mount({
       textarea, actionsEl, insertText,
       registerAction, unregisterAction,
       registerSubmitCandidate, unregisterSubmitCandidate,
       contributeContent, retractContent,
       setChrome, submitNow,
-    }))
-    .filter((fn) => typeof fn === 'function');
+    });
+    // `mount()` may return a plain stopFn (unchanged, most extensions), OR
+    // `{stop?, reset?}` for one that also wants to hear about
+    // `clearContributions()` (`reset` - e.g. `attachmentExtension()`
+    // clearing its own pending-chip UI once a submit it contributed to
+    // actually went through, not just the editor's own `contributions` Map -
+    // see that file's own doc comment) - `void` means neither.
+    if (typeof result === 'function') stopFns.push(result);
+    else if (result) {
+      if (typeof result.stop === 'function') stopFns.push(result.stop);
+      if (typeof result.reset === 'function') resetFns.push(result.reset);
+    }
+  }
 
   return {
     textarea,
@@ -255,7 +280,11 @@ export function mountContentEditor(container, {
     setValue: (text) => { textarea.value = text; textarea.dispatchEvent(new CustomEvent('input', { bubbles: true })); },
     focus: () => textarea.focus(),
     onSubmit: (handler) => { submitHandler = handler; },
-    clearContributions: () => { contributions.clear(); resolveSubmitSlot(); },
+    clearContributions: () => {
+      contributions.clear();
+      for (const reset of resetFns) reset();
+      resolveSubmitSlot();
+    },
     stop: () => {
       stopAutogrow();
       leadingSlotHandle.stop();

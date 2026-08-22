@@ -1188,7 +1188,7 @@ Returns `{ textarea, actionsEl, getValue(), setValue(text), focus(), onSubmit(ha
 location}` (merged `contributeContent()`s) and `meta = {immediate}` (`true` only for a
 `submitNow()`-driven submit — see below).
 
-**The `EditorExtension` contract**: `{ id, mount(ctx) }`. `ctx`:
+**The `EditorExtension` contract**: `{ id, mount(ctx) -> stopFn|{stop?, reset?}|void }`. `ctx`:
 
 - `textarea`, `insertText(text)` (wraps `@qu/thread-ui`'s `insertAtCursor()`) — unchanged.
 - `actionsEl` — the TRAILING slot, still raw/unmanaged DOM (used by `emojiExtension`/`mentionExtension`).
@@ -1206,11 +1206,18 @@ location}` (merged `contributeContent()`s) and `meta = {immediate}` (`true` only
   `extraPartial` (never the typed draft, never standing contributions), `meta.immediate = true`
   — what `voiceExtension`'s own Send uses, independent of the composer's draft.
 
+`mount()`'s return value may be a plain `stopFn` (unchanged, most extensions), or
+`{stop?, reset?}` for one that also wants `reset()` called on `clearContributions()`
+(Forum-migration round) — a normal submit succeeding, so it can clear its OWN rendered UI/state
+(`contributeContent()`/`retractContent()` alone only track the editor's own merge-map, not
+whatever DOM an extension rendered — see `attachmentExtension()` below for the real bug this closed).
+
 ### `emojiExtension({ trigger = '😀', triggerTitle } = {})` / `mentionExtension({ services, subscribe } = {})`
 
 Thin `EditorExtension` adapters over `@qu/thread-ui`'s `renderEmojiPicker()`/
-`mountMentionAutocomplete()`, appending into the trailing `actionsEl` — the exact two
-primitives `apps/forum/client.js` already calls by hand for its own composer today.
+`mountMentionAutocomplete()`, appending into the trailing `actionsEl` — the same two
+primitives `apps/forum/client.js`'s composer now consumes this way (Forum-migration round),
+having previously called them by hand.
 
 ### `attachmentExtension({ assetService, spaceId, readerPubs, asSpaceId, trigger = '📎', triggerTitle } = {})`
 
@@ -1218,7 +1225,12 @@ Generalizes `apps/chat/client.js`'s own proven "attach a file" flow. Drives `@qu
 `<qu-asset-upload hide-picker>` (its own `hide-picker`/`.openPicker()` exist specifically for
 this composer-embedding case) via a `registerAction()` trigger; on `qu-asset-uploaded`,
 `contributeContent()`s the attachment (multiple uploads accumulate) and renders a removable
-chip; removing the last one `retractContent()`s.
+chip; removing the last one `retractContent()`s. Returns `{stop, reset}` — `reset()` (Forum-
+migration round, the first real caller to expose this gap) clears the chip/`pending` array on
+a successful submit, so a sent attachment doesn't keep re-attaching itself to the next,
+unrelated send. Still has no `.confirmSent()` wiring for `<qu-asset-upload>`'s own deferred
+sync-out verification phase — a documented, real gap (see the file's own doc comment), not
+fixed this round.
 
 ### `locationExtension({ trigger = '📍', triggerTitle, label } = {})`
 

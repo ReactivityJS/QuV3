@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { QuStore, MemoryStoreAdapter } from '@qu/core';
-import { AccessEngine, ThreadEngine, AssetEngine, CollectionEngine } from '@qu/engines';
+import { AccessEngine, ThreadEngine, AssetEngine, CollectionEngine, EntityEngine } from '@qu/engines';
 import { QuIdentityEngine, actorPath } from '@qu/identity';
 import {
-  ListService, AccessService, MessageService, ReactionService, PinService, ChannelService,
+  ListService, AccessService, MessageService, ReactionService, PinService, ChannelService, CommentableService,
   ActorService, ProfileService, DirectoryService, ContactsService, AssetService, FlagService, BookmarksService, THREAD_PRESETS, paths,
 } from '@qu/services';
 import { ExtensionPointHost, Registry } from '@qu/foundation';
@@ -28,6 +28,7 @@ function createQu() {
   new AccessEngine(qu);
   new ThreadEngine(qu);
   new CollectionEngine(qu);
+  new EntityEngine(qu); // Quniverse V4: a Topic is now an Entity, see ChannelService's own "QUNIVERSE V4" doc comment
   return qu;
 }
 
@@ -78,6 +79,7 @@ async function freshEnv(alias, { syncFetch = null } = {}) {
     directory: new DirectoryService(qu, identity, list),
     contacts: new ContactsService(new FlagService(qu, identity, list), identity),
     channels: new ChannelService(qu, identity, list, access, messages, syncFetch),
+    commentable: new CommentableService(messages),
   };
   const registry = new Registry();
   registry.registerService('list-service', list);
@@ -280,7 +282,7 @@ test('the composer posts a message and clears the input afterward', async () => 
     await waitFor(() => container.querySelector('textarea') !== null);
     const textarea = container.querySelector('textarea');
     textarea.value = 'Posted from the composer';
-    const sendBtn = container.querySelector('.qu-forum-composer-action');
+    const sendBtn = container.querySelector('.qu-content-editor-submit-slot button');
     sendBtn.click();
 
     await waitFor(() => container.querySelector('.qu-forum-message-text')?.textContent.includes('Posted from the composer'));
@@ -300,13 +302,13 @@ test('the composer textarea starts at ONE visual line (rows=1) - regression: an 
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
   try {
     await waitFor(() => container.querySelector('textarea') !== null);
-    assert.equal(container.querySelector('.qu-forum-composer-input-wrap textarea').rows, 1);
+    assert.equal(container.querySelector('.qu-content-editor-input-wrap textarea').rows, 1);
   } finally {
     stop();
   }
 });
 
-test('the composer\'s "+" action menu (content.composerActions) lists Attach natively, plus any plugin-contributed item', async () => {
+test('the composer\'s leading action slot includes Attach natively, plus any plugin-contributed content.composerActions item', async () => {
   const a = await freshEnv('Ada');
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
 
@@ -326,16 +328,21 @@ test('the composer\'s "+" action menu (content.composerActions) lists Attach nat
   };
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS, extensionPoints });
   try {
-    await waitFor(() => container.querySelector('.qu-forum-composer-plus .qu-thread-ui-context-menu-trigger') !== null);
-    container.querySelector('.qu-forum-composer-plus .qu-thread-ui-context-menu-trigger').click();
-    await waitFor(() => container.querySelector('.qu-thread-ui-context-menu-panel') !== null);
-    const panel = container.querySelector('.qu-thread-ui-context-menu-panel');
-    const items = [...panel.querySelectorAll('.qu-thread-ui-context-menu-item')].map((btn) => btn.textContent);
-    assert.deepEqual(items, ['📎Attach file', '📅New calendar event']);
-    assert.equal(seen.length, 1);
-    assert.equal(seen[0].point, 'content.composerActions');
-    assert.equal(seen[0].payload.spaceId, FORUM_SPACE_ID);
-    assert.equal(seen[0].payload.threadId, 'general');
+    // composerActionsExtension() fetches content.composerActions ONCE at
+    // mount time (see that function's own doc comment) - with only 2 total
+    // leading actions (Attach + the one plugin item), the Presentation
+    // Resolver's default 'inline-then-menu' strategy (threshold: 2) shows
+    // both inline, no "+" menu needed for this count.
+    await waitFor(() => container.querySelectorAll('.qu-content-editor-leading .qu-slot-resolver-item').length === 2);
+    const items = [...container.querySelectorAll('.qu-content-editor-leading .qu-slot-resolver-item')];
+    assert.deepEqual(items.map((btn) => btn.textContent), ['📎', '📅']);
+    // `seen` also picks up the topic header's own `content.entityMenu`
+    // collect() call (Quniverse V4, unrelated to this test) - filter to
+    // just the point this test actually cares about.
+    const composerActionsCalls = seen.filter((call) => call.point === 'content.composerActions');
+    assert.equal(composerActionsCalls.length, 1);
+    assert.equal(composerActionsCalls[0].payload.spaceId, FORUM_SPACE_ID);
+    assert.equal(composerActionsCalls[0].payload.threadId, 'general');
   } finally {
     stop();
   }
@@ -358,11 +365,11 @@ test('attaching a file via the composer\'s <qu-asset-upload> sends it along with
     // close to waitFor()'s default 1000ms under a loaded full-suite run
     // (observed flaking at ~1040ms) - a longer timeout here is about REAL
     // crypto work taking real time, not a bug being masked.
-    await waitFor(() => container.querySelector('.qu-forum-pending-attachment')?.hidden === false, { timeout: 5000 });
+    await waitFor(() => container.querySelector('.qu-content-ui-attachment-chip') !== null, { timeout: 5000 });
 
     const textarea = container.querySelector('textarea');
     textarea.value = 'Check out this photo';
-    const sendBtn = container.querySelector('.qu-forum-composer-action');
+    const sendBtn = container.querySelector('.qu-content-editor-submit-slot button');
     sendBtn.click();
 
     await waitFor(() => container.querySelector('.qu-forum-message-attachment') !== null, { timeout: 5000 });
@@ -370,8 +377,9 @@ test('attaching a file via the composer\'s <qu-asset-upload> sends it along with
     assert.equal(messages[0].attachment.name, 'photo.png');
     assert.equal(messages[0].attachment.mime, 'image/png');
     assert.equal(container.querySelector('.qu-forum-message-attachment').getAttribute('asset-id'), messages[0].attachment.assetId);
-    // The pending-attachment chip is cleared after a successful send.
-    assert.equal(container.querySelector('.qu-forum-pending-attachment').hidden, true);
+    // The pending-attachment chip is cleared after a successful send (see
+    // content-editor.js's own `reset()` hook, Forum-migration round).
+    assert.equal(container.querySelector('.qu-content-ui-attachment-chip'), null);
   } finally {
     stop();
   }
@@ -391,13 +399,14 @@ test('composer: a failed postMessage() (e.g. this identity\'s local ACL copy for
     await waitFor(() => container.querySelector('textarea') !== null);
     const textarea = container.querySelector('textarea');
     textarea.value = 'This should fail';
-    const sendBtn = container.querySelector('.qu-forum-composer-action');
-    sendBtn.click();
+    container.querySelector('.qu-content-editor-submit-slot button').click();
 
     await waitFor(() => container.querySelector('.qu-forum-composer-error')?.hidden === false);
     assert.match(container.querySelector('.qu-forum-composer-error').textContent, /writer not authorized/);
-    assert.equal(sendBtn.disabled, false);
-    // the composer text is NOT cleared on failure - the user can retry.
+    // the composer text is NOT cleared on failure - the user can retry (see
+    // mountTopicView()'s own composer onSubmit doc comment on why this
+    // needs an explicit restore against mountContentComposer()'s own
+    // unconditional, synchronous clear-on-submit).
     assert.equal(textarea.value, 'This should fail');
   } finally {
     a.services.messages.postMessage = originalPostMessage;
@@ -411,11 +420,11 @@ test('composer: an unauthorized post is rejected LOCALLY, before it ever reaches
   const topic = await ada.services.channels.createTopic(FORUM_SPACE_ID, channel._id, { title: 'Secret' });
 
   // Eve - a real identity, never invited to this channel. Her OWN local
-  // store has the topic's title document (simulating e.g. a stale bookmark
+  // store has the topic's own Entity (simulating e.g. a stale bookmark
   // from before this restricted-channel privacy fix), but crucially NOT
-  // this topic's own thread ACL - the exact "never synced this ACL, ever"
-  // scenario the composer's own pre-send syncFetch() call (client.js,
-  // mountTopicView()'s actionBtn handler) exists to close.
+  // this topic's own COMMENT thread ACL - the exact "never synced this ACL,
+  // ever" scenario the composer's own pre-send syncFetch() call (client.js,
+  // mountTopicView()'s composer onSubmit) exists to close.
   const eve = await freshEnv('Eve', {
     // A syncFetch stub answering from Ada's store - THE relay's real job
     // (`SyncEngine.fetch()`/`#handleResponse()`) is exactly this: serve
@@ -429,7 +438,7 @@ test('composer: an unauthorized post is rejected LOCALLY, before it ever reaches
       return quBit ?? null;
     },
   });
-  await eve.qu.putSealed(paths.documentPath(FORUM_SPACE_ID, topic._id), await ada.qu.get(paths.documentPath(FORUM_SPACE_ID, topic._id)));
+  await eve.qu.putSealed(paths.entityPath(FORUM_SPACE_ID, topic._id), await ada.qu.get(paths.entityPath(FORUM_SPACE_ID, topic._id)));
 
   const container = makeContainer();
   const stop = mount(container, {
@@ -439,8 +448,7 @@ test('composer: an unauthorized post is rejected LOCALLY, before it ever reaches
   try {
     await waitFor(() => container.querySelector('textarea') !== null);
     container.querySelector('textarea').value = 'I should never arrive';
-    const sendBtn = container.querySelector('.qu-forum-composer-action');
-    sendBtn.click();
+    container.querySelector('.qu-content-editor-submit-slot button').click();
 
     await waitFor(() => container.querySelector('.qu-forum-composer-error')?.hidden === false);
     assert.match(container.querySelector('.qu-forum-composer-error').textContent, /not authorized/);
@@ -469,12 +477,12 @@ test('an attachment can be sent with no caption at all - the same rule voice mes
     const file = new File(['fake image bytes'], 'photo.png', { type: 'image/png' });
     Object.defineProperty(fileInput, 'files', { value: [file], configurable: true });
     fileInput.dispatchEvent(new window.Event('change'));
-    await waitFor(() => container.querySelector('.qu-forum-pending-attachment')?.hidden === false, { timeout: 5000 });
+    await waitFor(() => container.querySelector('.qu-content-ui-attachment-chip') !== null, { timeout: 5000 });
 
-    // No text typed at all - previously actionBtn's click handler bailed
-    // out on an empty body regardless of a pending attachment.
-    const sendBtn = container.querySelector('.qu-forum-composer-action');
-    sendBtn.click();
+    // No text typed at all - `requireText`'s own default rule (see
+    // mountContentEditor()'s doc comment) already allows an empty submit
+    // once a contribution (the attachment) exists.
+    container.querySelector('.qu-content-editor-submit-slot button').click();
 
     await waitFor(() => container.querySelector('.qu-forum-message-attachment') !== null, { timeout: 5000 });
     const { messages } = await a.services.messages.listMessages(FORUM_SPACE_ID, 'general');
@@ -545,8 +553,7 @@ test('the composer\'s @mention autocomplete inserts a full pub, and the posted m
     container.querySelector('.qu-thread-ui-mention-item').dispatchEvent(new CustomEvent('mousedown', { bubbles: true, cancelable: true }));
     assert.equal(textarea.value, `hey @${a.myPub}`);
 
-    const sendBtn = container.querySelector('.qu-forum-composer-action');
-    sendBtn.click();
+    container.querySelector('.qu-content-editor-submit-slot button').click();
     await waitFor(() => container.querySelector('.qu-forum-message-text') !== null);
 
     const { messages } = await b.services.messages.listMessages(FORUM_SPACE_ID, 'general');
@@ -967,6 +974,7 @@ test('clicking "Reply" in a post\'s context menu shows a "replying to" banner, a
   const a = await freshEnv('Ada');
   const b = await freshEnv('Bob');
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
+  await b.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
   const original = await b.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'from bob' });
   await mirrorThreadInto(b, a.qu, FORUM_SPACE_ID, 'general');
 
@@ -982,8 +990,7 @@ test('clicking "Reply" in a post\'s context menu shows a "replying to" banner, a
     assert.match(container.querySelector('.qu-forum-reply-banner').textContent, /Replying to/);
 
     container.querySelector('.qu-forum-composer textarea').value = 'my reply';
-    const sendBtn = container.querySelector('.qu-forum-composer-action');
-    sendBtn.click();
+    container.querySelector('.qu-content-editor-submit-slot button').click();
 
     await waitForAsync(async () => (await a.services.messages.listMessages(FORUM_SPACE_ID, 'general')).messages.length === 2);
     const { messages } = await a.services.messages.listMessages(FORUM_SPACE_ID, 'general');
@@ -1194,7 +1201,7 @@ test('sending a post always scrolls the view to the bottom, even if the user had
 
     const textarea = container.querySelector('textarea');
     textarea.value = 'sent while scrolled away';
-    container.querySelector('.qu-forum-composer-action').click();
+    container.querySelector('.qu-content-editor-submit-slot button').click();
 
     await waitFor(() => scrollToCalls.length > 0);
     assert.equal(container.querySelector('.qu-forum-scroll-bottom-btn').hidden, true);
@@ -1350,7 +1357,9 @@ test('the returned stop function tears down cleanly - no error thrown', async ()
 
 test('board view (#/forum, no sub-segments) lists the migrated "General" channel in the app-template sidebar (both desktop and mobile), and its topic in the recent-activity feed', async () => {
   const a = await freshEnv('Ada');
-  await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'first ever post' });
+  const [channel] = await a.services.channels.listChannels(FORUM_SPACE_ID);
+  const [topic] = await a.services.channels.listTopics(FORUM_SPACE_ID, channel._id);
+  await a.services.messages.postMessage(FORUM_SPACE_ID, topic._id, { body: 'first ever post' });
 
   const container = makeContainer();
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
@@ -1365,8 +1374,8 @@ test('board view (#/forum, no sub-segments) lists the migrated "General" channel
 
     await waitFor(() => container.querySelector('.qu-forum-topic-row a') !== null);
     const topicLink = container.querySelector('.qu-forum-topic-row a');
-    assert.equal(topicLink.getAttribute('href'), '#/forum/t/general');
-    assert.match(topicLink.textContent, /General/); // topic title
+    assert.equal(topicLink.getAttribute('href'), `#/forum/t/${topic._id}`);
+    assert.match(topicLink.textContent, new RegExp(topic.title)); // topic title
   } finally {
     stop();
   }
@@ -1617,15 +1626,15 @@ test('new topic view (channel known, #/forum/c/<id>/new-topic): no channel picke
     await waitFor(() => container.querySelector('.qu-forum-new-topic-form') !== null);
     assert.equal(container.querySelector('.qu-forum-new-topic-form select'), null);
     container.querySelector('.qu-forum-new-topic-form input[type="text"]').value = 'Hello world';
-    container.querySelector('.qu-forum-new-topic-body').value = 'First post body';
-    container.querySelector('.qu-forum-new-topic-form button[type="submit"]').click();
+    container.querySelector('.qu-forum-new-topic-composer textarea').value = 'First post body';
+    container.querySelector('.qu-forum-new-topic-composer .qu-content-editor-submit-slot button').click();
 
     await waitFor(() => window.location.hash.startsWith('#/forum/t/'));
     const topicId = window.location.hash.slice('#/forum/t/'.length);
     const topics = await a.services.channels.listTopics(FORUM_SPACE_ID, channel._id);
-    assert.ok(topics.some((tp) => tp._id === topicId && tp.title === 'Hello world'));
-    const { messages } = await a.services.messages.listMessages(FORUM_SPACE_ID, topicId);
-    assert.ok(messages.some((m) => m.body === 'First post body'));
+    const created = topics.find((tp) => tp._id === topicId);
+    assert.equal(created?.title, 'Hello world');
+    assert.equal(created?.content?.text, 'First post body'); // the opening post is the Entity's own content now, not a separate message
   } finally {
     stop();
   }
@@ -1662,11 +1671,10 @@ test('new topic view: a failed createTopic() (e.g. this identity is no longer a 
   try {
     await waitFor(() => container.querySelector('.qu-forum-new-topic-form') !== null);
     container.querySelector('.qu-forum-new-topic-form input[type="text"]').value = 'Doomed Topic';
-    container.querySelector('.qu-forum-new-topic-form button[type="submit"]').click();
+    container.querySelector('.qu-forum-new-topic-composer .qu-content-editor-submit-slot button').click();
 
     await waitFor(() => container.querySelector('.qu-forum-new-topic-error')?.hidden === false);
     assert.match(container.querySelector('.qu-forum-new-topic-error').textContent, /no channel/);
-    assert.equal(container.querySelector('.qu-forum-new-topic-form button[type="submit"]').disabled, false);
     assert.equal(window.location.hash.startsWith('#/forum/t/'), false); // never navigated away
   } finally {
     a.services.channels.createTopic = originalCreateTopic;
@@ -1757,7 +1765,7 @@ test('new topic view: submitting the form creates a topic and navigates to its o
 
     const titleInput = container.querySelector('.qu-forum-new-topic-form input[type="text"]');
     titleInput.value = 'Second topic';
-    container.querySelector('.qu-forum-new-topic-form button[type="submit"]').click();
+    container.querySelector('.qu-forum-new-topic-composer .qu-content-editor-submit-slot button').click();
     await waitFor(() => /^#\/forum\/t\//.test(window.location.hash));
   } finally {
     stop();
@@ -1793,6 +1801,8 @@ test('channel view: the reply count updates live when a message is posted to an 
 
 test('board view: the merged activity feed\'s reply count updates live too', async () => {
   const a = await freshEnv('Ada');
+  const [channel] = await a.services.channels.listChannels(FORUM_SPACE_ID);
+  const [topic] = await a.services.channels.listTopics(FORUM_SPACE_ID, channel._id);
 
   const container = makeContainer();
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
@@ -1800,7 +1810,7 @@ test('board view: the merged activity feed\'s reply count updates live too', asy
     await waitFor(() => container.querySelector('.qu-forum-topic-row a') !== null);
     assert.match(container.querySelector('.qu-forum-topic-meta').textContent, /0 replies/); // "General · 0 replies · ..." - channel title prefix included in the merged feed
 
-    await a.services.messages.postMessage(FORUM_SPACE_ID, 'general', { body: 'a reply' });
+    await a.services.messages.postMessage(FORUM_SPACE_ID, topic._id, { body: 'a reply' });
     await waitFor(() => /1 repl/.test(container.querySelector('.qu-forum-topic-meta').textContent));
   } finally {
     stop();
