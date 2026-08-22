@@ -177,6 +177,40 @@ export function threadReadMarkerPath(spaceId, threadId, actorPub) {
 }
 
 /**
+ * One (tag, entity) pairing - the FORWARD direction of Quniverse V4's
+ * `TagService` (see docs/v4-concept.md §4): "what has tag X" (of one
+ * `entityKind` at a time - see `TagService`'s own doc comment for why tag
+ * queries are deliberately scoped per kind, not cross-kind). Same "one QuBit
+ * per item under a shared parent, no index document" derived-list shape as
+ * `flagPath()`.
+ * @param {string|number} spaceId @param {string} tag @param {string} entityKind @param {string} entityId @returns {string}
+ */
+export function tagPath(spaceId, tag, entityKind, entityId) {
+  return `/store/${spaceId}/tags/${tag}/${entityKind}/${entityId}`;
+}
+
+/** The PARENT path `ListService.listDerived()` enumerates to find every entity (of one `entityKind`) tagged `tag` - one level above `tagPath()`. @param {string|number} spaceId @param {string} tag @param {string} entityKind @returns {string} */
+export function tagParentPath(spaceId, tag, entityKind) {
+  return `/store/${spaceId}/tags/${tag}/${entityKind}`;
+}
+
+/**
+ * The REVERSE direction of `TagService`: "what tags does this entity have" -
+ * a separate derived list from `tagPath()`, not a re-read of it, so both
+ * "what has tag X" and "what tags does entity Y have" stay O(1) writes with
+ * no read-modify-write of a shared document.
+ * @param {string|number} spaceId @param {string} entityKind @param {string} entityId @param {string} tag @returns {string}
+ */
+export function entityTagPath(spaceId, entityKind, entityId, tag) {
+  return `/store/${spaceId}/entity-tags/${entityKind}/${entityId}/${tag}`;
+}
+
+/** The PARENT path `ListService.listDerived()` enumerates to find every tag on one entity - one level above `entityTagPath()`. @param {string|number} spaceId @param {string} entityKind @param {string} entityId @returns {string} */
+export function entityTagsParentPath(spaceId, entityKind, entityId) {
+  return `/store/${spaceId}/entity-tags/${entityKind}/${entityId}`;
+}
+
+/**
  * One actor's own signed slot for a PUBLIC "reaction" (one emoji at a time)
  * on one message - `ReactionService`, same "one QuBit per actor under a
  * shared parent, enumerated via `ListService.listDerived()`" shape as
@@ -196,6 +230,25 @@ export function threadReactionPath(spaceId, threadId, messageId, actorPub) {
  */
 export function threadReactionsParentPath(spaceId, threadId, messageId) {
   return `/store/${spaceId}/threads/${threadId}/reactions/${messageId}`;
+}
+
+/**
+ * One actor's own signed reaction on a generic Entity (Quniverse V4, see
+ * docs/v4-concept.md §4) - the entity-scoped counterpart to
+ * `threadReactionPath()`, same "one QuBit per actor under a shared parent"
+ * shape, just one level shallower (an Entity has no `threadId`/`messageId`
+ * pair, only its own single id) - see `ReactionService`'s own doc comment
+ * for why this is two new methods on the SAME class rather than an
+ * overload of its existing thread-message ones.
+ * @param {string|number} spaceId @param {string} entityId @param {string} actorPub @returns {string}
+ */
+export function entityReactionPath(spaceId, entityId, actorPub) {
+  return `/store/${spaceId}/entities/${entityId}/reactions/${actorPub}`;
+}
+
+/** The PARENT path `ListService.listDerived()` enumerates to find every actor's reaction on one Entity - one level above `entityReactionPath()`. @param {string|number} spaceId @param {string} entityId @returns {string} */
+export function entityReactionsParentPath(spaceId, entityId) {
+  return `/store/${spaceId}/entities/${entityId}/reactions`;
 }
 
 /**
@@ -349,6 +402,35 @@ export function pushSubscriptionPath(actorPub, subscriptionId) {
  */
 export function pushSubscriptionsParentPath(actorPub) {
   return `/store/actors/~${actorPub}/push-subscriptions`;
+}
+
+/**
+ * One piece of content's signed "you were mentioned" marker in the
+ * MENTIONED actor's own GLOBAL mention index (Quniverse V4's `MentionService`,
+ * see docs/v4-concept.md §4) - global, not per-space, same reasoning
+ * `directoryEntryPath()`/`notificationPrefsPath()` already use (the
+ * mentioned actor may be mentioned in ANY space, not just one). Signed by
+ * the CONTENT'S AUTHOR (whoever wrote the mentioning text), never the
+ * mentioned actor - same "path is addressing, not trust" caveat
+ * `threadReactionPath()`'s own doc comment documents: a reader must key off
+ * the QuBit's own verified `pub`, never assume the mentioned actor wrote it.
+ *
+ * `spaceId`/`entityKind`/`entityId` are joined into ONE flat `~`-separated
+ * segment (same "both sides derive the same key, no nesting" trick
+ * `webrtcPairKey()` uses) rather than three nested path segments -
+ * `QuStore.getChildren()`/`ListService.listDerived()` only ever lists DIRECT
+ * (one level deep) children, so `actorMentionsParentPath()` must be exactly
+ * one segment above every entry, not three.
+ * @param {string} actorPub - The MENTIONED identity (whose index this lives under).
+ * @param {string|number} spaceId @param {string} entityKind @param {string} entityId @returns {string}
+ */
+export function actorMentionPath(actorPub, spaceId, entityKind, entityId) {
+  return `/store/mentions/${actorPub}/${spaceId}~${entityKind}~${entityId}`;
+}
+
+/** The PARENT path `ListService.listDerived()` enumerates to find everything that mentions `actorPub` - one level above `actorMentionPath()`. @param {string} actorPub @returns {string} */
+export function actorMentionsParentPath(actorPub) {
+  return `/store/mentions/${actorPub}`;
 }
 
 /**

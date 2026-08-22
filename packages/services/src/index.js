@@ -58,3 +58,6 @@ export { WebRtcSignalService } from './webrtc-signal-service.js';
 export { EntityService } from './entity-service.js';
 export { EntityTypeRegistry, defaultEntityTypes } from './entity-types.js';
 export { CONTENT_FORMATS, createContent } from './content.js';
+export { FollowService } from './follow-service.js';
+export { TagService } from './tag-service.js';
+export { MentionService } from './mention-service.js';

@@ -249,6 +249,10 @@ function here is a pure string-builder — no I/O. The Entity-API surface:
 | `NOTIFICATIONS_THREAD_ID` | `'notifications'` — the fixed thread id inside that space. |
 | `pushSubscriptionPath`/`pushSubscriptionsParentPath(actorPub[, subscriptionId])` | Web Push subscription records. |
 | `appCatalogEntryPath`/`appCatalogParentPath([name])` | The mirrored app catalog under `/store/apps/catalog/...`. |
+| `entityReactionPath`/`entityReactionsParentPath(spaceId, entityId[, actorPub])` | A generic Entity's reactions (Phase 2, `ReactionService.setEntityReaction()`). |
+| `tagPath`/`tagParentPath(spaceId, tag, entityKind[, entityId])` | "What has tag X" (Phase 2, `TagService`). |
+| `entityTagPath`/`entityTagsParentPath(spaceId, entityKind, entityId[, tag])` | "What tags does entity Y have" (Phase 2, `TagService`). |
+| `actorMentionPath`/`actorMentionsParentPath(actorPub[, spaceId, entityKind, entityId])` | An actor's global "mentioned in" index (Phase 2, `MentionService`). |
 
 ### `ListService`
 
@@ -595,6 +599,53 @@ generic `EntityService`-created Entity via `entityKind: 'entity'` — Phase
 1's "first capability migration" proof that one Capability implementation
 spans both the legacy Thread-message shape and the new generic Entity shape
 without forking any logic (see the file's own doc comment).
+
+#### `FollowService` (`follow-service.js`) — Phase 2
+
+`new FollowService(flagService)`. The "Followable" Capability, same
+thin-`FlagService`-wrapper shape as `BookmarksService` — but `entityKind` is
+a **required** parameter here (no single legacy caller to default for):
+`follow(entityKind, entityId, data = {})` / `unfollow(entityKind, entityId)` /
+`isFollowing(entityKind, entityId)` / `listFollowed(entityKind)`.
+
+#### `TagService` (`tag-service.js`) — Phase 2
+
+`new TagService(qu, identityEngine, listService)`. The "Taggable" Capability
+— deliberately minimal: tagging + query only, no hierarchy/aliases. Two
+independent derived-list indexes (`paths.tagPath`/`tagParentPath` for "what
+has tag X", `paths.entityTagPath`/`entityTagsParentPath` for "what tags does
+entity Y have"), both written/tombstoned together:
+
+- `addTag(spaceId, entityKind, entityId, tag, { asSpaceId })` /
+  `removeTag(spaceId, entityKind, entityId, tag, { asSpaceId })`.
+- `getTags(spaceId, entityKind, entityId)` → `string[]`.
+- `getTaggedEntities(spaceId, tag, entityKind)` → `string[]` — scoped to one
+  `entityKind` at a time, no cross-kind search.
+
+#### `MentionService` (`mention-service.js`) — Phase 2
+
+`new MentionService(qu, identityEngine, listService)`. The "Mentionable"
+Capability, generalizing `thread-formatting.js`'s `extractMentions()`:
+
+- `mentionsOf(text)` — a stateless passthrough to `extractMentions()`, no
+  stored index (always correct even after an edit).
+- `indexMentions(spaceId, entityKind, entityId, text, { asSpaceId })` —
+  extracts mentions and writes one signed marker into each mentioned actor's
+  own **global** mention index (`paths.actorMentionPath`); returns the
+  mentioned actor ids.
+- `mentionedIn(actorPub)` → `Array<{spaceId, entityKind, entityId, mentionedAt}>` —
+  everything that currently mentions `actorPub`, across every space/kind.
+  Re-indexing an edited, now-shorter text does not retroactively remove a
+  stale entry (documented scope cut, not yet reconciled).
+
+#### `ReactionService`, generalized — Phase 2
+
+`setEntityReaction(spaceId, entityId, emoji, { asSpaceId })` /
+`getEntityReactions(spaceId, entityId)` — the entity-scoped counterparts of
+`setReaction()`/`getReactions()`, added as two new methods on the same
+class (not an overload — a Thread's address is two-level, an Entity's is
+one-level, see the file's own doc comment) reusing its existing private
+signing/actor-pub helpers.
 
 ---
 

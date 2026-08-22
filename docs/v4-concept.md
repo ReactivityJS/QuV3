@@ -289,20 +289,25 @@ Each Capability is a thin Service over Entity, following the exact shape
 
 | Capability | Realized by | Status |
 |---|---|---|
-| Commentable | `MessageService` (a Thread's `postMessage`/`listReplies`) reused for any Entity, not just Thread | reuse existing |
-| Reactable | `ReactionService` generalized from `threadReactionPath()` to `entityReactionPath()` | reuse existing, generalize path helper |
-| Bookmarkable | `BookmarksService` (already an entity-kind-parametrized `FlagService` wrapper) | already generic — no change needed |
-| Followable | new `FollowService`, same `FlagService`-wrapper shape as `BookmarksService` | **new**, smallest possible: one wrapper, no new storage shape |
-| Mentionable | generalize `thread-formatting.js`'s `extractMentions()` into a small `MentionService` that both extracts and indexes (`mentionsOf(entityRef)` / `mentionedIn(actorPub)`), reusing the derived-list pattern | **new** indexing half; extraction already exists |
-| Taggable | new `TagService` — tagging + query only, explicitly **no** hierarchy/aliases at launch (per brainstorming §20's own explicit scoping) | **new**, deliberately minimal |
-| Notifiable | existing `PushDeliveryService` (relay) + `NotificationPrefsService`, generalized so any Capability write (a comment, a reaction, a mention, a follow) can enqueue a notification through one shared call, instead of only Thread-message-driven pushes | reuse existing delivery machinery, generalize the trigger surface |
+| Commentable | `MessageService` (a Thread's `postMessage`/`listReplies`) reused for any Entity, not just Thread | reuse existing — wiring an Entity to a comment Thread is Forum-migration-phase work, not done yet |
+| Reactable | `ReactionService.setEntityReaction()`/`getEntityReactions()` (`packages/services/src/reaction-service.js`), reusing the class's existing signing/actor-pub helpers via two new entity-scoped methods rather than overloading `setReaction()`'s thread-shaped signature | **implemented (Phase 2)** |
+| Bookmarkable | `BookmarksService` (already an entity-kind-parametrized `FlagService` wrapper) | already generic — no change needed (Phase 1) |
+| Followable | `FollowService` (`packages/services/src/follow-service.js`), same `FlagService`-wrapper shape as `BookmarksService`, `entityKind` required (no legacy caller to default for) | **implemented (Phase 2)** |
+| Mentionable | `MentionService` (`packages/services/src/mention-service.js`): `mentionsOf(text)` is a stateless passthrough to `extractMentions()` (no stored forward index — stays correct after an edit); `indexMentions()`/`mentionedIn(actorPub)` add the one real gap, a stored reverse index (`paths.actorMentionPath()`, a GLOBAL per-actor derived list) | **implemented (Phase 2)** — mention-triggered notification delivery is still separate, later work |
+| Taggable | `TagService` (`packages/services/src/tag-service.js`) — tagging + query only, explicitly **no** hierarchy/aliases (per brainstorming §20's own explicit scoping); two independent derived-list indexes (`tagPath()` forward, `entityTagPath()` reverse), scoped to one `entityKind` at a time, no cross-kind search | **implemented (Phase 2)** |
+| Notifiable | existing `PushDeliveryService` (relay) + `NotificationPrefsService`, generalized so any Capability write (a comment, a reaction, a mention, a follow) can enqueue a notification through one shared call, instead of only Thread-message-driven pushes | still open — Phase 3+ |
 | Attachable | `AssetEngine`/`AssetService` (already fully generic — takes any `spaceId`/entity reference) | already generic — no change needed |
 
 No Capability introduces a new `QuStore` Engine. Where a Capability needs a derived-list
 storage shape not yet covered by `paths.js`, it gets one new pair of path helpers
 (`xParentPath()`/`xPath()`) added to that file, following its own stated convention of
 adding helpers "alongside the Service that consumes them, not speculatively ahead of a real
-caller."
+caller." One subtlety worth recording for the next Capability that needs a derived list keyed
+by more than one identifier: `QuStore.getChildren()`/`ListService.listDerived()` only ever
+list **direct** (one level deep) children, so a compound key (e.g. `actorMentionPath()`'s
+`spaceId`/`entityKind`/`entityId`) must be joined into one flat, single-segment key — the same
+`~`-joining trick `webrtcPairKey()` already uses — never spread across nested path segments
+under the list's own parent.
 
 ## 5. Content Editor architecture
 
