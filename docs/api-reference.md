@@ -578,7 +578,13 @@ surface so a later swap to persisted/admin-editable storage changes only
 this class's internals, never a call site (see the file's own doc comment).
 `defaultEntityTypes` is pre-seeded with the seven types
 `docs/v4-concept.md` §3.3 specifies: `topic`, `message`, `article`, `page`,
-`notification`, `task`, `event`.
+`notification`, `task`, `event`. Each definition also carries a
+`contentFormat` (`'plain'` default, settable per type — `topic`/`article`/
+`page` default to `'markdown'`) — `resolveContentFormat(type, registry =
+defaultEntityTypes)` reads it (falling back to `'plain'` for an
+unregistered type), the minimal, static realization of §5's
+format-selection idea (not yet the fuller
+global → per-EntityType → per-device → user-preference chain).
 
 #### `createContent(...)` / `renderContent(...)` / `CONTENT_FORMATS` (`content.js`)
 
@@ -657,6 +663,25 @@ Capability, generalizing `thread-formatting.js`'s `extractMentions()`:
 class (not an overload — a Thread's address is two-level, an Entity's is
 one-level, see the file's own doc comment) reusing its existing private
 signing/actor-pub helpers.
+
+#### `CommentableService` (`commentable-service.js`) — Forum-migration round
+
+`new CommentableService(messageService)`. The "Commentable" Capability — a
+thin `MessageService` wrapper using an Entity's own id as its attached
+comment Thread's `threadId`, the same "same id, no separate concept"
+convention `ChannelService` already established for Topic↔Thread, applied
+one layer up (any commentable Entity, not just a Forum Topic). An Entity's
+own `content` (§3.1) and its attached comments stay two different things —
+comments are never "the thread's first message."
+
+- `enableComments(spaceId, entityId, config = {})` — wraps `createThread()`,
+  same idempotency (safe to call unconditionally on every Entity creation).
+- `postComment(spaceId, entityId, body, { replyTo, asSpaceId, extra })` /
+  `editComment(spaceId, entityId, commentId, body, { asSpaceId })` (author-only,
+  inherited from `editMessage()`) / `listComments(spaceId, entityId, { limit,
+  order, cursor })` / `getComment(spaceId, entityId, commentId)` — thin
+  passthroughs to the matching `MessageService` method, `entityId` standing
+  in for `threadId`.
 
 ---
 

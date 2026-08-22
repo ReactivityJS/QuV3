@@ -289,7 +289,7 @@ Each Capability is a thin Service over Entity, following the exact shape
 
 | Capability | Realized by | Status |
 |---|---|---|
-| Commentable | `MessageService` (a Thread's `postMessage`/`listReplies`) reused for any Entity, not just Thread | reuse existing — wiring an Entity to a comment Thread is Forum-migration-phase work, not done yet |
+| Commentable | `CommentableService` (`packages/services/src/commentable-service.js`) — a thin `MessageService` wrapper using an Entity's own id as its attached comment Thread's `threadId`, the same "same id, no separate concept" convention `ChannelService` already established for Topic↔Thread, applied one layer up | **implemented (Forum-migration round)** |
 | Reactable | `ReactionService.setEntityReaction()`/`getEntityReactions()` (`packages/services/src/reaction-service.js`), reusing the class's existing signing/actor-pub helpers via two new entity-scoped methods rather than overloading `setReaction()`'s thread-shaped signature | **implemented (Phase 2)** |
 | Bookmarkable | `BookmarksService` (already an entity-kind-parametrized `FlagService` wrapper) | already generic — no change needed (Phase 1) |
 | Followable | `FollowService` (`packages/services/src/follow-service.js`), same `FlagService`-wrapper shape as `BookmarksService`, `entityKind` required (no legacy caller to default for) | **implemented (Phase 2)** |
@@ -390,10 +390,17 @@ ContentRenderer`/`ContentEditor` split diagrammed above:
   extras.attachments, location: extras.location})` on submit, calls `onSubmit(content)`, and
   clears the draft + contributions ONLY for a normal submit (`meta.immediate === false`) —
   never for a `submitNow()`-driven one, which has nothing of its own to clear. `format` is
-  still a plain, explicit option, NOT yet resolved through the global/per-EntityType/
-  per-device/user-preference chain described above — there is no persisted config store yet
-  for a resolver to read from (`EntityType` is still static-only, §10), so that resolution
-  chain remains the real, still-open next step.
+  still a plain, explicit option a caller passes in — **now with one real rung of the
+  resolution chain built**: `resolveContentFormat(type, registry = defaultEntityTypes)`
+  (`packages/services/src/entity-types.js`, Forum-migration round) resolves an EntityType's
+  own `contentFormat` (`'plain'` default, `'markdown'`/`'richtext'` settable per type — e.g.
+  `topic`/`article`/`page` default to `'markdown'`, matching `THREAD_PRESETS.forum()`'s own
+  `formatting: ['markdown', 'mentions']`). This is deliberately still just the
+  per-EntityType rung, not the fuller global → per-EntityType → per-device → user-preference
+  chain described above — there is still no persisted config store for per-device/user
+  overrides to read from (`EntityType` is still static-only, §10) — but a caller no longer
+  has to hard-code a format per app; `mountContentComposer({format: resolveContentFormat
+  ('topic')})` is the real, current call shape.
 - **Still not migrated**: `apps/chat/client.js` keeps its own hand-wired implementations —
   this round generalized their PROVEN LOGIC into `content-ui`, it did not yet swap Chat itself
   over to consume the generalized version. `apps/forum/client.js` likewise keeps its own
