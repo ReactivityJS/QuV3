@@ -426,6 +426,7 @@ The brainstorming's insight that Navigation and FAB are themselves just Slots wi
 | Primary create action (FAB) | `mountAppTemplate`'s `primaryAction` | already real for **one** static action; no resolver for multiple candidate actions |
 | `content-editor` leading slot / submit control | `mountResolvedSlot()` (`@qu/ui`, see below) — **implemented** | `registerAction()`/`registerSubmitCandidate()` (§5) |
 | `entity-item.actions`, `entity-detail.context` | new slots any EntityType's list/detail template exposes, generalizing the per-Thread-message context menu already in `packages/thread-ui/src/context-menu.js` | **new**, direct generalization of existing code |
+| `content.entityFooter`, `content.entityMenu` | `ExtensionPointHost` (`contributes`) — the entity-scoped siblings of `content.messageFooter`/`content.messageMenu`, contributed by `apps/reactions`/`apps/bookmarks` alongside their existing message-level points; renders Reactions/Bookmarks on an Entity's own content (e.g. a Forum Topic's opening post) | **implemented (Forum-migration round)** — admin-configurable via the same `disabledApps` toggle already covering the message-level points; `apps/pins`' Pin capability is deliberately **not** given an entity-scoped sibling this round (documented scope cut, §10) |
 
 **Presentation Resolver — implemented**: `mountResolvedSlot()`
 (`packages/ui/src/slot-resolver.js`), exactly the concept §17 of the brainstorming named as

@@ -6,7 +6,7 @@ import { ListService, FlagService, BookmarksService, ActorService } from '@qu/se
 import { installDom, waitFor } from '@qu/ui/testing';
 
 installDom();
-const { mount, bookmarkMenuItem } = await import('../client.js');
+const { mount, bookmarkMenuItem, entityBookmarkMenuItem } = await import('../client.js');
 
 async function freshEnv() {
   const qu = new QuStore();
@@ -140,4 +140,32 @@ test('bookmarkMenuItem(): an ALREADY-bookmarked message resolves an active item 
 
   await item.onClick();
   assert.equal(await services.bookmarks.isBookmarked('msg1'), false);
+});
+
+// ===== entityBookmarkMenuItem() - the content.entityMenu contributor ======
+
+test('entityBookmarkMenuItem(): resolves an inactive item whose onClick adds the bookmark under entityKind "entity"', async () => {
+  const { services } = await freshEnv();
+  const item = await entityBookmarkMenuItem({ services, entityId: 'topic1', snapshot: { title: 'my topic' } });
+  assert.equal(item.id, 'bookmark');
+  assert.equal(item.icon, '🔖');
+
+  await item.onClick();
+
+  const [entry] = await services.bookmarks.list('entity');
+  assert.equal(entry.title, 'my topic');
+  assert.equal(await services.bookmarks.isBookmarked('topic1'), false); // never leaks into the default forumMessage list
+});
+
+test('entityBookmarkMenuItem(): an already-bookmarked entity resolves an active item whose onClick removes it, independent from the message-scoped list', async () => {
+  const { services } = await freshEnv();
+  await services.bookmarks.add('topic1', { title: 'saved' }, 'entity');
+  await services.bookmarks.add('topic1', { body: 'a same-id message, unrelated' }); // same id, default entityKind
+
+  const item = await entityBookmarkMenuItem({ services, entityId: 'topic1' });
+  assert.equal(item.icon, '📑');
+
+  await item.onClick();
+  assert.equal(await services.bookmarks.isBookmarked('topic1', 'entity'), false);
+  assert.equal(await services.bookmarks.isBookmarked('topic1'), true); // the default-kind bookmark is untouched
 });

@@ -6,7 +6,7 @@ import { ListService, ReactionService } from '@qu/services';
 import { installDom, waitFor } from '@qu/ui/testing';
 
 installDom();
-const { renderReactionWidget } = await import('../client.js');
+const { renderReactionWidget, renderEntityReactionWidget } = await import('../client.js');
 
 async function freshEnv() {
   const qu = new QuStore();
@@ -90,4 +90,36 @@ test('disconnecting the widget from the DOM tears down its live subscription (no
 
   container.remove();
   await assert.doesNotReject(() => env.services.reactions.setReaction('forum-space', 'topic1', 'msg1', '👍'));
+});
+
+// ===== renderEntityReactionWidget() - content.entityFooter ================
+
+function entityPayload({ qu, services, myPub }) {
+  return { services, qu, spaceId: 'forum-space', entityId: 'topic1', myPub };
+}
+
+test('renderEntityReactionWidget(): reacting via the "+" picker renders a pill, using the entity-scoped service methods', async () => {
+  const env = await freshEnv();
+  const container = makeContainer();
+  await renderEntityReactionWidget(container, entityPayload(env));
+  await waitFor(() => container.querySelector('.qu-thread-ui-emoji-trigger') !== null);
+
+  container.querySelector('.qu-thread-ui-emoji-trigger').click();
+  await waitFor(() => container.querySelector('.qu-thread-ui-emoji-panel') !== null);
+  container.querySelector('.qu-thread-ui-emoji-panel button').click();
+
+  await waitFor(() => container.querySelector('.qu-reactions-pill') !== null);
+  assert.ok(container.querySelector('.qu-reactions-pill').classList.contains('qu-reactions-pill-mine'));
+  const stored = await env.services.reactions.getEntityReactions('forum-space', 'topic1');
+  assert.equal(Object.values(stored).flat().length, 1);
+});
+
+test('renderEntityReactionWidget(): an entity reaction and a message reaction at the SAME id never mix', async () => {
+  const env = await freshEnv();
+  await env.services.reactions.setReaction('forum-space', 'topic1', 'msg1', '🔥'); // message-scoped, same threadId/id coincidentally
+
+  const container = makeContainer();
+  await renderEntityReactionWidget(container, entityPayload(env));
+  await waitFor(() => container.querySelector('.qu-reactions-row') !== null);
+  assert.equal(container.querySelectorAll('.qu-reactions-pill').length, 0); // the message-scoped reaction above must not leak in
 });
