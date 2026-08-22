@@ -1,7 +1,7 @@
 {
   "name": "@qu/services",
   "version": "0.1.0",
-  "description": "The Entity API - the layer apps actually call. Hides Qu paths and QuBit envelopes behind plain async methods returning plain values. paths/unwrap/sync-freshness/ListService (docs/v3-technical-concept.md §4.2's derived/curated list primitive), private-storage/StarredService (self-encrypted personal lists), FlagService (the universal Drupal-Flag-style mark/like/bookmark mechanism, private mode over StarredService + public mode over ListService) and its FavoritesService/ContactsService/BookmarksService facades, AccessService (the generic writer/reader ACL Entity API), the ThreadService decomposition (§4.3): MessageService/ReactionService/PinService/PresenceService, NotificationPrefsService/PushSubscriptionService (the two Services @qu/relay's push delivery depends on), ProfileService/DirectoryService/actor-format (the Quniverse platform's User List/Contact List building blocks), and Quniverse V4's generic Entity layer (docs/v4-concept.md): EntityService/entityPath (over @qu/engines' EntityEngine), EntityTypeRegistry/defaultEntityTypes (the static, swappable Content-Type+Fields registry), createContent (the universal Content shape, deliberately separate from any editor), and Phase 2's Capabilities: FollowService, TagService (tagging + query, deliberately no hierarchy/aliases), MentionService (mentionsOf/indexMentions/mentionedIn, generalizing thread-formatting.js's extractMentions with a stored reverse index), and ReactionService's generalized setEntityReaction()/getEntityReactions().",
+  "description": "The Entity API - the layer apps actually call. Hides Qu paths and QuBit envelopes behind plain async methods returning plain values. paths/unwrap/sync-freshness/ListService (docs/v3-technical-concept.md §4.2's derived/curated list primitive), private-storage/StarredService (self-encrypted personal lists), FlagService (the universal Drupal-Flag-style mark/like/bookmark mechanism, private mode over StarredService + public mode over ListService) and its FavoritesService/ContactsService/BookmarksService facades, AccessService (the generic writer/reader ACL Entity API), the ThreadService decomposition (§4.3): MessageService/ReactionService/PinService/PresenceService, NotificationPrefsService/PushSubscriptionService (the two Services @qu/relay's push delivery depends on), ProfileService/DirectoryService/actor-format (the Quniverse platform's User List/Contact List building blocks), and Quniverse V4's generic Entity layer (docs/v4-concept.md): EntityService/entityPath (over @qu/engines' EntityEngine), EntityTypeRegistry/defaultEntityTypes (the static, swappable Content-Type+Fields registry), createContent (the universal Content shape, deliberately separate from any editor), and Phase 2's Capabilities: FollowService, TagService (tagging + query, deliberately no hierarchy/aliases), MentionService (mentionsOf/indexMentions/mentionedIn, generalizing thread-formatting.js's extractMentions with a stored reverse index), ReactionService's generalized setEntityReaction()/getEntityReactions(), and CommentableService (the \"Commentable\" Capability - a thin MessageService wrapper over any commentable Entity).",
   "type": "module",
   "main": "src/index.js",
   "exports": {
@@ -38,7 +38,8 @@
     "./content": "./src/content.js",
     "./follow-service": "./src/follow-service.js",
     "./tag-service": "./src/tag-service.js",
-    "./mention-service": "./src/mention-service.js"
+    "./mention-service": "./src/mention-service.js",
+    "./commentable-service": "./src/commentable-service.js"
   },
   "dependencies": {
     "@qu/core": "^0.1.0",

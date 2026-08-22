@@ -19,6 +19,19 @@ import '@qu/ui'; // registers <qu-asset-upload> as a side effect - see @qu/ui's 
  * (label + ✕), the same shape `apps/chat/client.js`'s own
  * `pendingAttachmentEl` already uses; removing the last one
  * `ctx.retractContent()`s.
+ *
+ * KNOWN GAP: never calls `<qu-asset-upload>`'s own `.confirmSent(assetId)` -
+ * the `EditorExtension` contract (`content-editor.js`) has no "your
+ * contribution was actually submitted" hook for an extension to react to
+ * (only pre-submit `contributeContent()`/`retractContent()`), so this
+ * extension can't yet start the deferred sync-out verification/progress
+ * phase `<qu-asset-upload>`'s own doc comment describes. The asset itself
+ * still syncs normally via the outbox regardless (already durably written
+ * locally the moment `qu-asset-uploaded` fires) - this only means no
+ * dedicated verify/retry progress UI for it. Real follow-up work (extending
+ * the `EditorExtension` contract with a post-submit hook), not fixed here -
+ * `apps/chat/client.js`'s own still-hand-wired composer is unaffected (it
+ * calls `confirmSent()` itself, directly).
  */
 
 const STYLE_ID = 'qu-content-ui-attachment-style';
@@ -43,7 +56,7 @@ function ensureStyle() {
  *   (a host that wants them somewhere specific - e.g. above the composer,
  *   matching `apps/chat/client.js`'s own `pendingAttachmentEl` placement -
  *   passes its own container here).
- * @returns {{id: string, mount: (ctx: object) => (() => void)}}
+ * @returns {{id: string, mount: (ctx: object) => {stop: () => void, reset: () => void}}}
  */
 export function attachmentExtension({ assetService, spaceId, readerPubs, asSpaceId, trigger = '📎', triggerTitle = 'Attach file', chipContainer } = {}) {
   return {
@@ -97,12 +110,23 @@ export function attachmentExtension({ assetService, spaceId, readerPubs, asSpace
 
       ctx.registerAction({ id: 'attachment', icon: trigger, label: triggerTitle, onClick: () => uploadEl.openPicker() });
 
-      return () => {
-        uploadEl.removeEventListener('qu-asset-uploaded', onUploaded);
-        uploadEl.remove();
-        if (!chipContainer) chipsEl.remove();
-        ctx.unregisterAction('attachment');
-        ctx.retractContent('attachment');
+      return {
+        stop: () => {
+          uploadEl.removeEventListener('qu-asset-uploaded', onUploaded);
+          uploadEl.remove();
+          if (!chipContainer) chipsEl.remove();
+          ctx.unregisterAction('attachment');
+          ctx.retractContent('attachment');
+        },
+        // A successful submit already carried `pending` out via
+        // `mergedExtras()` - clear OUR OWN chip UI now, or it would keep
+        // showing (and keep re-attaching itself to every SUBSEQUENT send)
+        // after the message it was actually meant for already went out -
+        // see `content-editor.js`'s own doc comment on this hook.
+        reset: () => {
+          pending = [];
+          renderChips();
+        },
       };
     },
   };

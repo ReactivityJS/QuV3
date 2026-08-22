@@ -37,6 +37,14 @@
  *   `'mentionable'`, `'taggable'`, `'attachable'`, `'notifiable'`) this type
  *   supports - see docs/v4-concept.md §4. Advisory only in Phase 1: nothing
  *   here enforces that e.g. only a `'commentable'` type gets comments.
+ * @property {'plain'|'markdown'|'richtext'} [contentFormat='plain'] - The
+ *   default `format` a ContentEditor/Composer should use for this type's
+ *   `content` field (see content.js's `CONTENT_FORMATS`). Deliberately the
+ *   MINIMAL realization of docs/v4-concept.md §5's format-selection idea -
+ *   just a static per-EntityType default, not the fuller
+ *   global -> per-EntityType -> per-device -> user-preference resolution
+ *   chain that document describes as the eventual goal (there is still no
+ *   persisted config store to back per-device/per-user overrides).
  */
 export class EntityTypeRegistry {
   #types = new Map();
@@ -46,7 +54,7 @@ export class EntityTypeRegistry {
    * @param {EntityTypeDefinition} definition
    */
   register(type, definition) {
-    this.#types.set(type, { fields: {}, content: false, capabilities: [], ...definition });
+    this.#types.set(type, { fields: {}, content: false, capabilities: [], contentFormat: 'plain', ...definition });
   }
 
   /** @param {string} type @returns {EntityTypeDefinition|null} `null` if `type` was never registered. */
@@ -61,6 +69,19 @@ export class EntityTypeRegistry {
 }
 
 /**
+ * @param {string} type
+ * @param {EntityTypeRegistry} [registry=defaultEntityTypes]
+ * @returns {'plain'|'markdown'|'richtext'} `type`'s configured
+ *   `contentFormat`, or `'plain'` if `type` is unregistered - the same
+ *   open-by-default posture `EntityService`'s own `#normalizeFields()`
+ *   already takes for an unregistered type (see this file's own class doc
+ *   comment).
+ */
+export function resolveContentFormat(type, registry = defaultEntityTypes) {
+  return registry.get(type)?.contentFormat ?? 'plain';
+}
+
+/**
  * The seven EntityTypes specified in docs/v4-concept.md §3.3, seeded onto a
  * shared default instance - most callers just want `defaultEntityTypes`, not
  * their own empty registry.
@@ -71,40 +92,47 @@ defaultEntityTypes.register('topic', {
   fields: { title: 'text' },
   content: true,
   capabilities: ['commentable', 'reactable', 'followable', 'attachable'],
+  contentFormat: 'markdown', // matches THREAD_PRESETS.forum()'s formatting: ['markdown', 'mentions']
 });
 
 defaultEntityTypes.register('message', {
   fields: {},
   content: true,
   capabilities: ['reactable', 'attachable', 'mentionable'],
+  contentFormat: 'plain', // matches THREAD_PRESETS.chat()'s formatting: ['mentions'] only, no markdown
 });
 
 defaultEntityTypes.register('article', {
   fields: { title: 'text', coverImage: 'attachment' },
   content: true,
   capabilities: ['commentable', 'bookmarkable', 'taggable'],
+  contentFormat: 'markdown',
 });
 
 defaultEntityTypes.register('page', {
   fields: { title: 'text', route: 'text' },
   content: true,
   capabilities: ['attachable'],
+  contentFormat: 'markdown',
 });
 
 defaultEntityTypes.register('notification', {
   fields: {},
   content: true,
   capabilities: ['notifiable'],
+  contentFormat: 'plain',
 });
 
 defaultEntityTypes.register('task', {
   fields: { status: 'enum', dueDate: 'datetime', assignee: 'ref:actor' },
   content: true,
   capabilities: ['commentable', 'attachable'],
+  contentFormat: 'plain',
 });
 
 defaultEntityTypes.register('event', {
   fields: { title: 'text', start: 'datetime', end: 'datetime', location: 'text' },
   content: true,
   capabilities: ['reactable'],
+  contentFormat: 'plain',
 });

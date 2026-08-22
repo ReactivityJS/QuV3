@@ -47,6 +47,20 @@
  * `content.messageActions`' own payload shape) are needed here because a
  * live reaction count genuinely needs `watchChildren()`, not just a
  * `services.reactions` call.
+ *
+ * QUNIVERSE V4 (Forum-migration round, docs/v4-concept.md §4): a second
+ * export, `renderEntityReactionWidget()`, contributes the SAME widget to a
+ * new `content.entityFooter` point - for reacting to an Entity's own
+ * content (e.g. a Forum Topic's opening post), not one of its comments.
+ * `<qu-reactions-row>` is generalized rather than duplicated: its
+ * `configure()` payload now takes EITHER `{threadId, messageId}` (message-
+ * scoped, `threadReactionsParentPath()`/`setReaction()`/`getReactions()`) OR
+ * `{entityId}` (entity-scoped, `entityReactionsParentPath()`/
+ * `setEntityReaction()`/`getEntityReactions()`) - exactly one of the two
+ * shapes, picked once in `connectedCallback()`/`_render()`, no other logic
+ * forks on it. Admin-togglable via the exact same `disabledApps` mechanism
+ * already covering the message-scoped contribution - one manifest, one
+ * `enabled` flag, two points.
  */
 import { watchChildren } from '@qu/reactive';
 import { paths } from '@qu/services';
@@ -71,20 +85,39 @@ class QuReactionsRowElement extends HTMLElement {
   /**
    * Set BEFORE this element is appended - `connectedCallback()` runs
    * synchronously on insertion (same ordering constraint `@qu/ui`'s own
-   * Custom Elements document), so `renderReactionWidget()` below always
-   * calls this first.
-   * @param {{services: object, qu: object, syncFetch?: Function, spaceId: string, threadId: string, messageId: string, myPub: string}} opts
+   * Custom Elements document), so `renderReactionWidget()`/
+   * `renderEntityReactionWidget()` below always call this first.
+   *
+   * EITHER the message-scoped shape (`{spaceId, threadId, messageId}`) OR
+   * the entity-scoped shape (`{spaceId, entityId}`) - never both - see this
+   * file's own top doc comment.
+   * @param {{services: object, qu: object, syncFetch?: Function, spaceId: string, threadId?: string, messageId?: string, entityId?: string, myPub: string}} opts
    */
   configure(opts) {
     this._opts = opts;
+  }
+
+  #watchPath() {
+    const { spaceId, threadId, messageId, entityId } = this._opts;
+    return entityId != null ? paths.entityReactionsParentPath(spaceId, entityId) : paths.threadReactionsParentPath(spaceId, threadId, messageId);
+  }
+
+  #getReactions() {
+    const { services, spaceId, threadId, messageId, entityId } = this._opts;
+    return entityId != null ? services.reactions.getEntityReactions(spaceId, entityId) : services.reactions.getReactions(spaceId, threadId, messageId);
+  }
+
+  #setReaction(emoji) {
+    const { services, spaceId, threadId, messageId, entityId } = this._opts;
+    return entityId != null ? services.reactions.setEntityReaction(spaceId, entityId, emoji) : services.reactions.setReaction(spaceId, threadId, messageId, emoji);
   }
 
   connectedCallback() {
     ensureTheme();
     injectStyle(STYLE_ID, STYLE);
     this._token = 0;
-    const { qu, syncFetch, spaceId, threadId, messageId } = this._opts;
-    this._off = watchChildren(qu, paths.threadReactionsParentPath(spaceId, threadId, messageId), () => this._render(), { syncFetch });
+    const { qu, syncFetch } = this._opts;
+    this._off = watchChildren(qu, this.#watchPath(), () => this._render(), { syncFetch });
     this._render();
   }
 
@@ -94,8 +127,8 @@ class QuReactionsRowElement extends HTMLElement {
 
   async _render() {
     const token = ++this._token;
-    const { services, spaceId, threadId, messageId, myPub } = this._opts;
-    const reactions = await services.reactions.getReactions(spaceId, threadId, messageId);
+    const { myPub } = this._opts;
+    const reactions = await this.#getReactions();
     if (token !== this._token) return; // a newer render already superseded this one (two watchChildren() fires racing) - see this file's own doc comment
 
     this.textContent = '';
@@ -114,12 +147,12 @@ class QuReactionsRowElement extends HTMLElement {
       btn.type = 'button';
       btn.className = 'qu-reactions-pill' + (mine ? ' qu-reactions-pill-mine' : '');
       btn.textContent = `${emoji} ${reactors.length}`;
-      btn.addEventListener('click', () => services.reactions.setReaction(spaceId, threadId, messageId, mine ? null : emoji));
+      btn.addEventListener('click', () => this.#setReaction(mine ? null : emoji));
       row.appendChild(btn);
     }
 
     row.appendChild(renderEmojiPicker({
-      onPick: (emoji) => services.reactions.setReaction(spaceId, threadId, messageId, emoji === myReaction ? null : emoji),
+      onPick: (emoji) => this.#setReaction(emoji === myReaction ? null : emoji),
       trigger: '+',
       triggerTitle: t('react'),
     }));
@@ -135,6 +168,19 @@ if (!customElements.get('qu-reactions-row')) customElements.define('qu-reactions
  * @param {{services: object, qu: object, syncFetch?: Function, spaceId: string, threadId: string, messageId: string, myPub: string}} payload
  */
 export async function renderReactionWidget(container, payload) {
+  const el = document.createElement('qu-reactions-row');
+  el.configure(payload);
+  container.appendChild(el);
+}
+
+/**
+ * The `content.entityFooter` contributor - reacting to an Entity's own
+ * content (Quniverse V4, Forum-migration round) rather than one of its
+ * comments. See this file's own top doc comment for the payload contract.
+ * @param {HTMLElement} container
+ * @param {{services: object, qu: object, syncFetch?: Function, spaceId: string, entityId: string, myPub: string}} payload
+ */
+export async function renderEntityReactionWidget(container, payload) {
   const el = document.createElement('qu-reactions-row');
   el.configure(payload);
   container.appendChild(el);

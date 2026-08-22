@@ -6,6 +6,7 @@
   "clientMain": "./dist/client.js",
   "requires": [],
   "contributes": [
-    { "point": "content.messageFooter", "export": "renderReactionWidget", "kind": "ui", "order": 0 }
+    { "point": "content.messageFooter", "export": "renderReactionWidget", "kind": "ui", "order": 0 },
+    { "point": "content.entityFooter", "export": "renderEntityReactionWidget", "kind": "ui", "order": 0 }
   ]
 }

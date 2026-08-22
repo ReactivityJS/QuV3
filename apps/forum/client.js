@@ -1,6 +1,6 @@
 /**
  * FORUM — a real browser client for `apps/forum/index.js`'s Channel -> Topic
- * -> per-Topic-Thread hierarchy (`@qu/services`' `ChannelService`, see its
+ * -> per-Topic-Comments hierarchy (`@qu/services`' `ChannelService`, see its
  * own doc comment for the full data model and why it's built on
  * `ListService`'s already-hardened curated lists rather than QuV2's
  * unprotected `DocumentService`/`CollectionService` pair). `SPACE_ID` is NOT
@@ -24,12 +24,13 @@
  *   - `#/forum/new-topic` - the SAME form, reached from the board view's own
  *     `primaryAction` (no channel open yet) - adds a channel `<select>` at
  *     the top, since a topic always needs a parent channel.
- *   - `#/forum/t/<topicId>` - one topic's thread: message list, composer,
+ *   - `#/forum/t/<topicId>` - one topic: its own content card (title +
+ *     opening post + the entity-scoped `content.entityFooter`/
+ *     `content.entityMenu` plugins - Reactions/Bookmarks on the topic
+ *     ITSELF, docs/v4-concept.md §6), then its comment list, composer,
  *     attachments, plus whatever admin-enabled plugins render into this
- *     app's own extension points (reactions/pins/bookmarks - see EXTENSION
- *     POINTS below) - everything this app already had before Channels/
- *     Topics existed, now parametrized by `topicId` instead of a single
- *     hardcoded thread id.
+ *     app's own message-scoped extension points (reactions/pins/bookmarks
+ *     on individual COMMENTS - see EXTENSION POINTS below).
  *   - `#/forum/new` - the "create a channel" form, its own subpage, gated by
  *     the same policy check as the board/channel views' own `settings`
  *     entry that links to it (see `applyNewChannelSettings()`).
@@ -54,9 +55,13 @@
  * fetches/watches `services.channels.listChannels()` for its own reasons,
  * so only the "channels -> nav items" shape is shared, not the fetch itself.
  *
- * MIGRATION: `apps/forum/index.js`'s `register()` wraps the ORIGINAL flat
- * public thread (from before this round) in a real "General" channel/topic,
- * same thread id, no data loss - see that file's own doc comment.
+ * QUNIVERSE V4 (Forum-migration round, docs/v4-concept.md §9/§10): a Topic
+ * is now an `EntityService`-created Entity with its own `content` field (the
+ * opening post) - see `ChannelService`'s own "QUNIVERSE V4" doc comment.
+ * `apps/forum/index.js`'s `register()` creates a fresh "General" channel +
+ * opening topic on first boot; this branch has no deployed production Forum
+ * data to preserve, so there is no legacy-thread-wrapping migration path
+ * here anymore (a real deployment carrying real history would need its own).
  *
  * RESTRICTED CHANNELS - real end-to-end encryption for exactly an explicit
  * member list, not a UI-level filter (`ChannelService`'s own doc comment
@@ -67,15 +72,17 @@
  * forward, nothing retroactively, same documented trade-off as everywhere
  * else non-retroactive membership growth appears in this codebase).
  *
- * DOUBLE-SUBMIT: both the "create channel" and "create topic" forms disable
- * their submit button for the duration of the create call - the actual fix
- * for "clicking Create twice sometimes makes two boards" (confirmed root
- * cause: QuV2's own form had no such guard, and minted a fresh random id
- * per submit - two submits before the first finished meant two genuinely
- * different, both-valid channel documents, not a storage-layer race
- * `ListService.addCurated()`'s own retry logic was ever meant to catch).
- * Matches this file's own pre-existing `actionBtn.disabled = true` convention
- * for posting a message.
+ * DOUBLE-SUBMIT: the "create channel" form disables its submit button for
+ * the duration of the create call; the "create topic" form (whose actual
+ * submit trigger is its `ContentComposer`'s own send control, with no
+ * exposed `.disabled` handle - see `mountNewTopicView()`'s own doc comment)
+ * uses an equivalent re-entrancy flag instead - both close the same real bug
+ * ("clicking Create twice sometimes makes two boards": QuV2's own form had
+ * no such guard, and minted a fresh random id per submit - two submits
+ * before the first finished meant two genuinely different, both-valid
+ * channel documents, not a storage-layer race `ListService.addCurated()`'s
+ * own retry logic was ever meant to catch). Matches this file's own
+ * pre-existing `actionBtn.disabled = true` convention for posting a message.
  *
  * SCOPE - what this round's board/channel views deliberately do NOT do:
  * the merged recent-activity feed on `#/forum` itself re-computes when a
@@ -91,25 +98,30 @@
  * `AssetService`) - this app's designated TEST integration for the file/
  * image/video/audio upload+sync+display mechanism (see `AssetEngine`'s own
  * doc comment for where the actual chunking/hashing/dedup/retry LOGIC
- * lives). `pendingAttachment` (per-topic-view closure state) holds the
- * result of the LAST completed upload until Send is actually clicked -
- * picking a file starts uploading it immediately (not deferred to Send) so
- * the composer can show real upload/sync PROGRESS before the message is
- * even sent, at the cost of one edge case: uploading and never sending
- * leaves an orphaned, unreferenced asset in this identity's own
- * local+relay storage - acceptable for a public forum attachment (no
- * delete primitive exists for messages either). `attachment: {assetId,
- * name, mime, size}` rides on `MessageService.postMessage()`'s existing
- * `extra` param (merged into the stored message as-is) - no new
- * Service-layer field needed. A restricted topic's `readerPubs` are passed
- * to `upload()` too, matching the thread's own membership - an open
- * topic's attachments stay unencrypted, matching the message bodies
- * sitting next to them.
+ * lives). QUNIVERSE V4 (Forum-migration round): both composers
+ * (`mountNewTopicView()`'s own and the reply composer in `mountTopicView()`)
+ * now use `@qu/content-ui`'s `attachmentExtension()` for this instead of a
+ * hand-wired `<qu-asset-upload>` + `pendingAttachment` closure - see that
+ * extension's own doc comment for the identical "upload starts on pick, not
+ * deferred to Send" lifecycle, now shared with any other `ContentEditor`.
+ * Uploading and never sending still leaves an orphaned, unreferenced asset
+ * in this identity's own local+relay storage - acceptable for a public
+ * forum attachment (no delete primitive exists for messages either).
+ * `attachment: {assetId, name, mime, size}` (singular - the FIRST of the
+ * composer's own `content.attachments[]`, this app never sends more than
+ * one) rides on `MessageService.postMessage()`'s existing `extra` param
+ * (merged into the stored message as-is) - no new Service-layer field
+ * needed. Restricted-channel attachments are NOT separately encrypted for
+ * the topic's own member list (`attachmentExtension()` has no `readerPubs`
+ * wired here) - an accepted, unchanged gap from before this round (an
+ * earlier version of this doc comment claimed otherwise; it was never
+ * actually implemented).
  *
- * EMOJI/MENTIONS - see `@qu/thread-ui`'s own doc comment for the shared
- * `renderEmojiPicker()`/`mountMentionAutocomplete()`/`mountEmojiAutocomplete()`/
- * `insertAtCursor()` primitives this app's composer is built from - the SAME
- * package a future `apps/chat` port is meant to reuse without rework.
+ * EMOJI/MENTIONS - `@qu/content-ui`'s `emojiExtension()`/`mentionExtension()`
+ * (thin adapters over `@qu/thread-ui`'s own `renderEmojiPicker()`/
+ * `mountMentionAutocomplete()`, see either's own doc comment) - both
+ * composers get this now, including the topic's own opening post (which
+ * never had either before this round).
  *
  * REACTIONS/PINS/BOOKMARKS are NOT built into this file at all - they're
  * admin-toggleable plugins (`apps/reactions`, `apps/pins`, `apps/bookmarks`),
@@ -181,13 +193,25 @@
  *     (with its own `messagePermalink` route shape) - see that file's own
  *     doc comment.
  *   - `content.composerActions` (`kind: 'menu'`, `ExtensionPointHost.
- *     collect()`) - the composer's own "+" action menu (Attach, plus
- *     whatever a plugin app contributes - e.g. a Calendar/Gallery app's own
- *     entry), gathered fresh every time it opens, same shape/mechanism as
- *     `content.messageMenu` above. Same payload shape as `content.
- *     topicToolbar`. `apps/chat/client.js` shares this SAME point (plus its
- *     own native "Share location" item, which forum's composer has no
- *     equivalent of) - see that file's own doc comment.
+ *     collect()`) - additional composer actions a plugin app contributes
+ *     (e.g. a Calendar/Gallery app's own entry) - see this file's own
+ *     `composerActionsExtension()`. Same payload shape as `content.
+ *     topicToolbar`. Fetched ONCE per composer mount now (Forum-migration
+ *     round - see that function's own doc comment), not fresh on every open
+ *     the way this point's OLD bespoke "+" menu re-fetched it; `apps/chat/
+ *     client.js` still shares this SAME point via its own, still hand-wired
+ *     composer (plus its own native "Share location" item, which forum's
+ *     composer has no equivalent of) - see that file's own doc comment.
+ *   - `content.entityFooter`/`content.entityMenu` (`kind: 'ui'`/`'menu'`,
+ *     Quniverse V4, Forum-migration round) - the entity-scoped siblings of
+ *     `content.messageFooter`/`content.messageMenu` above, rendered ONCE in
+ *     the topic's own header (not per-comment) - Reactions/Bookmarks on the
+ *     topic's own opening content. Payload: `{services, qu, syncFetch,
+ *     spaceId, entityId, myPub}` (footer) / `{services, entityId, snapshot}`
+ *     (menu, `collect()`-style, same `{id, label, icon, onClick}` return
+ *     shape as `content.messageMenu`). `apps/pins` has no entity-scoped
+ *     sibling (documented scope cut, docs/v4-concept.md §10) - the opening
+ *     post loses pin-ability, only comments keep it.
  *
  * KNOWN GAPS, left for later: no delete (`MessageService` has none, author-
  * only `editMessage()` is the whole story), no channel-metadata editing UI
@@ -199,13 +223,11 @@
  */
 import { watchChildren, watch } from '@qu/reactive';
 import { rankFor } from '@qu/foundation';
-import { paths, formatActorLabel, detectLinks } from '@qu/services';
+import { paths, formatActorLabel, detectLinks, resolveContentFormat, renderContent } from '@qu/services';
 import { createI18n } from '@qu/i18n';
 import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage, mountAppTemplate, createIconButton } from '@qu/ui';
-import {
-  renderEmojiPicker, renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, insertAtCursor, copyToClipboard,
-  mountComposerAutogrow, COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS,
-} from '@qu/thread-ui';
+import { renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, copyToClipboard } from '@qu/thread-ui';
+import { mountContentComposer, emojiExtension, mentionExtension, attachmentExtension } from '@qu/content-ui';
 
 // Default fallback order for `content.messageFooter`/`content.messageMenu`
 // items when an admin hasn't configured `relay-settings`' `extensionOrder`
@@ -314,6 +336,54 @@ const DICT = {
 };
 const { t } = createI18n(DICT);
 
+/**
+ * A local, forum-specific `EditorExtension` bridging the existing
+ * `content.composerActions` extension point (a real, tested feature - lets
+ * e.g. a Calendar/Gallery app contribute its own composer action) onto a
+ * `ContentEditor`'s generic leading slot (Quniverse V4, Forum-migration
+ * round). Registers one `ctx.registerAction()` per collected plugin item -
+ * `@qu/ui`'s `mountResolvedSlot()` (the Presentation Resolver, already
+ * mounted for the leading slot by `mountContentEditor()` itself) then
+ * collapses however many leading actions exist (this extension's own items,
+ * PLUS `attachmentExtension()`'s own `📎` trigger, mounted alongside it)
+ * into one overflow trigger once there's more than a couple - the same
+ * visual outcome the old bespoke "+" button had, through the general
+ * mechanism instead of a `composerActions`-specific one.
+ *
+ * `mount()` must stay SYNCHRONOUS (the `EditorExtension` contract's
+ * `stopFn|void` return, not a Promise a caller would have to await) even
+ * though collecting plugin items is async - the fetch runs in a
+ * fire-and-forget IIFE, guarded by a `stopped` flag so a `stop()` racing the
+ * still-in-flight `collect()` never registers anything after teardown.
+ * Fetched ONCE at mount time, not fresh on every open the way the old
+ * bespoke "+" menu's own `getItems` was - apps are only enabled/disabled on
+ * a relay boot/app reload, which already re-mounts this view, so this is a
+ * deliberate, minor simplification, not a regression.
+ */
+function composerActionsExtension({ services, qu, syncFetch, spaceId, threadId, extensionPoints }) {
+  return {
+    id: 'composerActions',
+    mount(ctx) {
+      let stopped = false;
+      const registeredIds = [];
+      if (extensionPoints) {
+        (async () => {
+          const payload = { services, qu, syncFetch, spaceId, threadId };
+          const items = await extensionPoints.collect('content.composerActions', payload);
+          if (stopped) return;
+          const ranked = [...items].sort((a, b) => rankFor(extensionPoints.order, 'content.composerActions', a.id, COMPOSER_ACTIONS_ORDER_DEFAULT[a.id] ?? 50)
+            - rankFor(extensionPoints.order, 'content.composerActions', b.id, COMPOSER_ACTIONS_ORDER_DEFAULT[b.id] ?? 50));
+          for (const item of ranked) { ctx.registerAction(item); registeredIds.push(item.id); }
+        })();
+      }
+      return () => {
+        stopped = true;
+        for (const id of registeredIds) ctx.unregisterAction(id);
+      };
+    },
+  };
+}
+
 function formatReplies(count) {
   return t('replies', { count });
 }
@@ -361,46 +431,16 @@ const STYLE = `
   .qu-forum-edit-row { display: flex; flex-direction: column; gap: 0.4rem; position: relative; }
   .qu-forum-edit-row textarea { font: inherit; padding: 0.4rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); resize: vertical; }
   .qu-forum-edit-row-buttons { display: flex; gap: 0.4rem; }
-  /* The composer: a "+" action-menu trigger (content.composerActions - see
-     this file's own top doc comment's "EXTENSION POINTS" section), a
-     rounded PILL holding the textarea + emoji trigger, and one circular
-     send button - the SAME visual language apps/chat/client.js's own
-     composer uses (see that file's own STYLE comment), minus the mic morph
-     (Forum has no voice messages - see mountTopicView()'s own top doc
-     comment). position: relative on .qu-forum-composer itself (NOT
-     .qu-forum-composer-input-wrap, the textarea's own direct parent) -
-     @qu/thread-ui's mountMentionAutocomplete() appends its dropdown into the
-     textarea's parentNode as position: absolute, which anchors to the
-     nearest POSITIONED ancestor, not necessarily the direct parent - exactly
-     apps/chat/client.js's own identical setup, already proven to work. */
-  .qu-forum-composer { display: flex; align-items: flex-end; gap: 0.4rem; position: relative; }
-  .qu-forum-composer-tools { display: flex; align-items: center; gap: 0.2rem; padding-bottom: 0.35rem; }
-  /* Same sizing as apps/chat/client.js's own .qu-chat-composer-plus override -
-     @qu/thread-ui's own .qu-thread-ui-context-menu-trigger default is tuned
-     for the smaller per-message "⋮" menu, not a composer-height tool cluster. */
-  .qu-forum-composer-plus .qu-thread-ui-context-menu-trigger { font-size: 1.1em; padding: 0.3rem; border-radius: 999px; opacity: 0.75; }
-  .qu-forum-composer-plus .qu-thread-ui-context-menu-trigger:hover { opacity: 1; background: var(--qu-color-border, #8884); }
-  /* min-height/max-height are a defensive fallback only - the actual
-     1-to-COMPOSER_MAX_ROWS growth is driven by @qu/thread-ui's
-     mountComposerAutogrow(), not this CSS. */
-  .qu-forum-composer-input-wrap { flex: 1; min-width: 0; display: flex; align-items: flex-end; gap: 0.3rem; background: var(--qu-color-surface, #8882); border: 1px solid var(--qu-color-border, #8884); border-radius: 1.3rem; padding: 0.4rem 0.6rem; }
-  .qu-forum-composer-input-wrap textarea { flex: 1; min-width: 0; font: inherit; border: none; background: transparent; resize: none; min-height: 1.4rem; max-height: 8rem; padding: 0.15rem 0; }
-  .qu-forum-composer-input-wrap textarea:focus { outline: none; }
-  .qu-forum-composer-action { flex-shrink: 0; width: 2.6rem; height: 2.6rem; border-radius: 50%; border: none; background: var(--qu-color-accent, #5b5bd6); color: white; cursor: pointer; font-size: 1.1em; line-height: 1; }
-  .qu-forum-composer-action:disabled { opacity: 0.6; cursor: default; }
+  /* The composer is now @qu/content-ui's mountContentComposer()
+     (Forum-migration round) - it ships its own .qu-content-editor* styling;
+     .qu-forum-composer here is just this app's own thin wrapper class
+     (spacing only), no longer a bespoke pill/tools/action-button layout. */
+  .qu-forum-composer { display: flex; flex-direction: column; }
   .qu-forum-empty { padding: 1.5rem; text-align: center; opacity: 0.7; }
   .qu-forum-composer-wrap { flex-shrink: 0; display: flex; flex-direction: column; gap: 0.4rem; padding: 0.6rem 1rem 1rem; border-top: 1px solid var(--qu-color-border, #8884); }
   .qu-forum-reply-banner { display: flex; justify-content: space-between; align-items: center; padding: 0.3rem 0.6rem; border-left: 3px solid var(--qu-color-accent, #5b5bd6); background: var(--qu-color-surface, #8882); border-radius: var(--qu-radius-sm, 0.3rem); font-size: 0.85em; }
   .qu-forum-reply-banner button { background: none; border: none; cursor: pointer; opacity: 0.7; font: inherit; }
   .qu-forum-reply-banner[hidden] { display: none; }
-  .qu-forum-pending-attachment { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85em; opacity: 0.85; }
-  /* Without this, pendingAttachmentEl.hidden = true (its default, and how
-     it resets after posting/removing) would have no visual effect - a plain
-     author-stylesheet class selector beats the UA's own [hidden] rule at
-     equal specificity, so this row would show empty and take up composer
-     layout space even with no attachment pending. */
-  .qu-forum-pending-attachment[hidden] { display: none; }
-  .qu-forum-pending-attachment button { background: none; border: none; cursor: pointer; opacity: 0.7; font: inherit; padding: 0; }
   .qu-forum-message-attachment { margin-top: 0.5rem; max-width: 18rem; }
   .qu-forum-restricted-badge { font-size: 0.75em; opacity: 0.75; }
   /* TOPIC VIEW ROOM LAYOUT - mounted with mountAppTemplate({fullHeight: true,
@@ -413,6 +453,13 @@ const STYLE = `
   .qu-forum-room-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .qu-forum-topic-header { flex-shrink: 0; padding: 0.6rem 1rem 0.4rem; border-bottom: 1px solid var(--qu-color-border, #8884); }
   .qu-forum-topic-header h1 { margin: 0 0 0.3rem; font-size: 1.2em; }
+  .qu-forum-topic-content { overflow-wrap: anywhere; }
+  .qu-forum-topic-content:empty { display: none; }
+  .qu-forum-topic-footer, .qu-forum-topic-menu { display: flex; align-items: center; gap: 0.3rem; margin-top: 0.4rem; }
+  .qu-forum-topic-menu:empty { display: none; }
+  .qu-forum-topic-menu button { border: none; background: transparent; cursor: pointer; font: inherit; opacity: 0.75; padding: 0.1rem 0.4rem; }
+  .qu-forum-topic-menu button:hover { opacity: 1; }
+  .qu-forum-new-topic-composer { margin-top: 0.5rem; }
   .qu-forum-messages-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 1rem; }
   /* Persistent scroll-to-bottom button - see apps/chat/client.js's own
      identical .qu-chat-scroll-bottom-btn for the full reasoning (position:
@@ -1078,18 +1125,28 @@ function mountChannelView(container, { qu, services, syncFetch, SPACE_ID, channe
  * simply not submittable yet while it's empty, `<select required>` already
  * enforces that natively).
  *
- * Beyond the title, the form also takes the topic's opening post right here
- * (content textarea + one optional attachment) - same "build immediately,
- * fill in via your own async IIFE" shape every other async render in this
- * file already follows for the channel `<select>`, and the exact same
- * upload-starts-on-pick / `qu-asset-uploaded` / `confirmSent()` attachment
- * lifecycle `mountTopicView()`'s own composer uses (see this file's own top
- * doc comment's "ATTACHMENTS" section) - createTopic() then postMessage()
- * are two calls, but read as one atomic "create topic with its first post"
- * action from the form's point of view (a topic with no opening post makes
- * no sense here, unlike a later reply in an existing thread).
+ * QUNIVERSE V4 (Forum-migration round): the topic's own opening post is now
+ * composed through `@qu/content-ui`'s `mountContentComposer()` (the SAME
+ * primitive the reply composer in `mountTopicView()` below uses), not a bare
+ * `<textarea>` + hand-wired `<qu-asset-upload>` - it now gets emoji/mention
+ * completion too, which it never had before (a real, deliberate small
+ * improvement, not just a refactor - a topic's opening post and its replies
+ * compose identically now). `createTopic(SPACE_ID, targetChannelId, {title,
+ * content})` takes the composed `Content` object directly - the SEPARATE
+ * `postMessage()` call this view used to make right after `createTopic()`
+ * is gone entirely: the opening post is the Entity's own `content` field
+ * now, never "message #1" of its attached comment thread (see
+ * `ChannelService`'s own "QUNIVERSE V4" doc comment).
+ *
+ * The title field stays a plain, native-required `<input>` inside a real
+ * `<form>` (native "can't submit without a title" validation, same as
+ * before) - the ContentComposer's OWN submit button is what actually
+ * triggers the form's submission (`form.requestSubmit()`), carrying the
+ * just-composed `Content` through a short-lived closure variable, since a
+ * ContentEditor's submit control and a native `<form>`'s own submit are two
+ * different mechanisms that need bridging exactly once, here.
  */
-function mountNewTopicView(container, { services, SPACE_ID, channelId }) {
+function mountNewTopicView(container, { services, subscribe, SPACE_ID, channelId }) {
   let stopped = false;
   const formRoot = document.createElement('div');
   const heading = document.createElement('h1');
@@ -1140,76 +1197,66 @@ function mountNewTopicView(container, { services, SPACE_ID, channelId }) {
   titleInput.required = true;
   form.appendChild(titleInput);
 
-  const bodyInput = document.createElement('textarea');
-  bodyInput.className = 'qu-forum-new-topic-body';
-  bodyInput.placeholder = t('composerPlaceholder');
-  form.appendChild(bodyInput);
+  const composerRoot = document.createElement('div');
+  composerRoot.className = 'qu-forum-new-topic-composer';
+  form.appendChild(composerRoot);
 
-  // Same "upload starts on file-pick, held as `pendingAttachment` until
-  // submit" lifecycle as the topic view's own composer - see this file's
-  // own top doc comment's "ATTACHMENTS" section.
-  const attachUpload = document.createElement('qu-asset-upload');
-  const pendingAttachmentEl = document.createElement('div');
-  pendingAttachmentEl.className = 'qu-forum-pending-attachment';
-  pendingAttachmentEl.hidden = true;
-  let pendingAttachment = null;
-  function clearPendingAttachment() {
-    pendingAttachment = null;
-    pendingAttachmentEl.hidden = true;
-    pendingAttachmentEl.textContent = '';
-  }
-  attachUpload.addEventListener('qu-asset-uploaded', (e) => {
-    pendingAttachment = { assetId: e.detail.assetId, ...e.detail.meta };
-    pendingAttachmentEl.textContent = '';
-    pendingAttachmentEl.hidden = false;
-    const label = document.createElement('span');
-    label.textContent = `📎 ${pendingAttachment.name}`;
-    const removeBtn = createIconButton({ icon: '✕', label: t('attachRemove'), onClick: clearPendingAttachment });
-    pendingAttachmentEl.append(label, removeBtn);
-  });
-  form.append(attachUpload, pendingAttachmentEl);
-
-  const submit = document.createElement('button');
-  submit.type = 'submit';
-  submit.textContent = t('createTopic');
   const errorEl = document.createElement('p');
   errorEl.className = 'qu-forum-new-topic-error';
   errorEl.hidden = true;
-  form.append(submit, errorEl);
+  form.appendChild(errorEl);
 
-  // Same double-submit guard as the board view's "create channel" form.
+  let pendingContent = null;
+  const composer = mountContentComposer(composerRoot, {
+    format: resolveContentFormat('topic'),
+    placeholder: t('composerPlaceholder'),
+    submitLabel: t('createTopic'),
+    requireText: false, // a topic's opening post can be title-only, same as before (body/attachment were both optional)
+    extensions: [
+      emojiExtension({ triggerTitle: t('insertEmoji') }),
+      mentionExtension({ services, subscribe }),
+      attachmentExtension({ assetService: services.assets, spaceId: SPACE_ID }),
+    ],
+    onSubmit: (content) => {
+      pendingContent = content;
+      form.requestSubmit();
+    },
+  });
+
+  // Same double-submit guard intent as the board view's "create channel"
+  // form, now keyed off a re-entrancy flag rather than a dedicated submit
+  // button's own `.disabled` (the composer's send control - see this
+  // function's own top doc comment - exposes no such handle) - the form's
+  // submit event is what actually triggers the form's submission.
+  let submitting = false;
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
+    if (submitting) return;
     const title = titleInput.value.trim();
-    const body = bodyInput.value.trim();
+    const content = pendingContent;
+    pendingContent = null;
     const targetChannelId = channelId ?? channelSelect?.value;
     if (!title || !targetChannelId) return;
-    submit.disabled = true;
+    submitting = true;
     errorEl.hidden = true;
     try {
-      const topic = await services.channels.createTopic(SPACE_ID, targetChannelId, { title });
-      const attachment = pendingAttachment;
-      if (body || attachment) {
-        const extra = attachment ? { attachment } : {};
-        await services.messages.postMessage(SPACE_ID, topic._id, { body, extra });
-        if (attachment) attachUpload.confirmSent(attachment.assetId);
-      }
+      const topic = await services.channels.createTopic(SPACE_ID, targetChannelId, { title, content });
       if (!stopped) window.location.hash = `#/forum/t/${topic._id}`;
     } catch (err) {
       // Same "no catch here previously meant NOTHING visible" fix as
       // mountInviteForm()'s own `.qu-forum-invite-error` - a locally
-      // rejected createTopic()/postMessage() (e.g. this identity was
-      // removed from a restricted channel between opening this form and
-      // submitting it) used to leave the button just quietly re-enabling.
+      // rejected createTopic() (e.g. this identity was removed from a
+      // restricted channel between opening this form and submitting it)
+      // used to leave the button just quietly re-enabling.
       errorEl.textContent = err.message;
       errorEl.hidden = false;
     } finally {
-      submit.disabled = false;
+      submitting = false;
     }
   });
   formRoot.appendChild(form);
 
-  return () => { stopped = true; };
+  return () => { stopped = true; composer.stop(); };
 }
 
 // ===================================================================
@@ -1262,8 +1309,25 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
   header.className = 'qu-forum-topic-header';
   const heading = document.createElement('h1');
   heading.textContent = t('title');
+  // QUNIVERSE V4 (Forum-migration round): the topic's own opening post
+  // (`content` field, `renderContent()`'d the same DOM-free way any other
+  // Entity's content renders - see `@qu/services`' `content.js`), plus the
+  // two entity-scoped extension points (`content.entityFooter`/
+  // `content.entityMenu`, docs/v4-concept.md §6) so Reactions/Bookmarks can
+  // render against the TOPIC ITSELF, not just its comments - admin-
+  // configurable via the same `disabledApps` toggle already covering the
+  // message-scoped points. `apps/pins`' Pin capability deliberately has NO
+  // entity-scoped sibling this round (documented scope cut, docs/
+  // v4-concept.md §10): the opening post loses pin-ability, only comments
+  // keep it (`content.topicToolbar` below, unchanged).
+  const topicContentEl = document.createElement('div');
+  topicContentEl.className = 'qu-forum-topic-content';
+  const topicFooterRoot = document.createElement('div');
+  topicFooterRoot.className = 'qu-forum-topic-footer';
+  const topicMenuRoot = document.createElement('div');
+  topicMenuRoot.className = 'qu-forum-topic-menu';
   const pinnedRoot = document.createElement('div');
-  header.append(heading, pinnedRoot);
+  header.append(heading, topicContentEl, topicFooterRoot, topicMenuRoot, pinnedRoot);
   // Rendered ONCE - unlike the per-message slots in renderMessage(), this
   // point's own contributor (Pins' `renderPinnedBar()`) self-manages its
   // own live updates (a Custom Element watching the topic's pins path
@@ -1278,6 +1342,18 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
       // host-agnostic code - see apps/pins/client.js's own doc comment.
       messagePermalink: (messageId) => `#/forum/t/${topicId}/m/${messageId}`,
     });
+    const entityPayload = { services, qu, syncFetch, spaceId: SPACE_ID, entityId: topicId, myPub: undefined };
+    (async () => {
+      entityPayload.myPub = await services.actors.whoAmI();
+      if (stopped) return;
+      extensionPoints.renderSlot('content.entityFooter', topicFooterRoot, entityPayload);
+      const items = await extensionPoints.collect('content.entityMenu', { services, entityId: topicId, snapshot: {} });
+      if (stopped) return;
+      for (const item of items) {
+        const btn = createIconButton({ icon: item.icon, label: item.label, onClick: item.onClick });
+        topicMenuRoot.appendChild(btn);
+      }
+    })();
   }
 
   const messagesScroll = document.createElement('div');
@@ -1300,95 +1376,108 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
   replyBanner.className = 'qu-forum-reply-banner';
   replyBanner.hidden = true;
 
-  // The composer is a rounded "pill" (textarea + emoji trigger) plus a "+"
-  // action-menu trigger (`content.composerActions` - see this file's own top
-  // doc comment's "EXTENSION POINTS" section) and one circular send button -
-  // the SAME visual language `apps/chat/client.js`'s own composer uses (see
-  // that file's own top doc comment's "COMPOSER" section), minus the
-  // mic/morph-to-mic behavior entirely: Forum has no voice messages (see
-  // this function's own top doc comment), so this action button is ALWAYS
-  // "send".
-  const composerRow = document.createElement('div');
-  composerRow.className = 'qu-forum-composer';
-  const composerTools = document.createElement('div');
-  composerTools.className = 'qu-forum-composer-tools';
-  const attachUpload = document.createElement('qu-asset-upload');
-  attachUpload.setAttribute('space-id', SPACE_ID);
-  attachUpload.setAttribute('hide-picker', ''); // its own picker button is replaced by the "+" action menu below
-  const composerActionsBtn = renderContextMenu({
-    trigger: '+',
-    triggerTitle: t('addAttachment'),
-    getItems: async () => {
-      const nativeItems = [
-        { id: 'attach', label: t('attachFile'), icon: '📎', onClick: () => attachUpload.openPicker() },
-      ];
-      const payload = { services, qu, syncFetch, spaceId: SPACE_ID, threadId: topicId };
-      const pluginItems = extensionPoints ? await extensionPoints.collect('content.composerActions', payload) : [];
-      return [...nativeItems, ...pluginItems].sort(
-        (a, b) => rankFor(extensionPoints?.order, 'content.composerActions', a.id, COMPOSER_ACTIONS_ORDER_DEFAULT[a.id] ?? 50)
-          - rankFor(extensionPoints?.order, 'content.composerActions', b.id, COMPOSER_ACTIONS_ORDER_DEFAULT[b.id] ?? 50)
-      );
-    },
-  });
-  composerActionsBtn.classList.add('qu-forum-composer-plus');
-  composerTools.append(composerActionsBtn, attachUpload);
-
-  const inputWrap = document.createElement('div');
-  inputWrap.className = 'qu-forum-composer-input-wrap';
-  const composerInput = document.createElement('textarea');
-  composerInput.placeholder = t('composerPlaceholder');
-  const stopComposerAutogrow = mountComposerAutogrow(composerInput, { minRows: COMPOSER_MIN_ROWS, maxRows: COMPOSER_MAX_ROWS });
-  const emojiPicker = renderEmojiPicker({
-    onPick: (emoji) => insertAtCursor(composerInput, emoji),
-    trigger: '😀',
-    triggerTitle: t('insertEmoji'),
-  });
-  inputWrap.append(composerInput, emojiPicker);
-
-  const actionBtn = document.createElement('button');
-  actionBtn.type = 'button';
-  actionBtn.className = 'qu-forum-composer-action';
-  actionBtn.textContent = '➤';
-  actionBtn.title = t('send');
-  actionBtn.setAttribute('aria-label', t('send'));
-
-  composerRow.append(composerTools, inputWrap, actionBtn);
-
-  // @mention completion (by alias or pub, from the 2nd typed character) and
-  // :shortcode: emoji completion, both from the 2nd typed character - wire-
-  // format unchanged, purely compose-time insert helpers. See
-  // `@qu/thread-ui`'s own doc comment.
-  const stopComposerMentions = mountMentionAutocomplete(composerInput, { services, subscribe });
-  const stopComposerEmoji = mountEmojiAutocomplete(composerInput);
-
-  const pendingAttachmentEl = document.createElement('div');
-  pendingAttachmentEl.className = 'qu-forum-pending-attachment';
-  pendingAttachmentEl.hidden = true;
+  // QUNIVERSE V4 (Forum-migration round): the reply composer is now
+  // `@qu/content-ui`'s `mountContentComposer()` - the SAME primitive
+  // `mountNewTopicView()`'s own composer uses (see that function's own doc
+  // comment) - instead of a hand-assembled textarea + emoji/mention/attach
+  // wiring. `attachmentExtension()`'s own `📎` leading trigger and
+  // `composerActionsExtension()`'s collected plugin items (this file's own
+  // top-level helper, bridging the existing `content.composerActions` point)
+  // share the SAME leading slot, resolved by `@qu/ui`'s `mountResolvedSlot()`
+  // (the Presentation Resolver) - the "+"-style collapse into one overflow
+  // trigger once there's more than a couple of them happens generically now,
+  // not via a bespoke `content.composerActions`-only menu button.
+  const composerRoot = document.createElement('div');
+  composerRoot.className = 'qu-forum-composer';
   const composerErrorEl = document.createElement('p');
   composerErrorEl.className = 'qu-forum-composer-error';
   composerErrorEl.hidden = true;
-  // ABOVE the input row, not below it - see apps/chat/client.js's own
-  // identical composer-ordering fix for why (a pending attachment is
-  // context for what's about to be sent, not a footnote after the fact).
-  composerWrap.append(replyBanner, pendingAttachmentEl, composerErrorEl, composerRow);
+  composerWrap.append(replyBanner, composerErrorEl, composerRoot);
+
+  const composer = mountContentComposer(composerRoot, {
+    format: resolveContentFormat('topic'), // comments share the topic's own format - both render through the SAME thread `formatting` config
+    placeholder: t('composerPlaceholder'),
+    submitLabel: '➤',
+    extensions: [
+      emojiExtension({ triggerTitle: t('insertEmoji') }),
+      mentionExtension({ services, subscribe }),
+      attachmentExtension({ assetService: services.assets, spaceId: SPACE_ID, triggerTitle: t('attachFile') }),
+      composerActionsExtension({ services, qu, syncFetch, spaceId: SPACE_ID, threadId: topicId, extensionPoints }),
+    ],
+    onSubmit: async (content) => {
+      composerErrorEl.hidden = true;
+      try {
+        // Refreshes this topic's own COMMENT thread ACL doc right before
+        // posting - closes the exact silent-failure scenario this file's
+        // own top doc comment describes (`[SyncEngine] rejecting synced
+        // QuBit ... writer not authorized`), NOT merely shrinks it, whenever
+        // a relay is actually reachable: `syncFetch()` (`SyncEngine.
+        // fetch()`) ingests the fetched ACL via the same trusted "already-
+        // signed synced data" path `#handleSync()` uses, bypassing any
+        // local write-authorization check (it's not this identity authoring
+        // a change, just receiving one) - so it persists REGARDLESS of
+        // whether this identity itself has write access. The very next
+        // line's `postComment()` then runs through `QuStore.put()`'s own
+        // synchronous `AccessEngine` pipeline hook (`assertWriteAuthorized()`),
+        // which now sees the FRESH, authoritative ACL and throws immediately
+        // if unauthorized - the write never reaches PERSIST/NOTIFY, never
+        // enters the outbox, and is never sent out at all. Proven end-to-end
+        // (two real identities, no mocked rejection) by this app's own test:
+        // "composer: an unauthorized post is rejected LOCALLY, before it
+        // ever reaches the relay/other peers". The one case this can't
+        // close: genuinely OFFLINE (no relay reachable at all) - `syncFetch`
+        // then silently no-ops (`.catch(() => {})` below) and this
+        // identity's existing, possibly-stale local ACL cache is all there
+        // is to go on, same optimistic-write-while-offline trade-off
+        // `outbox.js` already makes for every other write in this codebase.
+        await syncFetch?.(paths.aclPath(SPACE_ID, 'threads', topicId)).catch(() => {});
+        const attachment = content.attachments[0] ?? null; // singular, matching this app's own stored message shape
+        const extra = attachment ? { attachment } : {};
+        await services.commentable.postComment(SPACE_ID, topicId, content.text, { replyTo: replyingTo?.id ?? null, extra });
+        stuckToBottom = true; // sending a post always means "show me what I just sent" - see apps/chat/client.js's own identical rule
+        setReplyingTo(null);
+      } catch (err) {
+        // Same "no catch here previously meant NOTHING visible" fix as
+        // mountInviteForm()'s own `.qu-forum-invite-error` - e.g. this
+        // identity's own local ACL copy for this topic's thread is stale
+        // (see this callback's own comment above on
+        // `[SyncEngine] rejecting synced QuBit ... writer not authorized`)
+        // and the local write is rejected before ever reaching the network -
+        // the composer used to just silently re-enable with nothing sent.
+        // `mountContentComposer()` already clears the draft SYNCHRONOUSLY on
+        // any normal submit, unconditionally (it has no way to know this
+        // callback will go on to fail - see its own doc comment) - restoring
+        // the typed text here is what keeps this app's own long-standing,
+        // tested guarantee ("the composer text is NOT cleared on failure -
+        // the user can retry") true after that unconditional clear.
+        composer.editor.setValue(content.text);
+        composerErrorEl.textContent = err.message;
+        composerErrorEl.hidden = false;
+      }
+    },
+  });
 
   roomView.append(header, messagesScroll, composerWrap);
 
-  // Resolves the topic's own title AND its room-switcher `navigation` (see
-  // mountAppTemplate()'s own "LATE-ARRIVING CHROME DATA" doc comment) -
-  // doesn't block the message list itself from loading, both start
-  // independently. No activeChannelId known until `topicBit` resolves - a
-  // topic only knows its own parent channel from its own stored document -
-  // so, unlike the channel view, the sidebar briefly shows with no active
-  // highlight before this settles.
+  // Resolves the topic's own title/content AND its room-switcher
+  // `navigation` (see mountAppTemplate()'s own "LATE-ARRIVING CHROME DATA"
+  // doc comment) - doesn't block the message list itself from loading, both
+  // start independently. No activeChannelId known until `topic` resolves - a
+  // topic only knows its own parent channel from its own stored Entity - so,
+  // unlike the channel view, the sidebar briefly shows with no active
+  // highlight before this settles. `services.channels.getTopic()` (not a
+  // raw `qu.get()`) is decrypt-aware for a restricted channel's topic - see
+  // that method's own doc comment.
   (async () => {
-    const [channels, topicBit] = await Promise.all([
+    const [channels, topic] = await Promise.all([
       services.channels.listChannels(SPACE_ID),
-      qu.get(paths.documentPath(SPACE_ID, topicId)),
+      services.channels.getTopic(SPACE_ID, topicId),
     ]);
     if (stopped) return;
-    const topic = topicBit?.val;
-    if (topic) heading.textContent = topic.title;
+    if (topic) {
+      heading.textContent = topic.title;
+      if (topic.content) topicContentEl.innerHTML = renderContent(topic.content);
+    }
     stopTemplate.update({
       navigation: {
         items: channelsToNavItems(channels),
@@ -1587,25 +1676,6 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     }
     stuckToBottom = nowAtBottom;
     syncScrollToBottomButton();
-  });
-
-  // Holds the LAST completed upload until Send is clicked - see this file's
-  // own top doc comment's "ATTACHMENTS" section for why uploading starts
-  // immediately on file-pick rather than being deferred to Send.
-  let pendingAttachment = null;
-  function clearPendingAttachment() {
-    pendingAttachment = null;
-    pendingAttachmentEl.hidden = true;
-    pendingAttachmentEl.textContent = '';
-  }
-  attachUpload.addEventListener('qu-asset-uploaded', (e) => {
-    pendingAttachment = { assetId: e.detail.assetId, ...e.detail.meta };
-    pendingAttachmentEl.textContent = '';
-    pendingAttachmentEl.hidden = false;
-    const label = document.createElement('span');
-    label.textContent = `📎 ${pendingAttachment.name}`;
-    const removeBtn = createIconButton({ icon: '✕', label: t('attachRemove'), onClick: clearPendingAttachment });
-    pendingAttachmentEl.append(label, removeBtn);
   });
 
   const profileCache = new Map();
@@ -1885,7 +1955,7 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
                 onClick: async () => {
                   const authorLabel = formatActorLabel(message.author, await resolveAuthor(message.author));
                   setReplyingTo(message, authorLabel);
-                  composerInput.focus();
+                  composer.editor.focus();
                 },
               });
               nativeItems.push({ id: 'copyText', label: t('copyText'), icon: '📋', onClick: () => copyToClipboard(message.body) });
@@ -2021,7 +2091,7 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     saveBtn.addEventListener('click', async () => {
       const body = textarea.value.trim();
       if (!body) return;
-      await services.messages.editMessage(SPACE_ID, topicId, message.id, { body });
+      await services.commentable.editComment(SPACE_ID, topicId, message.id, body);
       editingDrafts.delete(message.id);
       // The edit's own write triggers this whole list's watchChildren() ->
       // renderMessages() re-render, which rebuilds this exact node - no
@@ -2046,65 +2116,6 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
   // `buildMessageFooter()` above) and the once-per-topic `content.topicToolbar`
   // slot (`mountTopicView()`'s own setup below).
 
-  actionBtn.addEventListener('click', async () => {
-    const body = composerInput.value.trim();
-    // A caption is optional whenever there's an attachment to post instead
-    // - same "content doesn't have to be text" rule apps/chat/client.js's
-    // own sendTextMessage() already applies for its voice messages; only a
-    // genuinely empty post (no text AND no attachment) is refused.
-    if (!body && !pendingAttachment) return;
-    actionBtn.disabled = true;
-    composerErrorEl.hidden = true;
-    try {
-      // Refreshes this topic's own ACL doc right before posting - closes
-      // the exact silent-failure scenario this file's own top doc comment
-      // describes (`[SyncEngine] rejecting synced QuBit ... writer not
-      // authorized`), NOT merely shrinks it, whenever a relay is actually
-      // reachable: `syncFetch()` (`SyncEngine.fetch()`) ingests the fetched
-      // ACL via the same trusted "already-signed synced data" path
-      // `#handleSync()` uses, bypassing any local write-authorization check
-      // (it's not this identity authoring a change, just receiving one) -
-      // so it persists REGARDLESS of whether this identity itself has
-      // write access. The very next line's `postMessage()` then runs
-      // through `QuStore.put()`'s own synchronous `AccessEngine` pipeline
-      // hook (`assertWriteAuthorized()`), which now sees the FRESH,
-      // authoritative ACL and throws immediately if unauthorized - the
-      // write never reaches PERSIST/NOTIFY, never enters the outbox, and
-      // is never sent out at all. Proven end-to-end (two real identities,
-      // no mocked rejection) by this app's own test: "composer: an
-      // unauthorized post is rejected LOCALLY, before it ever reaches the
-      // relay/other peers". The one case this can't close: genuinely
-      // OFFLINE (no relay reachable at all) - `syncFetch` then silently
-      // no-ops (`.catch(() => {})` below) and this identity's existing,
-      // possibly-stale local ACL cache is all there is to go on, same
-      // optimistic-write-while-offline trade-off `outbox.js` already makes
-      // for every other write in this codebase.
-      await syncFetch?.(paths.aclPath(SPACE_ID, 'threads', topicId)).catch(() => {});
-      const attachment = pendingAttachment;
-      const extra = attachment ? { attachment } : {};
-      await services.messages.postMessage(SPACE_ID, topicId, { body, replyTo: replyingTo?.id ?? null, extra });
-      stuckToBottom = true; // sending a post always means "show me what I just sent" - see apps/chat/client.js's own identical rule
-      composerInput.value = '';
-      clearPendingAttachment();
-      setReplyingTo(null);
-      // Only now, once the attachment is genuinely part of a sent post,
-      // does the (deferred) sync-out verification phase start - see
-      // <qu-asset-upload>'s own doc comment on confirmSent() for why.
-      if (attachment) attachUpload.confirmSent(attachment.assetId);
-    } catch (err) {
-      // Same "no catch here previously meant NOTHING visible" fix as
-      // mountInviteForm()'s own `.qu-forum-invite-error` - e.g. this
-      // identity's own local ACL copy for this topic's thread is stale
-      // (see this file's own top doc comment's reasoning on
-      // `[SyncEngine] rejecting synced QuBit ... writer not authorized`)
-      // and the local write is rejected before ever reaching the network -
-      // the composer used to just silently re-enable with nothing sent.
-      composerErrorEl.textContent = err.message;
-      composerErrorEl.hidden = false;
-    } finally {
-      actionBtn.disabled = false;
-    }
-  });
 
   const offMessages = watchChildren(qu, paths.threadMessagesParentPath(SPACE_ID, topicId), () => renderMessages(), { syncFetch });
 
@@ -2113,9 +2124,7 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     resizeObserver?.disconnect();
     clearMessageWatchers();
     offMessages();
-    stopComposerMentions();
-    stopComposerEmoji();
-    stopComposerAutogrow();
+    composer.stop();
     stopTemplate();
   };
 }
@@ -2201,8 +2210,8 @@ export async function searchForum({ services, qu, apps, query, types, scope, seg
   }
 
   if (scope === 'subpage' && kindSeg === 't' && idSeg) {
-    const topicBit = await qu.get(paths.documentPath(SPACE_ID, idSeg));
-    return messagesOfTopic(idSeg, topicBit?.val?.channelId ?? null, topicBit?.val?.title);
+    const topic = await services.channels.getTopic(SPACE_ID, idSeg);
+    return messagesOfTopic(idSeg, topic?.channelId ?? null, topic?.title);
   }
   if (scope === 'subpage' && kindSeg === 'c' && idSeg) {
     const topics = await services.channels.listTopics(SPACE_ID, idSeg);
@@ -2238,12 +2247,12 @@ export async function resolveForumReference({ services, qu, syncFetch, spaceId, 
   const message = await services.messages.getMessage(spaceId, threadId, messageId);
   if (!message) return null;
 
-  const topicBit = await qu.get(paths.documentPath(spaceId, threadId));
+  const topic = await services.channels.getTopic(spaceId, threadId);
   return {
     contentType: classifyMessageContentType(message), ts: message.ts, author: message.author,
     snippet: buildSnippet(message.body, ''),
     href: `#/forum/t/${threadId}/m/${messageId}`,
-    topicId: threadId, channelId: topicBit?.val?.channelId ?? null, topicTitle: topicBit?.val?.title ?? threadId,
+    topicId: threadId, channelId: topic?.channelId ?? null, topicTitle: topic?.title ?? threadId,
     spaceId, attachment: message.attachment ?? null,
   };
 }

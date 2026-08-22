@@ -6,7 +6,7 @@ import { FsAdapter } from '@qu/runtime/fs';
 import { Registry, RuntimeContainer } from '@qu/foundation';
 import { QuIdentityEngine } from '@qu/identity';
 import { SyncEngine } from '@qu/sync';
-import { AccessEngine, DocumentEngine, CollectionEngine, AssetEngine, ThreadEngine } from '@qu/engines';
+import { AccessEngine, DocumentEngine, CollectionEngine, AssetEngine, ThreadEngine, EntityEngine } from '@qu/engines';
 import { ListService, AccessService, MessageService, NotificationPrefsService, PushSubscriptionService, ChannelService } from '@qu/services';
 import { QuLoader, discoverLocalPackages } from '@qu/loader';
 import { createLogger } from '@qu/log';
@@ -125,6 +125,13 @@ export class QuRelay {
       ['collection-engine', CollectionEngine],
       ['asset-engine', AssetEngine],
       ['thread-engine', ThreadEngine],
+      // Quniverse V4's generic Entity layer (docs/v4-concept.md §3.1) -
+      // registered here for the first time this round: `apps/forum`'s Topic
+      // is now an Entity (see ChannelService's own "QUNIVERSE V4" doc
+      // comment), so `_id`/`_created` stamping and the `_type`-required
+      // trust-boundary check need to run wherever an entity write lands,
+      // same as every other Engine in this list.
+      ['entity-engine', EntityEngine],
     ]) {
       this.registry.registerEngine(name, new EngineClass(this.qu));
     }

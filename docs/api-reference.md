@@ -362,14 +362,22 @@ differ only by config", all going through the same `createThread()`/
 ### `ChannelService`
 
 `new ChannelService(qu, identityEngine, listService, accessService, messageService, syncFetch = null)`.
-`apps/forum`'s Channel → Topic → per-Topic-Thread hierarchy (esoTalk-styled)
-— a Channel and a Topic are both plain, unencrypted-metadata Documents; a
-Topic's content is a real `MessageService` Thread keyed by the Topic's own
-id ("a Topic **is** its Thread"). Two curated lists per space
-(`ListService.addCurated()` — the same hardened, retry-on-conflict
-primitive every other list uses, not an unprotected read-modify-write):
-`listPath(spaceId, 'channels')` and one `listPath(spaceId, 'topics-<channelId>')`
-per channel.
+`apps/forum`'s Channel → Topic → per-Topic-Comments hierarchy (esoTalk-styled)
+— a Channel is still a plain, unencrypted-metadata Document. Two curated
+lists per space (`ListService.addCurated()` — the same hardened,
+retry-on-conflict primitive every other list uses, not an unprotected
+read-modify-write): `listPath(spaceId, 'channels')` and one
+`listPath(spaceId, 'topics-<channelId>')` per channel (referencing each
+topic's `entityPath()`).
+
+**Quniverse V4 (Forum-migration round):** a Topic is now an `EntityService`-
+created Entity (type `'topic'`, own `content` field — its opening post, NOT
+"the thread's first message" anymore). Its REPLIES are a separate
+`CommentableService`-attached comment Thread at the SAME id — the "a Topic
+IS its Thread, same id, no separate concept" convention now applies one
+layer down, to comments. `ChannelService` constructs its own internal
+`EntityService`/`CommentableService` (no new constructor param — both are
+stateless wrappers over `qu`/`identity`/`messageService`, already available).
 
 - **`createChannel(spaceId, { title, description = '', color = '', restricted = false, memberPubs = [], channelId })`**
   → `Promise<object>`. `channelId` is normally omitted (a fresh
@@ -381,20 +389,32 @@ per channel.
   their own pub in.
 - **`listChannels(spaceId)`** → `Promise<object[]>`. **`getChannel(spaceId, channelId)`**
   → `Promise<object|null>`.
-- **`createTopic(spaceId, channelId, { title })`** → `Promise<object>`. Throws
-  if the channel doesn't exist. Creates the topic document, adds it to the
-  channel's own topics list, and calls `messageService.createThread()` for
-  it — `THREAD_PRESETS.forum()` for an open channel; for a restricted one, a
-  config with the SAME encryption/membership shape as `THREAD_PRESETS.chat()`
-  (`writers`/`readers` both `channel.memberPubs`) but `forum()`'s own
-  `formatting: ['markdown', 'mentions']`, not `chat()`'s `['mentions']`-only
-  — using `chat()` verbatim silently renders every message with an EMPTY
-  body (`formattedHtml` is `null` without `'markdown'`, and `.innerHTML =
-  null` renders as nothing at all under `[LegacyNullToEmptyString]`, not
-  even the word "null") — confirmed live, not hypothetical.
+- **`createTopic(spaceId, channelId, { title, content })`** → `Promise<object>`
+  (the created Entity). Throws if the channel doesn't exist. `content` is
+  the topic's own opening post (`createContent()`'s shape, optional).
+  Creates the topic Entity, adds it to the channel's own topics list, then
+  `commentable.enableComments()` for its REPLIES — `THREAD_PRESETS.forum()`
+  for an open channel; for a restricted one, a config with the SAME
+  encryption/membership shape as `THREAD_PRESETS.chat()` (`writers`/
+  `readers` both `channel.memberPubs`) but `forum()`'s own `formatting:
+  ['markdown', 'mentions']`, not `chat()`'s `['mentions']`-only — using
+  `chat()` verbatim silently renders every comment with an EMPTY body
+  (`formattedHtml` is `null` without `'markdown'`, and `.innerHTML = null`
+  renders as nothing at all under `[LegacyNullToEmptyString]`, not even the
+  word "null") — confirmed live, not hypothetical.
+- **`getTopic(spaceId, topicId)`** → `Promise<object|null>` — the
+  decrypt-aware single-topic counterpart to `getChannel()`.
+- **`updateTopic(spaceId, topicId, patch, { asSpaceId })`** → `Promise<object>`
+  — updates a topic's own content (title/content/etc, NOT its comments — see
+  `CommentableService.editComment()` for those). Correctly re-encrypts for a
+  restricted channel: supplies its own decrypt hook to `EntityService.
+  updateEntity()` (see that method's own doc comment on why this matters).
 - **`listTopics(spaceId, channelId)`** → `Promise<Array<object & {replyCount, lastActivityAt, lastAuthor}>>`,
   newest activity first (one `listMessages()` per topic — fine at
-  community-forum scale, no pagination yet).
+  community-forum scale, no pagination yet). `replyCount` now genuinely
+  means "number of comments" (the opening post no longer double-counts as
+  message #1, a previously-acknowledged inaccuracy now fixed by the
+  migration itself).
 - **`addChannelMember(spaceId, channelId, actorPub)`** → `Promise<object>`
   (the updated channel). A no-op for an already-open channel or an
   already-present member. Grows the channel document's own writer ACL, then
@@ -560,12 +580,27 @@ The Entity API over `@qu/engines`' `EntityEngine` (which stamps `_id`/
 `_created` and requires `_type` — see that file's own doc comment), the same
 relationship `ChannelService`/`MessageService` have to `ThreadEngine`.
 
-- `createEntity(spaceId, type, fields = {}, { asSpaceId } = {})` — stamps
-  `_type`, runs `createContent()` over a supplied `fields.content` when the
-  type declares (or doesn't know) a content field.
-- `getEntity(spaceId, entityId)` → the stored entity, or `null`.
-- `updateEntity(spaceId, entityId, patch, { asSpaceId } = {})` — merge-write;
-  `_id`/`_created`/`_type` survive even if `patch` omits them.
+- `createEntity(spaceId, type, fields = {}, { asSpaceId, id, writeOptions } = {})`
+  — stamps `_id`/`_type`/`_created`, runs `createContent()` over a supplied
+  `fields.content` when the type declares (or doesn't know) a content field.
+  `id`/`writeOptions` (Forum-migration round) let a caller that must know
+  the final id BEFORE the write lands (e.g. `ChannelService.createTopic()`
+  protecting a restricted topic's own ACL first) pass an explicit id and/or
+  `AccessService.writeOptionsFor()`'s own `{encryptWith, senderXPrivateKey}`
+  shape for real reader-restricted encryption. Always returns the PLAINTEXT
+  entity it built, never `qu.put()`'s own returned QuBit — a real bug fixed
+  this round: for an encrypted write, that QuBit's `val` is the ciphertext
+  envelope, not the real fields (confirmed live via the first real caller to
+  pass `writeOptions.encryptWith` here).
+- `getEntity(spaceId, entityId, { decrypt } = {})` → the stored entity, or
+  `null`. `decrypt` (Forum-migration round) — an optional caller-supplied
+  `(quBit) => plainVal` hook for a caller that itself protected this Entity
+  with restricted `readers` (e.g. `ChannelService`) — `EntityService` stays
+  no more decrypt-aware than a plain Document read by itself.
+- `updateEntity(spaceId, entityId, patch, { asSpaceId, writeOptions, decrypt } = {})`
+  — merge-write; `_id`/`_created`/`_type` survive even if `patch` omits
+  them. Same `writeOptions`/`decrypt` escape hatches as above, needed
+  together for a correct decrypt-merge-encrypt round-trip on a protected Entity.
 
 `paths.entityPath(spaceId, entityId)` is the one new path helper this adds —
 no parent/listing path yet (see that helper's own doc comment).
@@ -578,7 +613,13 @@ surface so a later swap to persisted/admin-editable storage changes only
 this class's internals, never a call site (see the file's own doc comment).
 `defaultEntityTypes` is pre-seeded with the seven types
 `docs/v4-concept.md` §3.3 specifies: `topic`, `message`, `article`, `page`,
-`notification`, `task`, `event`.
+`notification`, `task`, `event`. Each definition also carries a
+`contentFormat` (`'plain'` default, settable per type — `topic`/`article`/
+`page` default to `'markdown'`) — `resolveContentFormat(type, registry =
+defaultEntityTypes)` reads it (falling back to `'plain'` for an
+unregistered type), the minimal, static realization of §5's
+format-selection idea (not yet the fuller
+global → per-EntityType → per-device → user-preference chain).
 
 #### `createContent(...)` / `renderContent(...)` / `CONTENT_FORMATS` (`content.js`)
 
@@ -657,6 +698,25 @@ Capability, generalizing `thread-formatting.js`'s `extractMentions()`:
 class (not an overload — a Thread's address is two-level, an Entity's is
 one-level, see the file's own doc comment) reusing its existing private
 signing/actor-pub helpers.
+
+#### `CommentableService` (`commentable-service.js`) — Forum-migration round
+
+`new CommentableService(messageService)`. The "Commentable" Capability — a
+thin `MessageService` wrapper using an Entity's own id as its attached
+comment Thread's `threadId`, the same "same id, no separate concept"
+convention `ChannelService` already established for Topic↔Thread, applied
+one layer up (any commentable Entity, not just a Forum Topic). An Entity's
+own `content` (§3.1) and its attached comments stay two different things —
+comments are never "the thread's first message."
+
+- `enableComments(spaceId, entityId, config = {})` — wraps `createThread()`,
+  same idempotency (safe to call unconditionally on every Entity creation).
+- `postComment(spaceId, entityId, body, { replyTo, asSpaceId, extra })` /
+  `editComment(spaceId, entityId, commentId, body, { asSpaceId })` (author-only,
+  inherited from `editMessage()`) / `listComments(spaceId, entityId, { limit,
+  order, cursor })` / `getComment(spaceId, entityId, commentId)` — thin
+  passthroughs to the matching `MessageService` method, `entityId` standing
+  in for `threadId`.
 
 ---
 
@@ -1128,7 +1188,7 @@ Returns `{ textarea, actionsEl, getValue(), setValue(text), focus(), onSubmit(ha
 location}` (merged `contributeContent()`s) and `meta = {immediate}` (`true` only for a
 `submitNow()`-driven submit — see below).
 
-**The `EditorExtension` contract**: `{ id, mount(ctx) }`. `ctx`:
+**The `EditorExtension` contract**: `{ id, mount(ctx) -> stopFn|{stop?, reset?}|void }`. `ctx`:
 
 - `textarea`, `insertText(text)` (wraps `@qu/thread-ui`'s `insertAtCursor()`) — unchanged.
 - `actionsEl` — the TRAILING slot, still raw/unmanaged DOM (used by `emojiExtension`/`mentionExtension`).
@@ -1146,11 +1206,18 @@ location}` (merged `contributeContent()`s) and `meta = {immediate}` (`true` only
   `extraPartial` (never the typed draft, never standing contributions), `meta.immediate = true`
   — what `voiceExtension`'s own Send uses, independent of the composer's draft.
 
+`mount()`'s return value may be a plain `stopFn` (unchanged, most extensions), or
+`{stop?, reset?}` for one that also wants `reset()` called on `clearContributions()`
+(Forum-migration round) — a normal submit succeeding, so it can clear its OWN rendered UI/state
+(`contributeContent()`/`retractContent()` alone only track the editor's own merge-map, not
+whatever DOM an extension rendered — see `attachmentExtension()` below for the real bug this closed).
+
 ### `emojiExtension({ trigger = '😀', triggerTitle } = {})` / `mentionExtension({ services, subscribe } = {})`
 
 Thin `EditorExtension` adapters over `@qu/thread-ui`'s `renderEmojiPicker()`/
-`mountMentionAutocomplete()`, appending into the trailing `actionsEl` — the exact two
-primitives `apps/forum/client.js` already calls by hand for its own composer today.
+`mountMentionAutocomplete()`, appending into the trailing `actionsEl` — the same two
+primitives `apps/forum/client.js`'s composer now consumes this way (Forum-migration round),
+having previously called them by hand.
 
 ### `attachmentExtension({ assetService, spaceId, readerPubs, asSpaceId, trigger = '📎', triggerTitle } = {})`
 
@@ -1158,7 +1225,12 @@ Generalizes `apps/chat/client.js`'s own proven "attach a file" flow. Drives `@qu
 `<qu-asset-upload hide-picker>` (its own `hide-picker`/`.openPicker()` exist specifically for
 this composer-embedding case) via a `registerAction()` trigger; on `qu-asset-uploaded`,
 `contributeContent()`s the attachment (multiple uploads accumulate) and renders a removable
-chip; removing the last one `retractContent()`s.
+chip; removing the last one `retractContent()`s. Returns `{stop, reset}` — `reset()` (Forum-
+migration round, the first real caller to expose this gap) clears the chip/`pending` array on
+a successful submit, so a sent attachment doesn't keep re-attaching itself to the next,
+unrelated send. Still has no `.confirmSent()` wiring for `<qu-asset-upload>`'s own deferred
+sync-out verification phase — a documented, real gap (see the file's own doc comment), not
+fixed this round.
 
 ### `locationExtension({ trigger = '📍', triggerTitle, label } = {})`
 

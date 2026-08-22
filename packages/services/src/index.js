@@ -22,9 +22,12 @@
  * over the existing relay-backed sync stack), and Quniverse V4's generic
  * Entity layer (docs/v4-concept.md): EntityService (the Entity API over
  * `@qu/engines`' EntityEngine), EntityTypeRegistry/defaultEntityTypes (the
- * static, swappable Content-Type+Fields registry), and createContent (the
- * universal Content shape - deliberately separate from any editor). See
- * each file's own doc comment.
+ * static, swappable Content-Type+Fields registry), createContent (the
+ * universal Content shape - deliberately separate from any editor), and
+ * CommentableService (the "Commentable" Capability - a thin MessageService
+ * wrapper using an Entity's own id as its attached comment Thread's id,
+ * the same "same id, no separate concept" convention ChannelService already
+ * established for Topic<->Thread, one layer up). See each file's own doc comment.
  */
 export * as paths from './paths.js';
 export { unwrap, unwrapAll } from './unwrap.js';
@@ -56,8 +59,9 @@ export { createTrustedCatalogStore } from './apps-catalog-store.js';
 export { AssetService } from './asset-service.js';
 export { WebRtcSignalService } from './webrtc-signal-service.js';
 export { EntityService } from './entity-service.js';
-export { EntityTypeRegistry, defaultEntityTypes } from './entity-types.js';
+export { EntityTypeRegistry, defaultEntityTypes, resolveContentFormat } from './entity-types.js';
 export { CONTENT_FORMATS, createContent, renderContent } from './content.js';
 export { FollowService } from './follow-service.js';
 export { TagService } from './tag-service.js';
 export { MentionService } from './mention-service.js';
+export { CommentableService } from './commentable-service.js';

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { EntityTypeRegistry, defaultEntityTypes } from '../src/entity-types.js';
+import { EntityTypeRegistry, defaultEntityTypes, resolveContentFormat } from '../src/entity-types.js';
 
 test('register()/get() round-trip, with defaults filled in', () => {
   const registry = new EntityTypeRegistry();
@@ -10,6 +10,7 @@ test('register()/get() round-trip, with defaults filled in', () => {
   assert.deepEqual(def.fields, { size: 'text' });
   assert.equal(def.content, false);
   assert.deepEqual(def.capabilities, []);
+  assert.equal(def.contentFormat, 'plain');
 });
 
 test('get() returns null for an unknown type, never throws', () => {
@@ -45,4 +46,30 @@ test('defaultEntityTypes: topic is commentable/reactable/followable/attachable, 
 test('defaultEntityTypes: notification has no comment/reaction capabilities', () => {
   const notification = defaultEntityTypes.get('notification');
   assert.deepEqual(notification.capabilities, ['notifiable']);
+});
+
+test('defaultEntityTypes: contentFormat matches each seeded type\'s real THREAD_PRESETS precedent', () => {
+  assert.equal(defaultEntityTypes.get('topic').contentFormat, 'markdown');
+  assert.equal(defaultEntityTypes.get('message').contentFormat, 'plain');
+  assert.equal(defaultEntityTypes.get('article').contentFormat, 'markdown');
+  assert.equal(defaultEntityTypes.get('page').contentFormat, 'markdown');
+  assert.equal(defaultEntityTypes.get('notification').contentFormat, 'plain');
+  assert.equal(defaultEntityTypes.get('task').contentFormat, 'plain');
+  assert.equal(defaultEntityTypes.get('event').contentFormat, 'plain');
+});
+
+test('resolveContentFormat() returns a registered type\'s configured format', () => {
+  assert.equal(resolveContentFormat('topic'), 'markdown');
+  assert.equal(resolveContentFormat('task'), 'plain');
+});
+
+test('resolveContentFormat() falls back to \'plain\' for an unregistered type', () => {
+  assert.equal(resolveContentFormat('nope'), 'plain');
+});
+
+test('resolveContentFormat() accepts a custom registry', () => {
+  const registry = new EntityTypeRegistry();
+  registry.register('widget', { contentFormat: 'richtext' });
+  assert.equal(resolveContentFormat('widget', registry), 'richtext');
+  assert.equal(resolveContentFormat('widget'), 'plain'); // defaultEntityTypes has no 'widget'
 });

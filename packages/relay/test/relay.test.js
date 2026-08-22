@@ -438,7 +438,7 @@ test('remoteApps loads an additional app from a (mocked) remote manifest URL at 
 
 // ===== the real, monorepo apps/ directory (apps/forum, the first real app) ========
 
-test('booting with the REAL repo apps/ directory loads apps/forum and creates the real public forum thread', async () => {
+test('booting with the REAL repo apps/ directory loads apps/forum and creates its real "General" channel + opening topic (Quniverse V4: a Topic is now an Entity with an attached comment thread, not a single fixed-id thread)', async () => {
   const base = await mkdtemp(join(tmpdir(), 'qu-relay-'));
   try {
     const relay = await new QuRelay({ storeDir: join(base, 'store'), blobDir: join(base, 'blob'), appsDir: REPO_APPS_DIR, port: 0 }).boot();
@@ -446,8 +446,15 @@ test('booting with the REAL repo apps/ directory loads apps/forum and creates th
       assert.equal(relay.loader.isLoaded('forum'), true);
       // apps/forum's spaceId is its manifest's fixed UUID (see @qu/foundation
       // manifest.js), never the human-readable app name.
-      const config = await relay.messages.getConfig('4eb04aa2-4ca9-4c9a-aa7e-33ad3802edb1', 'general');
-      assert.ok(config, 'apps/forum\'s register() should have created the public forum thread');
+      const SPACE_ID = '4eb04aa2-4ca9-4c9a-aa7e-33ad3802edb1';
+      const channels = relay.registry.getService('channel-service');
+      const [channel] = await channels.listChannels(SPACE_ID);
+      assert.equal(channel?.title, 'General');
+      const [topic] = await channels.listTopics(SPACE_ID, channel._id);
+      assert.ok(topic, 'apps/forum\'s register() should have created the "General" channel\'s opening topic');
+      // The topic's own attached comment thread (CommentableService, same id).
+      const config = await relay.messages.getConfig(SPACE_ID, topic._id);
+      assert.ok(config, 'the topic\'s own comment thread should have been created');
       assert.equal(config.writers, '*');
     } finally {
       await relay.close();

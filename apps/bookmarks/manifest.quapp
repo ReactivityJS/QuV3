@@ -9,6 +9,7 @@
   "navOrder": 11,
   "requires": [],
   "contributes": [
-    { "point": "content.messageMenu", "export": "bookmarkMenuItem", "kind": "menu", "order": 20 }
+    { "point": "content.messageMenu", "export": "bookmarkMenuItem", "kind": "menu", "order": 20 },
+    { "point": "content.entityMenu", "export": "entityBookmarkMenuItem", "kind": "menu", "order": 20 }
   ]
 }

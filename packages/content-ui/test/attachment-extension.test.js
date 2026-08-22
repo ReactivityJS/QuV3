@@ -115,3 +115,28 @@ test('stop() cleans up the upload element, trigger, and contribution', () => {
   assert.equal(host.querySelector('qu-asset-upload'), null);
   assert.equal(triggerBtn(host), null);
 });
+
+test('clearContributions() (a successful submit) clears the pending-attachment chip too - not just the editor\'s own contribution map', async () => {
+  const host = makeHost();
+  const service = fakeAssetService({ name: 'photo.png', mime: 'image/png', size: 100 });
+  const extension = attachmentExtension({ assetService: service, spaceId: 'space1' });
+  const editor = mountContentEditor(host, { extensions: [extension] });
+  const submitted = [];
+  editor.onSubmit((text, extras) => submitted.push(extras));
+
+  pickFile(host.querySelector('qu-asset-upload'), new File(['x'], 'photo.png', { type: 'image/png' }));
+  await waitFor(() => host.querySelector('.qu-content-ui-attachment-chip') !== null);
+
+  host.querySelector('.qu-content-editor-submit-slot button').click();
+  assert.equal(submitted.length, 1);
+  editor.clearContributions(); // mountContentComposer()'s own post-success call
+
+  assert.equal(host.querySelector('.qu-content-ui-attachment-chip'), null);
+
+  // A SECOND, unrelated submit no longer carries the first (already-sent)
+  // attachment along with it - the real bug this reset() hook fixes.
+  editor.setValue('a second, unrelated message');
+  host.querySelector('.qu-content-editor-submit-slot button').click();
+  assert.equal(submitted.length, 2);
+  assert.deepEqual(submitted[1].attachments, []);
+});

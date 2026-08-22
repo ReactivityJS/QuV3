@@ -32,6 +32,19 @@
  * subscription, same "a menu is transient" reasoning `apps/pins/client.js`'s
  * own `pinMenuItem()` doc comment has.
  *
+ * QUNIVERSE V4 (Forum-migration round, docs/v4-concept.md §4): a second
+ * export, `entityBookmarkMenuItem()`, contributes the same kind of menu item
+ * to a new `content.entityMenu` point - bookmarking an Entity's own content
+ * (e.g. a Forum Topic's opening post) rather than one of its comments.
+ * Payload is `{services, entityId, snapshot}` - `entityId` stands in for
+ * `messageId`, `snapshot` is passed through as-is (the caller already knows
+ * its own Entity's shape, unlike the message-scoped item which assembles the
+ * snapshot itself from individual fields). Storage-wise this is
+ * `BookmarksService` called with `entityKind: 'entity'` instead of the
+ * default `'forumMessage'` - each `entityKind` is its own independent list
+ * (see that Service's own doc comment), so an entity's bookmark state never
+ * collides with a comment's.
+ *
  * "My Bookmarks" (`mount()`) is deliberately simple: one flat, reverse-
  * chronological list of every bookmark's stored snapshot, each linking back
  * to `#/~<author>` (the one navigable reference a bookmarked message
@@ -162,5 +175,22 @@ export async function bookmarkMenuItem({ services, messageId, spaceId, threadId,
     label: bookmarked ? t('bookmarkRemove') : t('bookmarkAdd'),
     icon: bookmarked ? '📑' : '🔖',
     onClick: () => (bookmarked ? services.bookmarks.remove(messageId) : services.bookmarks.add(messageId, snapshot)),
+  };
+}
+
+/**
+ * The `content.entityMenu` contributor - bookmarking an Entity's own
+ * content (Quniverse V4, Forum-migration round) rather than one of its
+ * comments. See this file's own top doc comment for the payload contract.
+ * @param {{services: object, entityId: string, snapshot?: object}} payload
+ * @returns {Promise<{id: string, label: string, icon: string, onClick: () => void}>}
+ */
+export async function entityBookmarkMenuItem({ services, entityId, snapshot = {} }) {
+  const bookmarked = await services.bookmarks.isBookmarked(entityId, 'entity');
+  return {
+    id: 'bookmark',
+    label: bookmarked ? t('bookmarkRemove') : t('bookmarkAdd'),
+    icon: bookmarked ? '📑' : '🔖',
+    onClick: () => (bookmarked ? services.bookmarks.remove(entityId, 'entity') : services.bookmarks.add(entityId, snapshot, 'entity')),
   };
 }

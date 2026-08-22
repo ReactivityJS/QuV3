@@ -1,5 +1,5 @@
-import { ListService, FlagService, ContactsService, FavoritesService, ProfileService, DirectoryService, ActorService, AccessService, SharingService, MessageService, ReactionService, PinService, PresenceService, AssetService, BookmarksService, NotificationPrefsService, PushSubscriptionService, ChannelService, ChatService } from '@qu/services';
-import { AssetEngine, CollectionEngine } from '@qu/engines';
+import { ListService, FlagService, ContactsService, FavoritesService, ProfileService, DirectoryService, ActorService, AccessService, SharingService, MessageService, ReactionService, PinService, PresenceService, AssetService, BookmarksService, NotificationPrefsService, PushSubscriptionService, ChannelService, ChatService, EntityService, CommentableService } from '@qu/services';
+import { AssetEngine, CollectionEngine, EntityEngine } from '@qu/engines';
 
 /**
  * The fixed, known set of client-side Services every app under `apps/*`
@@ -60,6 +60,12 @@ export function createClientServices(qu, identity, { syncFetch = null, getGenera
   // "write/read-time behavior needs the Engine on THIS qu too" reasoning
   // `AssetEngine` above already documents.
   new CollectionEngine(qu);
+  // Quniverse V4's generic Entity layer (docs/v4-concept.md §3.1) - a WRITE-
+  // TIME behavior (`_id`/`_created` stamping, the `_type`-required check),
+  // same "must be registered on THIS qu too" reasoning `AssetEngine` above
+  // already documents. First real client-side need: `apps/forum`'s Topic is
+  // now an Entity (see `ChannelService`'s own "QUNIVERSE V4" doc comment).
+  new EntityEngine(qu);
   const messages = new MessageService(qu, identity, list, access, syncFetch, getGeneration);
   return {
     // The raw, generic Service `contacts`/`favorites`/`bookmarks` below each
@@ -98,6 +104,15 @@ export function createClientServices(qu, identity, { syncFetch = null, getGenera
     // created elsewhere never sees it - confirmed live, see
     // ChannelService's own constructor doc comment for the full mechanism.
     channels: new ChannelService(qu, identity, list, access, messages, syncFetch),
+    // Quniverse V4's generic Entity layer (docs/v4-concept.md §3.1) -
+    // `ChannelService` above already constructs its own internal copies of
+    // both (Forum's Topic is an Entity, see that class's own "QUNIVERSE V4"
+    // doc comment) - exposed here too, unconditionally, for any OTHER app's
+    // own EntityType (Article/Page/Task/Event, §3.3) to use directly, the
+    // same "present regardless of which app happens to be mounted" posture
+    // `bookmarks` below already has.
+    entities: new EntityService(qu, identity),
+    commentable: new CommentableService(messages),
     // apps/chat's room presence (online/offline/last-seen) + public read
     // receipts - shares no state with `messages` (see PresenceService's own
     // doc comment on why it isn't a ListService shape at all), first real

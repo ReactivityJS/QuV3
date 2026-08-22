@@ -289,7 +289,7 @@ Each Capability is a thin Service over Entity, following the exact shape
 
 | Capability | Realized by | Status |
 |---|---|---|
-| Commentable | `MessageService` (a Thread's `postMessage`/`listReplies`) reused for any Entity, not just Thread | reuse existing — wiring an Entity to a comment Thread is Forum-migration-phase work, not done yet |
+| Commentable | `CommentableService` (`packages/services/src/commentable-service.js`) — a thin `MessageService` wrapper using an Entity's own id as its attached comment Thread's `threadId`, the same "same id, no separate concept" convention `ChannelService` already established for Topic↔Thread, applied one layer up | **implemented (Forum-migration round)** |
 | Reactable | `ReactionService.setEntityReaction()`/`getEntityReactions()` (`packages/services/src/reaction-service.js`), reusing the class's existing signing/actor-pub helpers via two new entity-scoped methods rather than overloading `setReaction()`'s thread-shaped signature | **implemented (Phase 2)** |
 | Bookmarkable | `BookmarksService` (already an entity-kind-parametrized `FlagService` wrapper) | already generic — no change needed (Phase 1) |
 | Followable | `FollowService` (`packages/services/src/follow-service.js`), same `FlagService`-wrapper shape as `BookmarksService`, `entityKind` required (no legacy caller to default for) | **implemented (Phase 2)** |
@@ -366,15 +366,22 @@ ContentRenderer`/`ContentEditor` split diagrammed above:
   unmanaged, raw-DOM trailing `actionsEl` slot from the first round. `requireText` (default
   `true`) generalizes `apps/chat/client.js`'s own already-proven "a caption is optional
   whenever there's an attachment to send instead" rule.
-- `EditorExtension` contract, extended: `{id, mount(ctx) -> stopFn|void}`, `ctx = {textarea,
-  actionsEl, insertText, registerAction, unregisterAction, registerSubmitCandidate,
-  unregisterSubmitCandidate, contributeContent, retractContent, setChrome, submitNow}`.
-  `registerAction()`/`registerSubmitCandidate()` contribute `SlotItem`s to the two resolved
-  slots; `contributeContent()`/`retractContent()` carry non-text submission data
-  (`{attachments?, location?}`), merged into `onSubmit(text, extras, meta)`; `setChrome()`
-  temporarily replaces the whole editor row (Voice's recorder panel); `submitNow()` submits
-  immediately with empty text and ONLY its own `extraPartial`, `meta.immediate = true`,
-  never touching the typed draft or standing contributions (Voice's independent Send).
+- `EditorExtension` contract, extended: `{id, mount(ctx) -> stopFn|{stop?, reset?}|void}`,
+  `ctx = {textarea, actionsEl, insertText, registerAction, unregisterAction,
+  registerSubmitCandidate, unregisterSubmitCandidate, contributeContent, retractContent,
+  setChrome, submitNow}`. `registerAction()`/`registerSubmitCandidate()` contribute
+  `SlotItem`s to the two resolved slots; `contributeContent()`/`retractContent()` carry
+  non-text submission data (`{attachments?, location?}`), merged into
+  `onSubmit(text, extras, meta)`; `setChrome()` temporarily replaces the whole editor row
+  (Voice's recorder panel); `submitNow()` submits immediately with empty text and ONLY its
+  own `extraPartial`, `meta.immediate = true`, never touching the typed draft or standing
+  contributions (Voice's independent Send). **`reset()` (Forum-migration round)** — an
+  extension's chance to clear its OWN UI/state whenever `clearContributions()` runs (a normal
+  submit succeeded) — closes a real bug `attachmentExtension()` had until Forum became its
+  first real caller: `contributeContent()`/`retractContent()` alone only track the editor's
+  own merge-map, not whatever DOM an extension rendered for its contribution, so a sent
+  attachment's chip kept showing (and kept re-attaching itself to the NEXT, unrelated send)
+  after the message it was meant for already went out.
 - Five real `EditorExtension`s (`packages/content-ui/src/`): `emojiExtension`/
   `mentionExtension` (unchanged, trailing `actionsEl`), and — **resolved, no longer
   deferred** — `attachmentExtension`/`locationExtension`/`voiceExtension`, all three
@@ -390,10 +397,17 @@ ContentRenderer`/`ContentEditor` split diagrammed above:
   extras.attachments, location: extras.location})` on submit, calls `onSubmit(content)`, and
   clears the draft + contributions ONLY for a normal submit (`meta.immediate === false`) —
   never for a `submitNow()`-driven one, which has nothing of its own to clear. `format` is
-  still a plain, explicit option, NOT yet resolved through the global/per-EntityType/
-  per-device/user-preference chain described above — there is no persisted config store yet
-  for a resolver to read from (`EntityType` is still static-only, §10), so that resolution
-  chain remains the real, still-open next step.
+  still a plain, explicit option a caller passes in — **now with one real rung of the
+  resolution chain built**: `resolveContentFormat(type, registry = defaultEntityTypes)`
+  (`packages/services/src/entity-types.js`, Forum-migration round) resolves an EntityType's
+  own `contentFormat` (`'plain'` default, `'markdown'`/`'richtext'` settable per type — e.g.
+  `topic`/`article`/`page` default to `'markdown'`, matching `THREAD_PRESETS.forum()`'s own
+  `formatting: ['markdown', 'mentions']`). This is deliberately still just the
+  per-EntityType rung, not the fuller global → per-EntityType → per-device → user-preference
+  chain described above — there is still no persisted config store for per-device/user
+  overrides to read from (`EntityType` is still static-only, §10) — but a caller no longer
+  has to hard-code a format per app; `mountContentComposer({format: resolveContentFormat
+  ('topic')})` is the real, current call shape.
 - **Still not migrated**: `apps/chat/client.js` keeps its own hand-wired implementations —
   this round generalized their PROVEN LOGIC into `content-ui`, it did not yet swap Chat itself
   over to consume the generalized version. `apps/forum/client.js` likewise keeps its own
@@ -419,6 +433,7 @@ The brainstorming's insight that Navigation and FAB are themselves just Slots wi
 | Primary create action (FAB) | `mountAppTemplate`'s `primaryAction` | already real for **one** static action; no resolver for multiple candidate actions |
 | `content-editor` leading slot / submit control | `mountResolvedSlot()` (`@qu/ui`, see below) — **implemented** | `registerAction()`/`registerSubmitCandidate()` (§5) |
 | `entity-item.actions`, `entity-detail.context` | new slots any EntityType's list/detail template exposes, generalizing the per-Thread-message context menu already in `packages/thread-ui/src/context-menu.js` | **new**, direct generalization of existing code |
+| `content.entityFooter`, `content.entityMenu` | `ExtensionPointHost` (`contributes`) — the entity-scoped siblings of `content.messageFooter`/`content.messageMenu`, contributed by `apps/reactions`/`apps/bookmarks` alongside their existing message-level points; renders Reactions/Bookmarks on an Entity's own content (e.g. a Forum Topic's opening post) | **implemented (Forum-migration round)** — admin-configurable via the same `disabledApps` toggle already covering the message-level points; `apps/pins`' Pin capability is deliberately **not** given an entity-scoped sibling this round (documented scope cut, §10) |
 
 **Presentation Resolver — implemented**: `mountResolvedSlot()`
 (`packages/ui/src/slot-resolver.js`), exactly the concept §17 of the brainstorming named as
@@ -491,6 +506,10 @@ V4-Rewrite jetzt anders aufziehen") to what's already real in this repo:
 3. **Migrate one existing app** (Forum is the best candidate — already Thread + Comments +
    Reactions + Attachments, per §0.1) onto the Entity/Capability/ContentEditor contracts, to
    prove the composition holds under a real, already-shipped app before any other app moves.
+   **Done (Forum-migration round):** `ChannelService`'s Topic is now an `EntityService`-created
+   Entity (its own `content` field, not "the thread's first message"), with a
+   `CommentableService`-attached comment Thread at the same id — see §10's own "Forum
+   migration" entry for the details.
 4. **Migrate the remaining existing apps** (Chat, Notifications, Todo, Calendar) once step 3
    holds.
 5. **Build the genuinely new apps** the model newly makes cheap — Blog, CMS/Pages, Stream —
@@ -535,3 +554,30 @@ Phase 1 explicitly did **not** migrate any app (Forum's `ChannelService` "a Topi
 Thread" pattern is untouched) — see the Phase 1 implementation plan's own Non-Goals for what
 Phase 2+ still needs to cover (Follow/Tag/generalized-Reaction/Mention capabilities, the
 Forum migration itself, and all `ContentEditor`/Slot/UI work from §5-§6 above).
+
+- **Forum migration — resolved and implemented (build order step 3, above).**
+  `ChannelService.createTopic(spaceId, channelId, {title, content})` now creates an Entity
+  (type `'topic'`, `EntityService`) instead of a plain Document — the topic's own opening post
+  lives in its `content` field. Its REPLIES are a `CommentableService`-attached comment Thread
+  at the SAME id (`enableComments()`/`postComment()`/`editComment()`/`listComments()`) — the
+  "a Topic IS its Thread, same id, no separate concept" convention now applies one layer down,
+  to comments rather than to the topic's own content. New `ChannelService.updateTopic()`/
+  `getTopic()` round out the API (decrypt-aware for a restricted channel's topic, mirroring
+  `getChannel()`). `EntityEngine` is now registered on both the relay (`packages/relay/src/
+  relay.js`) and the client (`apps/shell/src/services.js`) — its first real wiring into a
+  running app; a genuine, now-fixed bug surfaced by that first real use is recorded in the
+  `EntityEngine`/`EntityService` doc comments themselves (a segment-match false-positive
+  against `acl/entities/<id>` paths, and `EntityService` previously returning `qu.put()`'s raw,
+  possibly-ciphertext QuBit instead of the plaintext it already built).
+  - **Reactions/Bookmarks on the topic's own content — resolved: configurable, not fixed** (a
+    later, explicit user decision — see this section's own framing: "not FIX, sondern
+    konfigurierbar"). New `content.entityFooter`/`content.entityMenu` extension points (§6),
+    contributed by `apps/reactions`/`apps/bookmarks` alongside their existing message-level
+    ones, admin-togglable via the same `disabledApps` mechanism.
+  - **Pin — scope cut, documented, not silently dropped.** `PinService` is NOT generalized this
+    round: the topic's own opening post loses pin-ability after migration (only comments keep
+    it, via the existing `content.topicToolbar`/message-scoped mechanism, unchanged).
+  - **No data migration.** This branch has no deployed production Forum data to preserve —
+    treated as a clean rebuild (`apps/forum/index.js`'s own "General" channel/topic creation
+    just uses the new shape directly), not a live migration. A real deployment would need a
+    real migration plan, explicitly out of scope here.
