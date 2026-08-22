@@ -5,14 +5,14 @@
  * essentially verbatim, see that file's own doc comment near
  * `startRecording()`) into a `ContentEditor` `EditorExtension`.
  *
- * TWO ways to start a recording, both calling the SAME `startRecording()`:
- *   - a `🎙️` trigger in the leading action slot (`ctx.registerAction()`) -
- *     tap it directly, any time.
- *   - a `ctx.registerSubmitCandidate()` entry that only wins (per `@qu/ui`'s
- *     `mountResolvedSlot()` `'switch'` strategy) while the composer is
- *     otherwise completely empty (`!hasText && !hasContribution`) - the
- *     mic-morph, now a normal, general submit-slot candidate instead of a
- *     one-off boundary violation (see `docs/v4-concept.md` §6).
+ * ONE way to start a recording: a `ctx.registerSubmitCandidate()` entry that
+ *   wins (per `@qu/ui`'s `mountResolvedSlot()` `'switch'` strategy) while the
+ *   composer is otherwise completely empty (`!hasText && !hasContribution`) -
+ *   the submit button itself morphs into the mic trigger, a normal
+ *   submit-slot candidate (see `docs/v4-concept.md` §6). (An earlier version
+ *   of this extension also registered a separate leading-slot `🎙️` trigger
+ *   alongside this morph - removed as a redundant second way to start the
+ *   same recording, per live-testing feedback.)
  *
  * While recording/paused/previewing, `ctx.setChrome()` swaps the editor's
  * entire normal row for this extension's own recorder panel (built once,
@@ -229,12 +229,10 @@ export function voiceExtension({ assetService, spaceId, readerPubs, asSpaceId, t
       finishBtn.addEventListener('click', finishRecording);
       sendBtn.addEventListener('click', sendRecording);
 
-      ctx.registerAction({ id: 'voice-trigger', icon: trigger, label: triggerTitle, onClick: startRecording });
       ctx.registerSubmitCandidate({ id: 'voice-send', icon: trigger, label: triggerTitle, when: (s) => !s.hasText && !s.hasContribution, onClick: startRecording });
 
       return () => {
         if (recorderState !== 'idle') discardRecording();
-        ctx.unregisterAction('voice-trigger');
         ctx.unregisterSubmitCandidate('voice-send');
       };
     },
