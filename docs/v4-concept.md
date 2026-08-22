@@ -168,10 +168,19 @@ Entity
 An Entity is **not** a new storage shape competing with "document" or "derived list" — it is
 a naming/typing convention layered on top of the existing `documentPath()`/list conventions
 in `packages/services/src/paths.js`, the same way `ThreadEngine`'s message stamping is a thin
-convention on top of the plain QuBit write pipeline. Placement: a new small package,
-`packages/entity`, holding the `Entity`/`EntityType` shape helpers and (if built) the
-`EntityEngine`; existing `paths.js` gains entity-oriented helpers (`entityPath()`,
-`entityChildrenPath()`) alongside, not instead of, its current thread/doc/list helpers.
+convention on top of the plain QuBit write pipeline.
+
+**Resolved (Phase 1, implemented):** no new package — placement follows this codebase's own
+Engine/Service split exactly, not a separate `packages/entity`. `EntityEngine`
+(`packages/engines/src/entity-engine.js`) is a real `QuStore` pipeline Engine from day one
+(see §10's superseded "conservative default" note): it stamps `_id`/`_created` exactly like
+`DocumentEngine`, and additionally **requires `_type`** — the one field genuinely mandatory
+for an Entity but optional for a plain Document, which is the concrete trust-boundary
+justification for an Engine here rather than a Service-layer convention (§2's decision tree).
+`@qu/engines`' `AccessEngine` gates an `entities` ACL kind the same way it already gates
+`docs`/`collections`/`assets`/`threads`. `EntityService`/`entityPath()`
+(`packages/services/src/entity-service.js`/`paths.js`) are the friendly API layer, the same
+relationship `ChannelService`/`MessageService` have to `ThreadEngine`.
 
 ### 3.2 Content
 
@@ -280,20 +289,25 @@ Each Capability is a thin Service over Entity, following the exact shape
 
 | Capability | Realized by | Status |
 |---|---|---|
-| Commentable | `MessageService` (a Thread's `postMessage`/`listReplies`) reused for any Entity, not just Thread | reuse existing |
-| Reactable | `ReactionService` generalized from `threadReactionPath()` to `entityReactionPath()` | reuse existing, generalize path helper |
-| Bookmarkable | `BookmarksService` (already an entity-kind-parametrized `FlagService` wrapper) | already generic — no change needed |
-| Followable | new `FollowService`, same `FlagService`-wrapper shape as `BookmarksService` | **new**, smallest possible: one wrapper, no new storage shape |
-| Mentionable | generalize `thread-formatting.js`'s `extractMentions()` into a small `MentionService` that both extracts and indexes (`mentionsOf(entityRef)` / `mentionedIn(actorPub)`), reusing the derived-list pattern | **new** indexing half; extraction already exists |
-| Taggable | new `TagService` — tagging + query only, explicitly **no** hierarchy/aliases at launch (per brainstorming §20's own explicit scoping) | **new**, deliberately minimal |
-| Notifiable | existing `PushDeliveryService` (relay) + `NotificationPrefsService`, generalized so any Capability write (a comment, a reaction, a mention, a follow) can enqueue a notification through one shared call, instead of only Thread-message-driven pushes | reuse existing delivery machinery, generalize the trigger surface |
+| Commentable | `MessageService` (a Thread's `postMessage`/`listReplies`) reused for any Entity, not just Thread | reuse existing — wiring an Entity to a comment Thread is Forum-migration-phase work, not done yet |
+| Reactable | `ReactionService.setEntityReaction()`/`getEntityReactions()` (`packages/services/src/reaction-service.js`), reusing the class's existing signing/actor-pub helpers via two new entity-scoped methods rather than overloading `setReaction()`'s thread-shaped signature | **implemented (Phase 2)** |
+| Bookmarkable | `BookmarksService` (already an entity-kind-parametrized `FlagService` wrapper) | already generic — no change needed (Phase 1) |
+| Followable | `FollowService` (`packages/services/src/follow-service.js`), same `FlagService`-wrapper shape as `BookmarksService`, `entityKind` required (no legacy caller to default for) | **implemented (Phase 2)** |
+| Mentionable | `MentionService` (`packages/services/src/mention-service.js`): `mentionsOf(text)` is a stateless passthrough to `extractMentions()` (no stored forward index — stays correct after an edit); `indexMentions()`/`mentionedIn(actorPub)` add the one real gap, a stored reverse index (`paths.actorMentionPath()`, a GLOBAL per-actor derived list) | **implemented (Phase 2)** — mention-triggered notification delivery is still separate, later work |
+| Taggable | `TagService` (`packages/services/src/tag-service.js`) — tagging + query only, explicitly **no** hierarchy/aliases (per brainstorming §20's own explicit scoping); two independent derived-list indexes (`tagPath()` forward, `entityTagPath()` reverse), scoped to one `entityKind` at a time, no cross-kind search | **implemented (Phase 2)** |
+| Notifiable | existing `PushDeliveryService` (relay) + `NotificationPrefsService`, generalized so any Capability write (a comment, a reaction, a mention, a follow) can enqueue a notification through one shared call, instead of only Thread-message-driven pushes | still open — Phase 3+ |
 | Attachable | `AssetEngine`/`AssetService` (already fully generic — takes any `spaceId`/entity reference) | already generic — no change needed |
 
 No Capability introduces a new `QuStore` Engine. Where a Capability needs a derived-list
 storage shape not yet covered by `paths.js`, it gets one new pair of path helpers
 (`xParentPath()`/`xPath()`) added to that file, following its own stated convention of
 adding helpers "alongside the Service that consumes them, not speculatively ahead of a real
-caller."
+caller." One subtlety worth recording for the next Capability that needs a derived list keyed
+by more than one identifier: `QuStore.getChildren()`/`ListService.listDerived()` only ever
+list **direct** (one level deep) children, so a compound key (e.g. `actorMentionPath()`'s
+`spaceId`/`entityKind`/`entityId`) must be joined into one flat, single-segment key — the same
+`~`-joining trick `webrtcPairKey()` already uses — never spread across nested path segments
+under the list's own parent.
 
 ## 5. Content Editor architecture
 
@@ -328,11 +342,69 @@ Content  ←──────────────┐
   the resolution order the brainstorming specifies in its §7. A Chat message can stay
   `plain`/`markdown` while a CMS Page defaults to `richtext`/`wysiwyg`, with zero app code
   change, because the app only ever asked for "a ContentEditor for this EntityType," never
-  for a concrete editor implementation.
+  for a concrete editor implementation. **Not yet implemented** — see "Resolved" below for
+  what's real today versus this eventual goal.
 - Package placement: a new `packages/content-ui` sits beside existing `packages/thread-ui`
   and `packages/ui`; `packages/thread-ui`'s existing composer plugins are re-exported from
   (or migrated into) it as the first three `EditorExtension` implementations, so nothing
   built on them today breaks.
+
+**Resolved (implemented):** `packages/content-ui` is real, with the exact `Content ↔
+ContentRenderer`/`ContentEditor` split diagrammed above:
+
+- `ContentRenderer` = `renderContent(content)` (`packages/services/src/content.js`) —
+  deliberately DOM-free, living beside `createContent()` rather than in `content-ui`, same
+  reasoning `thread-formatting.js`'s own `formatMarkdown()` is already DOM-free. Dispatches on
+  `content.format`: `'plain'` (HTML-escape + `<br>`, reusing `thread-formatting.js`'s newly
+  exported `escapeHtml()`), `'markdown'` (delegates to `formatMarkdown()`), `'richtext'`
+  (throws a documented error — no WYSIWYG editor exists in this codebase yet to have produced
+  richtext Content in the first place, an honest gap, not a silent wrong-looking fallback).
+- `ContentEditor` = `mountContentEditor()` (`packages/content-ui/src/content-editor.js`) — a
+  `<textarea>` (wired through `@qu/thread-ui`'s existing `mountComposerAutogrow()`, built in,
+  not optional), a leading action slot AND the submit control both rendered through `@qu/ui`'s
+  `mountResolvedSlot()` (§6 Presentation Resolver — implemented, see below), plus the
+  unmanaged, raw-DOM trailing `actionsEl` slot from the first round. `requireText` (default
+  `true`) generalizes `apps/chat/client.js`'s own already-proven "a caption is optional
+  whenever there's an attachment to send instead" rule.
+- `EditorExtension` contract, extended: `{id, mount(ctx) -> stopFn|void}`, `ctx = {textarea,
+  actionsEl, insertText, registerAction, unregisterAction, registerSubmitCandidate,
+  unregisterSubmitCandidate, contributeContent, retractContent, setChrome, submitNow}`.
+  `registerAction()`/`registerSubmitCandidate()` contribute `SlotItem`s to the two resolved
+  slots; `contributeContent()`/`retractContent()` carry non-text submission data
+  (`{attachments?, location?}`), merged into `onSubmit(text, extras, meta)`; `setChrome()`
+  temporarily replaces the whole editor row (Voice's recorder panel); `submitNow()` submits
+  immediately with empty text and ONLY its own `extraPartial`, `meta.immediate = true`,
+  never touching the typed draft or standing contributions (Voice's independent Send).
+- Five real `EditorExtension`s (`packages/content-ui/src/`): `emojiExtension`/
+  `mentionExtension` (unchanged, trailing `actionsEl`), and — **resolved, no longer
+  deferred** — `attachmentExtension`/`locationExtension`/`voiceExtension`, all three
+  generalized from `apps/chat/client.js`'s own already-proven implementations (its
+  `<qu-asset-upload hide-picker>` usage, `shareLocation()`, and the complete
+  Start→Pause⇄Resume→Finish→Preview→Send/Discard `MediaRecorder` state machine), not
+  reinvented. `voiceExtension` registers BOTH a leading-slot trigger AND a
+  `registerSubmitCandidate()` (`when: !hasText && !hasContribution`) — the mic-morph the
+  brainstorming's original Voice discussion wanted, now a normal, general submit-slot
+  candidate instead of a one-off boundary violation.
+- `ContentComposer` = `mountContentComposer()` (`packages/content-ui/src/content-composer.js`)
+  — wraps `mountContentEditor()`, builds `createContent({text, format, attachments:
+  extras.attachments, location: extras.location})` on submit, calls `onSubmit(content)`, and
+  clears the draft + contributions ONLY for a normal submit (`meta.immediate === false`) —
+  never for a `submitNow()`-driven one, which has nothing of its own to clear. `format` is
+  still a plain, explicit option, NOT yet resolved through the global/per-EntityType/
+  per-device/user-preference chain described above — there is no persisted config store yet
+  for a resolver to read from (`EntityType` is still static-only, §10), so that resolution
+  chain remains the real, still-open next step.
+- **Still not migrated**: `apps/chat/client.js` keeps its own hand-wired implementations —
+  this round generalized their PROVEN LOGIC into `content-ui`, it did not yet swap Chat itself
+  over to consume the generalized version. `apps/forum/client.js` likewise keeps its own
+  composer. Both are real app-migration work, deliberately kept separate from proving the
+  contracts themselves (same discipline every round has followed).
+- **Deliberately not built**: a Markdown toolbar (blocked on a real gap — no precise
+  caret/selection-coordinate measurement utility exists in this codebase yet, per
+  `mention-autocomplete.js`'s own doc comment); a "+"-menu that groups Attachment/Location/
+  Voice into one further-collapsed trigger beyond what `'inline-then-menu'` already gives —
+  each is independently registered via `registerAction()`, deliberately not coupled to each
+  other, so a future grouping change only touches call sites, not the extensions themselves.
 
 ## 6. Slot taxonomy — one consolidated table
 
@@ -345,17 +417,32 @@ The brainstorming's insight that Navigation and FAB are themselves just Slots wi
 | Per-app `contributes` points (e.g. `contact-row` action) | `ExtensionPointHost` / `actionsForSlot()` | already real |
 | App navigation (`navigation`, `views`, `settings` sections) | `mountAppTemplate`'s `AppConfig` | already real, but currently a static link list, not ranked/grouped contributions from multiple sources |
 | Primary create action (FAB) | `mountAppTemplate`'s `primaryAction` | already real for **one** static action; no resolver for multiple candidate actions |
-| `content-editor.actions`, `content-editor.attachments` | new `ExtensionPointHost`-style slots inside `ContentEditor` (§5) | **new** |
+| `content-editor` leading slot / submit control | `mountResolvedSlot()` (`@qu/ui`, see below) — **implemented** | `registerAction()`/`registerSubmitCandidate()` (§5) |
 | `entity-item.actions`, `entity-detail.context` | new slots any EntityType's list/detail template exposes, generalizing the per-Thread-message context menu already in `packages/thread-ui/src/context-menu.js` | **new**, direct generalization of existing code |
 
-**Presentation Resolver (new, §17 of the brainstorming, correctly identified as missing):**
-an app declares one or more candidate primary actions with a `priority`/`preferred`
-hint (`fab`, `toolbar`, `menu`); a resolver — living in `packages/ui` beside
-`app-template.js`, not a new package — decides, from viewport/device/action count, whether
-to render a single FAB, an expandable FAB, an action sheet, or a desktop toolbar/menu. This
-replaces `app-template.js`'s current single-`primaryAction` link with a list-aware version;
-existing single-action callers keep working unchanged (a list of one collapses to today's
-behavior exactly).
+**Presentation Resolver — implemented**: `mountResolvedSlot()`
+(`packages/ui/src/slot-resolver.js`), exactly the concept §17 of the brainstorming named as
+missing, now a real, reusable Core primitive rather than only a documented aspiration. Lives
+in `packages/ui` beside `app-template.js` as originally planned. A consumer declares
+candidate `SlotItem`s (`{id, icon?, label?, order?, onClick?, mount?, when?}`); the resolver
+decides HOW they're presented:
+
+- `'inline'` — every item its own button/widget.
+- `'menu'` — all items collapse into one `@qu/thread-ui` `renderContextMenu()` trigger (not a
+  second menu implementation — reuses the exact mechanism `apps/chat/client.js`'s own "+"
+  button already uses).
+- `'inline-then-menu'` — first `threshold` items inline, the rest collapse into one "More"
+  trigger — the concrete answer to "ab X Items als Menü, Rest zusammengeklappt."
+- `'switch'` — exactly one item renders, the first whose `when(state)` is true (IF/ELSE,
+  generalized to N candidates) — what makes the ContentEditor's Send/Voice mic-morph (§5) a
+  normal mechanism instead of a special case.
+
+**First real consumer**: `ContentEditor`'s leading action slot (`'inline-then-menu'`,
+configurable) and its submit control (`'switch'`) — see §5. **Scoped for now**: this round
+wires the resolver into `ContentEditor` only; `app-template.js`'s FAB/Nav still use their
+original mechanism (`primaryAction`'s single-link shape unchanged) — the resolver is built
+generically enough to serve that later (same `SlotItem`/strategy shape), per this section's
+original plan, but that wiring is separate, not-yet-done work.
 
 ## 7. Domain Services — kept as real domain logic
 
@@ -414,20 +501,37 @@ V4-Rewrite jetzt anders aufziehen") to what's already real in this repo:
 This is explicitly a separate future implementation task, not part of this document's
 deliverable — this document specifies the contracts and order, not the code.
 
-## 10. Open decisions for the next task (flagged, not resolved here)
+## 10. Decisions (resolved) and what's still open
 
-- Exact package boundary: does `Entity`/`EntityType` live in a new `packages/entity`, or as
-  an addition to `packages/services` (where `paths.js`/`ListService` already live)? This
-  document assumes a new package to keep Core-adjacent concerns out of the growing
-  `packages/services`, but this is a call for whoever writes the code, not settled here.
-- Does `EntityEngine` get built as a real `QuStore` pipeline Engine on day one (stamping
-  `_id`/`type`, mirroring `DocumentEngine`), or does `Entity` stay a pure Service-layer
-  convention (like today's "document"/"list" shapes) until a real pipeline-trust need
-  appears? Given §2's decision tree, the latter is the more conservative default — an Engine
-  should be added only once a concrete write needs the pipeline gate, not preemptively.
-- `EntityType` is specified here as static, code-defined composition (§3.3). Whether a CMS
-  app later needs a *persisted, admin-editable* EntityType/schema store is explicitly a CMS
-  app-layer decision, out of scope for this Core/Capability concept.
-- `extensions[]` on Content (§3.2) is deliberately deferred until ≥2 real cases exist —
-  which two (location + link preview? location + poll?) is an open call for whichever app
-  needs the first one.
+The four items below were open when this document was first written. All four are now
+decided (by the user) and, for the first three, **implemented** in Phase 1
+(`packages/engines/src/entity-engine.js`, `packages/services/src/entity-service.js`,
+`entity-types.js`, `content.js`, the generalized `bookmarks-service.js` — see
+`docs/api-reference.md` §5's "Quniverse V4: the generic Entity layer" section for the full
+API):
+
+- **Package boundary — resolved:** no new package. `EntityEngine` lives in `packages/engines`
+  (alongside `DocumentEngine`/`ThreadEngine`/`AssetEngine`/`AccessEngine`); `EntityService`/
+  `EntityTypeRegistry`/`createContent`/`entityPath()` live in `packages/services` (already
+  self-described as "the Entity API" in its own `package.json`). This follows the codebase's
+  existing Engine/Service package split exactly, rather than introducing a parallel boundary.
+- **`EntityEngine` timing — resolved: built now, as a real Engine.** Not the "conservative
+  default" this document originally leaned toward — the user explicitly chose to build it
+  immediately, and it earns Engine status on its own merits: unlike Document, an Entity has a
+  genuinely mandatory field (`_type`) that must hold regardless of caller, which is exactly
+  the kind of trust-boundary job §2's decision tree reserves for an Engine.
+- **`EntityType` persistence — resolved: static now, explicitly designed for an easy later
+  migration.** `EntityTypeRegistry` (`entity-types.js`) exposes only `register()`/`get()`/
+  `list()` as its public surface, specifically so that swapping the `Map`-backed
+  implementation for a persisted/admin-editable schema store later (a CMS app decision) never
+  requires touching a call site — the narrow surface is the mechanism, not just a promise in
+  a comment. Whether/when that persisted store gets built stays a later CMS-app decision, out
+  of scope here.
+- **`extensions[]` on Content — still open, deliberately.** Unchanged from the original
+  framing: deferred until at least two real cases exist (location + link preview? location +
+  poll?) — no app built in Phase 1 needed one, so there is still nothing to decide between.
+
+Phase 1 explicitly did **not** migrate any app (Forum's `ChannelService` "a Topic IS its
+Thread" pattern is untouched) — see the Phase 1 implementation plan's own Non-Goals for what
+Phase 2+ still needs to cover (Follow/Tag/generalized-Reaction/Mention capabilities, the
+Forum migration itself, and all `ContentEditor`/Slot/UI work from §5-§6 above).

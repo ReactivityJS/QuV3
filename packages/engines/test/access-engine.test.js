@@ -94,6 +94,26 @@ test('every protectable kind (docs, collections, assets-meta, threads) is gated 
   }
 });
 
+test('the "entities" kind (Quniverse V4) is gated the same way as every other kind', async () => {
+  const qu = storeWithAccess();
+  const alice = await actor();
+  const eve = await actor();
+  await qu.put('/store/s/acl/entities/1', { writers: [alice.pubB64Url] });
+
+  await assert.rejects(
+    () => qu.put('/store/s/entities/1', { _type: 'article' }, { signWith: eve.privateKey, writerPub: eve.publicKey }),
+    /not authorized to write to entities "1"/
+  );
+  await assert.doesNotReject(() =>
+    qu.put('/store/s/entities/1', { _type: 'article' }, { signWith: alice.privateKey, writerPub: alice.publicKey })
+  );
+});
+
+test('an entity with no ACL doc is fully open, same first-writer-wins default as every other kind', async () => {
+  const qu = storeWithAccess();
+  await assert.doesNotReject(() => qu.put('/store/wiki/entities/1', { _type: 'article' }));
+});
+
 test('a path outside every recognized kind is never gated', async () => {
   const qu = storeWithAccess();
   await assert.doesNotReject(() => qu.put('/store/some/unrelated/path', { x: 1 }));

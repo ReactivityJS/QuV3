@@ -67,6 +67,56 @@ test('getReactions() of a message nobody reacted to returns an empty object', as
   assert.deepEqual(await reactions.getReactions('board', 'general', 'never-reacted'), {});
 });
 
+// ===== Quniverse V4: generic Entity reactions ===============================
+
+test('setEntityReaction()/getEntityReactions() round-trip for the reacting identity', async () => {
+  const { reactions, identity } = await freshSetup();
+  const myPub = QuCrypto.toBase64Url((await identity.getMainKey()).publicKey);
+
+  await reactions.setEntityReaction('space1', 'entity1', '👍');
+  const byEmoji = await reactions.getEntityReactions('space1', 'entity1');
+  assert.deepEqual(byEmoji, { '👍': [myPub] });
+});
+
+test('setEntityReaction() with a different emoji REPLACES the previous one', async () => {
+  const { reactions, identity } = await freshSetup();
+  const myPub = QuCrypto.toBase64Url((await identity.getMainKey()).publicKey);
+
+  await reactions.setEntityReaction('space1', 'entity1', '👍');
+  await reactions.setEntityReaction('space1', 'entity1', '❤️');
+
+  assert.deepEqual(await reactions.getEntityReactions('space1', 'entity1'), { '❤️': [myPub] });
+});
+
+test('setEntityReaction(..., null) clears a reaction', async () => {
+  const { reactions } = await freshSetup();
+  await reactions.setEntityReaction('space1', 'entity1', '👍');
+  await reactions.setEntityReaction('space1', 'entity1', null);
+  assert.deepEqual(await reactions.getEntityReactions('space1', 'entity1'), {});
+});
+
+test('getEntityReactions() aggregates multiple different actors reacting to the same entity', async () => {
+  const { qu, reactions, identity } = await freshSetup();
+  const myPub = QuCrypto.toBase64Url((await identity.getMainKey()).publicKey);
+  await reactions.setEntityReaction('space1', 'entity1', '👍');
+
+  const kp = await QuCrypto.generateKeypair();
+  const otherPub = QuCrypto.toBase64Url(kp.publicKey);
+  await qu.put(`/store/space1/entities/entity1/reactions/${otherPub}`, '👍', { signWith: kp.privateKeyPkcs8, writerPub: kp.publicKey });
+
+  const byEmoji = await reactions.getEntityReactions('space1', 'entity1');
+  assert.deepEqual([...byEmoji['👍']].sort(), [myPub, otherPub].sort());
+});
+
+test('entity reactions and thread-message reactions are fully independent (same id, different address)', async () => {
+  const { reactions } = await freshSetup();
+  await reactions.setReaction('space1', 'entity1', 'entity1', '❤️'); // a thread/message reaction that happens to share the id
+  await reactions.setEntityReaction('space1', 'entity1', '👍');
+
+  assert.deepEqual(Object.keys(await reactions.getReactions('space1', 'entity1', 'entity1')), ['❤️']);
+  assert.deepEqual(Object.keys(await reactions.getEntityReactions('space1', 'entity1')), ['👍']);
+});
+
 test('setReaction() supports posting as a pseudonymous space identity (asSpaceId)', async () => {
   const { reactions, identity } = await freshSetup();
   const spacePub = QuCrypto.toBase64Url((await identity.getSpaceKey('anon-room')).publicKey);

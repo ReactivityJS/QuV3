@@ -2,9 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { QuStore, MemoryStoreAdapter } from '@qu/core';
 import { QuIdentityEngine } from '@qu/identity';
+import { EntityEngine } from '@qu/engines';
 import { ListService } from '../src/list-service.js';
 import { FlagService } from '../src/flag-service.js';
 import { BookmarksService } from '../src/bookmarks-service.js';
+import { EntityService } from '../src/entity-service.js';
 
 async function freshBookmarks() {
   const qu = new QuStore();
@@ -46,6 +48,33 @@ test('remove() un-bookmarks a message', async () => {
   const list = await bookmarks.list();
   assert.deepEqual(list.map((e) => e.id), ['msg2']);
   assert.equal(await bookmarks.isBookmarked('msg1'), false);
+});
+
+test('Quniverse V4 first capability migration: BookmarksService generalizes to bookmark a generic Entity via entityKind, without touching the forumMessage default', async () => {
+  const qu = new QuStore();
+  qu.mount('store', new MemoryStoreAdapter());
+  new EntityEngine(qu);
+  const identity = new QuIdentityEngine(qu);
+  await identity.importMnemonic(identity.generateMnemonic());
+  const flags = new FlagService(qu, identity, new ListService(qu));
+  const bookmarks = new BookmarksService(flags);
+  const entities = new EntityService(qu, identity);
+
+  const entity = await entities.createEntity('space1', 'article', { title: 'An article' });
+
+  // The default (forumMessage) list is untouched by an 'entity' bookmark.
+  await bookmarks.add(entity._id, { title: entity.title }, 'entity');
+  assert.equal(await bookmarks.isBookmarked(entity._id, 'entity'), true);
+  assert.equal(await bookmarks.isBookmarked(entity._id), false); // wrong (default) entityKind - not bookmarked there
+  assert.deepEqual(await bookmarks.list(), []); // the forumMessage list is still empty
+
+  const entityBookmarks = await bookmarks.list('entity');
+  assert.equal(entityBookmarks.length, 1);
+  assert.equal(entityBookmarks[0].id, entity._id);
+  assert.equal(entityBookmarks[0].title, entity.title);
+
+  await bookmarks.remove(entity._id, 'entity');
+  assert.equal(await bookmarks.isBookmarked(entity._id, 'entity'), false);
 });
 
 test('bookmarks are private to the identity that set them', async () => {

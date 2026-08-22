@@ -19,12 +19,13 @@ gives you.
 3. [`@qu/reactive`](#3-qureactive) — `watch()`, `watchChildren()`
 4. [`@qu/foundation`](#4-qufoundation) — manifests, extension points, actions
 5. [`@qu/services`](#5-quservices) — every Service class, `paths`
-6. [`@qu/ui`](#6-quui) — Custom Elements, avatars, flags, assets
+6. [`@qu/ui`](#6-quui) — Custom Elements, avatars, flags, assets, `mountResolvedSlot()` (Presentation Resolver)
 7. [`@qu/i18n`](#7-qui18n) — `createI18n()`
 8. [Theming](#8-theming) — `ensureTheme()`, `THEME_PRESETS`
 9. [Styling](#9-styling) — `injectStyle()` convention
 10. [Templating](#10-templating) — `apps/profile`'s `template`/`style` system, worked example
 11. [`@qu/thread-ui`](#11-quthread-ui) — `insertAtCursor()`, `renderEmojiPicker()`, `mountMentionAutocomplete()`
+12. [`@qu/content-ui`](#12-qucontent-ui) — `mountContentEditor()`, `mountContentComposer()`, `EditorExtension`s
 
 ---
 
@@ -228,6 +229,7 @@ function here is a pure string-builder — no I/O. The Entity-API surface:
 |---|---|
 | `spacePath(spaceId)` | Everything under one space — what a `subscribe()` call needs to cover it all. |
 | `documentPath(spaceId, docId)` | A single arbitrary document. |
+| `entityPath(spaceId, entityId)` | Quniverse V4's generic Entity (`EntityService`/`@qu/engines`' `EntityEngine`). |
 | `assetPath(spaceId, assetId)` | An uploaded asset's root (chunks live under it). |
 | `aclPath(spaceId, kind, resourceId)` | A resource's ACL document (what `AccessService` reads/writes). |
 | `listPath(spaceId, listId)` | A curated list document (`ListService.createCurated()`/`.listCurated()`). |
@@ -248,6 +250,10 @@ function here is a pure string-builder — no I/O. The Entity-API surface:
 | `NOTIFICATIONS_THREAD_ID` | `'notifications'` — the fixed thread id inside that space. |
 | `pushSubscriptionPath`/`pushSubscriptionsParentPath(actorPub[, subscriptionId])` | Web Push subscription records. |
 | `appCatalogEntryPath`/`appCatalogParentPath([name])` | The mirrored app catalog under `/store/apps/catalog/...`. |
+| `entityReactionPath`/`entityReactionsParentPath(spaceId, entityId[, actorPub])` | A generic Entity's reactions (Phase 2, `ReactionService.setEntityReaction()`). |
+| `tagPath`/`tagParentPath(spaceId, tag, entityKind[, entityId])` | "What has tag X" (Phase 2, `TagService`). |
+| `entityTagPath`/`entityTagsParentPath(spaceId, entityKind, entityId[, tag])` | "What tags does entity Y have" (Phase 2, `TagService`). |
+| `actorMentionPath`/`actorMentionsParentPath(actorPub[, spaceId, entityKind, entityId])` | An actor's global "mentioned in" index (Phase 2, `MentionService`). |
 
 ### `ListService`
 
@@ -299,8 +305,10 @@ each hides its own `flagType`/`entityKind` string pair behind a narrower API:
   `list()`, `isFavorite(appId)`.
 - **`ContactsService(flagService, identityEngine)`**: `addContact(actorPub, data = {})`,
   `removeContact(actorPub)`, `listContacts()`, `isContact(actorPub)`.
-- **`BookmarksService(flagService)`**: `add(messageId, snapshot = {})`,
-  `remove(messageId)`, `isBookmarked(messageId)`, `list()`.
+- **`BookmarksService(flagService)`**: `add(messageId, snapshot = {}, entityKind)`,
+  `remove(messageId, entityKind)`, `isBookmarked(messageId, entityKind)`, `list(entityKind)` —
+  `entityKind` defaults to `'forumMessage'`; see the Quniverse V4 Entity
+  layer section below for the generalized `'entity'` case.
 
 ### `MessageService`
 
@@ -539,6 +547,117 @@ into `/store/apps/catalog/<name>`, verifying each entry's signature against
 `relayPub` before accepting it. What `apps/app-list`'s `<qu-list parent="...">`
 and the shell's own nav (`apps/shell/src/nav.js`) both read.
 
+### Quniverse V4: the generic Entity layer (`docs/v4-concept.md`)
+
+The Entity+Content+Capability contracts Forum/Chat/Blog/CMS/Notifications are
+meant to compose from, per `docs/v4-concept.md` — Phase 1 (Core/Engines/
+Services only, no app migration yet).
+
+#### `EntityService` (`entity-service.js`)
+
+`new EntityService(qu, identityEngine, entityTypeRegistry = defaultEntityTypes)`.
+The Entity API over `@qu/engines`' `EntityEngine` (which stamps `_id`/
+`_created` and requires `_type` — see that file's own doc comment), the same
+relationship `ChannelService`/`MessageService` have to `ThreadEngine`.
+
+- `createEntity(spaceId, type, fields = {}, { asSpaceId } = {})` — stamps
+  `_type`, runs `createContent()` over a supplied `fields.content` when the
+  type declares (or doesn't know) a content field.
+- `getEntity(spaceId, entityId)` → the stored entity, or `null`.
+- `updateEntity(spaceId, entityId, patch, { asSpaceId } = {})` — merge-write;
+  `_id`/`_created`/`_type` survive even if `patch` omits them.
+
+`paths.entityPath(spaceId, entityId)` is the one new path helper this adds —
+no parent/listing path yet (see that helper's own doc comment).
+
+#### `EntityTypeRegistry` / `defaultEntityTypes` (`entity-types.js`)
+
+A static, Drupal-inspired "Content Type + Fields" registry, deliberately
+built with a narrow `register(type, definition)` / `get(type)` / `list()`
+surface so a later swap to persisted/admin-editable storage changes only
+this class's internals, never a call site (see the file's own doc comment).
+`defaultEntityTypes` is pre-seeded with the seven types
+`docs/v4-concept.md` §3.3 specifies: `topic`, `message`, `article`, `page`,
+`notification`, `task`, `event`.
+
+#### `createContent(...)` / `renderContent(...)` / `CONTENT_FORMATS` (`content.js`)
+
+`createContent({ text, format = 'plain', attachments = [], location = null })` — the
+universal, persisted Content shape (`docs/v4-concept.md` §3.2/§5),
+deliberately **not** an editor: normalizes/validates only, throws on an
+unknown `format` (one of `CONTENT_FORMATS`: `'plain'`, `'markdown'`,
+`'richtext'`) or non-array `attachments`. Content is a field embedded in
+whatever Entity/Thread-message document carries it — it has no storage path
+of its own. `location` (`{lat, lng}` or `null`) is a concrete, named field —
+generalized from `apps/chat/client.js`'s own `message.extra.location` shape
+— not the generic `extensions[]` registry §3.2 still defers (location is
+still the only real case).
+
+`renderContent(content)` — the `ContentRenderer` (§5/§12 below): pure,
+DOM-free Content → HTML, dispatched on `content.format`. `'plain'` HTML-
+escapes and converts newlines to `<br>` (reusing `thread-formatting.js`'s own
+`escapeHtml()`); `'markdown'` delegates to `formatMarkdown()`; `'richtext'`
+throws a documented error — no WYSIWYG editor exists in this codebase yet to
+have produced richtext Content in the first place.
+
+#### `BookmarksService`, generalized
+
+`add(messageId, snapshot = {}, entityKind = 'forumMessage')` /
+`remove(messageId, entityKind)` / `isBookmarked(messageId, entityKind)` /
+`list(entityKind)` — `entityKind` is now an optional parameter (previously
+hard-coded to `'forumMessage'`), so the exact same Service can bookmark a
+generic `EntityService`-created Entity via `entityKind: 'entity'` — Phase
+1's "first capability migration" proof that one Capability implementation
+spans both the legacy Thread-message shape and the new generic Entity shape
+without forking any logic (see the file's own doc comment).
+
+#### `FollowService` (`follow-service.js`) — Phase 2
+
+`new FollowService(flagService)`. The "Followable" Capability, same
+thin-`FlagService`-wrapper shape as `BookmarksService` — but `entityKind` is
+a **required** parameter here (no single legacy caller to default for):
+`follow(entityKind, entityId, data = {})` / `unfollow(entityKind, entityId)` /
+`isFollowing(entityKind, entityId)` / `listFollowed(entityKind)`.
+
+#### `TagService` (`tag-service.js`) — Phase 2
+
+`new TagService(qu, identityEngine, listService)`. The "Taggable" Capability
+— deliberately minimal: tagging + query only, no hierarchy/aliases. Two
+independent derived-list indexes (`paths.tagPath`/`tagParentPath` for "what
+has tag X", `paths.entityTagPath`/`entityTagsParentPath` for "what tags does
+entity Y have"), both written/tombstoned together:
+
+- `addTag(spaceId, entityKind, entityId, tag, { asSpaceId })` /
+  `removeTag(spaceId, entityKind, entityId, tag, { asSpaceId })`.
+- `getTags(spaceId, entityKind, entityId)` → `string[]`.
+- `getTaggedEntities(spaceId, tag, entityKind)` → `string[]` — scoped to one
+  `entityKind` at a time, no cross-kind search.
+
+#### `MentionService` (`mention-service.js`) — Phase 2
+
+`new MentionService(qu, identityEngine, listService)`. The "Mentionable"
+Capability, generalizing `thread-formatting.js`'s `extractMentions()`:
+
+- `mentionsOf(text)` — a stateless passthrough to `extractMentions()`, no
+  stored index (always correct even after an edit).
+- `indexMentions(spaceId, entityKind, entityId, text, { asSpaceId })` —
+  extracts mentions and writes one signed marker into each mentioned actor's
+  own **global** mention index (`paths.actorMentionPath`); returns the
+  mentioned actor ids.
+- `mentionedIn(actorPub)` → `Array<{spaceId, entityKind, entityId, mentionedAt}>` —
+  everything that currently mentions `actorPub`, across every space/kind.
+  Re-indexing an edited, now-shorter text does not retroactively remove a
+  stale entry (documented scope cut, not yet reconciled).
+
+#### `ReactionService`, generalized — Phase 2
+
+`setEntityReaction(spaceId, entityId, emoji, { asSpaceId })` /
+`getEntityReactions(spaceId, entityId)` — the entity-scoped counterparts of
+`setReaction()`/`getReactions()`, added as two new methods on the same
+class (not an overload — a Thread's address is two-level, an Entity's is
+one-level, see the file's own doc comment) reusing its existing private
+signing/actor-pub helpers.
+
 ---
 
 ## 6. `@qu/ui`
@@ -681,6 +800,30 @@ of its own, just calls `upload()`/`verifySyncOut()`/`download()` and renders.
   `<qu-list>` row rebuild never redundantly re-download/re-decrypt.
 - **`findAssetService(el)`** — same ancestor-walk as `findQu()`/`findSyncFetch()`,
   for `.assetService`.
+
+### `mountResolvedSlot(container, items, { strategy = 'inline', threshold = 2, moreIcon = '⋯', moreLabel = 'More' } = {})` (`slot-resolver.js`)
+
+Quniverse V4's **Presentation Resolver** (`docs/v4-concept.md` §6/§17): a
+consumer declares candidate `SlotItem`s (`{id, icon?, label?, order?,
+onClick?, mount?, when?}`), this decides HOW they're actually presented —
+the consumer never knows or cares which. Reuses `@qu/thread-ui`'s existing
+`renderContextMenu()` for the menu-based strategies, not a second menu
+implementation.
+
+- **`'inline'`** (default) — every item gets its own button (or its own
+  `mount(el)`-rendered widget), in `order`.
+- **`'menu'`** — every item collapses into one `renderContextMenu()` trigger.
+- **`'inline-then-menu'`** — the first `threshold` items render inline, the
+  rest collapse into one trailing `moreIcon`/`moreLabel` trigger.
+- **`'switch'`** — exactly ONE item renders: the first whose `when(state)`
+  returns true (an item with no `when` is the unconditional "else" — put it
+  last). `resolve(state)` re-evaluates and swaps the rendered item in place
+  when the winner changes, without tearing down/rebuilding if it hasn't.
+
+Returns `{ setItems(items), resolve(state), stop() }`. First real consumer:
+`@qu/content-ui`'s `mountContentEditor()` (§12) uses this for BOTH its
+leading action slot and its submit control (the Send/Voice mic-morph, as a
+`'switch'` slot) — the same primitive, two different configurations.
 
 ---
 
@@ -953,6 +1096,101 @@ insert the right one instead of typing a 16–64 character pub blind.
   complete, not pixel-perfect (a precise caret-coordinate measurement needs
   a hidden mirror-div technique this repo has no precedent for).
 - Returns a stop function — removes listeners, closes any open dropdown.
+
+---
+
+## 12. `@qu/content-ui`
+
+Quniverse V4's ContentEditor layer (`docs/v4-concept.md` §5): `mountContentEditor()`, the
+smallest reusable editor primitive, and `mountContentComposer()`, which wraps it for a
+posting context and produces `@qu/services`' `createContent()`-shaped `Content` on submit.
+Same "plain functions, no Custom Elements" philosophy as `@qu/thread-ui` — built directly on
+`@qu/thread-ui`'s existing primitives and `@qu/ui`'s `mountResolvedSlot()` (§6), not a
+reimplementation of any of them.
+
+### `mountContentEditor(container, { placeholder, minRows, maxRows, extensions = [], submitLabel = 'Send', requireText = true, leadingSlot } = {})`
+
+Renders a `<textarea>` (wired through `@qu/thread-ui`'s `mountComposerAutogrow()` — every
+editor gets this, it's not optional), a **leading action slot** and the **submit control**,
+both rendered through `mountResolvedSlot()` (§6), plus the (unmanaged, raw-DOM) trailing
+`actionsEl` row `extensions[]` mount their own UI into. Enter submits (Shift+Enter inserts a
+real newline).
+
+- `leadingSlot` — `{strategy, threshold, moreIcon, moreLabel}`, forwarded to the leading
+  slot's `mountResolvedSlot()` call; defaults to `{strategy: 'inline-then-menu', threshold: 2}`.
+- `requireText` (default `true`) — submitting empty text is blocked UNLESS some extension has
+  `contributeContent()`-ed something (an attachment, a location); `false` always allows an
+  empty submit. Generalizes `apps/chat/client.js`'s own already-proven "a caption is optional
+  whenever there's an attachment to send instead" rule.
+
+Returns `{ textarea, actionsEl, getValue(), setValue(text), focus(), onSubmit(handler), clearContributions(), stop() }`
+— `onSubmit(handler)`'s `handler(text, extras, meta)` receives `extras = {attachments,
+location}` (merged `contributeContent()`s) and `meta = {immediate}` (`true` only for a
+`submitNow()`-driven submit — see below).
+
+**The `EditorExtension` contract**: `{ id, mount(ctx) }`. `ctx`:
+
+- `textarea`, `insertText(text)` (wraps `@qu/thread-ui`'s `insertAtCursor()`) — unchanged.
+- `actionsEl` — the TRAILING slot, still raw/unmanaged DOM (used by `emojiExtension`/`mentionExtension`).
+- **`registerAction(item)` / `unregisterAction(id)`** — contributes a `SlotItem` (§6) to the
+  LEADING slot; presentation (inline/collapsed) is entirely the resolver's call.
+- **`registerSubmitCandidate(item)` / `unregisterSubmitCandidate(id)`** — contributes a
+  conditional (`when(state)`) alternative to the submit button itself, checked BEFORE the
+  built-in unconditional `send` item — e.g. `voiceExtension`'s mic-morph.
+- **`contributeContent(id, partial)` / `retractContent(id)`** — non-text submission data
+  (`{attachments?, location?}`), merged into `onSubmit`'s `extras`, keyed by the contributing
+  extension's own `id`.
+- **`setChrome(panelEl|null)`** — temporarily replaces the editor's entire normal row with
+  `panelEl` (or restores it) — what `voiceExtension`'s recorder panel uses.
+- **`submitNow(extraPartial?)`** — submits IMMEDIATELY with EMPTY text and ONLY
+  `extraPartial` (never the typed draft, never standing contributions), `meta.immediate = true`
+  — what `voiceExtension`'s own Send uses, independent of the composer's draft.
+
+### `emojiExtension({ trigger = '😀', triggerTitle } = {})` / `mentionExtension({ services, subscribe } = {})`
+
+Thin `EditorExtension` adapters over `@qu/thread-ui`'s `renderEmojiPicker()`/
+`mountMentionAutocomplete()`, appending into the trailing `actionsEl` — the exact two
+primitives `apps/forum/client.js` already calls by hand for its own composer today.
+
+### `attachmentExtension({ assetService, spaceId, readerPubs, asSpaceId, trigger = '📎', triggerTitle } = {})`
+
+Generalizes `apps/chat/client.js`'s own proven "attach a file" flow. Drives `@qu/ui`'s
+`<qu-asset-upload hide-picker>` (its own `hide-picker`/`.openPicker()` exist specifically for
+this composer-embedding case) via a `registerAction()` trigger; on `qu-asset-uploaded`,
+`contributeContent()`s the attachment (multiple uploads accumulate) and renders a removable
+chip; removing the last one `retractContent()`s.
+
+### `locationExtension({ trigger = '📍', triggerTitle, label } = {})`
+
+Generalizes `apps/chat/client.js`'s own `shareLocation()`
+(`navigator.geolocation.getCurrentPosition()` → `{lat, lng}`) via a `registerAction()`
+trigger. Deliberate improvement over the original: `contributeContent()`s the location and
+waits for the user's own Send (so it can carry a caption, or be removed) instead of posting
+the instant a position resolves.
+
+### `voiceExtension({ assetService, spaceId, readerPubs, asSpaceId, trigger = '🎙️', triggerTitle } = {})`
+
+Generalizes `apps/chat/client.js`'s complete, proven voice-message state machine (Start →
+Pause ⇄ Resume → Finish → **Preview (real `<audio controls>` playback) → Send or Discard**,
+never an immediate send) essentially verbatim. Registers BOTH a `registerAction()` trigger
+(tap any time) AND a `registerSubmitCandidate()` (`when: (s) => !s.hasText &&
+!s.hasContribution` — the mic-morph, shown only while the composer is otherwise empty) that
+both start the same recording. While recording/paused/previewing, `setChrome()` swaps in the
+recorder panel; Send uploads the `Blob` via `assetService.upload()` then `submitNow()`s it,
+independent of any currently-typed draft.
+
+### `mountContentComposer(container, { format = 'plain', requireText = true, onSubmit, ...editorOptions } = {})`
+
+Wraps `mountContentEditor()` for an interactive posting context: on a NORMAL submit
+(`meta.immediate === false`), builds `createContent({text, format, attachments:
+extras.attachments, location: extras.location})`, calls `onSubmit(content)`, then clears the
+draft AND every standing contribution. On an `submitNow()`-driven submit (`meta.immediate ===
+true`, e.g. Voice's own Send), calls `onSubmit(content)` but clears NEITHER — there is nothing
+of that submission's own to clear, and doing so would wrongly wipe an unrelated typed draft or
+a pending attachment meant for the next, separate normal submit. `format` is a plain, explicit
+option for now — not yet resolved through the global/per-context/per-device/user-preference
+chain `docs/v4-concept.md` §5 describes as the eventual goal, since there is no persisted
+config store yet for a resolver to read from. Returns `{ editor, stop() }`.
 
 ---
 

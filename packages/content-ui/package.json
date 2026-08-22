@@ -1,0 +1,16 @@
+{
+  "name": "@qu/content-ui",
+  "version": "0.1.0",
+  "description": "Quniverse V4's ContentEditor layer (see docs/v4-concept.md §5): mountContentEditor() (the smallest reusable editor primitive - a textarea, a leading action slot and a submit control both rendered through @qu/ui's mountResolvedSlot() Presentation Resolver, and a trailing extension slot), mountContentComposer() (wraps a ContentEditor for a posting context, producing @qu/services' createContent()-shaped Content on submit), and the real EditorExtensions (emojiExtension/mentionExtension/attachmentExtension/locationExtension/voiceExtension), thin adapters over @qu/thread-ui's and apps/chat's existing, already-proven composer primitives - not reimplementations. No Custom Elements of its own (unlike @qu/ui) - plain functions returning/mutating real DOM, same small-composable-pieces philosophy @qu/thread-ui already follows. Browser-only.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "dependencies": {
+    "@qu/services": "^0.1.0",
+    "@qu/thread-ui": "^0.1.0",
+    "@qu/ui": "^0.1.0"
+  },
+  "license": "MIT"
+}

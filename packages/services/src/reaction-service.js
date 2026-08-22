@@ -1,5 +1,5 @@
 import { QuCrypto } from '@qu/core';
-import { threadReactionPath, threadReactionsParentPath } from './paths.js';
+import { threadReactionPath, threadReactionsParentPath, entityReactionPath, entityReactionsParentPath } from './paths.js';
 
 /**
  * REACTION SERVICE — one of four focused services `ThreadService` (QuV2's
@@ -25,6 +25,19 @@ import { threadReactionPath, threadReactionsParentPath } from './paths.js';
  * addressing, not trust: a caller must always key off the QuBit's own
  * verified `pub` (see `#actorPubOf()` below), never trust a path segment as
  * proof of who wrote it.
+ *
+ * QUNIVERSE V4 (see docs/v4-concept.md §4): `setEntityReaction()`/
+ * `getEntityReactions()` below generalize the exact same mechanism to a
+ * generic Entity, reusing this class's own `#signingKey()`/`#actorPubOf()`
+ * private helpers - one implementation, two entry points. Deliberately NOT
+ * an overload of `setReaction()`'s existing 4-positional-arg signature: a
+ * Thread's address is genuinely two-level (`threadId` + `messageId`), while
+ * an Entity's is one-level (just its own id) - collapsing both into one
+ * signature would make call sites ambiguous about which shape they mean, so
+ * this stays two clearly-named methods on the same class instead (the same
+ * "generalize the shape, don't overload the signature" call
+ * `BookmarksService`'s `entityKind` parameter made differently, because
+ * Bookmarks' shape didn't change - only WHICH `entityKind` string did).
  */
 export class ReactionService {
   /**
@@ -76,6 +89,36 @@ export class ReactionService {
     for (const { quBit } of entries) {
       const reactorPub = this.#actorPubOf(quBit);
       if (!reactorPub || !quBit.val) continue; // unsigned, or a cleared (tombstone) reaction
+      (byEmoji[quBit.val] ??= []).push(reactorPub);
+    }
+    return byEmoji;
+  }
+
+  // ===== Quniverse V4: generic Entity reactions ===============================
+
+  /**
+   * The entity-scoped counterpart to `setReaction()` - see class doc comment.
+   * @param {string|number} spaceId @param {string} entityId
+   * @param {string|null} emoji
+   * @param {{asSpaceId?: string|number}} [options]
+   */
+  async setEntityReaction(spaceId, entityId, emoji, { asSpaceId = null } = {}) {
+    const signKey = await this.#signingKey(asSpaceId);
+    const path = entityReactionPath(spaceId, entityId, QuCrypto.toBase64Url(signKey.publicKey));
+    await this.qu.put(path, emoji, { signWith: signKey.privateKeyPkcs8, writerPub: signKey.publicKey });
+  }
+
+  /**
+   * The entity-scoped counterpart to `getReactions()` - see class doc comment.
+   * @param {string|number} spaceId @param {string} entityId
+   * @returns {Promise<Record<string, string[]>>} `{ emoji: [reactorActorPub, ...] }`.
+   */
+  async getEntityReactions(spaceId, entityId) {
+    const entries = await this.list.listDerived(entityReactionsParentPath(spaceId, entityId));
+    const byEmoji = {};
+    for (const { quBit } of entries) {
+      const reactorPub = this.#actorPubOf(quBit);
+      if (!reactorPub || !quBit.val) continue;
       (byEmoji[quBit.val] ??= []).push(reactorPub);
     }
     return byEmoji;
