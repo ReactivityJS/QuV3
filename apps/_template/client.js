@@ -13,6 +13,16 @@
  *      `spaceId` (`docs/building-an-app.md` §2.2) - this template has none,
  *      it only demonstrates NAVIGATION, using trivial in-memory data.
  *
+ * This file demonstrates the App Navigation Standard ONLY - it has nothing
+ * to say about Entity/Content/Capability/Slot (`docs/v4-concept.md`), since
+ * its own "Notes" data is deliberately just an in-memory array, not
+ * anything persisted. If your new app's content is something a user
+ * creates/comments-on/reacts-to (the common case, not a pure-navigation
+ * app like this one), start from `apps/forum/client.js` instead - it's the
+ * reference implementation for creating an Entity with a `content` field,
+ * attaching Capabilities (Commentable, Reactable, ...), and building its
+ * composer via `@qu/content-ui`'s `ContentEditor`/`ContentComposer`.
+ *
  * A tiny "Notes" app: a small, fixed set of Folders (the switchable sibling
  * "places" - Rule 3, here rendered via Rule 5's AppConfig `navigation`) each
  * holding Notes (a list + a detail subpage - Rule 1), with "+ New note" as

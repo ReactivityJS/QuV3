@@ -53,7 +53,18 @@ function ensureStyle() {
  * @param {string} [options.trigger] - Trigger button glyph/label.
  * @param {string} [options.triggerTitle]
  * @param {string} [options.emptyLabel] - Shown instead of an empty panel when `getItems()` resolves to nothing.
- * @returns {HTMLElement}
+ * @returns {HTMLElement} the root element, with one extra method attached:
+ *   `.destroy()` - closes an open panel (if any) and removes the two
+ *   `document`-level listeners `openPanel()` adds. Not required for normal
+ *   use (see `closePanel()`'s own doc comment: the next click anywhere on
+ *   the page already removes them even if this root was detached from the
+ *   DOM first), but gives a caller that DOES tear a row down explicitly
+ *   (list virtualization, an editable-in-place delete) a deterministic way
+ *   to do so instead of relying on "the user will click again eventually" -
+ *   same `{el, ...extra methods}`-on-the-element shape already used
+ *   elsewhere in this file's own sibling components rather than changing
+ *   this function's return type and breaking every existing
+ *   `renderContextMenu(...)` → `appendChild()`/`querySelector()` call site.
  */
 export function renderContextMenu({ getItems, trigger = '⋮', triggerTitle = 'More', emptyLabel = null }) {
   ensureStyle();
@@ -136,6 +147,8 @@ export function renderContextMenu({ getItems, trigger = '⋮', triggerTitle = 'M
     e.stopPropagation();
     openPanel();
   });
+
+  root.destroy = () => closePanel();
 
   return root;
 }

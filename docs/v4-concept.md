@@ -453,11 +453,26 @@ decides HOW they're presented:
   normal mechanism instead of a special case.
 
 **First real consumer**: `ContentEditor`'s leading action slot (`'inline-then-menu'`,
-configurable) and its submit control (`'switch'`) — see §5. **Scoped for now**: this round
-wires the resolver into `ContentEditor` only; `app-template.js`'s FAB/Nav still use their
-original mechanism (`primaryAction`'s single-link shape unchanged) — the resolver is built
-generically enough to serve that later (same `SlotItem`/strategy shape), per this section's
-original plan, but that wiring is separate, not-yet-done work.
+configurable) and its submit control (`'switch'`) — see §5.
+
+**`primaryAction`/FAB multi-candidate resolution — implemented (architecture-review
+round).** `AppConfig.primaryAction` (`packages/ui/src/app-template.js`) now also accepts an
+**array** of candidates, not just one `{label, href, icon?}`. The app still only declares
+WHAT it offers; this template decides HOW: on wide screens every candidate gets its own
+prominent sidebar button (room to spare, no collapsing needed); on narrow screens 2+
+candidates collapse into one FAB that opens a small popup of real `<a href>` links, via
+`buildPopupTrigger()` — the SAME anchored-popup convention this file already uses for its
+`navigation`/`views`/`settings` pills, not a second, FAB-specific menu implementation (and
+not `mountResolvedSlot()` either — that resolver's real consumers all stay `onClick`-driven
+in-editor actions with no dedicated route, so routing the FAB through it would have been an
+unused, unjustified detour; `buildPopupTrigger()` was already the file's own established
+answer for "multiple candidates → an anchored popup of real links" and needed no new
+primitive). A single-item array renders identically to passing that one object directly; all
+~6 existing call sites (Forum, Chat, Todo, GeoChase, `_template`) are unchanged. Deliberately
+NOT built: a literal global `shell.fab` slot, or cross-app FAB contribution (e.g. a
+hypothetical Poll plugin contributing into Forum's FAB without Forum knowing about Poll) —
+no second real consumer needs either yet; the multi-candidate array is scoped to what one
+app itself declares, which is the concrete gap this round closes.
 
 ## 7. Domain Services — kept as real domain logic
 

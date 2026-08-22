@@ -1550,6 +1550,12 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     myPub = await services.actors.whoAmI();
     chatSettings = await getChatSettings(qu, services.messages.identity, myPub);
     if (stopped || token !== renderToken) return;
+    // No pagination/windowing here - every message in the room renders into
+    // the DOM, each with its own content.messageFooter/messageMenu slot
+    // instances (same "fine at community scale, not designed to scale past
+    // it" tradeoff apps/forum/client.js's own top doc comment already
+    // documents for its topic view - recorded here too rather than left as
+    // an undocumented difference between the two).
     const { messages } = await services.messages.listMessages(SPACE_ID, roomId);
     if (stopped || token !== renderToken) return;
 

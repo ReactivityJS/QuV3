@@ -107,6 +107,32 @@ test('clicking outside the menu closes an open panel', async () => {
   assert.equal(el.querySelector('.qu-thread-ui-context-menu-panel'), null);
 });
 
+test('destroy() closes an open panel and removes the document-level listeners, even after the root was detached', async () => {
+  const host = makeHost();
+  const el = renderContextMenu({ getItems: () => [{ id: 'a', label: 'A', onClick: () => {} }] });
+  host.appendChild(el);
+  el.querySelector('button').click();
+  await tick();
+  assert.ok(el.querySelector('.qu-thread-ui-context-menu-panel'));
+
+  el.remove(); // simulate a row being torn down while its menu is still open
+  el.destroy();
+  assert.equal(el.querySelector('.qu-thread-ui-context-menu-panel'), null);
+
+  // If the document-level listeners weren't removed, a stray click here
+  // would throw trying to close an already-removed panel a second time (or
+  // otherwise misbehave) - this only passes cleanly if destroy() actually
+  // tore them down.
+  assert.doesNotThrow(() => document.body.click());
+});
+
+test('destroy() is a harmless no-op when no panel is open', () => {
+  const host = makeHost();
+  const el = renderContextMenu({ getItems: () => [{ id: 'a', label: 'A', onClick: () => {} }] });
+  host.appendChild(el);
+  assert.doesNotThrow(() => el.destroy());
+});
+
 test('opening near the bottom of the viewport flips the panel upward (flipUpIfNeeded)', async () => {
   const host = makeHost();
   const el = renderContextMenu({ getItems: () => [{ id: 'a', label: 'A', onClick: () => {} }] });

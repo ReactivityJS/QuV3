@@ -88,6 +88,72 @@ test('only primaryAction: a standalone FAB, no bar chrome, no reserved content p
   assert.equal(sidebar.querySelector('.qu-apptpl-section'), null);
 });
 
+test('primaryAction as a single-item array renders identically to passing that one object', () => {
+  const container = makeContainer();
+  mountAppTemplate(container, { primaryAction: [PRIMARY], render: () => {} });
+
+  const fab = container.querySelector('.qu-apptpl-footer a.qu-apptpl-fab');
+  assert.ok(fab);
+  assert.equal(fab.getAttribute('href'), '#/app/new');
+  assert.equal(container.querySelector('.qu-apptpl-fab-multi'), null);
+});
+
+test('primaryAction: [] (empty array) counts as no primaryAction at all - no fab, no sidebar button', () => {
+  const container = makeContainer();
+  mountAppTemplate(container, { primaryAction: [], render: () => {} });
+
+  assert.equal(container.querySelector('.qu-apptpl-footer'), null);
+  assert.equal(container.querySelector('.qu-apptpl-sidebar'), null);
+});
+
+test('2+ primaryAction candidates: desktop sidebar gets one prominent button per candidate (room to spare, no collapsing)', () => {
+  const container = makeContainer();
+  const SECOND = { label: 'New channel', href: '#/app/new-channel', icon: '📁' };
+  mountAppTemplate(container, { primaryAction: [PRIMARY, SECOND], render: () => {} });
+
+  const buttons = [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-primary-desktop')];
+  assert.deepEqual(buttons.map((a) => a.getAttribute('href')), ['#/app/new', '#/app/new-channel']);
+});
+
+test('2+ primaryAction candidates: mobile gets ONE fab that opens a popup of real links, marked as a menu trigger', () => {
+  const container = makeContainer();
+  const SECOND = { label: 'New channel', href: '#/app/new-channel', icon: '📁' };
+  mountAppTemplate(container, { primaryAction: [PRIMARY, SECOND], render: () => {} });
+
+  const footer = container.querySelector('.qu-apptpl-footer');
+  assert.equal(footer.classList.contains('qu-apptpl-footer--fab-only'), true);
+  // Exactly one FAB-styled trigger, not one per candidate.
+  assert.equal(footer.querySelectorAll('.qu-apptpl-fab').length, 1);
+  const trigger = footer.querySelector('.qu-apptpl-fab');
+  assert.equal(trigger.classList.contains('qu-apptpl-fab-multi'), true); // the "this is a menu" caret cue
+  assert.equal(trigger.tagName, 'BUTTON'); // not a direct link - opens a popup instead
+
+  const popup = footer.querySelector('.qu-apptpl-popup');
+  assert.equal(popup.hidden, true);
+  trigger.click();
+  assert.equal(popup.hidden, false);
+  const links = [...popup.querySelectorAll('a')];
+  assert.deepEqual(links.map((a) => a.getAttribute('href')), ['#/app/new', '#/app/new-channel']);
+  assert.deepEqual(links.map((a) => a.textContent.trim()), ['✏️New topic', '📁New channel']);
+
+  document.body.click();
+  assert.equal(popup.hidden, true);
+});
+
+test('2+ primaryAction candidates alongside navigation: the fab-multi popup listeners are torn down by the returned cleanup', () => {
+  const container = makeContainer();
+  const SECOND = { label: 'New channel', href: '#/app/new-channel' };
+  const stop = mountAppTemplate(container, { navigation: NAV, primaryAction: [PRIMARY, SECOND], render: () => {} });
+
+  const trigger = container.querySelector('.qu-apptpl-fab-multi');
+  trigger.click();
+  assert.equal(container.querySelector('.qu-apptpl-popup:not([hidden])') !== null, true);
+
+  stop();
+  // A stray click after teardown must not throw (no leftover document listener touching removed DOM).
+  assert.doesNotThrow(() => document.body.click());
+});
+
 test('full config: desktop sidebar renders all four sections, footer renders pills/gear/fab', () => {
   const container = makeContainer();
   let renderedContent = null;
