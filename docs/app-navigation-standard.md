@@ -388,6 +388,88 @@ rooms exist, in what order, with what unread/muted state", shared by both
 the rich room-list view and the lightweight `navigation` items either view
 builds from the same data via `roomsToNavItems()`.
 
+### Rule 5a — Chrome Inversion: `ctx.chrome`, the platform-owned counterpart
+
+`mountAppTemplate()` (Rule 5) is called BY the app, once per view — the app
+still decides when to mount its own chrome, and still owns the DOM node it's
+built into. **Chrome Inversion** removes that last choice too: `apps/shell`
+mounts the sidebar/footer chrome ONCE, for the whole session
+(`apps/shell/src/chrome.js`), and hands every app a `ctx.chrome` handle
+instead of a container to build a fresh `mountAppTemplate()` structure into.
+The platform loads the app; the app no longer mounts itself into the
+platform. An app on `ctx.chrome` builds its own UI straight into `container`
+(already the platform's own content area) and calls:
+
+```js
+ctx.chrome.set({
+  primaryAction: { label: 'New topic', href: '#/yourapp/new', icon: '✏️' },
+  navigation: { items: [...], activeId: currentId, heading: 'Channels', filter: true },
+});
+```
+
+Same shallow-merge semantics `mountAppTemplate()`'s own
+`stopTemplate.update(partialConfig)` already has (call it again from a later
+`watch()` callback or async IIFE to fill in late-arriving chrome data,
+exactly as before) — the only real differences are that there's no `render`
+field (you already have `container`, just append to it) and no `stopTemplate()`
+call to make when your view unmounts (the shell clears chrome automatically
+on the next navigation, the same place it already tears down your app's own
+`mount()` return value).
+
+**`navigation`/`views` may also be registered as a live list** instead of a
+plain `items[]` snapshot:
+
+```js
+ctx.chrome.set({
+  navigation: {
+    list: { path: paths.listPath(SPACE_ID, 'channels'), template: channelTemplate(), onItemStamped },
+    activeId: currentChannelId, heading: 'Channels', filter: true,
+  },
+});
+```
+
+`template` is a literal `<template>` element and `onItemStamped(els, itemId,
+item)` fires once per newly-stamped item — the exact same contract
+`<qu-list>` (`@qu/ui`'s `components.js`) already has everywhere else in this
+codebase, not a new item-mapping convention. `chrome.js` mounts a real
+`<qu-list>` bound to that `path`/`parent`, which then updates itself via
+`<qu-list>`'s own keyed, per-item reconciliation — you stop having to
+`watch()`/recompute/re-push a snapshot array yourself just to keep the list
+membership current; you only call `chrome.set()` again when something ELSE
+about the section changes (which item is active, the heading, whether the
+section exists at all on this route). Prefer this form for a section backed
+by real Qu-store data; keep the plain `items[]` form for something small/
+static/derived-in-app-code (e.g. `settings`, rarely more than a couple of
+fixed links) where mounting a whole reactive list would be overhead for no
+benefit.
+
+**Scoped for this round, not a silent gap**: a `list:`-registered section
+renders in the desktop sidebar only — it does NOT appear in the mobile
+footer pill/popup. An app whose mobile users genuinely need to switch
+between the same items from a footer pill (any app whose main view is a
+feed/list rather than the switched-to place itself — see Rule 5's own
+`desktopOnly` discussion) should keep `navigation`/`views` as a plain
+`items[]` snapshot for now, recomputed from its own `watch()` callback
+exactly as `mountAppTemplate()`-based apps already do — this is real,
+deliberate follow-up work once a second real app needs the reactive form on
+mobile too, not an oversight.
+
+**Migration status**: `apps/forum/client.js` is the first (and, as of this
+writing, only) app migrated onto `ctx.chrome` — the proof-of-concept for
+this whole mechanism, chosen because its own recurring `watch()`-driven
+navigation and async policy gates are the hardest real case in this
+codebase. Every other app still calls `mountAppTemplate()` directly, is
+unaffected, and is under no obligation to migrate — `ctx.chrome` is
+additive (`apps/shell/client.js` defaults it to a working no-op for any test
+harness that doesn't construct one), and `mountAppTemplate()` itself is
+completely unchanged (`chrome.js` reuses its own exported builder functions
+internally, so the two can never silently drift into two different chrome
+behaviors for the same `AppConfig` shape). **`mountAppTemplate()` stays the
+recommended entry point for a NEW app** (Rule 5's own checklist item below)
+until a second real app has migrated and the mobile-footer gap above is
+closed — copy `apps/_template/`, not `apps/forum/client.js`, when starting
+something new.
+
 ## Building a new app? A checklist
 
 1. Copy `apps/_template/` — it implements every rule above, working and

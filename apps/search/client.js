@@ -89,9 +89,6 @@ const TYPES = ['post', 'image', 'video', 'audio', 'file', 'link'];
 
 const STYLE_ID = 'qu-search-style';
 const STYLE = `
-  .qu-search-tabs { display: flex; gap: 0.4rem; margin: 0.6rem 0; }
-  .qu-search-tab { padding: 0.3rem 0.7rem; border-radius: 999px; text-decoration: none; color: inherit; background: var(--qu-color-surface, #8882); font-size: 0.9em; }
-  .qu-search-tab-active { background: var(--qu-color-accent, #5b5bd6); color: white; }
   .qu-search-controls { display: flex; flex-direction: column; gap: 0.5rem; max-width: 34rem; margin-bottom: 0.8rem; }
   .qu-search-input { font: inherit; padding: 0.5rem 0.7rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); }
   .qu-search-chips { display: flex; flex-wrap: wrap; gap: 0.35rem; }
@@ -130,21 +127,6 @@ export function mount(container, ctx) {
   const heading = document.createElement('h1');
   heading.textContent = t('title');
 
-  const tabs = document.createElement('div');
-  tabs.className = 'qu-search-tabs';
-  function addTab(scopeName, href, label) {
-    const a = document.createElement('a');
-    a.href = href;
-    a.textContent = label;
-    a.className = 'qu-search-tab' + (scope === scopeName ? ' qu-search-tab-active' : '');
-    tabs.appendChild(a);
-  }
-  addTab('global', `#/search/global${contextSuffix}`, t('scopeGlobal'));
-  if (contextAppId) {
-    addTab('app', `#/search/app${contextSuffix}`, t('scopeApp', { app: contextLabel }));
-    if (rest.length > 0) addTab('subpage', `#/search/subpage${contextSuffix}`, t('scopeSubpage'));
-  }
-
   const input = document.createElement('input');
   input.type = 'search';
   input.placeholder = t('placeholder');
@@ -173,15 +155,21 @@ export function mount(container, ctx) {
   const resultsRoot = document.createElement('div');
   resultsRoot.className = 'qu-search-results';
 
-  // Rule 5 (docs/app-navigation-standard.md) - the app's one, chrome-less
-  // main view still routes through `mountAppTemplate()`, same as every other
-  // app's MAIN view: none of `navigation`/`views`/`primaryAction`/`settings`
-  // fit this single-view, tab-switched-via-hash-route app, so `render` is
-  // all that's passed - zero visible chrome change, content still gets 100%
-  // of the container.
+  // Rule 5 (docs/app-navigation-standard.md) - the app's scope tabs are a
+  // real route already (global/app/subpage, each a real `#/search/...`
+  // href, same "switching is a real navigation, not client-side button
+  // state" shape apps/notifications/client.js's own unread/all `views`
+  // already uses) - `views` renders them instead of a hand-built tab strip,
+  // same active-state highlighting, same links, one less bespoke component.
+  const viewItems = [{ id: 'global', label: t('scopeGlobal'), href: `#/search/global${contextSuffix}` }];
+  if (contextAppId) {
+    viewItems.push({ id: 'app', label: t('scopeApp', { app: contextLabel }), href: `#/search/app${contextSuffix}` });
+    if (rest.length > 0) viewItems.push({ id: 'subpage', label: t('scopeSubpage'), href: `#/search/subpage${contextSuffix}` });
+  }
   mountAppTemplate(container, {
+    views: { items: viewItems, activeId: scope },
     render: (content) => {
-      content.append(heading, tabs, controls, resultsRoot);
+      content.append(heading, controls, resultsRoot);
     },
   });
 

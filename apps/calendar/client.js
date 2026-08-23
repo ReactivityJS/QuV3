@@ -46,6 +46,13 @@
  * §4.2), never a modal:
  *   - `#/calendar` - My Calendars (an off-canvas drawer on mobile, a
  *     persistent sidebar from ~880px up) + the combined Day/Week/Month/List view.
+ *   - `#/calendar/<day|week|month|list>` (optionally `/<cursorMs>`) - the
+ *     SAME combined view, with a specific view mode (and, optionally, the
+ *     specific date it should open on) as a real link -
+ *     `mountAppTemplate()`'s own `views` field, see this file's own
+ *     VIEW_KEYS doc comment further down. `day`/`week`/`month`/`list` are
+ *     reserved words at this position (calendar ids are UUIDs, never
+ *     collide - same trick `manage`/`from-message` below already use).
  *   - `#/calendar/<calId>` - open an invited calendar (stars it if this
  *     identity is actually a member, else explains why it can't).
  *   - `#/calendar/<calId>/share` - owner-only: rename, color, members,
@@ -180,11 +187,6 @@ const STYLE = `
   .qu-cal-primary { border: none; border-radius: var(--qu-radius-md, 0.4rem); padding: 0.5rem 1rem; background: var(--qu-color-accent, #5b5bd6); color: #fff; cursor: pointer; font-weight: 600; text-decoration: none; display: inline-block; }
   .qu-cal-filter { padding: 0.5rem; width: 100%; box-sizing: border-box; font-size: 1em; }
 
-  /* Segmented view switcher - full-width, thumb-friendly on mobile */
-  .qu-cal-viewswitch { display: flex; border: 1px solid var(--qu-color-border, #8884); border-radius: 999px; overflow: hidden; width: 100%; }
-  .qu-cal-viewswitch button { flex: 1; border: none; background: none; padding: 0.5rem 0.4rem; cursor: pointer; font-size: 0.85em; }
-  .qu-cal-viewswitch button[data-active="true"] { background: var(--qu-color-accent, #5b5bd6); color: #fff; font-weight: 600; }
-
   .qu-cal-month-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 0.2rem; }
   .qu-cal-month-cell { min-width: 0; border: 1px solid var(--qu-color-border, #8884); border-radius: 0.25rem; padding: 0.25rem; min-height: 3.6rem; font-size: 0.82em; cursor: pointer; transition: background-color 0.1s; }
   .qu-cal-month-cell:hover { background: #8881; }
@@ -254,8 +256,6 @@ const STYLE = `
   @media (min-width: 720px) {
     .qu-cal-toolbar { flex-wrap: nowrap; }
     .qu-cal-toolbar-navrow { width: auto; flex: 1; min-width: 0; }
-    .qu-cal-viewswitch { width: auto; flex-shrink: 0; }
-    .qu-cal-viewswitch button { flex: initial; padding: 0.35rem 0.8rem; }
     .qu-cal-filter { width: 14rem; }
     .qu-cal-month-cell { min-height: 5.2rem; padding: 0.35rem; font-size: 0.85em; }
   }
@@ -468,16 +468,35 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
   let unwatches = [];
   let nowTimer = null;
   let checked = null; // Set<calendarId> - null until first populated (defaults to "all")
-  let view = window.matchMedia?.(MOBILE_QUERY)?.matches ? 'list' : 'month';
-  let cursor = startOfDay(new Date());
   let filterText = '';
   let myActorPub = null;
   let pickerCleanups = [];
   let pendingInvitesChecked = false; // discoverPendingInvites() - see its own doc comment; runs once per mount
 
+  // VIEW_KEYS ('day'/'week'/'month'/'list') are reserved words at the SAME
+  // segments[1] position a real calendar id normally occupies - the exact
+  // same "reserved word alongside a dynamic id" trick 'manage'/'from-message'
+  // below already use (calendar ids are UUIDs, never collide). This makes
+  // the day/week/month/list switch a REAL route (`views`, Rule 5 -
+  // mountAppTemplate()'s own `views` field renders real links, it can't
+  // represent a hand-toggled local variable) instead of the in-place
+  // `view = key; renderMain();` mutation this file used before - the same
+  // "one extra step for a bookmarkable/shareable URL" trade-off
+  // apps/notifications/client.js's own unread/all migration already made.
+  // An optional 3rd segment carries the cursor DATE (ms since epoch) - only
+  // the view-switch buttons and a month-grid day-cell click set it; prev/
+  // next/today stay pure in-place `cursor` mutation + renderMain(), same as
+  // before (date PAGINATION within a view, not a view-mode change, so it
+  // doesn't belong in the URL any more than it did before this change).
+  const VIEW_KEYS = ['day', 'week', 'month', 'list'];
   const calId = segments[1] ?? null;
-  const sub = segments[2] ?? null; // null | 'share' | 'new' | <eventId>
-  const extra = segments[3] ?? null; // 'new'-only: an optional pre-filled start time (ms)
+  const isViewRoute = calId != null && VIEW_KEYS.includes(calId);
+  const sub = !isViewRoute ? (segments[2] ?? null) : null; // null | 'share' | 'new' | <eventId>
+  const extra = !isViewRoute ? (segments[3] ?? null) : null; // 'new'-only: an optional pre-filled start time (ms)
+  const routedCursorMs = isViewRoute && segments[2] ? Number(segments[2]) : NaN;
+
+  let view = isViewRoute ? calId : (window.matchMedia?.(MOBILE_QUERY)?.matches ? 'list' : 'month');
+  let cursor = Number.isFinite(routedCursorMs) ? startOfDay(new Date(routedCursorMs)) : startOfDay(new Date());
 
   (async () => {
     myActorPub = await services.actors.whoAmI();
@@ -488,7 +507,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     // context-switcher call and docs/app-navigation-standard.md Rule 3) -
     // never an off-canvas drawer.
     if (calId === 'manage') { await renderManagePage(); return; }
-    if (!calId) { await renderMain(); return; }
+    if (!calId || isViewRoute) { await renderMain(); return; }
     if (!sub) { await handleInviteLink(calId); return; }
     if (sub === 'share') { await renderSharePage(calId); return; }
     if (sub === 'new') { await renderNewEventPage(calId, extra ? Number(extra) : null, null); return; }
@@ -682,8 +701,17 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     // page `switchHref` already routes to, so the inline "„Kalender" ›"
     // title-row link (`hideTitleLink: true` below) is no longer needed as a
     // SECOND way to reach it (Rule 5's "app settings" affordance instead).
+    // `views` is the day/week/month/list switch (see this file's own
+    // VIEW_KEYS doc comment above) - real links carrying the CURRENT cursor
+    // date, so switching view lands on whatever date you were already
+    // looking at, not always today's.
     mountAppTemplate(container, {
       settings: { items: [{ label: t('manageCalendars'), href: '#/calendar/manage', icon: '📅' }] },
+      views: {
+        items: [['day', t('day')], ['week', t('week')], ['month', t('month')], ['list', t('list')]]
+          .map(([key, label]) => ({ id: key, label, href: `#/calendar/${key}/${cursor.getTime()}` })),
+        activeId: view,
+      },
       render: (content) => {
         const root = document.createElement('div');
         root.className = 'qu-cal-root';
@@ -971,17 +999,9 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     // width instead of only ≥720px.
     bar.appendChild(navRow);
 
-    const switcher = document.createElement('div');
-    switcher.className = 'qu-cal-viewswitch';
-    for (const [key, label] of [['day', t('day')], ['week', t('week')], ['month', t('month')], ['list', t('list')]]) {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.textContent = label;
-      btn.dataset.active = String(view === key);
-      btn.addEventListener('click', () => { view = key; renderMain(); });
-      switcher.appendChild(btn);
-    }
-    bar.appendChild(switcher);
+    // No more hand-built view-switch strip here - it's `mountAppTemplate()`'s
+    // own `views` field now (see renderMain()'s own mountAppTemplate() call
+    // and this file's top VIEW_KEYS doc comment).
 
     return bar;
   }
@@ -1064,9 +1084,11 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
       }
       cell.addEventListener('click', (e) => {
         if (e.target.closest('a')) return; // let a chip's own link navigate instead of also jumping to day view
-        cursor = day;
-        view = 'day';
-        renderMain();
+        // Real navigation now (view is a real route, see this file's own
+        // VIEW_KEYS doc comment) - carries the clicked day so Day view opens
+        // on THAT date, not today's (a fresh mount() resets `cursor` to
+        // today otherwise).
+        window.location.hash = `#/calendar/day/${day.getTime()}`;
       });
       grid.appendChild(cell);
     }

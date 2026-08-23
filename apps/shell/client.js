@@ -99,6 +99,7 @@ import { renderOnboarding } from './src/onboarding.js';
 import { createClientServices } from './src/services.js';
 import { connectToRelay } from './src/sync.js';
 import { mountHeader } from './src/header.js';
+import { mountChrome } from './src/chrome.js';
 import { mountNotificationPopups } from './src/notification-popups.js';
 import { registerServiceWorker, applyUpdate, captureInstallPrompt } from './src/pwa.js';
 import { parseHash } from './src/router.js';
@@ -119,7 +120,6 @@ const { t } = createI18n(DICT);
 const STYLE_ID = 'qu-shell-style';
 const STYLE = `
   body { margin: 0; font-family: system-ui, sans-serif; }
-  .qu-shell-screen { padding: 1rem; }
   .qu-shell-placeholder { padding: 2rem; text-align: center; opacity: 0.7; }
 `;
 
@@ -272,9 +272,7 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
   }
 
   const headerRoot = document.createElement('div');
-  const screen = document.createElement('div');
-  screen.className = 'qu-shell-screen';
-  container.append(headerRoot, screen);
+  container.appendChild(headerRoot);
 
   // `adminPubs` is this relay's own operator allowlist (see
   // `@qu/relay`'s `AdminHttp#verifyAdmin()`) - fetched here only so the
@@ -294,6 +292,7 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
   let adminPubs = [];
   let extensionOrder = {};
   let iceServers = [];
+  let menuThreshold = 8; // DEFAULT_RELAY_SETTINGS.chrome.menuThreshold, see relay-settings.js
   try {
     const res = await fetch('/config.json');
     if (res.ok) {
@@ -301,8 +300,24 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
       adminPubs = data.adminPubs ?? [];
       extensionOrder = data.settings?.extensionOrder ?? {};
       iceServers = data.iceServers ?? [];
+      menuThreshold = data.settings?.chrome?.menuThreshold ?? menuThreshold;
     }
-  } catch { /* offline/unreachable - header just shows no admin link, extension points fall back to their own default order/ICE servers */ }
+  } catch { /* offline/unreachable - header just shows no admin link, extension points fall back to their own default order/ICE servers/menuThreshold */ }
+
+  // The platform-owned chrome (sidebar/footer nav, primaryAction, views,
+  // settings) - mounted ONCE for the whole session, alongside the header.
+  // Apps mount into `chrome.contentSlot` (same structural role `screen`
+  // used to play) and drive their own chrome via `ctx.chrome.set()`
+  // instead of calling `mountAppTemplate()` themselves - see
+  // `./src/chrome.js`'s own doc comment for the full "Chrome Inversion"
+  // reasoning (docs/v4-concept.md / the architecture-review plan). Mounted
+  // AFTER the `/config.json` fetch above so `menuThreshold` reflects this
+  // relay's own admin setting from the very first render, not a hardcoded
+  // default that then never changes for the rest of the session (same
+  // once-per-page-load staleness trade-off `extensionOrder`/`adminPubs`
+  // already accept).
+  const chrome = mountChrome(container, { qu, syncFetch, menuThreshold });
+
   // A boot-time snapshot of the SAME catalog `renderRoute()` re-fetches on
   // every navigation below - the header is mounted exactly once for the
   // whole session (see its own "SEARCH SLOT" doc comment), so a snapshot
@@ -342,11 +357,11 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
   }
 
   function renderPlaceholder(message) {
-    screen.textContent = '';
+    chrome.contentSlot.textContent = '';
     const p = document.createElement('p');
     p.className = 'qu-shell-placeholder';
     p.textContent = message;
-    screen.appendChild(p);
+    chrome.contentSlot.appendChild(p);
   }
 
   /**
@@ -398,7 +413,14 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
     routeCount++;
     stopMountedApp?.();
     stopMountedApp = null;
-    screen.textContent = '';
+    // A fresh chrome epoch for this navigation - clears whatever the
+    // previous app registered (nav/views/settings/primaryAction) and hands
+    // back a handle only THIS navigation may write through (see chrome.js's
+    // own `begin()`/epoch doc comment - a late `.set()` call from a
+    // torn-down view's forgotten watcher becomes a silent no-op, mirroring
+    // the `navToken` guard already used throughout this function).
+    const chromeHandle = chrome.begin();
+    chrome.contentSlot.textContent = '';
 
     const { appId, segments } = parseHash(window.location.hash);
     if (!appId) { renderPlaceholder(t('home')); return; }
@@ -436,11 +458,11 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
     // placeholder rather than throwing on `mod.mount is not a function`.
     if (typeof mod.mount !== 'function') { renderPlaceholder(t('appNotFound')); return; }
     const extensionPoints = new ExtensionPointHost(apps, { extensionOrder });
-    const stopFn = (await mod.mount(screen, { qu, identity, services, apps, segments, subscribe, syncFetch, extensionPoints, iceServers, goBack })) ?? null;
+    const stopFn = (await mod.mount(chrome.contentSlot, { qu, identity, services, apps, segments, subscribe, syncFetch, extensionPoints, iceServers, goBack, chrome: chromeHandle })) ?? null;
     if (stopped || token !== navToken) {
-      // A newer navigation already won control of `screen` while this
-      // mount() call was itself in flight - never leave this one mounted
-      // (and its watches/subscriptions live) in the background.
+      // A newer navigation already won control of `chrome.contentSlot`
+      // while this mount() call was itself in flight - never leave this one
+      // mounted (and its watches/subscriptions live) in the background.
       stopFn?.();
       return;
     }
@@ -457,6 +479,7 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
     stopMountedApp?.();
     stopHeader?.();
     stopNotificationPopups?.();
+    chrome.stop();
     transport?.close();
   };
 }

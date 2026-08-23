@@ -227,7 +227,13 @@ function styleFor(breakpoint) {
   `;
 }
 
-function ensureStyle(breakpoint) {
+/**
+ * Injects `styleFor(breakpoint)`'s CSS once per distinct breakpoint value -
+ * exported so `apps/shell/src/chrome.js` can reuse the exact same
+ * `.qu-apptpl-*` styles for its session-scoped chrome instead of a second,
+ * drifting copy of the same rules.
+ */
+export function ensureStyle(breakpoint) {
   const id = `${STYLE_ID_PREFIX}-${String(breakpoint).replace(/[^a-zA-Z0-9]/g, '')}`;
   injectStyle(id, styleFor(breakpoint));
 }
@@ -261,7 +267,8 @@ function searchTextFor(item) {
  * the same time (the `720px` breakpoint shows exactly one), so there is
  * nothing to keep in sync.
  */
-function buildFilterInput(getEntries, { placeholder = 'Filter…' } = {}) {
+/** Exported alongside `ensureStyle()`/`buildChrome()` for the same reason - `apps/shell/src/chrome.js` reuses it for a `<qu-list>`-backed section's own filter box. */
+export function buildFilterInput(getEntries, { placeholder = 'Filter…' } = {}) {
   const input = document.createElement('input');
   input.type = 'search';
   input.className = 'qu-apptpl-filter';
@@ -564,6 +571,45 @@ function buildFab(items) {
 }
 
 /**
+ * Computes everything about HOW a normalized `AppConfig` renders as chrome -
+ * shared by `mountAppTemplate()` below (per-app-call chrome) and
+ * `apps/shell/src/chrome.js` (the session-scoped "Chrome Inversion"
+ * orchestrator, see `docs/v4-concept.md`), so both stay byte-for-byte
+ * consistent instead of two copies of the same `hasChrome`/`fabOnly`
+ * decision tree drifting apart. Pure with respect to any existing DOM - it
+ * only ever BUILDS new `sidebarEl`/`footerEl` elements, never mutates a
+ * caller-owned tree; the caller decides where those elements go and how any
+ * previous ones get removed.
+ * @param {ReturnType<typeof normalizeAppConfig>} cfg - already normalized.
+ * @returns {{sidebarEl: HTMLElement|null, footerEl: HTMLElement|null,
+ *   hasChrome: boolean, hasMobileFooterContent: boolean, fabOnly: boolean,
+ *   cleanup: () => void}}
+ */
+export function buildChrome(cfg) {
+  // `hasChrome` decides the DESKTOP sidebar - every section counts,
+  // `desktopOnly` or not. The mobile footer only cares about sections
+  // that AREN'T `desktopOnly` - see `AppConfig.navigation`'s own doc
+  // comment above for why a section opts out of the footer entirely.
+  const hasPrimaryAction = primaryActionItems(cfg.primaryAction).length > 0;
+  const hasChrome = !!(hasPrimaryAction || cfg.navigation || cfg.views || cfg.settings);
+  const mobileNav = cfg.navigation && !cfg.navigation.desktopOnly ? cfg.navigation : null;
+  const mobileViews = cfg.views && !cfg.views.desktopOnly ? cfg.views : null;
+  const mobileSettings = cfg.settings && !cfg.settings.desktopOnly ? cfg.settings : null;
+  const hasMobileFooterContent = !!(hasPrimaryAction || mobileNav || mobileViews || mobileSettings);
+  const fabOnly = hasMobileFooterContent && !mobileNav && !mobileViews && !mobileSettings && hasPrimaryAction;
+
+  const sidebarEl = hasChrome ? buildDesktopSidebar(cfg) : null;
+  let footerEl = null;
+  let cleanup = () => {};
+  if (hasMobileFooterContent) {
+    const built = buildMobileFooter(cfg, { fabOnly, mobileNav, mobileViews, mobileSettings });
+    footerEl = built.el;
+    cleanup = built.cleanup;
+  }
+  return { sidebarEl, footerEl, hasChrome, hasMobileFooterContent, fabOnly, cleanup };
+}
+
+/**
  * @param {HTMLElement} container - cleared and (re)populated in place.
  * @param {AppConfig} config
  * @returns {(() => void) & {update: (partial: Partial<AppConfig>) => void}} destroy -
@@ -600,39 +646,23 @@ export function mountAppTemplate(container, config) {
     sidebarEl?.remove();
     footerEl?.remove();
 
-    // `hasChrome` decides the DESKTOP sidebar - every section counts,
-    // `desktopOnly` or not. The mobile footer only cares about sections
-    // that AREN'T `desktopOnly` - see this file's own `navigation` doc
-    // comment above for why a section opts out of the footer entirely.
-    const hasPrimaryAction = primaryActionItems(cfg.primaryAction).length > 0;
-    const hasChrome = !!(hasPrimaryAction || cfg.navigation || cfg.views || cfg.settings);
-    const mobileNav = cfg.navigation && !cfg.navigation.desktopOnly ? cfg.navigation : null;
-    const mobileViews = cfg.views && !cfg.views.desktopOnly ? cfg.views : null;
-    const mobileSettings = cfg.settings && !cfg.settings.desktopOnly ? cfg.settings : null;
-    const hasMobileFooterContent = !!(hasPrimaryAction || mobileNav || mobileViews || mobileSettings);
-    const fabOnly = hasMobileFooterContent && !mobileNav && !mobileViews && !mobileSettings && hasPrimaryAction;
+    const built = buildChrome(cfg);
+    cleanupFooter = built.cleanup;
 
     root.className = cfg.fullHeight ? 'qu-apptpl-root qu-apptpl-root--full-height' : 'qu-apptpl-root';
-    if (cfg.fullHeight && hasMobileFooterContent && !fabOnly) root.classList.add('qu-apptpl-root--has-footer-bar');
+    if (cfg.fullHeight && built.hasMobileFooterContent && !built.fabOnly) root.classList.add('qu-apptpl-root--has-footer-bar');
 
     // In full-height mode, the fixed root's own bottom inset already makes
     // room for the footer bar (`.qu-apptpl-root--has-footer-bar`) - adding
     // this padding TOO would double-reserve that space, since content isn't
     // the thing scrolling the page anymore. See the `fullHeight` doc comment.
-    content.classList.toggle('qu-apptpl-content--with-bar', hasMobileFooterContent && !fabOnly && !cfg.fullHeight);
+    content.classList.toggle('qu-apptpl-content--with-bar', built.hasMobileFooterContent && !built.fabOnly && !cfg.fullHeight);
 
-    sidebarEl = hasChrome ? buildDesktopSidebar(cfg) : null;
+    sidebarEl = built.sidebarEl;
     if (sidebarEl) layout.insertBefore(sidebarEl, content);
 
-    if (hasMobileFooterContent) {
-      const { el, cleanup } = buildMobileFooter(cfg, { fabOnly, mobileNav, mobileViews, mobileSettings });
-      footerEl = el;
-      root.appendChild(footerEl);
-      cleanupFooter = cleanup;
-    } else {
-      footerEl = null;
-      cleanupFooter = () => {};
-    }
+    footerEl = built.footerEl;
+    if (footerEl) root.appendChild(footerEl);
   }
 
   // `content` must already be `layout`'s child BEFORE the first

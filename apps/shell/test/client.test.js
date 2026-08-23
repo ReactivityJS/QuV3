@@ -154,9 +154,9 @@ test('navigating to a known route dynamically imports and mounts the target app 
   try {
     window.location.hash = '#/testapp';
     window.dispatchEvent(new window.Event('hashchange'));
-    await waitFor(() => container.querySelector('.qu-shell-screen')?.textContent.startsWith('MOUNTED'));
+    await waitFor(() => container.querySelector('.qu-apptpl-content')?.textContent.startsWith('MOUNTED'));
 
-    const text = container.querySelector('.qu-shell-screen').textContent;
+    const text = container.querySelector('.qu-apptpl-content').textContent;
     for (const key of ['qu', 'identity', 'services', 'apps', 'segments', 'subscribe', 'syncFetch', 'extensionPoints', 'goBack']) {
       assert.ok(text.includes(key), `expected context key "${key}" in ${text}`);
     }
@@ -183,7 +183,7 @@ test('navigating to a route an admin has disabled (enabled: false) shows "app no
     window.location.hash = '#/testapp';
     window.dispatchEvent(new window.Event('hashchange'));
     await waitFor(() => container.querySelector('.qu-shell-placeholder') !== null);
-    assert.ok(!container.querySelector('.qu-shell-screen')?.textContent.includes('MOUNTED'));
+    assert.ok(!container.querySelector('.qu-apptpl-content')?.textContent.includes('MOUNTED'));
   } finally {
     stop();
   }
@@ -239,8 +239,8 @@ test('ctx.extensionPoints.renderSlot() actually dynamically imports a DIFFERENT 
   try {
     window.location.hash = '#/host';
     window.dispatchEvent(new window.Event('hashchange'));
-    await waitFor(() => container.querySelector('.qu-shell-screen button') !== null);
-    assert.equal(container.querySelector('.qu-shell-screen button').textContent, 'like:msg1');
+    await waitFor(() => container.querySelector('.qu-apptpl-content button') !== null);
+    assert.equal(container.querySelector('.qu-apptpl-content button').textContent, 'like:msg1');
   } finally {
     stop();
   }
@@ -263,7 +263,7 @@ test('navigating away from a mounted app calls its own returned stop function', 
   try {
     window.location.hash = '#/testapp';
     window.dispatchEvent(new window.Event('hashchange'));
-    await waitFor(() => container.querySelector('.qu-shell-screen')?.textContent === 'MOUNTED');
+    await waitFor(() => container.querySelector('.qu-apptpl-content')?.textContent === 'MOUNTED');
 
     window.location.hash = '';
     window.dispatchEvent(new window.Event('hashchange'));
@@ -328,7 +328,7 @@ test('a re-navigation while a prior app\'s own mount() is still in flight stops 
     // gate - the exact race renderRoute()'s navToken guard exists to close.
     window.location.hash = '#/fastapp';
     window.dispatchEvent(new window.Event('hashchange'));
-    await waitFor(() => container.querySelector('.qu-shell-screen')?.textContent === 'FAST MOUNTED');
+    await waitFor(() => container.querySelector('.qu-apptpl-content')?.textContent === 'FAST MOUNTED');
 
     // Now let the stale slowapp's mount() finally resolve - its own stop()
     // must be called immediately (no leaked watches/subscriptions), instead
@@ -393,7 +393,7 @@ test('ctx.goBack() uses real browser history.back() once there IS a prior in-app
   try {
     window.location.hash = '#/testapp';
     window.dispatchEvent(new window.Event('hashchange'));
-    await waitFor(() => container.querySelector('.qu-shell-screen')?.textContent === 'MOUNTED');
+    await waitFor(() => container.querySelector('.qu-apptpl-content')?.textContent === 'MOUNTED');
 
     const hashBefore = window.location.hash;
     window.__testGoBack('#/fallback-should-not-be-used');
@@ -426,7 +426,7 @@ test('ctx.goBack() falls back to the given hash (no history.back()) when THIS is
   const container = makeContainer();
   const stop = await mount(container, { qu, identity });
   try {
-    await waitFor(() => container.querySelector('.qu-shell-screen')?.textContent === 'MOUNTED');
+    await waitFor(() => container.querySelector('.qu-apptpl-content')?.textContent === 'MOUNTED');
 
     window.__testGoBack('#/fallback-route');
     assert.equal(historyBackCalls.mock.callCount(), 0);
@@ -454,8 +454,8 @@ test('#/~<pub> dispatches to the "profile" catalog entry, with segments passed t
   try {
     window.location.hash = '#/~someactorpub';
     window.dispatchEvent(new window.Event('hashchange'));
-    await waitFor(() => container.querySelector('.qu-shell-screen')?.textContent.startsWith('PROFILE'));
-    assert.equal(container.querySelector('.qu-shell-screen').textContent, 'PROFILE:["~someactorpub"]');
+    await waitFor(() => container.querySelector('.qu-apptpl-content')?.textContent.startsWith('PROFILE'));
+    assert.equal(container.querySelector('.qu-apptpl-content').textContent, 'PROFILE:["~someactorpub"]');
   } finally {
     stop();
   }

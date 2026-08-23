@@ -13,6 +13,7 @@ import { register as registerForum } from '../index.js';
 
 installDom();
 const { mount, searchForum, renderSearchResult } = await import('../client.js');
+const { mountAppTemplate } = await import('@qu/ui');
 
 function createQu() {
   const qu = new QuStore();
@@ -197,6 +198,32 @@ function makeContainer() {
   const el = document.createElement('div');
   document.body.appendChild(el);
   return el;
+}
+
+/**
+ * A test-only stand-in for the platform-owned `ctx.chrome` handle
+ * (Chrome Inversion, `apps/shell/src/chrome.js`) - reuses `@qu/ui`'s own
+ * `mountAppTemplate()`, the exact same `buildChrome()` building blocks the
+ * real `chrome.js` itself reuses, so tests that need to assert on real
+ * chrome DOM (sidebar/fab/gear/mobile footer) get byte-identical rendering
+ * without importing apps/shell's own internals from a different app's test
+ * suite. Renders into `chromeRoot` - a SEPARATE element from whatever
+ * `container` Forum's own `mount()` writes its business content into,
+ * mirroring the real architecture (the platform's sidebar/footer are
+ * siblings of the app's own `chrome.contentSlot`, not nested inside it).
+ * Most tests in this file don't need this at all - `client.js`'s own
+ * `mount()` defaults `ctx.chrome` to a harmless no-op when absent.
+ */
+function fakeChrome(chromeRoot) {
+  let current = {};
+  const stopTemplate = mountAppTemplate(chromeRoot, { render: () => {} });
+  return {
+    get current() { return current; },
+    set(partial) {
+      current = { ...current, ...partial };
+      stopTemplate.update(current);
+    },
+  };
 }
 
 /** jsdom's own scrollHeight/clientHeight are fixed getter-only 0s - same helper as apps/chat/test/client.test.js's own identical simulateScroll(), needed to give the geometry-based scroll listener real numbers to compare. */
@@ -1453,15 +1480,17 @@ test('board view (#/forum, no sub-segments) lists the migrated "General" channel
   const [topic] = await a.services.channels.listTopics(FORUM_SPACE_ID, channel._id);
   await a.services.messages.postMessage(FORUM_SPACE_ID, topic._id, { body: 'first ever post' });
 
+  const chromeRoot = makeContainer();
+  const chrome = fakeChrome(chromeRoot);
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'], chrome });
   try {
-    await waitFor(() => container.querySelector('.qu-apptpl-sidebar .qu-apptpl-list a') !== null);
-    const links = [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')];
+    await waitFor(() => chromeRoot.querySelector('.qu-apptpl-sidebar .qu-apptpl-list a') !== null);
+    const links = [...chromeRoot.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')];
     assert.equal(links[0].textContent, 'All channels');
     assert.equal(links[0].getAttribute('href'), '#/forum');
     assert.match(links[1].textContent, /General/);
-    const activeLink = container.querySelector('.qu-apptpl-sidebar .qu-apptpl-item-active');
+    const activeLink = chromeRoot.querySelector('.qu-apptpl-sidebar .qu-apptpl-item-active');
     assert.equal(activeLink.getAttribute('href'), '#/forum'); // the board view IS "All channels"
 
     await waitFor(() => container.querySelector('.qu-forum-topic-row a') !== null);
@@ -1490,12 +1519,14 @@ test('board view: explicitly backfills each channel\'s OWN topics list via syncF
 
 test('board view: the mobile footer shows a channel pill whose popup lists the same entries as the sidebar, "All channels" as the active label', async () => {
   const a = await freshEnv('Ada');
+  const chromeRoot = makeContainer();
+  const chrome = fakeChrome(chromeRoot);
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'], chrome });
   try {
-    await waitFor(() => container.querySelector('.qu-apptpl-pill') !== null);
-    assert.equal(container.querySelector('.qu-apptpl-pill-label').textContent, 'All channels');
-    const popupLinks = [...container.querySelectorAll('.qu-apptpl-popup a')];
+    await waitFor(() => chromeRoot.querySelector('.qu-apptpl-pill') !== null);
+    assert.equal(chromeRoot.querySelector('.qu-apptpl-pill-label').textContent, 'All channels');
+    const popupLinks = [...chromeRoot.querySelectorAll('.qu-apptpl-popup a')];
     assert.ok(popupLinks.some((l) => l.getAttribute('href') === '#/forum/c/general-channel' && l.textContent.includes('General')));
   } finally {
     stop();
@@ -1506,11 +1537,13 @@ test('board view: a restricted channel shows a 🔒 badge in the persistent side
   const a = await freshEnv('Ada');
   await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Secret Stuff', restricted: true, memberPubs: [] });
 
+  const chromeRoot = makeContainer();
+  const chrome = fakeChrome(chromeRoot);
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'], chrome });
   try {
-    await waitFor(() => [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')].some((a2) => a2.textContent.includes('Secret Stuff')));
-    const row = [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')].find((a2) => a2.textContent.includes('Secret Stuff'));
+    await waitFor(() => [...chromeRoot.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')].some((a2) => a2.textContent.includes('Secret Stuff')));
+    const row = [...chromeRoot.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')].find((a2) => a2.textContent.includes('Secret Stuff'));
     assert.match(row.textContent, /🔒/);
   } finally {
     stop();
@@ -1524,13 +1557,15 @@ test('board view: no "New channel" settings entry for a non-admin when channels.
   const a = await freshEnv('Ada');
   t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ adminPubs: [], settings: { channels: { allowMemberCreate: false, allowMemberRestricted: false } } }), { status: 200 }));
 
+  const chromeRoot = makeContainer();
+  const chrome = fakeChrome(chromeRoot);
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'], chrome });
   try {
-    await waitFor(() => container.querySelector('a.qu-apptpl-fab') !== null);
-    assert.equal(container.querySelector('a.qu-apptpl-fab').getAttribute('href'), '#/forum/new-topic');
+    await waitFor(() => chromeRoot.querySelector('a.qu-apptpl-fab') !== null);
+    assert.equal(chromeRoot.querySelector('a.qu-apptpl-fab').getAttribute('href'), '#/forum/new-topic');
     await new Promise((resolve) => setTimeout(resolve, 30)); // let the channel-policy fetch settle
-    assert.equal(container.querySelector('.qu-apptpl-gear'), null);
+    assert.equal(chromeRoot.querySelector('.qu-apptpl-gear'), null);
   } finally {
     stop();
   }
@@ -1540,11 +1575,13 @@ test('board view: shows a "New channel" settings entry for this relay\'s own adm
   const a = await freshEnv('Ada');
   t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ adminPubs: [a.myPub], settings: { channels: { allowMemberCreate: false, allowMemberRestricted: false } } }), { status: 200 }));
 
+  const chromeRoot = makeContainer();
+  const chrome = fakeChrome(chromeRoot);
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'] });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'], chrome });
   try {
-    await waitFor(() => container.querySelector('.qu-apptpl-gear') !== null);
-    const settingsLink = container.querySelector('.qu-apptpl-popup a, .qu-apptpl-section--settings a');
+    await waitFor(() => chromeRoot.querySelector('.qu-apptpl-gear') !== null);
+    const settingsLink = chromeRoot.querySelector('.qu-apptpl-popup a, .qu-apptpl-section--settings a');
     assert.ok(settingsLink);
     assert.equal(settingsLink.getAttribute('href'), '#/forum/new');
   } finally {
@@ -1557,19 +1594,23 @@ test('channel view: "New topic" primaryAction links into this specific channel, 
   t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ adminPubs: [a.myPub], settings: { channels: { allowMemberCreate: true, allowMemberRestricted: false } } }), { status: 200 }));
   const chan2 = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Second', restricted: false, memberPubs: [] });
 
+  const chromeRoot = makeContainer();
+  const chrome = fakeChrome(chromeRoot);
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', 'general-channel'] });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', 'general-channel'], chrome });
   try {
-    await waitFor(() => container.querySelector('a.qu-apptpl-fab') !== null);
-    assert.equal(container.querySelector('a.qu-apptpl-fab').getAttribute('href'), '#/forum/c/general-channel/new-topic');
-    await waitFor(() => container.querySelector('.qu-apptpl-gear') !== null);
+    await waitFor(() => chromeRoot.querySelector('a.qu-apptpl-fab') !== null);
+    assert.equal(chromeRoot.querySelector('a.qu-apptpl-fab').getAttribute('href'), '#/forum/c/general-channel/new-topic');
+    await waitFor(() => chromeRoot.querySelector('.qu-apptpl-gear') !== null);
 
     // Switching to a different channel view updates the active sidebar entry.
     stop();
+    const chromeRoot2 = makeContainer();
+    const chrome2 = fakeChrome(chromeRoot2);
     const container2 = makeContainer();
-    const stop2 = mount(container2, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', chan2._id] });
-    await waitFor(() => container2.querySelector('a.qu-apptpl-fab') !== null);
-    assert.equal(container2.querySelector('a.qu-apptpl-fab').getAttribute('href'), `#/forum/c/${chan2._id}/new-topic`);
+    const stop2 = mount(container2, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', chan2._id], chrome: chrome2 });
+    await waitFor(() => chromeRoot2.querySelector('a.qu-apptpl-fab') !== null);
+    assert.equal(chromeRoot2.querySelector('a.qu-apptpl-fab').getAttribute('href'), `#/forum/c/${chan2._id}/new-topic`);
     stop2();
   } finally {
     stop();
@@ -1784,18 +1825,18 @@ test('none of the forum subpages (channel view, topic view, new-channel view) re
   const channel = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Announcements' });
 
   // The new-channel form still goes through renderSubpage() directly
-  // (`.qu-subpage-content`). The channel view no longer does - it's
-  // @qu/ui's mountAppTemplate() now (see mountChannelView()'s own doc
-  // comment / docs/app-navigation-standard.md Rule 5), which owns its own
-  // "no back link" guarantee without needing a nested renderSubpage() -
-  // waited for via its own `.qu-apptpl-content` marker instead. The
-  // topic view is its own fixed "room" layout with no page-level back-link
-  // concept to begin with, checked separately below via its own
-  // always-present marker.
+  // (`.qu-subpage-content`). The channel view no longer does - it builds
+  // directly into its own `container` (Chrome Inversion - the platform-
+  // owned `chrome.contentSlot`, see `apps/shell/src/chrome.js`), which owns
+  // its own "no back link" guarantee without needing a nested
+  // renderSubpage() - waited for via its own `.qu-forum-channel-heading`
+  // marker instead. The topic view is its own fixed "room" layout with no
+  // page-level back-link concept to begin with, checked separately below
+  // via its own always-present marker.
   const channelContainer = makeContainer();
   const stopChannel = mount(channelContainer, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', channel._id] });
   try {
-    await waitFor(() => channelContainer.querySelector('.qu-apptpl-content') !== null);
+    await waitFor(() => channelContainer.querySelector('.qu-forum-channel-heading') !== null);
     assert.equal(channelContainer.querySelector('.qu-subpage-back'), null);
   } finally {
     stopChannel();
@@ -1940,13 +1981,15 @@ test('channel view: the app-template sidebar lists every channel and highlights 
   const announcements = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Announcements' });
   await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Off-topic' });
 
+  const chromeRoot = makeContainer();
+  const chrome = fakeChrome(chromeRoot);
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', announcements._id] });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', announcements._id], chrome });
   try {
-    await waitFor(() => container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a').length >= 4); // All channels + General + Announcements + Off-topic
-    const links = [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')];
+    await waitFor(() => chromeRoot.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a').length >= 4); // All channels + General + Announcements + Off-topic
+    const links = [...chromeRoot.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')];
     assert.ok(links.some((a2) => a2.textContent.includes('Off-topic')));
-    const active = container.querySelector('.qu-apptpl-sidebar .qu-apptpl-item-active');
+    const active = chromeRoot.querySelector('.qu-apptpl-sidebar .qu-apptpl-item-active');
     assert.match(active.textContent, /Announcements/);
   } finally {
     stop();
@@ -1958,12 +2001,14 @@ test('topic view: a desktopOnly app-template sidebar lists every channel alongsi
   await a.services.messages.createThread(FORUM_SPACE_ID, 'general', THREAD_PRESETS.forum());
   await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Off-topic' });
 
+  const chromeRoot = makeContainer();
+  const chrome = fakeChrome(chromeRoot);
   const container = makeContainer();
-  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS });
+  const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS, chrome });
   try {
-    await waitFor(() => container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a').length >= 3); // All channels + General + Off-topic
+    await waitFor(() => chromeRoot.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a').length >= 3); // All channels + General + Off-topic
     await waitFor(() => container.querySelector('.qu-forum-message, .qu-forum-empty') !== null); // the thread itself still renders alongside it
-    assert.equal(container.querySelector('.qu-apptpl-footer'), null); // desktopOnly nav, no primaryAction/settings -> no mobile footer at all
+    assert.equal(chromeRoot.querySelector('.qu-apptpl-footer'), null); // desktopOnly nav, no primaryAction/settings -> no mobile footer at all
   } finally {
     stop();
   }
