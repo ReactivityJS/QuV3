@@ -105,33 +105,37 @@
  * plus an optional trailing `/m/<messageId>` on either room route - a
  * message PERMALINK (see `mount()`'s own route-parsing comment).
  *
- * NAVIGATION (`docs/app-navigation-standard.md` Rule 5): both the room list
- * (`mountRoomListView()`) and an open room (`mountRoomView()`) mount through
- * `@qu/ui`'s `mountAppTemplate()`. "+ New group" (`primaryAction`) lives on
- * the room list ONLY - the global header's `shell.headerNavPoints`
- * contributor this app used to ship is gone, superseded by this, but an
- * open room does NOT also get it (feedback: rarely needed once already
- * inside a room, and a mobile FAB there had nothing to pair with). Both
- * views also get `navigation`: every room (1:1 + group), the current one
- * marked active on the room list (none active) or the open room (itself
- * active) - a real room-switcher sidebar on wide screens either way. On
- * NARROW screens, `desktopOnly: true` on both views' `navigation` keeps it
- * OUT of the mobile footer entirely: the room list already shows this same
- * list as its own full-width content (a pill would just duplicate it,
- * feedback: "keep rooms on the start page, not a sidebar/pill on mobile"),
- * and an open room drops the mobile footer bar altogether once
- * `primaryAction` is also absent (feedback: it read as a second, duplicate
- * footer sitting right above the room's own composer bar) - Back to the
- * room list is the shell header's own Back button either way (Rule 1).
- * Both fields depend on an async fetch (contacts/groups, and - room list
- * only - the group-creation policy check `fetchChatPolicy()` does) that
- * isn't ready at the one synchronous `mountAppTemplate()` call -
- * `stopTemplate.update({...})` (see that function's own "LATE-ARRIVING
- * CHROME DATA" doc comment) fills them in once resolved, same "build
- * immediately, fill in via your own async IIFE" shape every other async
- * render in this file already follows. `listRooms()` (shared by both views)
- * is the one place that computes "what rooms exist, in what order, with
- * what unread/muted state".
+ * NAVIGATION (`docs/app-navigation-standard.md` Rule 5a - Chrome Inversion):
+ * both the room list (`mountRoomListView()`) and an open room
+ * (`mountRoomView()`) build directly into `container` (the platform-owned
+ * `chrome.contentSlot`, `apps/shell/src/chrome.js`) and drive chrome via
+ * `ctx.chrome.set()`. "+ New group" (`primaryAction`) lives on the room list
+ * ONLY - the global header's `shell.headerNavPoints` contributor this app
+ * used to ship is gone, superseded by this, but an open room does NOT also
+ * get it (feedback: rarely needed once already inside a room, and a mobile
+ * FAB there had nothing to pair with). Both views also get `navigation`:
+ * every room (1:1 + group), the current one marked active on the room list
+ * (none active) or the open room (itself active) - a real room-switcher
+ * sidebar on wide screens either way. On NARROW screens, `desktopOnly: true`
+ * on both views' `navigation` keeps it OUT of the mobile footer entirely:
+ * the room list already shows this same list as its own full-width content
+ * (a pill would just duplicate it, feedback: "keep rooms on the start page,
+ * not a sidebar/pill on mobile"), and an open room drops the mobile footer
+ * bar altogether once `primaryAction` is also absent (feedback: it read as
+ * a second, duplicate footer sitting right above the room's own composer
+ * bar) - Back to the room list is the shell header's own Back button either
+ * way (Rule 1). `navigation` stays a plain `items[]` snapshot, not the
+ * reactive `list:` form Rule 5a also offers - `listRooms()` is a
+ * client-side MERGE of two different sources (favorited contacts + groups)
+ * plus computed unread/muted state, not a single Qu-store path/parent a
+ * `<qu-list>` could bind to. Both fields depend on an async fetch
+ * (contacts/groups, and - room list only - the group-creation policy check
+ * `fetchChatPolicy()` does) that isn't ready at the view's own first,
+ * synchronous `chrome.set()` call - a SECOND `chrome.set()` from an async
+ * IIFE fills them in once resolved, same "build immediately, fill in via
+ * your own async IIFE" shape every other async render in this file already
+ * follows. `listRooms()` (shared by both views) is the one place that
+ * computes "what rooms exist, in what order, with what unread/muted state".
  *
  * PERMALINKS + SCROLL-FOLLOW: a message's timestamp (see
  * `buildMessageFooter()`) IS its permalink - clicking it (or landing on one
@@ -221,7 +225,7 @@ import { watch, watchChildren } from '@qu/reactive';
 import { paths, formatActorLabel, getPrivate, putPrivate, getPrivateChildren, detectLinks, ChatService, resolveContentFormat } from '@qu/services';
 import { rankFor } from '@qu/foundation';
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage, mountAppTemplate, createIconButton } from '@qu/ui';
+import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage, createIconButton } from '@qu/ui';
 import { renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, copyToClipboard, flipUpIfNeeded } from '@qu/thread-ui';
 import {
   mountContentComposer, attachmentExtension, locationExtension, voiceExtension,
@@ -375,12 +379,12 @@ const STYLE = `
   .qu-chat-request-actions button { padding: 0.3rem 0.7rem; border-radius: var(--qu-radius-sm, 0.3rem); border: 1px solid var(--qu-color-border, #8884); background: transparent; cursor: pointer; font: inherit; }
   .qu-chat-request-actions button:first-child { background: var(--qu-color-accent, #5b5bd6); color: white; border-color: transparent; }
   .qu-chat-empty { padding: 1.5rem; text-align: center; opacity: 0.7; }
-  /* ROOM VIEW LAYOUT - mounted with mountAppTemplate({fullHeight: true, ...})
-     now (see this file's own top doc comment and @qu/ui's app-template.js
-     own "FULL HEIGHT MODE" doc comment for the full "why fixed, not
-     calc(100vh)" reasoning, which now lives there instead of here - the
-     Core's .qu-apptpl-root--full-height/.qu-apptpl-content already do
-     the real, viewport-relative position: fixed sizing this room view
+  /* ROOM VIEW LAYOUT - driven via chrome.set({fullHeight: true}) now (Chrome
+     Inversion - see this file's own top doc comment and @qu/ui's
+     app-template.js own "FULL HEIGHT MODE" doc comment for the full "why
+     fixed, not calc(100vh)" reasoning, which now lives there instead of
+     here - the Core's .qu-apptpl-root--full-height/.qu-apptpl-content
+     already do the real, viewport-relative position: fixed sizing this room view
      used to do entirely on its own). This element is now just a plain flex
      COLUMN filling whatever height .qu-apptpl-content hands it - flex: 1;
      min-height: 0 is what makes it actually stretch, the same "only the
@@ -597,6 +601,13 @@ export function mount(container, ctx) {
   ensureTheme();
   injectStyle(STYLE_ID, STYLE);
   const { qu, services, apps, subscribe, segments = [] } = ctx;
+  // `chrome` (Chrome Inversion, `apps/shell/src/chrome.js`) is always real
+  // in production - the no-op fallback here exists only for this file's own
+  // tests that mount Chat directly with a hand-built `ctx`, same "optional
+  // dependency, safe no-op if absent" idiom `subscribe?.()` already uses
+  // elsewhere in this function. See `apps/forum/client.js`'s own identical
+  // default for the reference precedent.
+  const chrome = ctx.chrome ?? { set() {} };
 
   const SPACE_ID = apps?.find((a) => a.name === 'chat')?.spaceId;
   if (!SPACE_ID) throw new Error('[chat] no "spaceId" found in the apps catalog for "chat" - check manifest.quapp');
@@ -610,7 +621,7 @@ export function mount(container, ctx) {
   // is a message PERMALINK - see mountRoomView()'s own doc comment on
   // "PERMALINKS" for what it does once there.
   const [, seg1, seg2, seg3, seg4] = segments;
-  const viewCtx = { ...ctx, SPACE_ID };
+  const viewCtx = { ...ctx, SPACE_ID, chrome };
   let stopView;
   if (seg1 === 'new-group') {
     stopView = mountNewGroupView(container, viewCtx);
@@ -747,24 +758,25 @@ function roomsToNavItems(rooms) {
 // ROOM LIST VIEW - #/chat
 // ===================================================================
 
-function mountRoomListView(container, { qu, services, subscribe, syncFetch, SPACE_ID }) {
+function mountRoomListView(container, { qu, services, subscribe, syncFetch, SPACE_ID, chrome }) {
   let stopped = false;
 
   const requestsRoot = document.createElement('div');
   const listRoot = document.createElement('div');
-  const stopTemplate = mountAppTemplate(container, {
-    render: (content) => {
-      const heading = document.createElement('h1');
-      heading.textContent = t('title');
-      content.append(heading, requestsRoot, listRoot);
-    },
-  });
-  // primaryAction ("+ New group") depends on an async policy check - see
-  // mountAppTemplate()'s own "LATE-ARRIVING CHROME DATA" doc comment.
+  // Chrome Inversion (`apps/shell/src/chrome.js`) - `container` is already
+  // the platform's own content area; build directly into it and drive
+  // chrome via `chrome.set()` instead of `mountAppTemplate()`.
+  const heading = document.createElement('h1');
+  heading.textContent = t('title');
+  container.append(heading, requestsRoot, listRoot);
+  // primaryAction ("+ New group") depends on an async policy check - a
+  // SECOND, later `chrome.set()` call from this async IIFE, same
+  // "late-arriving chrome data" shape `mountAppTemplate()`'s own
+  // `stopTemplate.update()` already had.
   (async () => {
     const { allowMemberCreateGroup, isAdmin } = await fetchChatPolicy(services);
     if (stopped || !(isAdmin || allowMemberCreateGroup)) return;
-    stopTemplate.update({ primaryAction: { label: t('newChatGroup'), href: '#/chat/new-group', icon: '✏️' } });
+    chrome.set({ primaryAction: { label: t('newChatGroup'), href: '#/chat/new-group', icon: '✏️' } });
   })();
 
   let renderToken = 0;
@@ -783,10 +795,14 @@ function mountRoomListView(container, { qu, services, subscribe, syncFetch, SPAC
     if (stopped || token !== renderToken) return;
 
     // Desktop-only - see this file's own top doc comment's "NAVIGATION"
-    // section: this same room list already fills `content` below, so a
+    // section: this same room list already fills `container` below, so a
     // mobile pill duplicating it would be pointless; the desktop sidebar
-    // gets it anyway, matching an open room's own sidebar.
-    stopTemplate.update({ navigation: { items: roomsToNavItems(rooms), desktopOnly: true, heading: t('title'), filter: true } });
+    // gets it anyway, matching an open room's own sidebar. Stays a plain
+    // `items[]` snapshot, not the reactive `list:` form - `listRooms()` is
+    // a client-side MERGE of two different sources (favorited contacts +
+    // groups) plus computed unread/muted state, not a single Qu-store
+    // path/parent a `<qu-list>` could bind to.
+    chrome.set({ navigation: { items: roomsToNavItems(rooms), desktopOnly: true, heading: t('title'), filter: true } });
 
     // MESSAGE REQUESTS - see ChatService's own "1:1 DISCOVERY" doc comment.
     // A request is worth SHOWING only while it's neither already accepted
@@ -823,9 +839,9 @@ function mountRoomListView(container, { qu, services, subscribe, syncFetch, SPAC
       for (const room of rooms) ul.appendChild(roomRow(room));
       listRoot.appendChild(ul);
     }
-    // No inline "+ New group" link here - it's `primaryAction` on this
-    // view's own `mountAppTemplate()` call above (see this file's own top
-    // doc comment's "NAVIGATION" section), same policy check.
+    // No inline "+ New group" link here - it's `primaryAction` via
+    // `chrome.set()` above (see this file's own top doc comment's
+    // "NAVIGATION" section), same policy check.
   }
 
   function roomRow(room) {
@@ -943,7 +959,6 @@ function mountRoomListView(container, { qu, services, subscribe, syncFetch, SPAC
     stopped = true;
     offContacts();
     offInvites();
-    stopTemplate();
   };
 }
 
@@ -1062,12 +1077,12 @@ function composerActionsExtension({ services, qu, syncFetch, spaceId, threadId, 
 // ROOM VIEW - #/chat/<peerPub> (1:1) / #/chat/g/<groupId> (group)
 // ===================================================================
 
-function mountRoomView(container, { qu, services, subscribe, syncFetch, extensionPoints, SPACE_ID }, target) {
+function mountRoomView(container, { qu, services, subscribe, syncFetch, extensionPoints, SPACE_ID, chrome }, target) {
   let stopped = false;
 
   // A flex COLUMN filling the viewport height below the shell's own fixed
-  // top header, via `mountAppTemplate({fullHeight: true, ...})` below (see
-  // this file's own top doc comment's "NAVIGATION" section and `@qu/ui`'s
+  // top header, via `chrome.set({fullHeight: true})` below (see this file's
+  // own top doc comment's "NAVIGATION" section and `@qu/ui`'s
   // `app-template.js` own "FULL HEIGHT MODE" doc comment) -
   // `heading`/`composerWrap` are flex-shrink:0 (pinned), only
   // `.qu-chat-messages-scroll` (wrapping `messagesRoot`) scrolls. Doesn't use
@@ -1228,10 +1243,11 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   composerWrap.append(replyBanner, composerErrorEl, composerRoot);
 
   roomView.append(heading, toolbarRoot, messagesScroll, composerWrap);
-  const stopTemplate = mountAppTemplate(container, {
-    fullHeight: true,
-    render: (content) => content.appendChild(roomView),
-  });
+  // Chrome Inversion (`apps/shell/src/chrome.js`) - `container` is already
+  // the platform's own content area; build directly into it and drive
+  // `fullHeight` through `chrome.set()` instead of `mountAppTemplate()`.
+  chrome.set({ fullHeight: true });
+  container.appendChild(roomView);
 
   let roomId = null;
   let memberPubs = [];
@@ -2188,7 +2204,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     if (stopped) return;
     const rooms = await listRooms({ services, SPACE_ID, myPub: myPubForNav });
     if (stopped) return;
-    stopTemplate.update({
+    chrome.set({
       navigation: { items: roomsToNavItems(rooms), activeId: roomId, heading: t('title'), desktopOnly: true, filter: true },
     });
   })();
@@ -2206,7 +2222,6 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     composer?.stop(); // may never have been constructed - e.g. a group that turned out not to exist (roomReady never became true)
     resizeObserver?.disconnect();
     viewportResizeTarget.removeEventListener('resize', onViewportResize);
-    stopTemplate();
   };
 }
 

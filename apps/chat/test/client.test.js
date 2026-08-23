@@ -12,6 +12,7 @@ import { installDom, waitFor } from '@qu/ui/testing';
 
 installDom();
 const { mount, renderChatSettings, searchChat, resolveChatReference, renderSearchResult } = await import('../client.js');
+const { mountAppTemplate } = await import('@qu/ui');
 
 /** A minimal MediaRecorder test double - start()/pause()/resume()/stop(), stop() synchronously fires ondataavailable then onstop, matching real MediaRecorder's own event order closely enough for startRecording()'s own handler. pause()/resume() just track state (this file's own tests only assert on the DOM state the client itself derives, not on MediaRecorder.state). */
 class FakeMediaRecorder {
@@ -101,6 +102,33 @@ function makeContainer() {
   const el = document.createElement('div');
   document.body.appendChild(el);
   return el;
+}
+
+/**
+ * A test-only stand-in for the platform-owned `ctx.chrome` handle (Chrome
+ * Inversion, `apps/shell/src/chrome.js`) - reuses `@qu/ui`'s own
+ * `mountAppTemplate()`, the exact same `buildChrome()` building blocks the
+ * real `chrome.js` itself reuses, so a test asserting on real chrome DOM
+ * gets byte-identical rendering without importing `apps/shell`'s own
+ * internals into a different app's test suite. Renders into `chromeRoot` -
+ * a SEPARATE element from whatever `container` the app's own `mount()`
+ * writes its business content into, mirroring the real architecture (the
+ * platform's sidebar/footer are siblings of the app's own
+ * `chrome.contentSlot`, not nested inside it). Copied from
+ * `apps/forum/test/client.test.js`'s identical helper - most tests in this
+ * file don't need this at all, `client.js`'s own `mount()` defaults
+ * `ctx.chrome` to a harmless no-op when absent.
+ */
+function fakeChrome(chromeRoot) {
+  let current = {};
+  const stopTemplate = mountAppTemplate(chromeRoot, { render: () => {} });
+  return {
+    get current() { return current; },
+    set(partial) {
+      current = { ...current, ...partial };
+      stopTemplate.update(current);
+    },
+  };
 }
 
 /**
@@ -1751,7 +1779,7 @@ test('the new-group form has no bespoke back link either - just the shell header
   }
 });
 
-// ===== mountAppTemplate() chrome (see docs/app-navigation-standard.md Rule 5) =====
+// ===== ctx.chrome (Chrome Inversion, see docs/app-navigation-standard.md Rule 5a) =====
 
 test('the room list\'s primaryAction ("+ New group") links to #/chat/new-group, and the desktop sidebar ALSO gets a (desktop-only) room list, while the mobile footer stays fab-only', async () => {
   const alice = await freshEnv('Alice');
@@ -1759,27 +1787,29 @@ test('the room list\'s primaryAction ("+ New group") links to #/chat/new-group, 
   await mirrorProfileInto(bob, alice.qu);
   await alice.services.contacts.addContact(bob.myPub);
 
+  const chromeRoot = makeContainer();
+  const chrome = fakeChrome(chromeRoot);
   const container = makeContainer();
-  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat'] });
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat'], chrome });
   try {
-    await waitFor(() => container.querySelector('a.qu-apptpl-fab') !== null);
-    const fab = container.querySelector('a.qu-apptpl-fab');
+    await waitFor(() => chromeRoot.querySelector('a.qu-apptpl-fab') !== null);
+    const fab = chromeRoot.querySelector('a.qu-apptpl-fab');
     assert.equal(fab.getAttribute('href'), '#/chat/new-group');
     assert.equal(fab.title, 'New chat group');
-    const desktopPrimary = container.querySelector('a.qu-apptpl-primary-desktop');
+    const desktopPrimary = chromeRoot.querySelector('a.qu-apptpl-primary-desktop');
     assert.equal(desktopPrimary.getAttribute('href'), '#/chat/new-group');
 
     // The desktop sidebar ALSO shows the room list now (feedback: it felt
     // inconsistent that only an open room got one) - none marked active,
     // since no specific room is open here.
-    await waitFor(() => container.querySelector('.qu-apptpl-sidebar .qu-apptpl-list a') !== null);
-    assert.equal(container.querySelector('.qu-apptpl-sidebar .qu-apptpl-list a').textContent, '👤Bob');
-    assert.equal(container.querySelector('.qu-apptpl-sidebar .qu-apptpl-item-active'), null);
+    await waitFor(() => chromeRoot.querySelector('.qu-apptpl-sidebar .qu-apptpl-list a') !== null);
+    assert.equal(chromeRoot.querySelector('.qu-apptpl-sidebar .qu-apptpl-list a').textContent, '👤Bob');
+    assert.equal(chromeRoot.querySelector('.qu-apptpl-sidebar .qu-apptpl-item-active'), null);
 
     // But the mobile footer stays fab-only - the room list is ALREADY the
     // page's own full-width content there, so a pill duplicating it would
     // be pointless (feedback: "keep rooms on the start page, not a pill").
-    const footer = container.querySelector('.qu-apptpl-footer');
+    const footer = chromeRoot.querySelector('.qu-apptpl-footer');
     assert.equal(footer.classList.contains('qu-apptpl-footer--fab-only'), true);
     assert.equal(footer.querySelector('.qu-apptpl-pill'), null);
   } finally {
@@ -1802,26 +1832,28 @@ test('an open room\'s navigation sidebar lists every room (1:1 + group), the cur
   await mirrorThreadInto(alice, bob.qu, inviteSpace, 'groups');
   await mirrorThreadInto(alice, bob.qu, CHAT_SPACE_ID, groupId);
 
+  const chromeRoot = makeContainer();
+  const chrome = fakeChrome(chromeRoot);
   const container = makeContainer();
-  const stop = mount(container, { qu: bob.qu, services: bob.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', 'g', groupId] });
+  const stop = mount(container, { qu: bob.qu, services: bob.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', 'g', groupId], chrome });
   try {
-    await waitFor(() => container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a').length === 2);
-    const links = [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')];
+    await waitFor(() => chromeRoot.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a').length === 2);
+    const links = [...chromeRoot.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')];
     assert.deepEqual(links.map((a) => a.textContent).sort(), ['👤Alice', '👥Team Rocket']);
     assert.equal(links.map((a) => a.getAttribute('href')).includes(`#/chat/${alice.myPub}`), true);
     assert.equal(links.map((a) => a.getAttribute('href')).includes(`#/chat/g/${groupId}`), true);
-    const activeLink = container.querySelector('.qu-apptpl-sidebar .qu-apptpl-item-active');
+    const activeLink = chromeRoot.querySelector('.qu-apptpl-sidebar .qu-apptpl-item-active');
     assert.equal(activeLink.getAttribute('href'), `#/chat/g/${groupId}`); // the currently open room, not the DM
 
     // No "+ New group" anywhere inside an open room (feedback: rarely
     // needed once already inside a room) - neither the desktop sidebar
     // button nor a mobile FAB.
-    assert.equal(container.querySelector('.qu-apptpl-primary-desktop'), null);
-    assert.equal(container.querySelector('a.qu-apptpl-fab'), null);
+    assert.equal(chromeRoot.querySelector('.qu-apptpl-primary-desktop'), null);
+    assert.equal(chromeRoot.querySelector('a.qu-apptpl-fab'), null);
     // And with no primaryAction AND a desktop-only navigation, there's
     // nothing left for the mobile footer to show at all (feedback: it
     // duplicated the room's own composer bar right above it).
-    assert.equal(container.querySelector('.qu-apptpl-footer'), null);
+    assert.equal(chromeRoot.querySelector('.qu-apptpl-footer'), null);
   } finally {
     stop();
   }
@@ -1838,13 +1870,15 @@ test('the sidebar\'s filter input matches a group room by a PARTICIPANT\'s name 
   await mirrorThreadInto(alice, bob.qu, inviteSpace, 'groups');
   await mirrorThreadInto(alice, bob.qu, CHAT_SPACE_ID, groupId);
 
+  const chromeRoot = makeContainer();
+  const chrome = fakeChrome(chromeRoot);
   const container = makeContainer();
-  const stop = mount(container, { qu: bob.qu, services: bob.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat'] });
+  const stop = mount(container, { qu: bob.qu, services: bob.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat'], chrome });
   try {
-    await waitFor(() => container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a').length === 2);
-    const input = container.querySelector('.qu-apptpl-sidebar .qu-apptpl-filter');
+    await waitFor(() => chromeRoot.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a').length === 2);
+    const input = chromeRoot.querySelector('.qu-apptpl-sidebar .qu-apptpl-filter');
     assert.ok(input);
-    const visibleLabels = () => [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list li')].filter((li) => !li.hidden).map((li) => li.textContent);
+    const visibleLabels = () => [...chromeRoot.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list li')].filter((li) => !li.hidden).map((li) => li.textContent);
 
     // Searching a participant's name matches BOTH the DM with that person
     // (its own label already IS their name) AND the group they're in (via
@@ -1870,13 +1904,15 @@ test('the room view\'s navigation still populates (for switching AWAY) even when
   await mirrorProfileInto(bob, alice.qu);
   await alice.services.contacts.addContact(bob.myPub);
 
+  const chromeRoot = makeContainer();
+  const chrome = fakeChrome(chromeRoot);
   const container = makeContainer();
-  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', 'g', 'does-not-exist'] });
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', 'g', 'does-not-exist'], chrome });
   try {
     await waitFor(() => container.textContent.includes('This group doesn\'t exist, or you\'re not a member.'));
-    await waitFor(() => container.querySelector('.qu-apptpl-sidebar .qu-apptpl-list a') !== null);
-    assert.equal(container.querySelector('.qu-apptpl-sidebar .qu-apptpl-list a').getAttribute('href'), `#/chat/${bob.myPub}`);
-    assert.equal(container.querySelector('.qu-apptpl-footer'), null); // still no mobile footer, even in this edge case
+    await waitFor(() => chromeRoot.querySelector('.qu-apptpl-sidebar .qu-apptpl-list a') !== null);
+    assert.equal(chromeRoot.querySelector('.qu-apptpl-sidebar .qu-apptpl-list a').getAttribute('href'), `#/chat/${bob.myPub}`);
+    assert.equal(chromeRoot.querySelector('.qu-apptpl-footer'), null); // still no mobile footer, even in this edge case
   } finally {
     stop();
   }
