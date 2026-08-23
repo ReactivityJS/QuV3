@@ -25,7 +25,7 @@ globalThis.localStorage = (() => {
 // @qu/ui's package root transitively evaluates components.js, which extends
 // HTMLElement at module-load time - must come AFTER installDom(), same
 // reason `mount` itself is loaded dynamically below.
-const { getStoredTheme, setStoredTheme } = await import('@qu/ui');
+const { getStoredTheme, setStoredTheme, mountAppTemplate } = await import('@qu/ui');
 const { getStoredLocale, setLocale } = await import('@qu/i18n');
 const { mount } = await import('../client.js');
 
@@ -69,6 +69,33 @@ function makeContainer() {
   return el;
 }
 
+/**
+ * A test-only stand-in for the platform-owned `ctx.chrome` handle (Chrome
+ * Inversion, `apps/shell/src/chrome.js`) - reuses `@qu/ui`'s own
+ * `mountAppTemplate()`, the exact same `buildChrome()` building blocks the
+ * real `chrome.js` itself reuses, so a test asserting on real chrome DOM
+ * gets byte-identical rendering without importing `apps/shell`'s own
+ * internals into a different app's test suite. Renders into `chromeRoot` -
+ * a SEPARATE element from whatever `container` the app's own `mount()`
+ * writes its business content into, mirroring the real architecture (the
+ * platform's sidebar/footer are siblings of the app's own
+ * `chrome.contentSlot`, not nested inside it). Copied from
+ * `apps/forum/test/client.test.js`'s identical helper - most tests in this
+ * file don't need this at all, `client.js`'s own `mount()` defaults
+ * `ctx.chrome` to a harmless no-op when absent.
+ */
+function fakeChrome(chromeRoot) {
+  let current = {};
+  const stopTemplate = mountAppTemplate(chromeRoot, { render: () => {} });
+  return {
+    get current() { return current; },
+    set(partial) {
+      current = { ...current, ...partial };
+      stopTemplate.update(current);
+    },
+  };
+}
+
 test.beforeEach(() => {
   setLocale(null);
   setStoredTheme(null);
@@ -104,6 +131,45 @@ test('own profile renders like a foreign profile, editable: alias as a click-to-
     assert.equal(container.querySelector('.qu-profile-primary'), null);
     assert.ok(container.querySelector('.qu-profile-header').textContent.includes('🚀'));
     assert.ok(container.querySelector('.qu-profile-keys').textContent.includes(myPub));
+  } finally {
+    stop();
+  }
+});
+
+// ===== Chrome Inversion (ctx.chrome) - the "⚙️ Settings" link moved out of
+// content, into the platform-owned chrome (apps/shell/src/chrome.js) =====
+
+test('own profile registers a "Settings" chrome.settings entry linking to #/~<myPub>/settings, and renders no in-content settings link itself', async () => {
+  const { qu, identity, services, myPub } = await freshEnv();
+  await services.profile.saveProfile({ alias: 'Ada' });
+
+  const chromeRoot = makeContainer();
+  const chrome = fakeChrome(chromeRoot);
+  const container = makeContainer();
+  const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`], chrome });
+  try {
+    await waitFor(() => container.querySelector('.qu-profile-own') !== null);
+    await waitFor(() => chrome.current.settings != null);
+    assert.deepEqual(chrome.current.settings.items, [{ label: 'Settings', href: `#/~${myPub}/settings` }]);
+    // No hand-built settings link left in the app's own content - it's
+    // platform-owned chrome now, not something the app renders itself.
+    assert.equal([...container.querySelectorAll('a')].some((a) => a.getAttribute('href') === `#/~${myPub}/settings`), false);
+  } finally {
+    stop();
+  }
+});
+
+test('a foreign profile never sets chrome.settings - only the own-profile view links to Settings', async () => {
+  const { qu, identity, services } = await freshEnv();
+  const otherPub = await publishOtherUser(qu, { alias: 'Grace' });
+
+  const chromeRoot = makeContainer();
+  const chrome = fakeChrome(chromeRoot);
+  const container = makeContainer();
+  const stop = mount(container, { qu, identity, services, segments: [`~${otherPub}`], chrome });
+  try {
+    await waitFor(() => container.querySelector('.qu-profile-view') !== null);
+    assert.equal(chrome.current.settings, undefined);
   } finally {
     stop();
   }
