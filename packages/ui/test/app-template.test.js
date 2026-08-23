@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { installDom } from '../src/testing.js';
 
 installDom();
-const { mountAppTemplate, normalizeAppConfig } = await import('../src/app-template.js');
+const { mountAppTemplate, normalizeAppConfig, buildChrome } = await import('../src/app-template.js');
 
 const NAV = {
   items: [
@@ -44,6 +44,40 @@ test('normalizeAppConfig drops empty/missing sections', () => {
   assert.equal(cfg.settings, null);
   assert.equal(cfg.primaryAction, null);
   assert.equal(cfg.breakpoint, '720px');
+});
+
+// buildChrome() is the extracted primitive apps/shell/src/chrome.js (Chrome
+// Inversion) reuses for its own session-scoped chrome, alongside
+// mountAppTemplate() - covered directly here so both stay provably
+// consistent, not just "mountAppTemplate()'s tests happen to exercise it".
+test('buildChrome(): an empty config produces no sidebar and no footer', () => {
+  const cfg = normalizeAppConfig({ render: () => {} });
+  const built = buildChrome(cfg);
+  assert.equal(built.sidebarEl, null);
+  assert.equal(built.footerEl, null);
+  assert.equal(built.hasChrome, false);
+  assert.equal(built.hasMobileFooterContent, false);
+  assert.equal(built.fabOnly, false);
+});
+
+test('buildChrome(): a lone primaryAction produces a sidebar (one prominent button) and a fab-only footer', () => {
+  const cfg = normalizeAppConfig({ render: () => {}, primaryAction: PRIMARY });
+  const built = buildChrome(cfg);
+  assert.ok(built.sidebarEl.querySelector('.qu-apptpl-primary-desktop'));
+  assert.ok(built.footerEl.querySelector('a.qu-apptpl-fab'));
+  assert.equal(built.fabOnly, true);
+  built.cleanup();
+});
+
+test('buildChrome(): full config produces a sidebar with all four sections and a footer with pills/gear/fab', () => {
+  const cfg = normalizeAppConfig({ render: () => {}, navigation: NAV, views: VIEWS, settings: SETTINGS, primaryAction: PRIMARY });
+  const built = buildChrome(cfg);
+  assert.equal(built.sidebarEl.querySelectorAll('.qu-apptpl-section').length, 3);
+  assert.equal(built.footerEl.querySelectorAll('.qu-apptpl-pill').length, 2);
+  assert.ok(built.footerEl.querySelector('.qu-apptpl-gear'));
+  assert.ok(built.footerEl.querySelector('a.qu-apptpl-fab'));
+  assert.equal(built.fabOnly, false);
+  built.cleanup();
 });
 
 test('only render(): no chrome at all, content gets the full container', () => {
