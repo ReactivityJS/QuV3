@@ -454,21 +454,35 @@ exactly as `mountAppTemplate()`-based apps already do — this is real,
 deliberate follow-up work once a second real app needs the reactive form on
 mobile too, not an oversight.
 
-**Migration status**: `apps/forum/client.js` is the first (and, as of this
-writing, only) app migrated onto `ctx.chrome` — the proof-of-concept for
-this whole mechanism, chosen because its own recurring `watch()`-driven
-navigation and async policy gates are the hardest real case in this
-codebase. Every other app still calls `mountAppTemplate()` directly, is
-unaffected, and is under no obligation to migrate — `ctx.chrome` is
-additive (`apps/shell/client.js` defaults it to a working no-op for any test
-harness that doesn't construct one), and `mountAppTemplate()` itself is
-completely unchanged (`chrome.js` reuses its own exported builder functions
-internally, so the two can never silently drift into two different chrome
-behaviors for the same `AppConfig` shape). **`mountAppTemplate()` stays the
-recommended entry point for a NEW app** (Rule 5's own checklist item below)
-until a second real app has migrated and the mobile-footer gap above is
-closed — copy `apps/_template/`, not `apps/forum/client.js`, when starting
-something new.
+**Migration status**: `apps/forum/client.js` was the first app migrated onto
+`ctx.chrome` — the proof-of-concept for this whole mechanism, chosen because
+its own recurring `watch()`-driven navigation and async policy gates are the
+hardest real case in this codebase. `apps/user-list`, `apps/contact-list`,
+`apps/app-list` (trivial — none of the three ever set any chrome fields at
+all, so migrating them was just dropping the `mountAppTemplate({render})`
+wrapper), `apps/profile` (already built directly into `container`; the one
+real change was moving its in-content "⚙️ Settings" link into a
+`chrome.set({settings})` entry), and `apps/chat/client.js` (the second real
+test of the mechanism on a multi-view, `watch()`-driven app — mirrors
+Forum's board/channel/room shape closely; kept `navigation` as a plain
+`items[]` snapshot too, but for a DIFFERENT reason than Forum's — Forum's
+channels genuinely are one curated list a `<qu-list>` could bind to, kept as
+`items[]` purely for mobile-footer parity; `listRooms()` merges two
+different sources plus computed unread state, so there's no single path to
+bind to at all) are migrated too. Every other app (Calendar, Todo, GeoChase,
+Phone, Search, Notifications, Bookmarks, Relay Admin, `_template`) still
+calls `mountAppTemplate()` directly, is unaffected, and is under no
+obligation to migrate — `ctx.chrome` is additive (each migrated app's own
+`mount()` defaults it to a working no-op for any test harness that doesn't
+construct one), and `mountAppTemplate()` itself is completely unchanged
+(`chrome.js` reuses its own exported builder functions internally, so the
+two can never silently drift into two different chrome behaviors for the
+same `AppConfig` shape). **`mountAppTemplate()` stays the recommended entry
+point for a NEW app** (Rule 5's own checklist item below) — six apps have
+now migrated, but the mobile-footer `list:` gap above is still open (Forum
+could have closed it but deliberately didn't, to avoid a real mobile
+regression); copy `apps/_template/`, not one of the migrated apps' own
+`client.js` files, when starting something new.
 
 ## Building a new app? A checklist
 
