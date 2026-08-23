@@ -35,25 +35,28 @@
  *     the same policy check as the board/channel views' own `settings`
  *     entry that links to it (see `applyNewChannelSettings()`).
  *
- * NAVIGATION (`docs/app-navigation-standard.md` Rule 5): every view mounts
- * through `@qu/ui`'s `mountAppTemplate()`. "+ New topic" is `primaryAction`
- * on the board/channel views (context-aware href: the board view links to
- * the channel-picker form above, an open channel links straight to its own
- * `new-topic` route); "+ New channel" is `settings` (a gear icon) on both -
- * the old `shell.headerNavPoints` 1-or-2-item dropdown this app used to ship
- * is gone, superseded by these. EVERY view also gets `navigation`: the full
- * channel list, current one active where known - esoTalk's own "the channel
- * list never disappears, no matter how deep you've drilled in" idiom, still
- * true. The board/channel views' own `navigation` is NOT `desktopOnly`
- * (their own content is an activity feed/topic list, not the channel list
- * itself, so mobile genuinely needs the footer pill to switch channels at
- * all) - a topic's own `navigation` IS `desktopOnly` (mirrors
- * `apps/chat/client.js`'s room view: with no `primaryAction`/`settings`
- * either, mobile gets no app footer at all inside a topic, just the
- * composer). `channelsToNavItems()` is the one shared mapper every view's
- * own `stopTemplate.update()` call uses - each view already
- * fetches/watches `services.channels.listChannels()` for its own reasons,
- * so only the "channels -> nav items" shape is shared, not the fetch itself.
+ * NAVIGATION (`docs/app-navigation-standard.md` Rule 5): every view drives
+ * its own chrome through `ctx.chrome.set()` (Chrome Inversion - the
+ * platform-owned counterpart of `@qu/ui`'s `mountAppTemplate()`, see
+ * `apps/shell/src/chrome.js`'s own doc comment). "+ New topic" is
+ * `primaryAction` on the board/channel views (context-aware href: the board
+ * view links to the channel-picker form above, an open channel links
+ * straight to its own `new-topic` route); "+ New channel" is `settings` (a
+ * gear icon) on both - the old `shell.headerNavPoints` 1-or-2-item dropdown
+ * this app used to ship is gone, superseded by these. EVERY view also gets
+ * `navigation`: the full channel list, current one active where known -
+ * esoTalk's own "the channel list never disappears, no matter how deep
+ * you've drilled in" idiom, still true. The board/channel views' own
+ * `navigation` is NOT `desktopOnly` (their own content is an activity
+ * feed/topic list, not the channel list itself, so mobile genuinely needs
+ * the footer pill to switch channels at all) - a topic's own `navigation`
+ * IS `desktopOnly` (mirrors `apps/chat/client.js`'s room view: with no
+ * `primaryAction`/`settings` either, mobile gets no app footer at all
+ * inside a topic, just the composer). `channelsToNavItems()` is the one
+ * shared mapper every view's own `chrome.set()` call uses - each view
+ * already fetches/watches `services.channels.listChannels()` for its own
+ * reasons, so only the "channels -> nav items" shape is shared, not the
+ * fetch itself.
  *
  * QUNIVERSE V4 (Forum-migration round, docs/v4-concept.md §9/§10): a Topic
  * is now an `EntityService`-created Entity with its own `content` field (the
@@ -232,7 +235,7 @@ import { watchChildren, watch } from '@qu/reactive';
 import { rankFor } from '@qu/foundation';
 import { paths, formatActorLabel, detectLinks, resolveContentFormat, renderContent } from '@qu/services';
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage, mountAppTemplate, createIconButton } from '@qu/ui';
+import { injectStyle, ensureTheme, renderAvatarOrAsset, renderSubpage, createIconButton } from '@qu/ui';
 import { renderContextMenu, mountMentionAutocomplete, mountEmojiAutocomplete, copyToClipboard } from '@qu/thread-ui';
 import { mountContentComposer, emojiExtension, mentionExtension, attachmentExtension, markdownToolbarExtension } from '@qu/content-ui';
 
@@ -654,7 +657,15 @@ function watchTopicsActivity(qu, syncFetch, SPACE_ID, services, onChange) {
 export function mount(container, ctx) {
   ensureTheme();
   injectStyle(STYLE_ID, STYLE);
-  const { services, apps, subscribe, segments = [] } = ctx;
+  // `chrome` (Chrome Inversion, `apps/shell/src/chrome.js`) is always real
+  // in production - the shell router builds it fresh for every navigation
+  // and hands it through unconditionally, same as `services`/`apps`. The
+  // no-op fallback here exists only for the many existing tests in this
+  // file that mount Forum directly with a hand-built `ctx` and don't care
+  // about chrome at all - same "optional dependency, safe no-op if absent"
+  // idiom `subscribe?.()` already uses elsewhere in this function, not a
+  // real production code path.
+  const { services, apps, subscribe, segments = [], chrome = { set() {} } } = ctx;
 
   const SPACE_ID = apps?.find((a) => a.name === 'forum')?.spaceId;
   if (!SPACE_ID) throw new Error('[forum] no "spaceId" found in the apps catalog for "forum" - check manifest.quapp');
@@ -678,7 +689,7 @@ export function mount(container, ctx) {
   // what it does once there. Same scheme apps/chat/client.js's own route
   // parsing already establishes for chat's own room routes.
   const [, kindSeg, idSeg, seg3, seg4] = segments;
-  const viewCtx = { ...ctx, SPACE_ID };
+  const viewCtx = { ...ctx, SPACE_ID, chrome };
   let stopView;
   if (kindSeg === 't' && idSeg) {
     stopView = mountTopicView(container, { ...viewCtx, topicId: idSeg, messageId: seg3 === 'm' ? seg4 : null });
@@ -754,20 +765,21 @@ function channelsToNavItems(channels) {
  * "+ New topic" now - see `docs/app-navigation-standard.md` Rule 5's forum
  * example) - policy-gated the same way the retired sidebar's own inline
  * link and `renderHeaderNavPoints()`'s "New channel" dropdown item both
- * were. Depends on an async fetch not ready at the one synchronous
- * `mountAppTemplate()` call every view makes - see that function's own
- * "LATE-ARRIVING CHROME DATA" doc comment - so this is always called via
- * `stopTemplate.update()` from an app's own async IIFE, never awaited
- * before the initial `mountAppTemplate()` call itself.
- * @param {ReturnType<typeof mountAppTemplate>} stopTemplate
+ * were. Depends on an async fetch not ready at the view's own initial,
+ * synchronous `chrome.set()` call - so this is always called via a SECOND,
+ * later `chrome.set()` from an app's own async IIFE (Chrome Inversion,
+ * `apps/shell/src/chrome.js` - a platform-owned counterpart of the same
+ * "late-arriving chrome data" shape `@qu/ui`'s `mountAppTemplate()` already
+ * had), never awaited before the view's own first `chrome.set()` call.
+ * @param {{set: (partial: object) => void}} chrome - this route's `ctx.chrome` handle
  * @param {object} services
  * @param {() => boolean} isStopped
  */
-async function applyNewChannelSettings(stopTemplate, services, isStopped) {
+async function applyNewChannelSettings(chrome, services, isStopped) {
   const { channelPolicy, isAdmin } = await fetchChannelPolicy(services);
   if (isStopped()) return;
   if (!isAdmin && !channelPolicy.allowMemberCreate) return;
-  stopTemplate.update({ settings: { items: [{ label: t('newChannelLink'), href: '#/forum/new' }] } });
+  chrome.set({ settings: { items: [{ label: t('newChannelLink'), href: '#/forum/new' }] } });
 }
 
 /**
@@ -878,7 +890,7 @@ function mountNewChannelView(container, { services, SPACE_ID }) {
 // BOARD VIEW - #/forum: every channel + a merged recent-activity feed
 // ===================================================================
 
-function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
+function mountBoardView(container, { qu, services, syncFetch, SPACE_ID, chrome }) {
   let stopped = false;
   let topicsActivity;
   let off;
@@ -907,80 +919,84 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
   // `desktopOnly` here (unlike an open topic's own room-style view, or
   // apps/chat/client.js's room list): this view's own CONTENT is a merged
   // activity FEED, not the channel list itself, so mobile genuinely needs
-  // the footer pill to reach a specific channel at all.
-  const stopTemplate = mountAppTemplate(container, {
-    primaryAction: { label: t('newTopicLink'), href: '#/forum/new-topic', icon: '✏️' },
-    render: (content) => {
-      const heading = document.createElement('h1');
-      heading.textContent = t('title');
-      const activityRoot = document.createElement('div');
-      content.append(heading, activityRoot);
+  // the footer pill to reach a specific channel at all. Chrome Inversion:
+  // `container` IS the platform-owned `chrome.contentSlot` already (see
+  // `apps/shell/src/chrome.js`) - this view builds directly into it instead
+  // of calling `mountAppTemplate()` itself, and drives its own chrome
+  // (primaryAction/navigation/settings) through `chrome.set()` instead.
+  // `navigation` stays a plain `items[]` snapshot here, not the reactive
+  // `list:` form (`chrome.js`'s own doc comment) - that form only renders in
+  // the desktop sidebar this round, and this view's mobile footer pill (the
+  // "genuinely needs it" case above) still needs a real channel switcher.
+  chrome.set({ primaryAction: { label: t('newTopicLink'), href: '#/forum/new-topic', icon: '✏️' } });
 
-      // Keeps reply/unread counts current as messages land in any topic
-      // already on screen, not just when a channel/topic is added - see
-      // watchTopicsActivity()'s own doc comment for the confirmed bug this fixes.
-      topicsActivity = watchTopicsActivity(qu, syncFetch, SPACE_ID, services, () => render());
+  const heading = document.createElement('h1');
+  heading.textContent = t('title');
+  const activityRoot = document.createElement('div');
+  container.append(heading, activityRoot);
 
-      let renderToken = 0;
-      async function render() {
-        const token = ++renderToken;
-        if (stopped) return;
-        const channels = await services.channels.listChannels(SPACE_ID);
-        if (stopped || token !== renderToken) return;
+  // Keeps reply/unread counts current as messages land in any topic
+  // already on screen, not just when a channel/topic is added - see
+  // watchTopicsActivity()'s own doc comment for the confirmed bug this fixes.
+  topicsActivity = watchTopicsActivity(qu, syncFetch, SPACE_ID, services, () => render());
 
-        stopTemplate.update({
-          navigation: {
-            items: channelsToNavItems(channels),
-            activeId: 'all', // the board view IS the "All channels" entry
-            heading: t('channels'),
-            filter: true,
-          },
-        });
+  let renderToken = 0;
+  async function render() {
+    const token = ++renderToken;
+    if (stopped) return;
+    const channels = await services.channels.listChannels(SPACE_ID);
+    if (stopped || token !== renderToken) return;
 
-        // A per-channel topics-list watch, added once per channel (never
-        // re-added on a later render() re-run) - `ChannelService`'s own
-        // internal backfill-on-miss (packages/services/src/list-service.js's
-        // listCuratedRawPaths()) only retries a local miss ONCE PER SYNC
-        // "GENERATION" (see packages/services/src/sync-freshness.js's own
-        // doc comment on createMissGate()), which can race the sync
-        // connection still coming up on a cold client and then not retry
-        // until the next reconnect - a page reload is what actually forces
-        // that retry today, which is the exact "board view loads empty,
-        // needs a reload" symptom this closes. `watch()`'s own `syncFetch`
-        // option (below) is called UNCONDITIONALLY every time, no gating -
-        // same shape mountChannelView()'s own dedicated topics-list watch
-        // already uses for its one channel - and its callback re-runs THIS
-        // render() the moment fresh data actually lands, or a new topic is
-        // added later (watchTopicsActivity() above only covers ALREADY-
-        // LISTED topics' own messages, not a channel gaining a new topic).
-        for (const channel of channels) {
-          if (topicsListWatchers.has(channel._id)) continue;
-          topicsListWatchers.set(channel._id, watch(qu, paths.listPath(SPACE_ID, `topics-${channel._id}`), () => render(), { syncFetch, initial: false }));
-        }
+    chrome.set({
+      navigation: {
+        items: channelsToNavItems(channels),
+        activeId: 'all', // the board view IS the "All channels" entry
+        heading: t('channels'),
+        filter: true,
+      },
+    });
 
-        const topicsPerChannel = await Promise.all(channels.map((c) => services.channels.listTopics(SPACE_ID, c._id)));
-        if (stopped || token !== renderToken) return;
+    // A per-channel topics-list watch, added once per channel (never
+    // re-added on a later render() re-run) - `ChannelService`'s own
+    // internal backfill-on-miss (packages/services/src/list-service.js's
+    // listCuratedRawPaths()) only retries a local miss ONCE PER SYNC
+    // "GENERATION" (see packages/services/src/sync-freshness.js's own
+    // doc comment on createMissGate()), which can race the sync
+    // connection still coming up on a cold client and then not retry
+    // until the next reconnect - a page reload is what actually forces
+    // that retry today, which is the exact "board view loads empty,
+    // needs a reload" symptom this closes. `watch()`'s own `syncFetch`
+    // option (below) is called UNCONDITIONALLY every time, no gating -
+    // same shape mountChannelView()'s own dedicated topics-list watch
+    // already uses for its one channel - and its callback re-runs THIS
+    // render() the moment fresh data actually lands, or a new topic is
+    // added later (watchTopicsActivity() above only covers ALREADY-
+    // LISTED topics' own messages, not a channel gaining a new topic).
+    for (const channel of channels) {
+      if (topicsListWatchers.has(channel._id)) continue;
+      topicsListWatchers.set(channel._id, watch(qu, paths.listPath(SPACE_ID, `topics-${channel._id}`), () => render(), { syncFetch, initial: false }));
+    }
 
-        const merged = [];
-        channels.forEach((channel, i) => {
-          for (const topic of topicsPerChannel[i]) merged.push({ ...topic, channelTitle: channel.title });
-        });
-        merged.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
-        topicsActivity.sync(merged.map((topic) => topic._id));
-        renderActivityFeed(activityRoot, merged);
-      }
+    const topicsPerChannel = await Promise.all(channels.map((c) => services.channels.listTopics(SPACE_ID, c._id)));
+    if (stopped || token !== renderToken) return;
 
-      off = watch(qu, paths.listPath(SPACE_ID, 'channels'), () => render(), { syncFetch }); // initial: true (default) - fires render() immediately, not just on later changes
-    },
-  });
-  applyNewChannelSettings(stopTemplate, services, () => stopped);
+    const merged = [];
+    channels.forEach((channel, i) => {
+      for (const topic of topicsPerChannel[i]) merged.push({ ...topic, channelTitle: channel.title });
+    });
+    merged.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+    topicsActivity.sync(merged.map((topic) => topic._id));
+    renderActivityFeed(activityRoot, merged);
+  }
+
+  off = watch(qu, paths.listPath(SPACE_ID, 'channels'), () => render(), { syncFetch }); // initial: true (default) - fires render() immediately, not just on later changes
+  applyNewChannelSettings(chrome, services, () => stopped);
 
   return () => {
     stopped = true;
     off?.();
     topicsActivity?.stop();
     for (const stopWatch of topicsListWatchers.values()) stopWatch();
-    stopTemplate();
   };
 }
 
@@ -994,7 +1010,7 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID }) {
 // view's own `primaryAction`, "+ New channel" is `settings`
 // (`applyNewChannelSettings()` above).
 
-function mountChannelView(container, { qu, services, syncFetch, SPACE_ID, channelId }) {
+function mountChannelView(container, { qu, services, syncFetch, SPACE_ID, channelId, chrome }) {
   let stopped = false;
 
   const heading = document.createElement('div');
@@ -1009,18 +1025,17 @@ function mountChannelView(container, { qu, services, syncFetch, SPACE_ID, channe
   // See docs/app-navigation-standard.md Rule 1 (no bespoke back link - the
   // shell header's own Back/Forward already covers this, and the sidebar's
   // own "All channels" entry covers the rest) and Rule 5 - same shape as
-  // mountBoardView()'s own mountAppTemplate() call above; `navigation` is
-  // NOT `desktopOnly` here either, for the same reason.
-  const stopTemplate = mountAppTemplate(container, {
-    primaryAction: { label: t('newTopicLink'), href: `#/forum/c/${channelId}/new-topic`, icon: '✏️' },
-    render: (content) => content.append(heading, topicsRoot, inviteRoot),
-  });
-  applyNewChannelSettings(stopTemplate, services, () => stopped);
+  // mountBoardView()'s own chrome.set() calls above; `navigation` is NOT
+  // `desktopOnly` here either, for the same reason (and stays a plain
+  // `items[]` snapshot for the same mobile-footer-pill reason).
+  chrome.set({ primaryAction: { label: t('newTopicLink'), href: `#/forum/c/${channelId}/new-topic`, icon: '✏️' } });
+  container.append(heading, topicsRoot, inviteRoot);
+  applyNewChannelSettings(chrome, services, () => stopped);
   const offChannelList = watch(qu, paths.listPath(SPACE_ID, 'channels'), async () => {
     if (stopped) return;
     const channels = await services.channels.listChannels(SPACE_ID);
     if (stopped) return;
-    stopTemplate.update({
+    chrome.set({
       navigation: {
         items: channelsToNavItems(channels),
         activeId: channelId,
@@ -1120,7 +1135,6 @@ function mountChannelView(container, { qu, services, syncFetch, SPACE_ID, channe
     offChannel();
     offChannelList();
     topicsActivity.stop();
-    stopTemplate();
   };
 }
 
@@ -1286,22 +1300,25 @@ function mountNewTopicView(container, { services, subscribe, SPACE_ID, channelId
 // ===================================================================
 
 /**
- * TOPIC VIEW - mounts with `mountAppTemplate({fullHeight: true, ...})`, the
- * exact same technique `apps/chat/client.js`'s own `mountRoomView()` uses
- * (see `@qu/ui`'s `app-template.js` own "FULL HEIGHT MODE" doc comment for
- * the full "why fixed positioning, not vh/dvh calc()" reasoning) - ported
- * over per explicit request ("the base for Forum and Chat really is
- * identical - Forum just doesn't need voice messages"). A topic's message
- * list and composer never scroll away, no double-scrollbar, and it gets the
- * exact same scroll-follow/persistent-scroll-to-bottom/true-bottom-
- * correction machinery Chat has (see the "SCROLL-FOLLOW" block below). The
- * channel sidebar is now the Core's own `navigation` (`desktopOnly: true` -
- * see this function's own `stopTemplate.update()` call below) - this app's
- * own "the channel list never disappears, no matter how deep you've drilled
- * in" idiom (top doc comment) still holds on wide screens; on mobile there's
- * no footer here at all (no `primaryAction`/`settings`, unlike the board/
- * channel views), so the topic's own composer is the only bottom bar,
- * same fix `apps/chat/client.js`'s room view migration made.
+ * TOPIC VIEW - drives `chrome.set({fullHeight: true, ...})` (Chrome
+ * Inversion, `apps/shell/src/chrome.js`), the platform-owned counterpart of
+ * the `mountAppTemplate({fullHeight: true, ...})` technique
+ * `apps/chat/client.js`'s own `mountRoomView()` still uses (see `@qu/ui`'s
+ * `app-template.js` own "FULL HEIGHT MODE" doc comment for the full "why
+ * fixed positioning, not vh/dvh calc()" reasoning, which chrome.js's own
+ * `rebuild()` now applies identically) - ported over per explicit request
+ * ("the base for Forum and Chat really is identical - Forum just doesn't
+ * need voice messages"). A topic's message list and composer never scroll
+ * away, no double-scrollbar, and it gets the exact same scroll-follow/
+ * persistent-scroll-to-bottom/true-bottom-correction machinery Chat has
+ * (see the "SCROLL-FOLLOW" block below). The channel sidebar is now the
+ * platform's own `navigation` (`desktopOnly: true` - see this function's
+ * own `chrome.set()` call below) - this app's own "the channel list never
+ * disappears, no matter how deep you've drilled in" idiom (top doc comment)
+ * still holds on wide screens; on mobile there's no footer here at all (no
+ * `primaryAction`/`settings`, unlike the board/channel views), so the
+ * topic's own composer is the only bottom bar, same fix `apps/chat/client.js`'s
+ * room view migration made.
  *
  * PERMALINKS - a post's timestamp (see `buildMessageFooter()`) IS its
  * permalink, `#/forum/t/<topicId>/m/<messageId>` - clicking it, or landing
@@ -1310,7 +1327,7 @@ function mountNewTopicView(container, { services, subscribe, SPACE_ID, channelId
  * view (inside the internal scroll container now, not the page) and
  * briefly highlights it (`.qu-forum-message-highlight`).
  */
-function mountTopicView(container, { qu, services, subscribe, syncFetch, extensionPoints, SPACE_ID, topicId, messageId = null }) {
+function mountTopicView(container, { qu, services, subscribe, syncFetch, extensionPoints, SPACE_ID, topicId, messageId = null, chrome }) {
   let stopped = false;
 
   const roomView = document.createElement('div');
@@ -1324,8 +1341,11 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
   // views), so the mobile footer is empty and the Core renders none -
   // the topic's own composer is already a bottom bar, a second one right
   // above it would read as duplicated chrome (same reasoning chat's own
-  // room view migration was fixed for).
-  const stopTemplate = mountAppTemplate(container, { fullHeight: true, render: (content) => content.appendChild(roomView) });
+  // room view migration was fixed for). Chrome Inversion: `container` IS
+  // `chrome.contentSlot` already - build directly into it and drive
+  // `fullHeight` through `chrome.set()` instead of `mountAppTemplate()`.
+  chrome.set({ fullHeight: true });
+  container.appendChild(roomView);
 
   const header = document.createElement('div');
   header.className = 'qu-forum-topic-header';
@@ -1503,7 +1523,7 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
       heading.textContent = topic.title;
       if (topic.content) topicContentEl.innerHTML = renderContent(topic.content);
     }
-    stopTemplate.update({
+    chrome.set({
       navigation: {
         items: channelsToNavItems(channels),
         activeId: topic?.channelId ?? null,
@@ -2178,7 +2198,6 @@ function mountTopicView(container, { qu, services, subscribe, syncFetch, extensi
     clearMessageWatchers();
     offMessages();
     composer.stop();
-    stopTemplate();
   };
 }
 
