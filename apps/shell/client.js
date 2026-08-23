@@ -273,14 +273,6 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
 
   const headerRoot = document.createElement('div');
   container.appendChild(headerRoot);
-  // The platform-owned chrome (sidebar/footer nav, primaryAction, views,
-  // settings) - mounted ONCE for the whole session, alongside the header.
-  // Apps mount into `chrome.contentSlot` (same structural role `screen`
-  // used to play) and drive their own chrome via `ctx.chrome.set()`
-  // instead of calling `mountAppTemplate()` themselves - see
-  // `./src/chrome.js`'s own doc comment for the full "Chrome Inversion"
-  // reasoning (docs/v4-concept.md / the architecture-review plan).
-  const chrome = mountChrome(container, { qu, syncFetch });
 
   // `adminPubs` is this relay's own operator allowlist (see
   // `@qu/relay`'s `AdminHttp#verifyAdmin()`) - fetched here only so the
@@ -300,6 +292,7 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
   let adminPubs = [];
   let extensionOrder = {};
   let iceServers = [];
+  let menuThreshold = 8; // DEFAULT_RELAY_SETTINGS.chrome.menuThreshold, see relay-settings.js
   try {
     const res = await fetch('/config.json');
     if (res.ok) {
@@ -307,8 +300,24 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
       adminPubs = data.adminPubs ?? [];
       extensionOrder = data.settings?.extensionOrder ?? {};
       iceServers = data.iceServers ?? [];
+      menuThreshold = data.settings?.chrome?.menuThreshold ?? menuThreshold;
     }
-  } catch { /* offline/unreachable - header just shows no admin link, extension points fall back to their own default order/ICE servers */ }
+  } catch { /* offline/unreachable - header just shows no admin link, extension points fall back to their own default order/ICE servers/menuThreshold */ }
+
+  // The platform-owned chrome (sidebar/footer nav, primaryAction, views,
+  // settings) - mounted ONCE for the whole session, alongside the header.
+  // Apps mount into `chrome.contentSlot` (same structural role `screen`
+  // used to play) and drive their own chrome via `ctx.chrome.set()`
+  // instead of calling `mountAppTemplate()` themselves - see
+  // `./src/chrome.js`'s own doc comment for the full "Chrome Inversion"
+  // reasoning (docs/v4-concept.md / the architecture-review plan). Mounted
+  // AFTER the `/config.json` fetch above so `menuThreshold` reflects this
+  // relay's own admin setting from the very first render, not a hardcoded
+  // default that then never changes for the rest of the session (same
+  // once-per-page-load staleness trade-off `extensionOrder`/`adminPubs`
+  // already accept).
+  const chrome = mountChrome(container, { qu, syncFetch, menuThreshold });
+
   // A boot-time snapshot of the SAME catalog `renderRoute()` re-fetches on
   // every navigation below - the header is mounted exactly once for the
   // whole session (see its own "SEARCH SLOT" doc comment), so a snapshot

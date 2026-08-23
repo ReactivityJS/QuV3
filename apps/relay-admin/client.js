@@ -113,6 +113,8 @@ const DICT = {
     general: 'General',
     defaultLocale: 'Default locale',
     maxMessagesPerMinute: 'Rate limit (messages/minute, 0 = unlimited)',
+    menuThreshold: 'Chrome menu threshold (items before collapsing into "More…")',
+    menuThresholdHint: 'How many items a platform-owned sidebar/footer nav/views/settings section shows directly before collapsing the rest into a "More…" trigger. Does not apply to a live channel/room list, which is never truncated.',
     apps: 'Apps',
     appsHint: 'Unchecking an app disables it for everyone on this relay - it stops loading (and, for a UI plugin, stops contributing) immediately, no restart needed.',
     hideFromList: 'Hide from App List',
@@ -150,6 +152,8 @@ const DICT = {
     general: 'Allgemein',
     defaultLocale: 'Standardsprache',
     maxMessagesPerMinute: 'Ratenlimit (Nachrichten/Minute, 0 = unbegrenzt)',
+    menuThreshold: 'Chrome-Menü-Schwelle (Einträge vor Zusammenfassung in "Mehr…")',
+    menuThresholdHint: 'Wie viele Einträge ein plattformeigener Sidebar-/Footer-Navigations-/Views-/Einstellungen-Bereich direkt anzeigt, bevor der Rest in einem "Mehr…"-Trigger zusammengefasst wird. Gilt nicht für eine live Kanal-/Raumliste - diese wird nie gekürzt.',
     apps: 'Apps',
     appsHint: 'Eine App abwählen deaktiviert sie sofort für alle auf diesem Relay - kein Neustart nötig.',
     hideFromList: 'Aus App-Liste ausblenden',
@@ -351,7 +355,16 @@ export async function mount(container, { identity, services, apps }) {
   rateLimitInput.min = '0';
   rateLimitInput.value = String(settings.rateLimits?.maxMessagesPerMinute ?? 0);
   rateLimitLabel.append(document.createTextNode(t('maxMessagesPerMinute')), rateLimitInput);
-  generalSection.append(generalTitle, localeLabel, rateLimitLabel);
+  const menuThresholdLabel = document.createElement('label');
+  const menuThresholdInput = document.createElement('input');
+  menuThresholdInput.type = 'number';
+  menuThresholdInput.min = '1';
+  menuThresholdInput.value = String(settings.chrome?.menuThreshold ?? 8);
+  menuThresholdLabel.append(document.createTextNode(t('menuThreshold')), menuThresholdInput);
+  const menuThresholdHint = document.createElement('p');
+  menuThresholdHint.className = 'qu-relay-admin-hint';
+  menuThresholdHint.textContent = t('menuThresholdHint');
+  generalSection.append(generalTitle, localeLabel, rateLimitLabel, menuThresholdLabel, menuThresholdHint);
 
   // ---- Apps ----
   const appsSection = document.createElement('section');
@@ -494,6 +507,7 @@ export async function mount(container, { identity, services, apps }) {
       const patch = {
         defaultLocale: localeSelect.value,
         rateLimits: { maxMessagesPerMinute: Number(rateLimitInput.value) || 0 },
+        chrome: { menuThreshold: Math.max(1, Number(menuThresholdInput.value) || 8) },
         disabledApps: newDisabledApps,
         hiddenFromAppList: newHiddenFromAppList,
         channels: { allowMemberCreate: allowCreateInput.checked, allowMemberRestricted: allowRestrictedInput.checked },

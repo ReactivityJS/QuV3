@@ -103,11 +103,22 @@ export const DEFAULT_RELAY_SETTINGS = Object.freeze({
   // safety floor in `link-preview.js`, never something a relay operator
   // should be able to loosen via this setting.
   linkPreviews: Object.freeze({ enabled: true }),
+  // How many items a platform-owned chrome nav/views/settings section
+  // (`apps/shell/src/chrome.js`) shows directly before collapsing the rest
+  // into a "More…" trigger - see that file's own doc comment for the full
+  // "Chrome Inversion" reasoning. An admin-tunable UX call (how many
+  // channels/views fit before a list gets unwieldy), not a fixed constant,
+  // same reasoning `rateLimits`/`channels` already have for being data here
+  // rather than a hardcoded number in `chrome.js`. Does not apply to a
+  // `list:`-registered (reactive `<qu-list>`-backed) section - see
+  // `chrome.js`'s `applyMenuThreshold()` doc comment for why capping a live,
+  // keyed-reconciliation list needs its own separate solution, not this one.
+  chrome: Object.freeze({ menuThreshold: 8 }),
 });
 
 /**
  * @param {import('@qu/core').QuStore} qu
- * @returns {Promise<{defaultLocale: string, rateLimits: {maxMessagesPerMinute: number}, disabledApps: string[], hiddenFromAppList: string[], flagTypes: Array<{id: string, label: string, icon: string, mode: string, entityKinds: string[]}>, channels: {allowMemberCreate: boolean, allowMemberRestricted: boolean}, chat: {allowMemberCreateGroup: boolean}, extensionOrder: Record<string, string[]>, linkPreviews: {enabled: boolean}}>}
+ * @returns {Promise<{defaultLocale: string, rateLimits: {maxMessagesPerMinute: number}, disabledApps: string[], hiddenFromAppList: string[], flagTypes: Array<{id: string, label: string, icon: string, mode: string, entityKinds: string[]}>, channels: {allowMemberCreate: boolean, allowMemberRestricted: boolean}, chat: {allowMemberCreateGroup: boolean}, extensionOrder: Record<string, string[]>, linkPreviews: {enabled: boolean}, chrome: {menuThreshold: number}}>}
  *   Always fully populated - missing fields fall back to `DEFAULT_RELAY_SETTINGS`.
  */
 export async function getSettings(qu) {
@@ -121,6 +132,7 @@ export async function getSettings(qu) {
     chat: { ...DEFAULT_RELAY_SETTINGS.chat, ...val.chat },
     extensionOrder: { ...DEFAULT_RELAY_SETTINGS.extensionOrder, ...val.extensionOrder },
     linkPreviews: { ...DEFAULT_RELAY_SETTINGS.linkPreviews, ...val.linkPreviews },
+    chrome: { ...DEFAULT_RELAY_SETTINGS.chrome, ...val.chrome },
   };
 }
 
