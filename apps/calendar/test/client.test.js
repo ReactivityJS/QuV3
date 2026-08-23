@@ -170,6 +170,76 @@ test('creating a calendar via the sidebar form shows it under "My calendars" and
   }
 });
 
+// The desktop sidebar can also carry a `settings` section (its own
+// `.qu-apptpl-list`, "Manage calendars") - scope selectors to the section
+// that has NO `qu-apptpl-section--settings` modifier (`views`, `navigation`
+// - Calendar never passes `navigation`, so this is unambiguously `views`).
+function viewSwitchLinks(container) {
+  return [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-section:not(.qu-apptpl-section--settings) .qu-apptpl-list a')];
+}
+
+test('the day/week/month/list switch renders as mountAppTemplate()\'s own `views` field - 4 real links, the current one active, each carrying the current cursor date', async () => {
+  const { qu, services } = await freshEnv();
+  const container = makeContainer();
+  const stop = mount(container, { qu, services, segments: ['calendar'], subscribe: noopSubscribe });
+  try {
+    await waitFor(() => viewSwitchLinks(container).length > 0);
+    const items = viewSwitchLinks(container);
+    assert.equal(items.length, 4);
+    const labels = items.map((a) => a.textContent);
+    assert.deepEqual(labels, ['Day', 'Week', 'Month', 'Agenda']);
+    // Default (non-mobile matchMedia) is month.
+    const monthLink = items.find((a) => a.textContent === 'Month');
+    assert.ok(monthLink.classList.contains('qu-apptpl-item-active'));
+    assert.ok(!items.find((a) => a.textContent === 'Day').classList.contains('qu-apptpl-item-active'));
+    for (const a of items) {
+      const href = a.getAttribute('href');
+      assert.match(href, /^#\/calendar\/(day|week|month|list)\/\d+$/);
+    }
+  } finally {
+    stop();
+  }
+});
+
+test('navigating to #/calendar/<view>/<cursorMs> opens that exact view on that exact date, not today\'s', async () => {
+  const { qu, services } = await freshEnv();
+  const container = makeContainer();
+  const stop = mount(container, { qu, services, segments: ['calendar'], subscribe: noopSubscribe });
+  await createCalendarViaForm(container);
+  stop();
+
+  // A FRESH container - stop() only stops watchers, it doesn't clear the
+  // DOM (mountAppTemplate() does that on its own NEXT call) - reusing the
+  // same container would let the first mount's stale heading satisfy a
+  // waitFor() below without the second mount ever actually rendering.
+  const container2 = makeContainer();
+  const targetDate = new Date('2026-03-15T00:00:00Z').getTime();
+  const stop2 = mount(container2, { qu, services, segments: ['calendar', 'week', String(targetDate)], subscribe: noopSubscribe });
+  try {
+    await waitFor(() => container2.querySelector('.qu-cal-heading') !== null);
+    const weekLink = viewSwitchLinks(container2).find((a) => a.textContent === 'Week');
+    assert.ok(weekLink.classList.contains('qu-apptpl-item-active'));
+    // The heading reflects the routed date, not "today" - proves `cursor`
+    // was actually seeded from the URL's 3rd segment, not reset on mount.
+    assert.match(container2.querySelector('.qu-cal-heading').textContent, /2026/);
+  } finally {
+    stop2();
+  }
+});
+
+test('an invalid/garbage cursor segment falls back to today instead of crashing', async () => {
+  const { qu, services } = await freshEnv();
+  const container = makeContainer();
+  const stop = mount(container, { qu, services, segments: ['calendar', 'day', 'not-a-number'], subscribe: noopSubscribe });
+  try {
+    await waitFor(() => viewSwitchLinks(container).length > 0);
+    const dayLink = viewSwitchLinks(container).find((a) => a.textContent === 'Day');
+    assert.ok(dayLink.classList.contains('qu-apptpl-item-active'));
+  } finally {
+    stop();
+  }
+});
+
 test('the main view has exactly one way to reach "Kalender verwalten" (mountAppTemplate\'s settings gear) - no inline title-row link, no bespoke hamburger/off-canvas drawer', async () => {
   const { qu, services } = await freshEnv();
   const container = makeContainer();
@@ -645,15 +715,21 @@ test('typing into the Agenda filter never recreates the input element (focus/cur
   const { qu, services } = await freshEnv();
   const container = makeContainer();
   const stop = mount(container, { qu, services, segments: ['calendar'], subscribe: noopSubscribe });
-  try {
+  const [{ id: calId }] = await (async () => {
     await createCalendarViaForm(container);
-    const [{ id: calId }] = await services.flags.listPrivate('calendar', 'calendar');
-    await upsertEventDirectly(qu, services, calId, { title: 'Standup' });
-    await upsertEventDirectly(qu, services, calId, { title: 'Retro' });
-    await waitFor(() => container.querySelector('.qu-cal-viewswitch button')?.textContent === 'Day');
+    return services.flags.listPrivate('calendar', 'calendar');
+  })();
+  await upsertEventDirectly(qu, services, calId, { title: 'Standup' });
+  await upsertEventDirectly(qu, services, calId, { title: 'Retro' });
+  stop();
 
-    const agendaBtn = [...container.querySelectorAll('.qu-cal-viewswitch button')].find((b) => b.textContent === 'Agenda');
-    agendaBtn.click();
+  // List/"Agenda" is a real route now (see client.js's own VIEW_KEYS doc
+  // comment) - switching views is a fresh mount() with new segments, same
+  // as every other real-route switch in this codebase (see e.g.
+  // apps/notifications/test/client.test.js's own unread/all tests) - not an
+  // in-page button click.
+  const stop2 = mount(container, { qu, services, segments: ['calendar', 'list'], subscribe: noopSubscribe });
+  try {
     await waitFor(() => container.querySelector('.qu-cal-filter') !== null);
 
     const filterInput = container.querySelector('.qu-cal-filter');
@@ -668,7 +744,7 @@ test('typing into the Agenda filter never recreates the input element (focus/cur
     await waitFor(() => container.querySelectorAll('.qu-cal-event-row, .qu-cal-chip').length === 1);
     assert.match(container.querySelector('.qu-cal-event-row, .qu-cal-chip').textContent, /Standup/);
   } finally {
-    stop();
+    stop2();
   }
 });
 

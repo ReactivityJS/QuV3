@@ -111,7 +111,9 @@ test('mount(): scope tabs reflect the route, the matching one is marked active, 
     extensionPoints,
   });
   try {
-    const tabs = [...container.querySelectorAll('.qu-search-tab')];
+    // Rendered via mountAppTemplate()'s `views` field now (@qu/ui's own
+    // AppTemplateLinkItem shape/classes), not a hand-built tab strip.
+    const tabs = [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')];
     assert.equal(tabs.length, 3);
     assert.equal(tabs[0].textContent, 'Everywhere');
     assert.equal(tabs[0].getAttribute('href'), '#/search/global/forum/t/general');
@@ -119,8 +121,8 @@ test('mount(): scope tabs reflect the route, the matching one is marked active, 
     assert.equal(tabs[1].getAttribute('href'), '#/search/app/forum/t/general');
     assert.equal(tabs[2].textContent, 'Here');
     assert.equal(tabs[2].getAttribute('href'), '#/search/subpage/forum/t/general');
-    assert.ok(tabs[2].classList.contains('qu-search-tab-active'));
-    assert.ok(!tabs[0].classList.contains('qu-search-tab-active'));
+    assert.ok(tabs[2].classList.contains('qu-apptpl-item-active'));
+    assert.ok(!tabs[0].classList.contains('qu-apptpl-item-active'));
   } finally {
     stop();
   }
@@ -135,9 +137,9 @@ test('mount(): with no context app at all, only the Global tab renders', async (
     extensionPoints: new ExtensionPointHost([]),
   });
   try {
-    const tabs = [...container.querySelectorAll('.qu-search-tab')];
+    const tabs = [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')];
     assert.equal(tabs.length, 1);
-    assert.ok(tabs[0].classList.contains('qu-search-tab-active'));
+    assert.ok(tabs[0].classList.contains('qu-apptpl-item-active'));
   } finally {
     stop();
   }
