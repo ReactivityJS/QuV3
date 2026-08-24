@@ -14,6 +14,7 @@ installFakeRTCPeerConnection();
 installFakeMediaDevices();
 installDom();
 const { mount, renderCallMenuItems } = await import('../client.js');
+const { mountAppTemplate } = await import('@qu/ui');
 
 async function freshEnv() {
   const qu = new QuStore();
@@ -57,6 +58,18 @@ function makeContainer() {
   const el = document.createElement('div');
   document.body.appendChild(el);
   return el;
+}
+
+function fakeChrome(chromeRoot) {
+  let current = {};
+  const stopTemplate = mountAppTemplate(chromeRoot, { render: () => {} });
+  return {
+    get current() { return current; },
+    set(partial) {
+      current = { ...current, ...partial };
+      stopTemplate.update(current);
+    },
+  };
 }
 
 // ===== Two REAL, connected client.js mounts - a genuine client-relay star,
@@ -344,6 +357,25 @@ test('#/phone/<pub> (caller) shows "Calling…" and enables controls once local 
   const stop = mount(container, { qu, identity, services, apps, segments: ['phone', 'remote-pub-a'] });
   try {
     assert.ok(container.querySelector('.qu-phone-status').textContent.match(/calling|rufe an/i));
+    await waitFor(() => container.querySelector('.qu-phone-local-video').srcObject != null);
+  } finally {
+    stop();
+  }
+});
+
+test('the active call view renders full-bleed under real chrome.set({fullHeight: true}), and no mobile footer bar appears (no navigation/views/primaryAction/settings set)', async () => {
+  const { qu, identity, services, apps } = await freshEnv();
+  const chromeRoot = makeContainer();
+  const chrome = fakeChrome(chromeRoot);
+  const container = makeContainer();
+  const stop = mount(container, { qu, identity, services, apps, segments: ['phone', 'remote-pub-fullheight'], chrome });
+  try {
+    assert.ok(chromeRoot.querySelector('.qu-apptpl-root--full-height'), 'expected chrome.set({fullHeight: true}) to have applied the real full-height class');
+    assert.equal(chromeRoot.querySelector('.qu-apptpl-footer'), null, 'Phone sets no navigation/views/primaryAction/settings, so no footer bar should render');
+    // Same "wait for getUserMedia() to actually resolve before stop()" discipline
+    // every other caller-side test here already uses - stopping too early would
+    // let this test's own in-flight media request resolve into the NEXT test's
+    // freshly reinstalled installFakeMediaDevices() fake instead, contaminating it.
     await waitFor(() => container.querySelector('.qu-phone-local-video').srcObject != null);
   } finally {
     stop();
