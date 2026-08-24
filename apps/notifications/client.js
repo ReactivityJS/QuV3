@@ -65,8 +65,8 @@
  * now. Which of the two is showing is a REAL route, not client-side button
  * state: `#/notifications` (unread-only, the default) vs.
  * `#/notifications/all` - `mount()`'s own `segments[1] === 'all'` decides
- * `showAll` once, at mount time, and `mountAppTemplate()`'s `views` section
- * renders both as real links. Switching is therefore a real navigation (the
+ * `showAll` once, at mount time, and `chrome.set()`'s `views` section
+ * renders both as real links (Chrome Inversion, `apps/shell/src/chrome.js`). Switching is therefore a real navigation (the
  * shell re-mounts this app fresh with the new `segments`, same mechanism
  * `apps/_template`'s folder switcher already relies on) rather than an
  * in-place re-render - one extra step in exchange for a bookmarkable/
@@ -83,7 +83,7 @@
 import { watchChildren } from '@qu/reactive';
 import { paths } from '@qu/services';
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme, mountAppTemplate } from '@qu/ui';
+import { injectStyle, ensureTheme } from '@qu/ui';
 
 const DICT = {
   en: {
@@ -125,7 +125,7 @@ const STYLE = `
  * @param {{qu: import('@qu/core').QuStore, services: object, subscribe?: (prefix: string) => void, syncFetch?: (prefix: string) => Promise<*>, extensionPoints?: import('@qu/foundation').ExtensionPointHost, segments?: string[]}} deps
  * @returns {() => void}
  */
-export function mount(container, { qu, services, subscribe, syncFetch, extensionPoints, segments = [] }) {
+export function mount(container, { qu, services, subscribe, syncFetch, extensionPoints, segments = [], chrome = { set() {} } }) {
   ensureTheme();
   injectStyle(STYLE_ID, STYLE);
   let stopped = false;
@@ -148,7 +148,10 @@ export function mount(container, { qu, services, subscribe, syncFetch, extension
   const heading = document.createElement('h1');
   heading.textContent = t('title');
   const listRoot = document.createElement('div');
-  mountAppTemplate(container, {
+  // Chrome Inversion (`apps/shell/src/chrome.js`) - `container` is already
+  // the platform's own content area; build directly into it and drive
+  // chrome via `chrome.set()` instead of `mountAppTemplate()`.
+  chrome.set({
     views: {
       items: [
         { id: 'unread', label: t('unreadOnly'), href: '#/notifications' },
@@ -156,8 +159,8 @@ export function mount(container, { qu, services, subscribe, syncFetch, extension
       ],
       activeId: showAll ? 'all' : 'unread',
     },
-    render: (content) => content.append(heading, listRoot),
   });
+  container.append(heading, listRoot);
 
   // `watchChildren()`'s callback can legitimately fire twice in quick
   // succession (the initial local read, then a fresher value arriving
