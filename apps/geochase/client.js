@@ -44,7 +44,7 @@
 import { createI18n } from '@qu/i18n';
 import { watch } from '@qu/reactive';
 import { paths, matchesActorQuery, formatActorLabel } from '@qu/services';
-import { injectStyle, ensureTheme, renderSubpage, mountAppTemplate, mountActorPicker, mountWakeLock } from '@qu/ui';
+import { injectStyle, ensureTheme, renderSubpage, mountActorPicker, mountWakeLock } from '@qu/ui';
 import { copyToClipboard } from '@qu/thread-ui';
 import { startLocationSharing } from './src/location.js';
 import {
@@ -220,7 +220,7 @@ function bearingLabel(deg) { return BEARING_LABELS[Math.round(deg / 45) % 8]; }
 export function mount(container, ctx) {
   ensureTheme();
   injectStyle(STYLE_ID, STYLE);
-  const { qu, identity, services, apps, segments = [], subscribe, syncFetch } = ctx;
+  const { qu, identity, services, apps, segments = [], subscribe, syncFetch, chrome = { set() {} } } = ctx;
   const SPACE_ID = apps?.find((a) => a.name === 'geochase')?.spaceId;
   if (!SPACE_ID) throw new Error('[geochase] no "spaceId" found in the apps catalog for "geochase" - check manifest.quapp');
 
@@ -342,51 +342,49 @@ export function mount(container, ctx) {
     }
     if (stopped) return;
 
-    mountAppTemplate(container, {
-      // Rule 5 (docs/app-navigation-standard.md) - "Start a game" is this
-      // app's one create action, so it lives here as the App Template's
-      // `primaryAction` instead of a `shell.headerNavPoints` contribution
-      // AND a second, inline link buried in the page body (the two used to
-      // duplicate each other here).
-      primaryAction: { label: t('startGame'), href: '#/geochase/new', icon: '🏁' },
-      render: (content) => {
-        const page = document.createElement('div');
-        page.className = 'qu-geochase-page';
-        const h1 = document.createElement('h1');
-        h1.textContent = t('title');
-        page.appendChild(h1);
+    // Rule 5a (docs/app-navigation-standard.md) - "Start a game" is this
+    // app's one create action, so it lives here as ctx.chrome's own
+    // `primaryAction` instead of a `shell.headerNavPoints` contribution
+    // AND a second, inline link buried in the page body (the two used to
+    // duplicate each other here).
+    chrome.set({ primaryAction: { label: t('startGame'), href: '#/geochase/new', icon: '🏁' } });
 
-        if (infos.length === 0) {
-          const empty = document.createElement('p');
-          empty.className = 'qu-geochase-empty';
-          empty.textContent = t('noGames');
-          page.appendChild(empty);
-        } else {
-          // req. 1: fold anything old-and-finished into a collapsed
-          // "Archive" section instead of the main list - purely a
-          // client-side split of the already-fetched `infos`, no extra
-          // store read (see game-service.js's own `isArchivable()`).
-          const active = infos.filter((info) => !isArchivable(info.meta));
-          const archived = infos.filter((info) => isArchivable(info.meta));
+    container.textContent = ''; // renderGameListPage() can re-run within one mount (e.g. after a delete) - see buildGameRows()'s own delete handler
+    const page = document.createElement('div');
+    page.className = 'qu-geochase-page';
+    const h1 = document.createElement('h1');
+    h1.textContent = t('title');
+    page.appendChild(h1);
 
-          const h2 = document.createElement('h2');
-          h2.textContent = t('myGames');
-          page.appendChild(h2);
-          page.appendChild(buildGameRows(active));
+    if (infos.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'qu-geochase-empty';
+      empty.textContent = t('noGames');
+      page.appendChild(empty);
+    } else {
+      // req. 1: fold anything old-and-finished into a collapsed
+      // "Archive" section instead of the main list - purely a
+      // client-side split of the already-fetched `infos`, no extra
+      // store read (see game-service.js's own `isArchivable()`).
+      const active = infos.filter((info) => !isArchivable(info.meta));
+      const archived = infos.filter((info) => isArchivable(info.meta));
 
-          if (archived.length > 0) {
-            const details = document.createElement('details');
-            details.className = 'qu-geochase-archive';
-            const summary = document.createElement('summary');
-            summary.textContent = t('myGamesArchived', { count: archived.length });
-            details.appendChild(summary);
-            details.appendChild(buildGameRows(archived));
-            page.appendChild(details);
-          }
-        }
-        content.appendChild(page);
-      },
-    });
+      const h2 = document.createElement('h2');
+      h2.textContent = t('myGames');
+      page.appendChild(h2);
+      page.appendChild(buildGameRows(active));
+
+      if (archived.length > 0) {
+        const details = document.createElement('details');
+        details.className = 'qu-geochase-archive';
+        const summary = document.createElement('summary');
+        summary.textContent = t('myGamesArchived', { count: archived.length });
+        details.appendChild(summary);
+        details.appendChild(buildGameRows(archived));
+        page.appendChild(details);
+      }
+    }
+    container.appendChild(page);
   }
 
   /** @param {Array<{id: string, meta: object}>} infos @returns {HTMLUListElement} */
