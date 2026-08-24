@@ -62,6 +62,17 @@ function styleFor(breakpoint) {
     .qu-ctxswitch-content { flex: 1; min-width: 0; }
     .qu-ctxswitch-page-heading { margin: 0 0 0.6rem; font-size: 1.1em; }
 
+    /* FULL HEIGHT MODE (opt-in fullHeight: true) - mirrors app-template.js's
+       own .qu-apptpl-root--full-height shape one level down, so a caller
+       nesting mountContextSwitcher() inside a chrome.set({fullHeight: true})
+       view (e.g. apps/calendar's own day/week/month grid) actually gets the
+       remaining height cascaded all the way to its own render(content)
+       callback, instead of stopping at chrome's own content slot. */
+    .qu-ctxswitch-root[data-full-height] { flex: 1; min-height: 0; }
+    .qu-ctxswitch-root[data-full-height] .qu-ctxswitch-layout { flex: 1; min-height: 0; align-items: stretch; }
+    .qu-ctxswitch-root[data-full-height] .qu-ctxswitch-sidebar { overflow-y: auto; }
+    .qu-ctxswitch-root[data-full-height] .qu-ctxswitch-content { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
     @media (max-width: ${breakpoint}) {
       .qu-ctxswitch-layout { flex-direction: column; }
 
@@ -144,19 +155,25 @@ function buildSidebarBody(host, { items, renderSidebar, activeId, newItem }) {
  *   activeLabel?: string,
  *   hideTitleLink?: boolean,
  *   newItem?: {label: string, href: string},
+ *   fullHeight?: boolean - opt-in, see this file's own "FULL HEIGHT MODE" CSS
+ *     comment. Only meaningful when the CALLER's own container is itself
+ *     inside a `chrome.set({fullHeight: true})` view - it cascades the
+ *     remaining height down through this component's own nested sidebar+
+ *     content layout, it doesn't create height on its own.
  *   render: (content: HTMLElement) => void,
  * }} options
  * @returns {() => void} destroy
  */
 export function mountContextSwitcher(container, {
   items, renderSidebar, activeId = null, heading, variant = 'tabs', breakpoint = '720px',
-  switchHref, activeLabel, hideTitleLink = false, newItem, render,
+  switchHref, activeLabel, hideTitleLink = false, newItem, fullHeight = false, render,
 }) {
   ensureStyle(breakpoint);
   container.textContent = '';
 
   const root = document.createElement('div');
   root.className = 'qu-ctxswitch-root';
+  if (fullHeight) root.dataset.fullHeight = 'true';
 
   // `hideTitleLink` - an opt-out for a caller that reaches `switchHref`
   // through some OTHER real, routable affordance instead (e.g. Calendar's

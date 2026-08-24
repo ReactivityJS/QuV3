@@ -246,6 +246,30 @@ test('navigating to #/calendar/<view>/<cursorMs> opens that exact view on that e
   }
 });
 
+// Regression: the Week view used to force a fixed 480px ('30rem') min-width
+// on its 7-day-column row regardless of actually available space, which the
+// timegrid's own overflow-x:auto containment (see the horizontal-overflow
+// test above) then always turned into a scrollbar, even at ordinary widths.
+// No fixed floor should remain - the columns should shrink to fit like
+// Month view's own grid already does.
+test('the Week view\'s day columns carry no fixed min-width floor - they shrink to fit like Month view\'s own grid already does', async () => {
+  const { qu, services } = await freshEnv();
+  const setupContainer = makeContainer();
+  const setupStop = mount(setupContainer, { qu, services, segments: ['calendar'], subscribe: noopSubscribe });
+  await createCalendarViaForm(setupContainer);
+  setupStop();
+
+  const container = makeContainer();
+  const stop = mount(container, { qu, services, segments: ['calendar', 'week'], subscribe: noopSubscribe });
+  try {
+    await waitFor(() => container.querySelector('.qu-cal-daycols') !== null);
+    const daycols = container.querySelector('.qu-cal-daycols');
+    assert.equal(daycols.style.minWidth, '', 'expected no inline min-width forcing a fixed floor on the week grid');
+  } finally {
+    stop();
+  }
+});
+
 test('an invalid/garbage cursor segment falls back to today instead of crashing', async () => {
   const { qu, services } = await freshEnv();
   const chromeRoot = makeContainer();
