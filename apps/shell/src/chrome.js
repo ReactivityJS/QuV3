@@ -63,20 +63,37 @@
  * `.qu.ownPath` (which `<qu-list>` already sets per stamped item) - never
  * recreating the list itself for an active-id-only change.
  *
- * SCOPED FOR THIS ROUND (Forum-only proof-of-concept, not a silent gap):
- *   - A `list:`-based section renders in the DESKTOP SIDEBAR ONLY. Forum's
- *     mobile channel-switcher pill (today's `desktopOnly: false` behavior)
- *     is real, deliberate follow-up work, not built here - extending the
- *     reactive section to the mobile popup trigger is a second, separable
- *     unit of work once a second real app needs the same shape.
- *   - `menuThreshold` overflow truncation (below) applies ONLY to
- *     `buildChrome()`'s plain `items[]` sections (primaryAction/views/
- *     settings) - deliberately NOT combined with a `list:`-based section in
- *     this round (truncating a live, keyed-reconciled list needs its own
- *     design, not assumed to fall out for free from combining two
- *     mechanisms that individually work).
+ * MOBILE FOOTER, TOO (`navigation.list`, `!desktopOnly`) - a `list:`-backed
+ * section now renders in the mobile footer as well as the desktop sidebar:
+ * a second, independent `<qu-list>` (cheap - its own `watch()` subscription,
+ * never shared with the sidebar's instance, since the two are never visible
+ * at the same time anyway) inside a `buildPopupTrigger()`-style pill+popup,
+ * built by `buildReactiveFooterPill()` below. The one genuinely new problem
+ * this raises - the pill's own visible label (the CURRENTLY ACTIVE item's
+ * name) has no synchronous `items[]` array to read from, unlike a static
+ * section - is solved with a SECOND literal `<template>`, `pillTemplate`
+ * (same contract as `template` itself): stamped once per active-item CHANGE
+ * (not per data change), its root elements' `.qu` set to the SAME
+ * `ItemContext` the footer's own already-stamped `<qu-list>` child created
+ * for that item (see `resolveActiveChild()`/`buildReactiveFooterPill()`
+ * below) - a `<qu-view field="...">` inside it is then genuinely,
+ * continuously live, not a one-time snapshot with an accepted staleness
+ * tradeoff. No `pillTemplate` given (or no active item resolved yet) falls
+ * back to showing the section's own `heading`. `views.list` is NOT
+ * supported (only `navigation.list` is, matching this file's existing
+ * scope) - a second axis of "is this list-backed" for `views` too isn't
+ * asked for by any real use case yet.
+ *
+ * `menuThreshold` overflow truncation (below) still applies ONLY to
+ * `buildChrome()`'s plain `items[]` sections (primaryAction/views/settings),
+ * in BOTH sidebar and footer - a `list:`-backed section is exempt in both
+ * places: the sidebar was already exempt (truncating a live, keyed-
+ * reconciled list needs its own design, not assumed for free), and the
+ * footer popup needs no truncation at all - it's already a real scroll
+ * region (`.qu-apptpl-popup`'s own `max-height`/`overflow-y`), unlike the
+ * sidebar's own unbounded column.
  */
-import { buildChrome, normalizeAppConfig, ensureStyle, buildFilterInput } from '@qu/ui';
+import { buildChrome, normalizeAppConfig, ensureStyle, buildFilterInput, buildPopupTrigger, buildPillShell } from '@qu/ui';
 
 const BREAKPOINT = '720px';
 
@@ -84,6 +101,48 @@ function sameListRegistration(a, b) {
   if (!a && !b) return true;
   if (!a || !b) return false;
   return a.path === b.path && a.parent === b.parent && a.template === b.template;
+}
+
+/**
+ * The `<qu-list>`-wiring shared by BOTH the sidebar's reactive section
+ * (`buildReactiveNavSection()`) and the footer's reactive pill+popup
+ * (`buildReactiveFooterPill()`) - creating the element, setting
+ * `path`/`parent`/`.qu`/`.syncFetch`, appending the caller's own `template`
+ * clone, and wiring `onItemStamped`. The two callers differ in what they DO
+ * around this (active-class toggling on every stamped child vs. a single
+ * live pill label) enough that they stay separate functions - this is only
+ * the ~identical setup boilerplate between them.
+ * @returns {HTMLElement} an unconnected `<qu-list>`, not yet appended anywhere
+ */
+function createBoundList(listSpec, { qu, syncFetch, onStamped }) {
+  const listEl = document.createElement('qu-list');
+  listEl.className = 'qu-apptpl-list';
+  if (listSpec.path) listEl.setAttribute('path', listSpec.path);
+  else listEl.setAttribute('parent', listSpec.parent);
+  listEl.qu = qu;
+  if (syncFetch) listEl.syncFetch = syncFetch;
+  listEl.onItemStamped = onStamped;
+  listEl.appendChild(listSpec.template.cloneNode(true));
+  return listEl;
+}
+
+/**
+ * Finds the already-stamped `<qu-list>` child whose own id (the last
+ * segment of its `.qu.ownPath`, the same convention `<qu-list>`'s own
+ * `_render()` uses to derive `itemId`) matches `activeId` - `null` if
+ * `activeId` is unset or nothing matching has stamped in yet (stamping is
+ * async, this can legitimately be true for a whole microtask after
+ * `syncActive()` first runs).
+ */
+function resolveActiveChild(listEl, activeId) {
+  if (activeId == null) return null;
+  for (const child of listEl.children) {
+    if (child.tagName === 'TEMPLATE') continue;
+    const ownPath = child.qu?.ownPath;
+    const itemId = ownPath ? ownPath.slice(ownPath.lastIndexOf('/') + 1) : null;
+    if (itemId === activeId) return child;
+  }
+  return null;
 }
 
 /**
@@ -120,16 +179,13 @@ function buildReactiveNavSection(listSpec, { qu, syncFetch, heading, filter, fil
     link?.classList.toggle('qu-apptpl-item-active', itemId != null && itemId === currentActiveId);
   }
 
-  const listEl = document.createElement('qu-list');
-  listEl.className = 'qu-apptpl-list';
-  if (listSpec.path) listEl.setAttribute('path', listSpec.path);
-  else listEl.setAttribute('parent', listSpec.parent);
-  listEl.qu = qu;
-  if (syncFetch) listEl.syncFetch = syncFetch;
-  listEl.onItemStamped = (els, itemId, item) => {
-    listSpec.onItemStamped?.(els, itemId, item);
-    applyActiveClass(els[0], itemId);
-  };
+  const listEl = createBoundList(listSpec, {
+    qu, syncFetch,
+    onStamped: (els, itemId, item) => {
+      listSpec.onItemStamped?.(els, itemId, item);
+      applyActiveClass(els[0], itemId);
+    },
+  });
 
   if (filter) {
     wrap.appendChild(buildFilterInput(
@@ -137,7 +193,6 @@ function buildReactiveNavSection(listSpec, { qu, syncFetch, heading, filter, fil
       { placeholder: filterPlaceholder },
     ));
   }
-  listEl.appendChild(listSpec.template.cloneNode(true));
   wrap.appendChild(listEl);
 
   // Handles the OTHER direction: activeId changes on an ALREADY-stamped,
@@ -155,6 +210,97 @@ function buildReactiveNavSection(listSpec, { qu, syncFetch, heading, filter, fil
   }
 
   return { el: wrap, syncActive, cleanup: () => {} };
+}
+
+/**
+ * The mobile-footer counterpart to `buildReactiveNavSection()` - a SECOND,
+ * independent `<qu-list>` (same `path`/`parent`, a fresh `template` clone -
+ * the same `<template>` element can't be a child of two `<qu-list>`s) inside
+ * a pill+popup (`buildPillShell()`/`buildPopupTrigger()`, `@qu/ui`). Cheap:
+ * its own `watch()` subscription, never shared with the sidebar's instance -
+ * the two are never visible at the same time anyway (same reasoning
+ * `buildFilterInput()`'s own doc comment already gives for building
+ * independent filter inputs per breakpoint).
+ *
+ * The pill's own visible label tracks the CURRENTLY ACTIVE item, genuinely
+ * live, via `listSpec.pillTemplate` (this file's own top doc comment has the
+ * full "why a template, not a JS callback" reasoning) - `applyPill()` below
+ * re-stamps it ONLY when the resolved active item's own `ownPath` actually
+ * changes (never on every call - re-stamping unchanged would tear down and
+ * recreate whatever reactive elements `pillTemplate` contains, the same
+ * churn class `mountChrome()`'s own `insertBefore` guards exist to prevent
+ * elsewhere in this file).
+ * @returns {{el: HTMLElement, syncActive: (activeId: string|null) => void, cleanup: () => void}}
+ */
+function buildReactiveFooterPill(listSpec, { qu, syncFetch, heading, filter, filterPlaceholder }) {
+  let currentActiveId = null;
+  let appliedOwnPath = null;
+
+  const { btn, labelEl } = buildPillShell(heading ?? 'Menu');
+  labelEl.textContent = heading ?? '';
+
+  /**
+   * `targetEl` is either a STABLE, already-inserted `<qu-list>` child
+   * (`resolveActiveChild()`'s own return, for the `syncActive()` path - an
+   * activeId change on an already-stamped list) or the JUST-stamped
+   * element itself, passed directly by `onStamped` below - NOT re-derived
+   * via `resolveActiveChild()` there, because `<qu-list>`'s own
+   * `onItemStamped` fires BEFORE the stamped element is actually inserted
+   * as a child of `listEl` (see `components.js`'s own doc comment: "before
+   * insertion") - `resolveActiveChild()`'s `listEl.children` walk would
+   * find nothing yet for that case.
+   */
+  function applyPillFor(targetEl) {
+    const ownPath = targetEl?.qu?.ownPath ?? null;
+    if (ownPath === appliedOwnPath) return; // unchanged - do not re-stamp
+    appliedOwnPath = ownPath;
+    labelEl.textContent = '';
+    if (targetEl && listSpec.pillTemplate) {
+      const clone = listSpec.pillTemplate.content.cloneNode(true);
+      // Reuses the SAME ItemContext the footer's own already-stamped
+      // <qu-list> child was given (see components.js's own ItemContext) -
+      // not a new one - so a <qu-view field="..."> inside pillTemplate
+      // resolves against the exact same live data the popup's own row does.
+      for (const el of clone.children) el.qu = targetEl.qu;
+      labelEl.appendChild(clone);
+    } else {
+      labelEl.textContent = heading ?? '';
+    }
+  }
+
+  function applyPill() {
+    applyPillFor(resolveActiveChild(listEl, currentActiveId));
+  }
+
+  const listEl = createBoundList(listSpec, {
+    qu, syncFetch,
+    onStamped: (els, itemId, item) => {
+      listSpec.onItemStamped?.(els, itemId, item);
+      if (itemId === currentActiveId) applyPillFor(els[0]);
+    },
+  });
+
+  const bodyWrap = document.createElement('div');
+  bodyWrap.className = 'qu-apptpl-section';
+  if (filter) {
+    bodyWrap.appendChild(buildFilterInput(
+      () => [...listEl.children].filter((c) => c.tagName !== 'TEMPLATE').map((el) => ({ el, search: el.dataset.search ?? '' })),
+      { placeholder: filterPlaceholder },
+    ));
+  }
+  bodyWrap.appendChild(listEl);
+
+  const { el, cleanup } = buildPopupTrigger({ triggerEl: btn, bodyEl: bodyWrap, popupPosition: 'left' });
+
+  // Handles the OTHER direction, same as buildReactiveNavSection()'s own
+  // syncActive(): activeId changes (a route change) on an ALREADY-stamped,
+  // otherwise-unchanged list - onStamped only fires for NEWLY stamped items.
+  function syncActive(activeId) {
+    currentActiveId = activeId;
+    applyPill();
+  }
+
+  return { el, syncActive, cleanup };
 }
 
 /**
@@ -228,28 +374,39 @@ export function mountChrome(container, { qu, syncFetch, menuThreshold = 8 } = {}
   root.appendChild(layout);
   container.appendChild(root);
 
-  // The sidebar is a PERSISTENT element, created once, NEVER `.remove()`d as
-  // a whole and recreated - only its own children get swapped per rebuild.
-  // This matters specifically because a `list:`-registered section's
-  // `reactiveNav.el` (containing a live `<qu-list>`) must never be
-  // disconnected from the document even momentarily: an explicit
-  // `.remove()` on an ANCESTOR followed by a later re-append fires
-  // `<qu-list>`'s `disconnectedCallback()` (tears down its `watch()`
-  // subscription AND wipes every stamped item) and then
+  // BOTH the sidebar AND the footer are PERSISTENT elements, created once,
+  // NEVER `.remove()`d as a whole and recreated - only their own children
+  // get swapped per rebuild. The footer became persistent for the exact
+  // same reason the sidebar already was: a `list:`-registered section's own
+  // reactive element (`reactiveNav.el` in the sidebar, `reactiveFooter.el`
+  // in the footer) must never be disconnected from the document even
+  // momentarily - an explicit `.remove()` on an ANCESTOR followed by a
+  // later re-append fires `<qu-list>`'s `disconnectedCallback()` (tears
+  // down its `watch()` subscription AND wipes every stamped item) and then
   // `connectedCallback()` again on re-insertion (a fresh, ASYNC re-fetch) -
   // exactly the "full rebuild" this whole mechanism exists to avoid.
   // Confirmed empirically (not just a theoretical concern, and not saved by
-  // `insertBefore()` alone either - see `rebuild()`'s own `sidebarEl.
-  // firstChild !== reactiveNav.el` guard below): even calling
-  // `insertBefore(node, ref)` to "move" a node that's already exactly at
-  // the target position still fires disconnect+reconnect, so the code
-  // below skips that call entirely, not just relies on insertBefore being
-  // a no-op for an unchanged position.
+  // `insertBefore()`/`appendChild()` alone either - see `rebuild()`'s own
+  // three guards below): even calling `insertBefore(node, ref)` (or
+  // `appendChild(node)`, the footer's own equivalent) to "move" a node
+  // that's already exactly at the target position still fires
+  // disconnect+reconnect, so the code below skips those calls entirely, not
+  // just relies on either being a no-op for an unchanged position.
+  //
+  // The footer is made UNCONDITIONALLY persistent (not only when a `list:`
+  // section is actually present) deliberately - a route where `navigation`
+  // flips between the `list:`/`items[]` forms (a real sequence, not
+  // hypothetical: Forum's own board→channel→topic navigation does exactly
+  // this) would otherwise hit an untested structural-switch path at the
+  // exact moment a live `<qu-list>` is most exposed. Unconditional costs a
+  // few extra lines and keeps both containers reasoning identically.
   const sidebarEl = document.createElement('aside');
   sidebarEl.className = 'qu-apptpl-sidebar';
-  let footerEl = null;
+  const footerEl = document.createElement('div');
+  footerEl.className = 'qu-apptpl-footer';
   let cleanupChrome = () => {};
-  let reactiveNav = null; // {el, syncActive, cleanup, registration} | null
+  let reactiveNav = null; // {el, syncActive, cleanup, registration} | null - sidebar
+  let reactiveFooter = null; // same shape - footer pill+popup
 
   let epoch = 0;
   let currentConfig = {};
@@ -260,33 +417,56 @@ export function mountChrome(container, { qu, syncFetch, menuThreshold = 8 } = {}
     reactiveNav = null;
   }
 
+  function teardownReactiveFooter() {
+    reactiveFooter?.el?.remove();
+    reactiveFooter?.cleanup?.();
+    reactiveFooter = null;
+  }
+
   function rebuild() {
     const navList = currentConfig.navigation?.list ?? null;
     const passthrough = { ...currentConfig };
-    if (navList) passthrough.navigation = null; // reactive section spliced in separately below
+    if (navList) passthrough.navigation = null; // reactive section(s) spliced in separately below
 
     const cfg = normalizeAppConfig({ ...passthrough, render: () => {} });
 
-    cleanupChrome();
-    footerEl?.remove();
-    if (!navList) teardownReactiveNav();
+    // `navigation.list`'s own `desktopOnly` is honored exactly like the
+    // `items[]` form already does (`buildChrome()`'s own `mobileNav`
+    // computation) - `buildChrome()` never sees `cfg.navigation` for a
+    // `list:` registration at all (nulled out above), so it has no way to
+    // know a mobile footer pill is coming unless told explicitly.
+    const hasExternalMobileNav = !!(navList && !currentConfig.navigation.desktopOnly);
 
-    const built = buildChrome(cfg);
+    cleanupChrome();
+    if (!navList) teardownReactiveNav();
+    if (!hasExternalMobileNav) teardownReactiveFooter();
+
+    const built = buildChrome(cfg, { hasExternalMobileNav });
     cleanupChrome = built.cleanup;
-    footerEl = built.footerEl;
+    // The footer's own class (e.g. the `fabOnly` variant) still comes fresh
+    // from `buildChrome()` every rebuild - only the ELEMENT itself is
+    // persistent, not its class name.
+    footerEl.className = built.footerEl?.className ?? 'qu-apptpl-footer';
 
     // Move buildChrome()'s own freshly-built sections into the PERSISTENT
-    // sidebarEl, preserving `reactiveNav.el` (if kept) rather than wiping
-    // and rebuilding it - everything from `built.sidebarEl` is disposable,
-    // brand new DOM every call (mountAppTemplate()'s own per-call
-    // semantics), so only ITS children are worth keeping; the temporary
-    // wrapper itself is discarded.
+    // sidebarEl/footerEl, preserving `reactiveNav.el`/`reactiveFooter.el`
+    // (if kept) rather than wiping and rebuilding them - everything from
+    // `built.sidebarEl`/`built.footerEl` is disposable, brand new DOM every
+    // call (mountAppTemplate()'s own per-call semantics), so only ITS
+    // children are worth keeping; the temporary wrapper itself is discarded.
     for (const child of [...sidebarEl.children]) {
       if (reactiveNav && child === reactiveNav.el) continue;
       child.remove();
     }
     if (built.sidebarEl) {
       for (const child of [...built.sidebarEl.children]) sidebarEl.appendChild(child);
+    }
+    for (const child of [...footerEl.children]) {
+      if (reactiveFooter && child === reactiveFooter.el) continue;
+      child.remove();
+    }
+    if (built.footerEl) {
+      for (const child of [...built.footerEl.children]) footerEl.appendChild(child);
     }
 
     if (navList) {
@@ -310,6 +490,21 @@ export function mountChrome(container, { qu, syncFetch, menuThreshold = 8 } = {}
       // positioned is what actually keeps `<qu-list>` connected without
       // interruption, not `insertBefore()`'s own semantics alone.
       if (sidebarEl.firstChild !== reactiveNav.el) sidebarEl.insertBefore(reactiveNav.el, sidebarEl.firstChild);
+
+      if (hasExternalMobileNav) {
+        if (!reactiveFooter || !sameListRegistration(reactiveFooter.registration, registration)) {
+          teardownReactiveFooter();
+          reactiveFooter = buildReactiveFooterPill(navList, {
+            qu, syncFetch,
+            heading: currentConfig.navigation.heading,
+            filter: !!currentConfig.navigation.filter,
+            filterPlaceholder: currentConfig.navigation.heading ? `Filter ${currentConfig.navigation.heading}…` : 'Filter…',
+          });
+          reactiveFooter.registration = registration;
+        }
+        reactiveFooter.syncActive(currentConfig.navigation.activeId ?? null);
+        if (footerEl.firstChild !== reactiveFooter.el) footerEl.insertBefore(reactiveFooter.el, footerEl.firstChild);
+      }
     }
 
     applyMenuThreshold(sidebarEl, menuThreshold);
@@ -318,17 +513,22 @@ export function mountChrome(container, { qu, syncFetch, menuThreshold = 8 } = {}
     if (currentConfig.fullHeight && built.hasMobileFooterContent && !built.fabOnly) root.classList.add('qu-apptpl-root--has-footer-bar');
     contentSlot.classList.toggle('qu-apptpl-content--with-bar', built.hasMobileFooterContent && !built.fabOnly && !currentConfig.fullHeight);
 
-    // Same "skip insertBefore() entirely when already correctly
-    // positioned" guard as `reactiveNav.el` above, one level up: without
-    // it, EVERY rebuild() call re-disconnects/reconnects the whole
-    // persistent sidebarEl subtree (including any live <qu-list> inside
-    // it) via `layout`, even when sidebarEl was already exactly here.
+    // Same "skip insertBefore()/appendChild() entirely when already
+    // correctly positioned" guard as `reactiveNav.el`/`reactiveFooter.el`
+    // above, one level up: without it, EVERY rebuild() call
+    // re-disconnects/reconnects the whole persistent sidebarEl/footerEl
+    // subtree (including any live <qu-list> inside either) via
+    // `layout`/`root`, even when they were already exactly here.
     if (sidebarEl.children.length > 0) {
       if (layout.firstChild !== sidebarEl) layout.insertBefore(sidebarEl, contentSlot);
     } else {
       sidebarEl.remove(); // nothing to show - safe to fully detach, reactiveNav (if any) was already torn down above when navList became absent
     }
-    if (footerEl) root.appendChild(footerEl);
+    if (footerEl.children.length > 0) {
+      if (root.lastChild !== footerEl) root.appendChild(footerEl);
+    } else {
+      footerEl.remove(); // nothing to show - reactiveFooter (if any) was already torn down above when hasExternalMobileNav became false
+    }
   }
 
   /**
@@ -359,6 +559,7 @@ export function mountChrome(container, { qu, syncFetch, menuThreshold = 8 } = {}
   function stop() {
     cleanupChrome();
     teardownReactiveNav();
+    teardownReactiveFooter();
   }
 
   return { contentSlot, begin, stop };

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { installDom } from '../src/testing.js';
 
 installDom();
-const { mountAppTemplate, normalizeAppConfig, buildChrome } = await import('../src/app-template.js');
+const { mountAppTemplate, normalizeAppConfig, buildChrome, buildPopupTrigger } = await import('../src/app-template.js');
 
 const NAV = {
   items: [
@@ -497,4 +497,58 @@ test('filter: true also renders a search input in the mobile popup, filtering in
   input.value = 'team';
   input.dispatchEvent(new window.Event('input'));
   assert.deepEqual(links(), ['Team Chat']);
+});
+
+// ===== hasExternalMobileNav / bodyEl (apps/shell/src/chrome.js's own
+// list:-backed mobile-footer pill support - see that file's own doc
+// comment for the full "why") =========================================
+
+test('buildChrome({hasExternalMobileNav: true}) forces a real footer bar even with no navigation/views/settings of its own, and suppresses fabOnly', () => {
+  const cfg = normalizeAppConfig({ primaryAction: { label: 'New', href: '#/new' }, render: () => {} });
+  const withoutExternalNav = buildChrome(cfg);
+  assert.equal(withoutExternalNav.fabOnly, true); // baseline: primaryAction alone is fab-only
+
+  const withExternalNav = buildChrome(cfg, { hasExternalMobileNav: true });
+  assert.equal(withExternalNav.hasMobileFooterContent, true);
+  assert.equal(withExternalNav.fabOnly, false);
+  assert.ok(withExternalNav.footerEl); // a real bar, not fab-only, for the caller to splice its own pill into
+});
+
+test('buildChrome({hasExternalMobileNav: true}) with genuinely nothing else set still produces a real footer bar', () => {
+  const cfg = normalizeAppConfig({ render: () => {} });
+  const withoutExternalNav = buildChrome(cfg);
+  assert.equal(withoutExternalNav.hasMobileFooterContent, false);
+  assert.equal(withoutExternalNav.footerEl, null);
+
+  const withExternalNav = buildChrome(cfg, { hasExternalMobileNav: true });
+  assert.equal(withExternalNav.hasMobileFooterContent, true);
+  assert.equal(withExternalNav.fabOnly, false);
+  assert.ok(withExternalNav.footerEl);
+});
+
+test('buildPopupTrigger({bodyEl}) appends the given body instead of building static items, and still opens/closes correctly', () => {
+  const container = makeContainer();
+  const triggerEl = document.createElement('button');
+  triggerEl.type = 'button';
+  triggerEl.textContent = 'Open';
+  const bodyEl = document.createElement('div');
+  bodyEl.className = 'my-custom-body';
+  bodyEl.textContent = 'custom content';
+
+  const { el } = buildPopupTrigger({ triggerEl, bodyEl });
+  container.appendChild(el);
+
+  const popup = container.querySelector('.qu-apptpl-popup');
+  assert.ok(popup.contains(bodyEl));
+  assert.equal(popup.querySelector('a'), null); // no static <a> items built when bodyEl is given
+  assert.equal(popup.hidden, true);
+
+  triggerEl.click();
+  assert.equal(popup.hidden, false);
+  assert.equal(triggerEl.getAttribute('aria-expanded'), 'true');
+
+  const escEvent = new window.Event('keydown');
+  escEvent.key = 'Escape';
+  document.dispatchEvent(escEvent);
+  assert.equal(popup.hidden, true);
 });
