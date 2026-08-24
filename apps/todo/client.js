@@ -47,12 +47,20 @@
  * without a bespoke text-parsing pipeline. Due date is a plain native
  * `<input type="date">`, no quick-pick trigger yet.
  *
- * ROUTING - `#/todo` (my lists), `#/todo/manage` (rename/share/delete/leave,
- * full-page - mirrors Calendar's own `/manage`), `#/todo/mine` (every task,
- * across every list, currently assigned to me), `#/todo/<listId>` (that
- * list's own tasks - unlike Calendar's merged multi-calendar view, each
- * ToDo list gets its own dedicated page), `#/todo/<listId>/share`,
- * `#/todo/<listId>/new[/<parentTaskId>]`, `#/todo/<listId>/<taskId>`.
+ * ROUTING - `#/todo` (the app's DEFAULT view: "Assigned to me", every task
+ * across every list currently assigned to this identity), `#/todo/all`
+ * (every task in every list, regardless of assignee - deliberately a
+ * SEPARATE aggregate from the default view, not the same set), `#/todo/new`
+ * (create a list), `#/todo/manage` (rename/share/delete/leave, full-page -
+ * mirrors Calendar's own `/manage`), `#/todo/<listId>` (that list's own
+ * tasks - unlike Calendar's merged multi-calendar view, each ToDo list gets
+ * its own dedicated page), `#/todo/<listId>/share`,
+ * `#/todo/<listId>/new[/<parentTaskId>]`, `#/todo/<listId>/<taskId>`. Every
+ * one of these top-level "my tasks"/"all tasks"/list pages shares the same
+ * `ctx.chrome`-driven switcher (`fetchSwitcherItems()`) so filtering is
+ * always one tap away: pick a specific list, or "All tasks", from the same
+ * navigation sidebar/pill everywhere (docs/app-navigation-standard.md Rule
+ * 5a) - never a bespoke picker per page.
  */
 import { watch } from '@qu/reactive';
 import { paths, THREAD_PRESETS, formatActorLabel, matchesActorQuery } from '@qu/services';
@@ -64,7 +72,8 @@ const SPACE_ID = '63f5cc6f-62f6-4a43-a889-33900138f8b0'; // this app's own manif
 
 const DICT = {
   en: {
-    title: 'ToDo', myTasks: 'Assigned to me', noAssignedTasks: 'Nothing assigned to you right now.',
+    myTasks: 'Assigned to me', noAssignedTasks: 'Nothing assigned to you right now.',
+    allTasks: 'All tasks', noAllTasksAnywhere: 'No tasks in any of your lists yet.',
     newListPlaceholder: 'New list name…', create: 'Create', noLists: 'No lists yet — create one below, or wait for an invite.',
     untitled: 'Untitled list', sharedBadge: 'Shared', manageLists: 'Manage lists',
     newList: 'New list', listsMenu: 'Lists',
@@ -90,7 +99,8 @@ const DICT = {
     unknownPerson: '~{pub}…',
   },
   de: {
-    title: 'ToDo', myTasks: 'Mir zugewiesen', noAssignedTasks: 'Dir ist gerade nichts zugewiesen.',
+    myTasks: 'Mir zugewiesen', noAssignedTasks: 'Dir ist gerade nichts zugewiesen.',
+    allTasks: 'Alle Aufgaben', noAllTasksAnywhere: 'Noch keine Aufgaben in deinen Listen.',
     newListPlaceholder: 'Name der neuen Liste…', create: 'Erstellen', noLists: 'Noch keine Listen — unten eine anlegen oder auf eine Einladung warten.',
     untitled: 'Unbenannte Liste', sharedBadge: 'Geteilt', manageLists: 'Listen verwalten',
     newList: 'Neue Liste', listsMenu: 'Listen',
@@ -121,11 +131,7 @@ const { t } = createI18n(DICT);
 const STYLE_ID = 'qu-todo-style';
 const STYLE = `
   .qu-todo-page { max-width: 34rem; padding-bottom: 3rem; }
-  .qu-todo-mine-link { display: inline-block; margin-bottom: 0.8rem; }
   .qu-todo-empty { opacity: 0.7; }
-  .qu-todo-lists { list-style: none; margin: 0 0 1rem; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
-  .qu-todo-lists li { display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0.7rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); }
-  .qu-todo-row-title { flex: 1; text-decoration: none; color: inherit; }
   .qu-todo-badge { font-size: 0.75em; opacity: 0.65; border: 1px solid var(--qu-color-border, #8884); border-radius: 999px; padding: 0.1rem 0.55rem; }
   .qu-todo-new { display: flex; gap: 0.5rem; }
   .qu-todo-new input { flex: 1; padding: 0.55rem; font: inherit; border-radius: var(--qu-radius-sm, 0.3rem); border: 1px solid var(--qu-color-border, #8884); box-sizing: border-box; }
@@ -168,7 +174,10 @@ function listHash(listId) { return `#/todo/${listId}`; }
 function shareHash(listId) { return `#/todo/${listId}/share`; }
 function newTaskHash(listId, parentId) { return parentId ? `#/todo/${listId}/new/${parentId}` : `#/todo/${listId}/new`; }
 function taskHash(listId, taskId) { return `#/todo/${listId}/${taskId}`; }
-const mineHash = '#/todo/mine';
+/** The default landing route (Rule "default view = my tasks") - "Assigned to me", across every list. */
+const mineHash = '#/todo';
+/** Every task, in every list this identity can see - deliberately NOT the same set as `mineHash` (all tasks vs. all MY tasks). */
+const allHash = '#/todo/all';
 /** Resolved against the full current URL (not just origin), same reasoning apps/forum's/apps/chat's own absoluteMessagePermalink() give - survives being pasted elsewhere or subpath deployments. */
 function absoluteHash(hash) { return new URL(hash, window.location.href).href; }
 
@@ -227,7 +236,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch,
   let myActorPub = null;
   let pendingInvitesChecked = false; // discoverPendingInvites() - runs once per mount, mirrors apps/calendar's own guard
 
-  const seg1 = segments[1] ?? null; // listId | 'mine' | 'manage' | 'new' | null
+  const seg1 = segments[1] ?? null; // listId | 'all' | 'manage' | 'new' | null
   const sub = segments[2] ?? null; // null | 'share' | 'new' | <taskId>
   const extra = segments[3] ?? null; // 'new'-only: an optional parent task id (subtask creation)
 
@@ -235,13 +244,18 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch,
     myActorPub = await services.actors.whoAmI();
     if (stopped) return;
     if (seg1 === 'manage') { await renderManagePage(); return; }
-    if (seg1 === 'mine') { await renderMyTasksPage(); return; }
-    // 'new' (a fixed literal - crypto.randomUUID() never produces it, same
-    // reasoning apps/geochase's own 'all'-sentinel comment gives) is the
-    // dedicated "create a list" page (see renderHeaderNavPoints()'s own doc
-    // comment), never a listId.
+    // 'new'/'all' (fixed literals - crypto.randomUUID() never produces
+    // either, same reasoning apps/geochase's own 'all'-sentinel comment
+    // gives) are never a listId. 'new' is the dedicated "create a list" page
+    // (see renderHeaderNavPoints()'s own doc comment); 'all' is the "every
+    // task in every list" aggregate - see allHash's own doc comment above.
     if (seg1 === 'new') { await renderNewListPage(); return; }
-    if (!seg1) { await renderMain(); return; }
+    if (seg1 === 'all') { await renderAllTasksPage(); return; }
+    // No segment at all is the app's default landing view: "Assigned to
+    // me", across every list - not the old bare list-of-lists picker (that
+    // job is now covered by the chrome navigation sidebar/pill everywhere,
+    // and by #/todo/manage for actual list management).
+    if (!seg1) { await renderMyTasksPage(); return; }
     if (!sub) { await renderListPage(seg1); return; }
     if (sub === 'share') { await renderSharePage(seg1); return; }
     if (sub === 'new') { await renderNewTaskForm(seg1, extra || null); return; }
@@ -281,16 +295,20 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch,
     });
   }
 
+  /** Runs `discoverPendingInvites()` exactly once per mount, regardless of which view happens to be the first one rendered (used to only be reachable via the old bare `#/todo` list picker - now every "landing" view calls this itself). */
+  async function ensurePendingInvitesChecked() {
+    if (pendingInvitesChecked) return;
+    pendingInvitesChecked = true;
+    await discoverPendingInvites();
+  }
+
   // ---------------------------------------------------------------------
-  // Main view - #/todo
+  // Manage page's own list loader - #/todo/manage
   // ---------------------------------------------------------------------
   async function loadListInfos(onChange) {
     subscribe?.(paths.spacePath(SPACE_ID));
-    if (!pendingInvitesChecked) {
-      pendingInvitesChecked = true;
-      await discoverPendingInvites();
-      if (stopped) return null;
-    }
+    await ensurePendingInvitesChecked();
+    if (stopped) return null;
     const mine = await listMine();
     if (stopped) return null;
 
@@ -306,23 +324,29 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch,
   }
 
   /**
-   * The Lists <-> "Mir zugewiesen" switcher's own nav items - "Mir
-   * zugewiesen" first, then every list this identity is a member of. Fed
-   * straight into `mountAppTemplate()`'s own `navigation.items` (already the
-   * exact `{id, label, href, badge}` shape it expects - see `@qu/ui`'s
-   * `app-template.js` `AppTemplateLinkItem` typedef) by both
-   * `renderListPage()` and `renderMyTasksPage()`, following
+   * The switcher's own nav items - "Assigned to me" (the default view) and
+   * "All tasks" (every task, in every list - deliberately a SEPARATE
+   * aggregate from "Assigned to me", see allHash's own doc comment) first,
+   * then every individual list this identity is a member of, so picking a
+   * specific list filters down to just that one. Fed straight into
+   * `mountAppTemplate()`'s own `navigation.items` (already the exact
+   * `{id, label, href, badge}` shape it expects - see `@qu/ui`'s
+   * `app-template.js` `AppTemplateLinkItem` typedef) by `renderListPage()`,
+   * `renderMyTasksPage()`, and `renderAllTasksPage()`, following
    * `apps/chat/client.js`'s own `roomsToNavItems()`/`stopTemplate.update()`
    * pattern (docs/app-navigation-standard.md Rule 5), so a user viewing one
-   * list, or their assigned-to-me aggregate, has a direct way to jump to
-   * another one. Deliberately a plain, unwatched read (unlike
-   * loadListInfos() above) - it must NOT call clearWatches() itself, which
-   * would wipe out whichever page-specific watch(es) the caller already
-   * pushed for ITS OWN list/task data.
+   * list, or either aggregate, has a direct way to jump to another one.
+   * Deliberately a plain, unwatched read (unlike loadListInfos() above) - it
+   * must NOT call clearWatches() itself, which would wipe out whichever
+   * page-specific watch(es) the caller already pushed for ITS OWN list/task
+   * data.
    */
   async function fetchSwitcherItems() {
     const mine = await listMine();
-    const items = [{ id: 'mine', label: t('myTasks'), href: mineHash }];
+    const items = [
+      { id: 'mine', label: t('myTasks'), href: mineHash },
+      { id: 'all', label: t('allTasks'), href: allHash },
+    ];
     for (const l of mine) {
       const meta = await fetchMeta(l.id);
       if (!meta) continue;
@@ -339,13 +363,13 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch,
   /**
    * The "create a list" form itself - shared by the dedicated `#/todo/new`
    * page below (also reachable as `primaryAction` on every list-picker-ish
-   * route - see renderMain()'s own `mountAppTemplate()` call, the SAME
-   * "Rule 5" move `apps/chat/client.js` already made for "+ New group") AND
-   * the inline copy still sitting at the bottom of `#/todo`/`#/todo/manage` -
-   * list creation was deliberately made reachable from BOTH places rather
-   * than moved wholesale, unlike Forum's channel creation, since a list
-   * (unlike a channel) is something users create far more casually/often
-   * while already looking at their list picker.
+   * route, via `ctx.chrome.set()` - the same "Rule 5a" move
+   * `apps/chat/client.js` already made for "+ New group") AND the inline
+   * copy always shown at the bottom of `#/todo`, `#/todo/all`, and
+   * `#/todo/manage` - list creation was deliberately made reachable from
+   * BOTH places rather than moved wholesale, unlike Forum's channel
+   * creation, since a list (unlike a channel) is something users create far
+   * more casually/often while already looking at their task list.
    * @param {(listId: string) => Promise<void>} onCreated
    */
   function newListForm(onCreated) {
@@ -391,58 +415,6 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch,
         content.appendChild(page);
       },
     });
-  }
-
-  async function renderMain() {
-    if (stopped) return;
-    const infos = await loadListInfos(renderMain);
-    if (!infos) return;
-    chrome.set({
-      primaryAction: { label: t('newList'), href: '#/todo/new', icon: '✏️' },
-      settings: { items: [{ label: t('manageLists'), href: '#/todo/manage' }] },
-    });
-
-    container.textContent = '';
-    const page = document.createElement('div');
-    page.className = 'qu-todo-page';
-    const h1 = document.createElement('h1');
-    h1.textContent = t('title');
-    page.appendChild(h1);
-
-    const mineLink = document.createElement('a');
-    mineLink.className = 'qu-todo-mine-link';
-    mineLink.href = '#/todo/mine';
-    mineLink.textContent = t('myTasks');
-    page.appendChild(mineLink);
-
-    if (infos.length === 0) {
-      const empty = document.createElement('p');
-      empty.className = 'qu-todo-empty';
-      empty.textContent = t('noLists');
-      page.appendChild(empty);
-    } else {
-      const ul = document.createElement('ul');
-      ul.className = 'qu-todo-lists';
-      for (const info of infos) {
-        const li = document.createElement('li');
-        const a = document.createElement('a');
-        a.href = listHash(info.id);
-        a.className = 'qu-todo-row-title';
-        a.textContent = info.meta.title || t('untitled');
-        li.appendChild(a);
-        if (info.role && info.role !== 'owner') {
-          const badge = document.createElement('span');
-          badge.className = 'qu-todo-badge';
-          badge.textContent = t('sharedBadge');
-          li.appendChild(badge);
-        }
-        ul.appendChild(li);
-      }
-      page.appendChild(ul);
-    }
-
-    page.appendChild(newListForm(async () => { await renderMain(); }));
-    container.appendChild(page);
   }
 
   // ---------------------------------------------------------------------
@@ -508,12 +480,14 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch,
   }
 
   // ---------------------------------------------------------------------
-  // My Tasks aggregate - #/todo/mine
+  // My Tasks aggregate - #/todo - the app's DEFAULT landing view.
   // ---------------------------------------------------------------------
   async function renderMyTasksPage() {
     if (stopped) return;
     clearWatches();
     subscribe?.(paths.spacePath(SPACE_ID));
+    await ensurePendingInvitesChecked();
+    if (stopped) return;
     const mine = await listMine();
     if (stopped) return;
 
@@ -552,23 +526,105 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch,
     page.appendChild(h1);
     page.appendChild(copyLinkButton(mineHash));
 
-    if (assigned.length === 0) {
+    // No list at all yet - this identity has nothing to be assigned a task
+    // IN, so lead with "create your first list" instead of "nothing
+    // assigned" (which would otherwise be technically true but useless).
+    if (mine.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'qu-todo-empty';
+      empty.textContent = t('noLists');
+      page.appendChild(empty);
+    } else if (assigned.length === 0) {
       const empty = document.createElement('p');
       empty.className = 'qu-todo-empty';
       empty.textContent = t('noAssignedTasks');
       page.appendChild(empty);
-      container.appendChild(page);
-      return;
+    } else {
+      const ul = document.createElement('ul');
+      ul.className = 'qu-todo-tasks';
+      for (const task of assigned) {
+        ul.appendChild(renderTaskRow(task.listId, task, task.editable, {
+          listLabel: task.listTitle,
+          onToggled: renderMyTasksPage, // a just-completed task must drop out of THIS (not-done-only) aggregate immediately
+        }));
+      }
+      page.appendChild(ul);
     }
-    const ul = document.createElement('ul');
-    ul.className = 'qu-todo-tasks';
-    for (const task of assigned) {
-      ul.appendChild(renderTaskRow(task.listId, task, task.editable, {
-        listLabel: task.listTitle,
-        onToggled: renderMyTasksPage, // a just-completed task must drop out of THIS (not-done-only) aggregate immediately
-      }));
+    // Always reachable, same as #/todo/manage's own inline form - see
+    // newListForm()'s own doc comment on why list creation stays available
+    // from casual browsing, not just the dedicated #/todo/new page/primaryAction.
+    page.appendChild(newListForm(async () => { await renderMyTasksPage(); }));
+    container.appendChild(page);
+  }
+
+  // ---------------------------------------------------------------------
+  // All Tasks aggregate - #/todo/all - every task, in every list this
+  // identity can see, regardless of assignee - deliberately NOT the same
+  // set as "Assigned to me" above (see allHash's own doc comment). Unlike
+  // that view, a task's done state is never filtered out here (so it stays
+  // a genuine "everything in every list" overview, not a work queue) -
+  // toggling one just re-renders in place instead of dropping the row.
+  // ---------------------------------------------------------------------
+  async function renderAllTasksPage() {
+    if (stopped) return;
+    clearWatches();
+    subscribe?.(paths.spacePath(SPACE_ID));
+    await ensurePendingInvitesChecked();
+    if (stopped) return;
+    const mine = await listMine();
+    if (stopped) return;
+
+    const allTasks = [];
+    for (const l of mine) {
+      unwatches.push(watch(qu, paths.documentPath(SPACE_ID, itemsResourceId(l.id)), () => renderAllTasksPage(), { initial: false, syncFetch }));
+      const meta = await fetchMeta(l.id);
+      const doc = await fetchItems(l.id);
+      const editable = canEdit(roleOf(meta, myActorPub));
+      for (const task of doc.items ?? []) {
+        allTasks.push({ ...task, listId: l.id, listTitle: meta?.title || t('untitled'), editable });
+      }
     }
-    page.appendChild(ul);
+    allTasks.sort((a, b) => (a.dueDate ?? Infinity) - (b.dueDate ?? Infinity));
+    if (stopped) return;
+    const switcherItems = await fetchSwitcherItems();
+    if (stopped) return;
+
+    chrome.set({
+      primaryAction: { label: t('newList'), href: '#/todo/new', icon: '✏️' },
+      navigation: { items: switcherItems, activeId: 'all', heading: t('listsMenu'), desktopOnly: true },
+      settings: { items: [{ label: t('manageLists'), href: '#/todo/manage' }] },
+    });
+
+    container.textContent = '';
+    const page = document.createElement('div');
+    page.className = 'qu-todo-page';
+    const h1 = document.createElement('h1');
+    h1.textContent = t('allTasks');
+    page.appendChild(h1);
+    page.appendChild(copyLinkButton(allHash));
+
+    if (mine.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'qu-todo-empty';
+      empty.textContent = t('noLists');
+      page.appendChild(empty);
+    } else if (allTasks.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'qu-todo-empty';
+      empty.textContent = t('noAllTasksAnywhere');
+      page.appendChild(empty);
+    } else {
+      const ul = document.createElement('ul');
+      ul.className = 'qu-todo-tasks';
+      for (const task of allTasks) {
+        ul.appendChild(renderTaskRow(task.listId, task, task.editable, {
+          listLabel: task.listTitle,
+          onToggled: renderAllTasksPage,
+        }));
+      }
+      page.appendChild(ul);
+    }
+    page.appendChild(newListForm(async () => { await renderAllTasksPage(); }));
     container.appendChild(page);
   }
 
@@ -578,15 +634,18 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch,
   /**
    * @param {string} listId @param {object} item @param {boolean} editable
    * @param {{listLabel?: string, onToggled?: () => Promise<void>}} [options]
-   *   `listLabel` - shown as a small "jump to this list" link when set (the
-   *   "Mir zugewiesen" aggregate spans multiple lists, so each row needs to
-   *   say/link WHICH one - see renderMyTasksPage()'s own call site; the
+   *   `listLabel` - shown as a small "jump to this list" link when set (both
+   *   aggregates - `renderMyTasksPage()`/`renderAllTasksPage()` - span
+   *   multiple lists, so each row needs to say/link WHICH one; the
    *   single-list page never passes it, since that context is already the
    *   page's own <h1>). `onToggled` - called after a checkbox toggle lands;
-   *   renderMyTasksPage() uses this to re-run itself, since that aggregate
+   *   `renderMyTasksPage()` uses this to re-run itself, since that aggregate
    *   only ever shows NOT-done tasks, so a just-completed one must drop out
    *   of the list immediately, not just gain a strikethrough in place (what
-   *   the plain list page's own checkbox already does with no callback).
+   *   the plain list page's own checkbox already does with no callback);
+   *   `renderAllTasksPage()` also re-runs itself, purely so the row's own
+   *   strikethrough reflects the new done state in place (nothing drops out
+   *   of that aggregate on toggle).
    */
   function renderTaskRow(listId, item, editable, { listLabel, onToggled } = {}) {
     const li = document.createElement('li');
