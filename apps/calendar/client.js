@@ -48,11 +48,11 @@
  *     persistent sidebar from ~880px up) + the combined Day/Week/Month/List view.
  *   - `#/calendar/<day|week|month|list>` (optionally `/<cursorMs>`) - the
  *     SAME combined view, with a specific view mode (and, optionally, the
- *     specific date it should open on) as a real link -
- *     `mountAppTemplate()`'s own `views` field, see this file's own
- *     VIEW_KEYS doc comment further down. `day`/`week`/`month`/`list` are
- *     reserved words at this position (calendar ids are UUIDs, never
- *     collide - same trick `manage`/`from-message` below already use).
+ *     specific date it should open on) as a real link - `ctx.chrome`'s own
+ *     `views` field, see this file's own VIEW_KEYS doc comment further
+ *     down. `day`/`week`/`month`/`list` are reserved words at this
+ *     position (calendar ids are UUIDs, never collide - same trick
+ *     `manage`/`from-message` below already use).
  *   - `#/calendar/<calId>` - open an invited calendar (stars it if this
  *     identity is actually a member, else explains why it can't).
  *   - `#/calendar/<calId>/share` - owner-only: rename, color, members,
@@ -73,7 +73,7 @@
 import { watch } from '@qu/reactive';
 import { paths, THREAD_PRESETS, formatActorLabel, matchesActorQuery } from '@qu/services';
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme, renderSubpage, mountContextSwitcher, renderContextListPage, mountAppHeaderAction, renderNavPointsMenu, mountActorPicker, mountAppTemplate } from '@qu/ui';
+import { injectStyle, ensureTheme, renderSubpage, mountContextSwitcher, renderContextListPage, mountActorPicker } from '@qu/ui';
 
 const SPACE_ID = 'ff73365b-144a-4285-8e98-ac7f9928a95f'; // this app's own manifest.spaceId - see index.js's own copy of this constant
 const PALETTE = ['#e0483e', '#3e7fe0', '#3ea05e', '#d0a02a', '#9a4fe0', '#e0648a', '#2ab3a6', '#c47a2a'];
@@ -421,47 +421,9 @@ function mountCalendarActorPicker(container, { services, subscribe, ...opts }) {
 }
 
 // ===========================================================================
-// Header action - "+ New event" (see docs/app-navigation-standard.md Rule 2)
-// ===========================================================================
-
-/**
- * The `shell.headerNavPoints` contributor (see `apps/calendar/manifest.quapp`'s
- * `contributes`) - shows a single "+" icon in the GLOBAL header, only while
- * Calendar is the active app, linking straight to the New Event page for the
- * first calendar this identity can actually edit. Replaces the old floating
- * action button (mobile) + inline toolbar link (desktop) - this ONE
- * affordance is reachable at every width, since the global header is always
- * visible, so nothing mobile-specific is lost.
- * @param {HTMLElement} container
- * @param {{getContext: Function, onContextChange: Function, services: object, qu: import('@qu/core').QuStore}} payload
- */
-export function renderHeaderNavPoints(container, { getContext, onContextChange, services, qu }) {
-  mountAppHeaderAction(container, {
-    appId: 'calendar', getContext, onContextChange,
-    render: (wrap) => {
-      let stopped = false;
-      (async () => {
-        const myPub = await services.actors.whoAmI();
-        const mine = await services.flags.listPrivate('calendar', 'calendar');
-        for (const cal of mine) {
-          if (stopped) return;
-          const quBit = await qu.get(paths.documentPath(SPACE_ID, metaResourceId(cal.id)));
-          const role = quBit?.val?.members?.find((m) => m.actorPub === myPub)?.role;
-          if (role === 'owner' || role === 'editor') {
-            if (!stopped) renderNavPointsMenu(wrap, { items: [{ label: t('newEvent'), href: newEventHash(cal.id) }] });
-            return;
-          }
-        }
-      })();
-      return () => { stopped = true; };
-    },
-  });
-}
-
-// ===========================================================================
 // mount()
 // ===========================================================================
-export function mount(container, { qu, services, segments, subscribe, syncFetch }) {
+export function mount(container, { qu, services, segments, subscribe, syncFetch, chrome = { set() {} } }) {
   ensureTheme();
   injectStyle(STYLE_ID, STYLE);
   let stopped = false;
@@ -694,76 +656,86 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     // The calendars-list sidebar (multi-select show/hide + share/delete/
     // rename) stays `mountContextSwitcher()`'s `variant: 'page'` - it has its
     // own per-item management UI that doesn't fit a simple link list (see
-    // docs/app-navigation-standard.md Rule 3), so `mountAppTemplate()`'s own
+    // docs/app-navigation-standard.md Rule 3), so `ctx.chrome`'s own
     // `navigation` (plain href items only) can't replace it. Instead
-    // `mountAppTemplate()` wraps the WHOLE view purely for its `settings`
-    // gear - "Kalender verwalten" now reaches the exact same `#/calendar/manage`
-    // page `switchHref` already routes to, so the inline "„Kalender" ›"
-    // title-row link (`hideTitleLink: true` below) is no longer needed as a
-    // SECOND way to reach it (Rule 5's "app settings" affordance instead).
-    // `views` is the day/week/month/list switch (see this file's own
-    // VIEW_KEYS doc comment above) - real links carrying the CURRENT cursor
-    // date, so switching view lands on whatever date you were already
-    // looking at, not always today's.
-    mountAppTemplate(container, {
+    // `chrome.set()` carries `settings` - "Kalender verwalten" now reaches
+    // the exact same `#/calendar/manage` page `switchHref` already routes
+    // to, so the inline "„Kalender" ›" title-row link (`hideTitleLink: true`
+    // below) is no longer needed as a SECOND way to reach it (Rule 5a's "app
+    // settings" affordance instead). `views` is the day/week/month/list
+    // switch (see this file's own VIEW_KEYS doc comment above) - real links
+    // carrying the CURRENT cursor date, so switching view lands on whatever
+    // date you were already looking at, not always today's. `primaryAction`
+    // ("+ New event") used to be a SEPARATE, async `shell.headerNavPoints`
+    // lookup (`renderHeaderNavPoints()`, now retired - see
+    // `apps/calendar/manifest.quapp`'s removed `contributes` entry) with no
+    // access to whatever this view had already fetched - now that it's this
+    // SAME view's own chrome, the identical "first calendar I can edit" rule
+    // is just a synchronous find() over `infos` (already resolved, `role`
+    // included, by `loadCalendarInfos()` above), so no second, later
+    // `chrome.set()` call is needed here the way Forum's own
+    // `applyNewChannelSettings()` needs for its genuinely separate fetch.
+    const editableCal = infos.find((info) => info.role && canEdit(info.role));
+    chrome.set({
+      primaryAction: editableCal ? { label: t('newEvent'), href: newEventHash(editableCal.id), icon: '✏️' } : null,
       settings: { items: [{ label: t('manageCalendars'), href: '#/calendar/manage', icon: '📅' }] },
       views: {
         items: [['day', t('day')], ['week', t('week')], ['month', t('month')], ['list', t('list')]]
           .map(([key, label]) => ({ id: key, label, href: `#/calendar/${key}/${cursor.getTime()}` })),
         activeId: view,
       },
-      render: (content) => {
-        const root = document.createElement('div');
-        root.className = 'qu-cal-root';
+    });
 
-        mountContextSwitcher(root, {
-          renderSidebar: (host) => buildCalendarsSidebar(host, infos, renderMain),
-          variant: 'page',
-          switchHref: '#/calendar/manage',
-          activeLabel: t('title'),
-          hideTitleLink: true,
-          heading: t('calendarsMenu'),
-          render: (ctxContent) => {
-            if (infos.length === 0) {
-              const empty = document.createElement('p');
-              empty.className = 'qu-cal-empty';
-              empty.textContent = t('noCalendars');
-              ctxContent.appendChild(empty);
-            } else if (checked.size === 0) {
-              // Nothing to filter with every calendar hidden - just keep the
-              // typed text (no re-render needed, the empty message doesn't
-              // depend on it), so the filter input stays usable instead of
-              // throwing on the otherwise-required onFilterChange callback.
-              ctxContent.appendChild(toolbar(infos, (value) => { filterText = value; }));
-              const empty = document.createElement('p');
-              empty.className = 'qu-cal-empty';
-              empty.textContent = t('allHidden');
-              ctxContent.appendChild(empty);
-            } else {
-              // The filter input lives inside toolbar(infos), rendered ONCE per
-              // renderMain() call - typing into it must NOT trigger a full
-              // renderMain() rebuild (that recreates the <input> element itself
-              // from scratch on every keystroke, dropping focus/cursor position
-              // after every single character, confirmed live). Only the view
-              // portion below the toolbar is swapped on a filter change instead,
-              // via this closure's own onFilterChange callback - the toolbar
-              // (and its input) is never touched again until the next REAL
-              // renderMain() (a view/nav/calendar-visibility change).
-              const viewContainer = document.createElement('div');
-              ctxContent.appendChild(toolbar(infos, (value) => {
-                filterText = value;
-                viewContainer.textContent = '';
-                viewContainer.appendChild(viewEl(events, infos));
-              }));
-              viewContainer.appendChild(viewEl(events, infos));
-              ctxContent.appendChild(viewContainer);
-            }
-          },
-        });
+    container.textContent = '';
+    const root = document.createElement('div');
+    root.className = 'qu-cal-root';
 
-        content.appendChild(root);
+    mountContextSwitcher(root, {
+      renderSidebar: (host) => buildCalendarsSidebar(host, infos, renderMain),
+      variant: 'page',
+      switchHref: '#/calendar/manage',
+      activeLabel: t('title'),
+      hideTitleLink: true,
+      heading: t('calendarsMenu'),
+      render: (ctxContent) => {
+        if (infos.length === 0) {
+          const empty = document.createElement('p');
+          empty.className = 'qu-cal-empty';
+          empty.textContent = t('noCalendars');
+          ctxContent.appendChild(empty);
+        } else if (checked.size === 0) {
+          // Nothing to filter with every calendar hidden - just keep the
+          // typed text (no re-render needed, the empty message doesn't
+          // depend on it), so the filter input stays usable instead of
+          // throwing on the otherwise-required onFilterChange callback.
+          ctxContent.appendChild(toolbar(infos, (value) => { filterText = value; }));
+          const empty = document.createElement('p');
+          empty.className = 'qu-cal-empty';
+          empty.textContent = t('allHidden');
+          ctxContent.appendChild(empty);
+        } else {
+          // The filter input lives inside toolbar(infos), rendered ONCE per
+          // renderMain() call - typing into it must NOT trigger a full
+          // renderMain() rebuild (that recreates the <input> element itself
+          // from scratch on every keystroke, dropping focus/cursor position
+          // after every single character, confirmed live). Only the view
+          // portion below the toolbar is swapped on a filter change instead,
+          // via this closure's own onFilterChange callback - the toolbar
+          // (and its input) is never touched again until the next REAL
+          // renderMain() (a view/nav/calendar-visibility change).
+          const viewContainer = document.createElement('div');
+          ctxContent.appendChild(toolbar(infos, (value) => {
+            filterText = value;
+            viewContainer.textContent = '';
+            viewContainer.appendChild(viewEl(events, infos));
+          }));
+          viewContainer.appendChild(viewEl(events, infos));
+          ctxContent.appendChild(viewContainer);
+        }
       },
     });
+
+    container.appendChild(root);
   }
 
   /**

@@ -132,10 +132,17 @@ that only makes sense on a specific sub-route — register your own
 `onContextChange` listener from inside `render()` to recompute and
 re-render on every route change within your app (`mountAppHeaderAction()`
 itself only re-renders on activate/deactivate, not on every internal route
-change). `apps/todo/client.js`'s own `shell.headerNavPoints` contribution is
-a working reference for this shape (Forum has since migrated its own
-route-dependent actions onto `mountAppTemplate()`'s `primaryAction`/
-`settings` instead - see Rule 5 below).
+change).
+
+**Status: no app currently contributes to `shell.headerNavPoints`.**
+Calendar was the last real contributor (its own async "first calendar I can
+edit" lookup); every app that used to use this point (Calendar, Chat, ToDo,
+Forum) has since migrated its "create X" action onto Rule 5a's `ctx.chrome`
+`primaryAction`/`settings` instead — see Rule 5a below, the current
+recommended path for every app. The point itself, `mountAppHeaderAction()`,
+and `renderNavPointsMenu()` are NOT removed (kept as generic, reusable
+infra for a genuinely future contributor, same shape as before), just
+unused today.
 
 The contributor's payload carries `getContext`/`onContextChange` (the current
 route) plus `services`/`qu`/`subscribe`/`syncFetch` — the same ones the
@@ -257,14 +264,12 @@ button with no system behind it — every app that wanted one built its own,
 inconsistently, and it could sit wherever it liked on top of content. This
 FAB is different in kind: it's one field (`primaryAction`) in a single,
 Core-owned, data-driven template that every app renders identically, exactly
-the same reasoning that already justifies the App Navigation Points Slot
-(Rule 2) existing as a fixed, predictable location. The two aren't
-competing — `shell.headerNavPoints` remains valid for apps that already use
-it (Calendar, Chat, ToDo, Forum are not required to migrate), but **new**
-apps should reach for `mountAppTemplate()`'s `primaryAction` first: it keeps
-the "create X" action next to the rest of that app's own chrome
-(navigation/views/settings) instead of splitting it across the global header
-and the app's own UI.
+the same reasoning that already justified the App Navigation Points Slot
+(Rule 2) as a fixed, predictable location — since superseded by Rule 5a's
+`ctx.chrome`, which every app (Calendar, Chat, ToDo, Forum included) has now
+migrated onto: the "create X" action lives next to the rest of that app's
+own chrome (navigation/views/settings), platform-owned, instead of split
+across the global header and the app's own UI.
 
 **No bottom sheet, no drawer/scrim** — same reasoning as Rule 3's rejection
 of a JS-toggled overlay for the Context Switcher (no route, no Back/Forward
@@ -492,17 +497,16 @@ regression); copy `apps/_template/`, not one of the migrated apps' own
    purpose, so it's never itself bundled/catalog-listed).
 2. No custom back link, anywhere. `renderSubpage({ showBackLink: false })`
    for every subpage.
-3. Route your app's MAIN view through `mountAppTemplate()` (Rule 5), even if
-   you pass only `render` — that's the standard entry point now, chrome-less
-   by default. Add `primaryAction`/`navigation`/`views`/`settings` (any
-   combination, omit the rest) the moment your app actually has a "create new
-   X" action, more than one sibling place to switch between, more than one
-   way to view the current place, or app-level settings — never build that
-   chrome by hand. `mountAppTemplate()`'s `primaryAction` is now the
-   recommended home for a NEW app's "create new X" action; a plain
-   `shell.headerNavPoints` contribution (`renderNavPointsMenu()` renders 1
-   item as a plain link, 2+ as a dropdown) is still valid for apps that
-   already use it.
+3. Drive your app's MAIN view through `ctx.chrome.set()` (Rule 5a) — the
+   platform, not your own app, mounts the chrome, chrome-less by default
+   when your app never calls `.set()`. Add `primaryAction`/`navigation`/
+   `views`/`settings` (any combination, omit the rest) the moment your app
+   actually has a "create new X" action, more than one sibling place to
+   switch between, more than one way to view the current place, or
+   app-level settings — never build that chrome by hand.
+   `ctx.chrome`'s `primaryAction` is the one recommended home for a "create
+   new X" action; `shell.headerNavPoints` (Rule 2) is retired - every app
+   that used it has migrated onto `ctx.chrome` instead.
 4. `mountContextSwitcher()` if you need a channel/calendar-style switcher
    OUTSIDE of `mountAppTemplate()`'s own `navigation` section (e.g. a
    dedicated `variant: 'page'` management page) — `variant: 'tabs'` for a
