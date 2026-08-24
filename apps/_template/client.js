@@ -24,9 +24,9 @@
  * composer via `@qu/content-ui`'s `ContentEditor`/`ContentComposer`.
  *
  * A tiny "Notes" app: a small, fixed set of Folders (the switchable sibling
- * "places" - Rule 3, here rendered via Rule 5's AppConfig `navigation`) each
- * holding Notes (a list + a detail subpage - Rule 1), with "+ New note" as
- * the app's one create action (Rule 5's `primaryAction`). Data is a
+ * "places" - Rule 3, here rendered via Rule 5a's `ctx.chrome` `navigation`)
+ * each holding Notes (a list + a detail subpage - Rule 1), with "+ New note"
+ * as the app's one create action (Rule 5a's `primaryAction`). Data is a
  * closure-scoped in-memory array, reset on every `mount()` - a real app
  * would persist it via `@qu/services` (see `docs/api-reference.md`); that
  * part is deliberately NOT this template's concern.
@@ -35,18 +35,23 @@
  *   - Rule 1 (global chrome owns Back/Forward): every subpage below
  *     (`renderNoteDetail()`, `renderNewNoteForm()`) goes through
  *     `renderSubpage({ showBackLink: false, ... })` - no bespoke back link
- *     anywhere in this file. Subpages render bare (no App Template chrome) -
- *     `mountAppTemplate()` is only called from `renderFolderView()` below,
+ *     anywhere in this file. Subpages render bare (no platform chrome) -
+ *     `ctx.chrome.set()` is only called from `renderFolderView()` below,
  *     same as `mountContextSwitcher()` was before it.
- *   - Rule 5 (App Template / Footer-Sidebar Chrome, see
+ *   - Rule 5a (`ctx.chrome` - the platform-owned sidebar/footer chrome, see
  *     `docs/app-navigation-standard.md`): `renderFolderView()` below is the
- *     one call to `@qu/ui`'s `mountAppTemplate()` - `navigation` carries the
+ *     one place this app calls `chrome.set()` - `navigation` carries the
  *     FOLDERS list (a left sidebar on wide screens, a pill+popup in the
  *     fixed bottom bar on narrow ones), `primaryAction` carries "+ New
  *     note" (a prominent sidebar button / a circular button at the end of
  *     the bar). Both are plain data - this file never builds a footer or a
- *     sidebar itself, the Core does.
- *   - Rule 4 (icon tooltips): every icon-only control `mountAppTemplate()`
+ *     sidebar itself, the platform does. `container` is already the
+ *     platform's own content area (Chrome Inversion - `apps/shell/src/
+ *     chrome.js` mounts it once, for the whole session), so every view
+ *     below builds directly into it (or, for a subpage, into whatever
+ *     `renderSubpage()` hands it) rather than into a `render(content)`
+ *     callback's own separately-constructed element.
+ *   - Rule 4 (icon tooltips): every icon-only control the platform chrome
  *     builds already sets `title`/`aria-label` itself - nothing to do here.
  *
  * Routes: `#/template` (defaults to the first folder), `#/template/f/<folderId>`
@@ -54,7 +59,7 @@
  * (new note form).
  */
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme, renderSubpage, mountAppTemplate } from '@qu/ui';
+import { injectStyle, ensureTheme, renderSubpage } from '@qu/ui';
 
 const FOLDERS = [
   { id: 'inbox', label: 'Inbox' },
@@ -100,7 +105,7 @@ const STYLE = `
 // ===========================================================================
 // mount()
 // ===========================================================================
-export function mount(container, { services, segments = [] }) {
+export function mount(container, { services, segments = [], chrome = { set() {} } }) {
   ensureTheme();
   injectStyle(STYLE_ID, STYLE);
   let stopped = false;
@@ -131,35 +136,34 @@ export function mount(container, { services, segments = [] }) {
   function renderFolderView(folderId) {
     const folder = FOLDERS.find((f) => f.id === folderId) ?? FOLDERS[0];
 
-    mountAppTemplate(container, {
+    chrome.set({
       navigation: {
         items: FOLDERS.map((f) => ({ id: f.id, label: f.label, href: `#/template/f/${f.id}` })),
         activeId: folder.id,
         heading: t('folders'),
       },
       primaryAction: { label: t('newNote'), href: '#/template/new', icon: '✏️' },
-      render: (content) => {
-        const inFolder = notes.filter((n) => n.folderId === folder.id);
-        if (inFolder.length === 0) {
-          const empty = document.createElement('p');
-          empty.className = 'qu-template-empty';
-          empty.textContent = t('empty');
-          content.appendChild(empty);
-          return;
-        }
-        const ul = document.createElement('ul');
-        ul.className = 'qu-template-notes';
-        for (const note of inFolder) {
-          const li = document.createElement('li');
-          const a = document.createElement('a');
-          a.href = `#/template/n/${note.id}`;
-          a.textContent = note.title;
-          li.appendChild(a);
-          ul.appendChild(li);
-        }
-        content.appendChild(ul);
-      },
     });
+
+    const inFolder = notes.filter((n) => n.folderId === folder.id);
+    if (inFolder.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'qu-template-empty';
+      empty.textContent = t('empty');
+      container.appendChild(empty);
+      return;
+    }
+    const ul = document.createElement('ul');
+    ul.className = 'qu-template-notes';
+    for (const note of inFolder) {
+      const li = document.createElement('li');
+      const a = document.createElement('a');
+      a.href = `#/template/n/${note.id}`;
+      a.textContent = note.title;
+      li.appendChild(a);
+      ul.appendChild(li);
+    }
+    container.appendChild(ul);
   }
 
   // ---------------------------------------------------------------------
