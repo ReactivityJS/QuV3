@@ -57,7 +57,7 @@
 import { watch } from '@qu/reactive';
 import { paths, THREAD_PRESETS, formatActorLabel, matchesActorQuery } from '@qu/services';
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme, renderSubpage, mountActorPicker, mountAppTemplate } from '@qu/ui';
+import { injectStyle, ensureTheme, renderSubpage, mountActorPicker } from '@qu/ui';
 import { copyToClipboard } from '@qu/thread-ui';
 
 const SPACE_ID = '63f5cc6f-62f6-4a43-a889-33900138f8b0'; // this app's own manifest.spaceId - see index.js's own copy of this constant
@@ -217,7 +217,7 @@ function copyLinkButton(hash) {
 // ===========================================================================
 // mount()
 // ===========================================================================
-export function mount(container, { qu, services, segments, subscribe, syncFetch }) {
+export function mount(container, { qu, services, segments, subscribe, syncFetch, chrome = { set() {} } }) {
   ensureTheme();
   injectStyle(STYLE_ID, STYLE);
   container.assetService = services.assets; // ancestor for every <qu-asset-upload>/<qu-asset> below - see @qu/ui's asset-components.js
@@ -397,52 +397,52 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     if (stopped) return;
     const infos = await loadListInfos(renderMain);
     if (!infos) return;
-    mountAppTemplate(container, {
+    chrome.set({
       primaryAction: { label: t('newList'), href: '#/todo/new', icon: '✏️' },
       settings: { items: [{ label: t('manageLists'), href: '#/todo/manage' }] },
-      render: (content) => {
-        const page = document.createElement('div');
-        page.className = 'qu-todo-page';
-        const h1 = document.createElement('h1');
-        h1.textContent = t('title');
-        page.appendChild(h1);
-
-        const mineLink = document.createElement('a');
-        mineLink.className = 'qu-todo-mine-link';
-        mineLink.href = '#/todo/mine';
-        mineLink.textContent = t('myTasks');
-        page.appendChild(mineLink);
-
-        if (infos.length === 0) {
-          const empty = document.createElement('p');
-          empty.className = 'qu-todo-empty';
-          empty.textContent = t('noLists');
-          page.appendChild(empty);
-        } else {
-          const ul = document.createElement('ul');
-          ul.className = 'qu-todo-lists';
-          for (const info of infos) {
-            const li = document.createElement('li');
-            const a = document.createElement('a');
-            a.href = listHash(info.id);
-            a.className = 'qu-todo-row-title';
-            a.textContent = info.meta.title || t('untitled');
-            li.appendChild(a);
-            if (info.role && info.role !== 'owner') {
-              const badge = document.createElement('span');
-              badge.className = 'qu-todo-badge';
-              badge.textContent = t('sharedBadge');
-              li.appendChild(badge);
-            }
-            ul.appendChild(li);
-          }
-          page.appendChild(ul);
-        }
-
-        page.appendChild(newListForm(async () => { await renderMain(); }));
-        content.appendChild(page);
-      },
     });
+
+    container.textContent = '';
+    const page = document.createElement('div');
+    page.className = 'qu-todo-page';
+    const h1 = document.createElement('h1');
+    h1.textContent = t('title');
+    page.appendChild(h1);
+
+    const mineLink = document.createElement('a');
+    mineLink.className = 'qu-todo-mine-link';
+    mineLink.href = '#/todo/mine';
+    mineLink.textContent = t('myTasks');
+    page.appendChild(mineLink);
+
+    if (infos.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'qu-todo-empty';
+      empty.textContent = t('noLists');
+      page.appendChild(empty);
+    } else {
+      const ul = document.createElement('ul');
+      ul.className = 'qu-todo-lists';
+      for (const info of infos) {
+        const li = document.createElement('li');
+        const a = document.createElement('a');
+        a.href = listHash(info.id);
+        a.className = 'qu-todo-row-title';
+        a.textContent = info.meta.title || t('untitled');
+        li.appendChild(a);
+        if (info.role && info.role !== 'owner') {
+          const badge = document.createElement('span');
+          badge.className = 'qu-todo-badge';
+          badge.textContent = t('sharedBadge');
+          li.appendChild(badge);
+        }
+        ul.appendChild(li);
+      }
+      page.appendChild(ul);
+    }
+
+    page.appendChild(newListForm(async () => { await renderMain(); }));
+    container.appendChild(page);
   }
 
   // ---------------------------------------------------------------------
@@ -538,38 +538,38 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     const switcherItems = await fetchSwitcherItems();
     if (stopped) return;
 
-    mountAppTemplate(container, {
+    chrome.set({
       primaryAction: { label: t('newList'), href: '#/todo/new', icon: '✏️' },
       navigation: { items: switcherItems, activeId: 'mine', heading: t('listsMenu'), desktopOnly: true },
       settings: { items: [{ label: t('manageLists'), href: '#/todo/manage' }] },
-      render: (content) => {
-        const page = document.createElement('div');
-        page.className = 'qu-todo-page';
-        const h1 = document.createElement('h1');
-        h1.textContent = t('myTasks');
-        page.appendChild(h1);
-        page.appendChild(copyLinkButton(mineHash));
-
-        if (assigned.length === 0) {
-          const empty = document.createElement('p');
-          empty.className = 'qu-todo-empty';
-          empty.textContent = t('noAssignedTasks');
-          page.appendChild(empty);
-          content.appendChild(page);
-          return;
-        }
-        const ul = document.createElement('ul');
-        ul.className = 'qu-todo-tasks';
-        for (const task of assigned) {
-          ul.appendChild(renderTaskRow(task.listId, task, task.editable, {
-            listLabel: task.listTitle,
-            onToggled: renderMyTasksPage, // a just-completed task must drop out of THIS (not-done-only) aggregate immediately
-          }));
-        }
-        page.appendChild(ul);
-        content.appendChild(page);
-      },
     });
+
+    container.textContent = '';
+    const page = document.createElement('div');
+    page.className = 'qu-todo-page';
+    const h1 = document.createElement('h1');
+    h1.textContent = t('myTasks');
+    page.appendChild(h1);
+    page.appendChild(copyLinkButton(mineHash));
+
+    if (assigned.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'qu-todo-empty';
+      empty.textContent = t('noAssignedTasks');
+      page.appendChild(empty);
+      container.appendChild(page);
+      return;
+    }
+    const ul = document.createElement('ul');
+    ul.className = 'qu-todo-tasks';
+    for (const task of assigned) {
+      ul.appendChild(renderTaskRow(task.listId, task, task.editable, {
+        listLabel: task.listTitle,
+        onToggled: renderMyTasksPage, // a just-completed task must drop out of THIS (not-done-only) aggregate immediately
+      }));
+    }
+    page.appendChild(ul);
+    container.appendChild(page);
   }
 
   // ---------------------------------------------------------------------
@@ -697,39 +697,39 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch 
     // move Calendar's own "+ New event" already made (there via the global
     // header; here via mountAppTemplate(), since ToDo's own chrome is
     // per-route/per-list rather than a single always-editable target).
-    mountAppTemplate(container, {
+    chrome.set({
       primaryAction: editable ? { label: t('newTask'), href: newTaskHash(id, null), icon: '✏️' } : null,
       navigation: { items: switcherItems, activeId: id, heading: t('listsMenu'), desktopOnly: true },
       settings: { items: [{ label: t('manageLists'), href: '#/todo/manage' }] },
-      render: (content) => {
-        const page = document.createElement('div');
-        page.className = 'qu-todo-page';
-        const h1 = document.createElement('h1');
-        h1.textContent = meta.title || t('untitled');
-        page.appendChild(h1);
-
-        const actions = document.createElement('div');
-        actions.className = 'qu-todo-list-actions';
-        if (canManage(role)) {
-          const shareLink = document.createElement('a');
-          shareLink.href = shareHash(id);
-          shareLink.textContent = t('share');
-          actions.appendChild(shareLink);
-        }
-        actions.appendChild(copyLinkButton(listHash(id)));
-        page.appendChild(actions);
-
-        if (items.length === 0) {
-          const empty = document.createElement('p');
-          empty.className = 'qu-todo-empty';
-          empty.textContent = t('noTasks');
-          page.appendChild(empty);
-        } else {
-          page.appendChild(renderTaskTree(id, items, editable));
-        }
-        content.appendChild(page);
-      },
     });
+
+    container.textContent = '';
+    const page = document.createElement('div');
+    page.className = 'qu-todo-page';
+    const h1 = document.createElement('h1');
+    h1.textContent = meta.title || t('untitled');
+    page.appendChild(h1);
+
+    const actions = document.createElement('div');
+    actions.className = 'qu-todo-list-actions';
+    if (canManage(role)) {
+      const shareLink = document.createElement('a');
+      shareLink.href = shareHash(id);
+      shareLink.textContent = t('share');
+      actions.appendChild(shareLink);
+    }
+    actions.appendChild(copyLinkButton(listHash(id)));
+    page.appendChild(actions);
+
+    if (items.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'qu-todo-empty';
+      empty.textContent = t('noTasks');
+      page.appendChild(empty);
+    } else {
+      page.appendChild(renderTaskTree(id, items, editable));
+    }
+    container.appendChild(page);
   }
 
   // ---------------------------------------------------------------------
