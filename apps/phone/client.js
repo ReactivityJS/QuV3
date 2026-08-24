@@ -9,7 +9,8 @@
  *   `#/phone` - call-starter, pick a contact to call.
  *   `#/phone/<remotePub>` - CALLER's active-call view, AUDIO-ONLY by
  *     default (this session STARTS the call, `initiator: true`) - what the
- *     contact-list "Anrufen" icon and this app's own call-starter link to.
+ *     Contacts view's (`apps/user-list`) "Anrufen" icon and this app's own
+ *     call-starter link to.
  *     Video is opt-in, not the default - see `/video` below and
  *     `src/call.js`'s own `upgradeToVideo()` doc comment for turning it on
  *     mid-call instead.

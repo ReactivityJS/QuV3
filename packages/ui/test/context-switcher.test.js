@@ -92,6 +92,20 @@ test('renderSidebar overrides the default items list entirely', () => {
   assert.equal(sawHost.querySelector('p').textContent, 'custom sidebar');
 });
 
+test('fullHeight: true marks the root with data-full-height and injects the matching CSS rules; omitted/false leaves it unmarked', () => {
+  const container = document.createElement('div');
+  mountContextSwitcher(container, { items: ITEMS, heading: 'Calendars', fullHeight: true, render: () => {} });
+  const root = container.querySelector('.qu-ctxswitch-root');
+  assert.equal(root.dataset.fullHeight, 'true');
+  const css = document.getElementById('qu-ctxswitch-style-720px').textContent;
+  assert.match(css, /\.qu-ctxswitch-root\[data-full-height\]\s*\{[^}]*flex:\s*1/);
+  assert.match(css, /\.qu-ctxswitch-root\[data-full-height\]\s*\.qu-ctxswitch-content\s*\{[^}]*min-height:\s*0/);
+
+  const container2 = document.createElement('div');
+  mountContextSwitcher(container2, { items: ITEMS, heading: 'Calendars', render: () => {} });
+  assert.equal(container2.querySelector('.qu-ctxswitch-root').dataset.fullHeight, undefined);
+});
+
 test('renderContextListPage: renders the same list content standalone, with no back link (Rule 1 - global chrome owns it)', () => {
   const container = document.createElement('div');
   renderContextListPage(container, { items: ITEMS, activeId: 'general', heading: 'Calendars' });

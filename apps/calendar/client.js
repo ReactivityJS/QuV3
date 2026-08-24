@@ -149,6 +149,20 @@ const { t } = createI18n(DICT);
 const STYLE_ID = 'qu-calendar-style';
 const STYLE = `
   .qu-cal-root { position: relative; }
+  /* Only applied for Day/Week/Month (see renderMain()'s own isGridView) -
+     mirrors apps/chat's own .qu-chat-room-view: fills the space
+     chrome.set({fullHeight: true}) offers, cascaded one level further down
+     through mountContextSwitcher()'s own fullHeight option so the actual
+     grid/timegrid content (mountContextSwitcher()'s own render() callback)
+     gets the real remaining height, not just this wrapper. List (Agenda)
+     never gets this class - it stays a normal, page-scrolling view. */
+  .qu-cal-root--full-height { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  /* viewContainer (renderMain()'s render() callback) - the toolbar above it
+     stays its natural height, this takes whatever's left and hands it on
+     down to .qu-cal-month-grid/.qu-cal-timegrid-view, both of which only
+     ever render inside this class (List/Agenda never gets it - see
+     renderMain()'s own isGridView). */
+  .qu-cal-view-container--full-height { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 
   /* The calendar-list "manage" sidebar is now @qu/ui's shared
      mountContextSwitcher()/renderContextListPage() (variant: 'page') - see
@@ -187,7 +201,12 @@ const STYLE = `
   .qu-cal-primary { border: none; border-radius: var(--qu-radius-md, 0.4rem); padding: 0.5rem 1rem; background: var(--qu-color-accent, #5b5bd6); color: #fff; cursor: pointer; font-weight: 600; text-decoration: none; display: inline-block; }
   .qu-cal-filter { padding: 0.5rem; width: 100%; box-sizing: border-box; font-size: 1em; }
 
-  .qu-cal-month-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 0.2rem; }
+  /* grid-template-rows: repeat(6, 1fr) + height: 100% only actually fill the
+     available height when a taller ancestor hands it down (fullHeight mode,
+     see .qu-cal-root--full-height/.qu-cal-view-container--full-height below)
+     - in the normal (page-scrolling) case height:100% resolves against auto
+     and this is a no-op, same as before. */
+  .qu-cal-month-grid { display: grid; grid-template-columns: repeat(7, 1fr); grid-template-rows: repeat(6, 1fr); gap: 0.2rem; height: 100%; }
   .qu-cal-month-cell { min-width: 0; border: 1px solid var(--qu-color-border, #8884); border-radius: 0.25rem; padding: 0.25rem; min-height: 3.6rem; font-size: 0.82em; cursor: pointer; transition: background-color 0.1s; }
   .qu-cal-month-cell:hover { background: #8881; }
   .qu-cal-month-cell[data-dim="true"] { opacity: 0.4; }
@@ -208,10 +227,17 @@ const STYLE = `
   .qu-cal-allday-bar { grid-row: 1; min-width: 0; display: flex; align-items: center; border-radius: 0.25rem; padding: 0 0.4rem; color: #fff; font-size: 0.78em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; text-decoration: none; box-sizing: border-box; }
   .qu-cal-allday-bar[data-continues-from="true"] { border-top-left-radius: 0; border-bottom-left-radius: 0; }
   .qu-cal-allday-bar[data-continues-to="true"] { border-top-right-radius: 0; border-bottom-right-radius: 0; }
-  .qu-cal-timegrid-wrap { display: flex; max-width: 100%; border-top: 1px solid var(--qu-color-border, #8884); overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  /* .qu-cal-timegrid-view (the plain wrapper timeGridView() itself returns,
+     holding the optional all-day bar above .qu-cal-timegrid-wrap) becomes a
+     column flex box so the (fixed-height) all-day bar and the (fill-the-
+     rest, internally scrollable) hour grid below it share space correctly -
+     see .qu-cal-root--full-height's own doc comment for why "internal
+     scroll region" beats letting the page itself grow to 24 hours tall. */
+  .qu-cal-timegrid-view { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+  .qu-cal-timegrid-wrap { display: flex; flex: 1; min-height: 0; max-width: 100%; border-top: 1px solid var(--qu-color-border, #8884); overflow-x: auto; overflow-y: auto; -webkit-overflow-scrolling: touch; }
   .qu-cal-hours { width: 2.7rem; flex-shrink: 0; }
   .qu-cal-hour-label { height: ${HOUR_PX}px; box-sizing: border-box; font-size: 0.7em; opacity: 0.6; transform: translateY(-0.6em); text-align: right; padding-right: 0.35rem; }
-  .qu-cal-daycols { flex: 1; display: flex; }
+  .qu-cal-daycols { flex: 1; min-width: 0; display: flex; }
   .qu-cal-daycolwrap { flex: 1; min-width: 0; }
   .qu-cal-daycol { position: relative; border-left: 1px solid var(--qu-color-border, #8884); background-image: repeating-linear-gradient(to bottom, transparent, transparent ${HOUR_PX - 1}px, #8882 ${HOUR_PX - 1}px, #8882 ${HOUR_PX}px); height: ${GRID_PX}px; cursor: pointer; }
   .qu-cal-daycol-head { text-align: center; font-size: 0.82em; padding-bottom: 0.3rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -676,6 +702,13 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch,
     // `chrome.set()` call is needed here the way Forum's own
     // `applyNewChannelSettings()` needs for its genuinely separate fetch.
     const editableCal = infos.find((info) => info.role && canEdit(info.role));
+    // Day/Week/Month are grid-based, spatial views - they benefit from
+    // filling the available viewport height below the shell header, the
+    // exact mechanism apps/chat's/apps/forum's own room/topic views already
+    // use (see docs/app-navigation-standard.md's own "FULL HEIGHT MODE").
+    // List (Agenda) stays a normal, page-scrolling view - a plain upcoming-
+    // events list gains nothing from being forced to fill the viewport.
+    const isGridView = view !== 'list';
     chrome.set({
       primaryAction: editableCal ? { label: t('newEvent'), href: newEventHash(editableCal.id), icon: '✏️' } : null,
       settings: { items: [{ label: t('manageCalendars'), href: '#/calendar/manage', icon: '📅' }] },
@@ -684,11 +717,12 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch,
           .map(([key, label]) => ({ id: key, label, href: `#/calendar/${key}/${cursor.getTime()}` })),
         activeId: view,
       },
+      fullHeight: isGridView,
     });
 
     container.textContent = '';
     const root = document.createElement('div');
-    root.className = 'qu-cal-root';
+    root.className = isGridView ? 'qu-cal-root qu-cal-root--full-height' : 'qu-cal-root';
 
     mountContextSwitcher(root, {
       renderSidebar: (host) => buildCalendarsSidebar(host, infos, renderMain),
@@ -697,6 +731,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch,
       activeLabel: t('title'),
       hideTitleLink: true,
       heading: t('calendarsMenu'),
+      fullHeight: isGridView,
       render: (ctxContent) => {
         if (infos.length === 0) {
           const empty = document.createElement('p');
@@ -724,6 +759,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch,
           // (and its input) is never touched again until the next REAL
           // renderMain() (a view/nav/calendar-visibility change).
           const viewContainer = document.createElement('div');
+          viewContainer.className = isGridView ? 'qu-cal-view-container qu-cal-view-container--full-height' : 'qu-cal-view-container';
           ctxContent.appendChild(toolbar(infos, (value) => {
             filterText = value;
             viewContainer.textContent = '';
@@ -1069,6 +1105,7 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch,
 
   function timeGridView(days, events, editableCals) {
     const wrap = document.createElement('div');
+    wrap.className = 'qu-cal-timegrid-view';
 
     const spanning = layoutSpanningEvents(events.filter(isMultiDay), days);
     if (spanning.length) {
@@ -1115,7 +1152,14 @@ export function mount(container, { qu, services, segments, subscribe, syncFetch,
 
     const daycols = document.createElement('div');
     daycols.className = 'qu-cal-daycols';
-    daycols.style.minWidth = days.length > 1 ? '30rem' : '0';
+    // No fixed floor here - Week view used to force a 480px ('30rem') min-
+    // width regardless of actually available space, which .qu-cal-timegrid-
+    // wrap's own overflow-x:auto/max-width:100% (below) then contained as an
+    // internal scrollbar rather than letting it leak to the page, but forced
+    // that scrollbar even at ordinary widths. .qu-cal-daycolwrap is already
+    // `flex: 1; min-width: 0` (below), so letting daycols shrink freely
+    // fits any width with zero overflow - the exact same bug-free approach
+    // .qu-cal-month-grid's own `repeat(7, 1fr)` grid already uses.
     const today = startOfDay(new Date());
     const nowLines = [];
     for (const day of days) {

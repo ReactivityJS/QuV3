@@ -337,7 +337,7 @@ straight off the catalog it already has:
 ]
 ```
 
-The consumer (e.g. `apps/contact-list`) does:
+The consumer (e.g. `apps/user-list`'s own Contacts view) does:
 
 ```js
 import { actionsForSlot, resolveActionHref } from '@qu/foundation';
@@ -351,8 +351,8 @@ for (const action of actions) {
 }
 ```
 
-`apps/contact-list` never imports Chat; Chat never imports `apps/contact-list`
-— they only agree on the slot id `"contact-row"` and the `{pub}` placeholder.
+`apps/user-list` never imports Chat; Chat never imports `apps/user-list` —
+they only agree on the slot id `"contact-row"` and the `{pub}` placeholder.
 
 ### 6.2 `contributes` / `definesExtensionPoints` — real, live code
 

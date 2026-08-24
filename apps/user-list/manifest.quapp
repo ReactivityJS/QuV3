@@ -4,8 +4,8 @@
   "kind": "app",
   "main": "./index.js",
   "clientMain": "./dist/client.js",
-  "label": "User List",
-  "icon": "🧑‍🤝‍🧑",
-  "navOrder": 8,
+  "label": "Contacts",
+  "icon": "📇",
+  "navOrder": 7,
   "requires": []
 }
