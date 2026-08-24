@@ -342,7 +342,7 @@ test('#/phone lists a contact with a Call button that navigates to #/phone/<pub>
   try {
     await waitFor(() => container.querySelector('.qu-phone-contacts li') !== null);
     const row = container.querySelector('.qu-phone-contacts li');
-    // No published profile for this contact yet - formatActorLabel() falls back to a truncated pubkey (same convention apps/contact-list uses).
+    // No published profile for this contact yet - formatActorLabel() falls back to a truncated pubkey (same convention apps/user-list's Contacts view uses).
     assert.ok(row.textContent.includes(contactPubB64.slice(0, 10)));
     row.querySelector('button').click();
     assert.equal(window.location.hash, `#/phone/${contactPubB64}`);

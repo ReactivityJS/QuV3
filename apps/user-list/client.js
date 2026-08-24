@@ -1,66 +1,84 @@
 /**
- * USER LIST — every identity that opted into `DirectoryService`'s public
- * "listed" collection, each showing avatar/alias/pub (the pub links to
- * `#/~<pub>`) with a Contact toggle - favoriting a user HERE is exactly
- * what turns them into a Contact (`ContactsService`). Excludes the
- * viewer's own entry - you can't "contact" yourself.
+ * CONTACTS (app id stays `user-list` - the surviving app after merging the
+ * former `apps/contact-list`, see this file's own git history) — one app,
+ * two `chrome.set({views})`-switched scopes, the same `views` idiom
+ * `apps/notifications/client.js` already uses for its own unread/all split:
+ *   - `#/user-list` (default) - everyone this identity has starred as a
+ *     Contact (`@qu/services`' `ContactsService`/`FlagService`), each with
+ *     their CURRENT public profile resolved live (not a snapshot taken at
+ *     contact-time), a "Remove" button, and a "contact-row" extension SLOT
+ *     other apps (Phone, ...) plug row actions into (`actionsForSlot()`,
+ *     `@qu/foundation`) - kept scoped to THIS view only, preserving the
+ *     exact contract existing contributors already rely on.
+ *   - `#/user-list/all` - every identity that opted into `DirectoryService`'s
+ *     public "listed" collection, each with an Add/Remove-Contact toggle -
+ *     favoriting HERE is exactly what turns someone into a Contact. Also the
+ *     one place with an exact-FP "Not listed" fallback search, since that's
+ *     about discovering someone NOT already in either list - it doesn't fit
+ *     the Contacts view's own contract (searching your own already-known
+ *     contacts for a stranger's pubkey makes no sense there).
  *
- * Built on `<qu-list parent="/store/directory/entries">` (`@qu/ui`) - the
- * directory is a derived list, exactly the shape that primitive supports.
- * Avatar/alias/contact-toggle are resolved imperatively in `onItemStamped`,
- * for two independent reasons, not because `<qu-list>` doesn't work:
+ * Both views share one search `<input>` (a plain post-render `li.hidden`
+ * substring filter over whichever rows are currently rendered) and the same
+ * avatar/alias/pub row shape - only the data source and the trailing action
+ * area differ. Switching views is a real navigation (`href`), not an
+ * in-place toggle - the shell tears down and remounts this app fresh, same
+ * as every other `views`-based switch in this codebase (Notifications,
+ * Calendar's own day/week/month) - so `mount()` only ever needs to decide
+ * ONE view, from `segments[1]`, not handle switching internally.
+ *
+ * Both `<qu-list>` bindings need the SAME imperative `onItemStamped`
+ * treatment the two original apps already established, for the same two
+ * reasons neither is a `<qu-list>` shortcoming:
  *   - A profile document is NOT a plain readable value - it's a signed,
  *     WRAPPED envelope (`{profile: {...}, signature}`, see
  *     `@qu/identity`'s `publishMainProfile()`/`getProfile()`), verified and
  *     unwrapped only by `identity.getProfile()` (here, via
- *     `services.profile.getPublicProfile()` - the exact same call the
- *     "not listed" lookup below already needed). A `<qu-view
- *     related="profile" field="alias">` would show raw, UNVERIFIED
- *     envelope garbage, not an alias - `related`/`relatedPaths` genuinely
- *     don't fit here, there's no path a plain `<qu-view>` could safely
- *     read this from directly.
- *   - `renderAvatarOrAsset()` composes a whole DOM subtree from resolved values,
- *     not a single field a `<qu-view>` could mirror, and a manual `watch()`
- *     call here would have no lifecycle hook to unsubscribe from when a
- *     row is later removed (`<qu-list>` only self-cleans ITS OWN
- *     `<qu-view>`/`<qu-bind>` descendants). Accepted tradeoff: a live
- *     rename doesn't update an already-rendered row's avatar/alias without
- *     a fresh mount - profiles change rarely, and the LIST STRUCTURE
- *     itself (who's listed at all) stays fully live either way.
- *   - The exact-FP "not listed" lookup is inherently not list-shaped (one
- *     ad-hoc network lookup for a single pubkey), same as before.
- *   - Search is a plain post-render visibility toggle over the already-
- *     rendered rows' own text - a standard technique, not a hand-rolled
- *     list-diffing workaround (the list itself is still 100% `<qu-list>`).
+ *     `services.profile.getPublicProfile()`). A `<qu-view related="profile"
+ *     field="alias">` would show raw, UNVERIFIED envelope garbage.
+ *   - `renderAvatarOrAsset()` composes a whole DOM subtree from resolved
+ *     values, not a single field a `<qu-view>` could mirror, and a manual
+ *     `watch()` call here would have no lifecycle hook to unsubscribe from
+ *     when a row is later removed. Accepted tradeoff: a live rename doesn't
+ *     update an already-rendered row's avatar/alias without a fresh mount -
+ *     profiles change rarely, and the LIST STRUCTURE itself (who's a
+ *     contact / who's listed) stays fully live either way.
  *
- * SIGNER VERIFICATION: `/store/directory/entries` isn't `AccessEngine`-ACL-
- * protected (same reasoning as the app catalog - see
- * `DirectoryService`'s own doc comment: "trust comes only from the QuBit's
- * own verified signer, never the path segment"). `DirectoryService.
- * listVisible()` already does this check internally; binding `<qu-list>`
- * straight to the raw path bypasses that Service, so this file re-does the
- * SAME check itself (`createVerifiedDirectoryQu()` below) rather than
- * silently trusting whoever wrote to a given path.
+ * SIGNER VERIFICATION (`#/user-list/all` only): `/store/directory/entries`
+ * isn't `AccessEngine`-ACL-protected (same reasoning as the app catalog -
+ * see `DirectoryService`'s own doc comment: "trust comes only from the
+ * QuBit's own verified signer, never the path segment").
+ * `DirectoryService.listVisible()` already does this check internally;
+ * binding `<qu-list>` straight to the raw path bypasses that Service, so
+ * this file re-does the SAME check itself (`createVerifiedDirectoryQu()`
+ * below) rather than silently trusting whoever wrote to a given path.
  */
 import { createI18n } from '@qu/i18n';
-import { formatActorLabel, paths } from '@qu/services';
+import { formatActorLabel, paths, createPrivateStore } from '@qu/services';
+import { actionsForSlot, resolveActionHref } from '@qu/foundation';
 import { renderAvatarOrAsset, injectStyle, ensureTheme, renderFlagToggle } from '@qu/ui';
 import { QuCrypto } from '@qu/core';
 
 const DICT = {
   en: {
-    title: 'User List',
+    title: 'Contacts',
+    viewContacts: 'Contacts',
+    viewAll: 'All users',
     searchPlaceholder: 'Search by alias or FP…',
     unlisted: 'Not listed',
     contactAdd: 'Add contact',
     contactRemove: 'Remove contact',
+    remove: 'Remove',
   },
   de: {
-    title: 'Nutzerliste',
+    title: 'Kontakte',
+    viewContacts: 'Kontakte',
+    viewAll: 'Alle Nutzer',
     searchPlaceholder: 'Suche nach Alias oder FP…',
     unlisted: 'Nicht gelistet',
     contactAdd: 'Kontakt hinzufügen',
     contactRemove: 'Kontakt entfernen',
+    remove: 'Entfernen',
   },
 };
 const { t } = createI18n(DICT);
@@ -69,6 +87,8 @@ const { t } = createI18n(DICT);
 // QuCrypto.toBase64Url) - below this, a query can't possibly be a full FP,
 // so there's no point spending a network round-trip probing for one.
 const FP_LENGTH = 43;
+
+const CONTACT_ROW_SLOT = 'contact-row';
 
 const STYLE_ID = 'qu-user-list-style';
 const STYLE = `
@@ -88,6 +108,9 @@ const STYLE = `
   .qu-user-badge { font-size: 0.7em; font-weight: 600; text-transform: uppercase; opacity: 0.7; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-sm, 0.3rem); padding: 0.05rem 0.35rem; }
   .qu-user-pub { font-family: var(--qu-font-mono, ui-monospace, monospace); font-size: 0.8em; opacity: 0.6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .qu-user-list button { background: none; border: none; cursor: pointer; font-size: 1.1em; flex-shrink: 0; }
+  .qu-user-actions-slot { display: flex; align-items: center; gap: 0.3rem; flex-shrink: 0; }
+  .qu-user-action { text-decoration: none; font-size: 1.1em; }
+  .qu-user-list button.qu-user-remove { font-size: 1em; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-sm, 0.3rem); padding: 0.2rem 0.5rem; }
 `;
 
 /**
@@ -114,10 +137,11 @@ function createVerifiedDirectoryQu(qu, selfPub) {
   };
 }
 
-export function mount(container, { qu, services, subscribe, syncFetch }) {
+export function mount(container, { qu, identity, services, apps, subscribe, syncFetch, segments = [], chrome = { set() {} } }) {
   ensureTheme();
   injectStyle(STYLE_ID, STYLE);
   let stopped = false;
+  let debounceTimer = null;
 
   // Same "set on an ancestor before descendant Custom Elements connect"
   // discipline `.qu` already requires elsewhere in `@qu/ui` -
@@ -126,10 +150,16 @@ export function mount(container, { qu, services, subscribe, syncFetch }) {
   // image avatar (see @qu/ui/avatar.js's own doc comment).
   container.assetService = services.assets;
 
-  // Defense in depth - a future shell would already subscribe to
-  // '/store/directory' by default, but this app shouldn't silently depend
-  // on that staying true.
-  subscribe?.('/store/directory');
+  const view = segments[1] === 'all' ? 'all' : 'contacts';
+  chrome.set({
+    views: {
+      items: [
+        { id: 'contacts', label: t('viewContacts'), href: '#/user-list' },
+        { id: 'all', label: t('viewAll'), href: '#/user-list/all' },
+      ],
+      activeId: view,
+    },
+  });
 
   const heading = document.createElement('h1');
   heading.textContent = t('title');
@@ -140,19 +170,8 @@ export function mount(container, { qu, services, subscribe, syncFetch }) {
   search.placeholder = t('searchPlaceholder');
 
   const listRoot = document.createElement('div');
-  const unlistedRoot = document.createElement('div');
-  // Chrome Inversion (`apps/shell/src/chrome.js`) - `container` is already
-  // the platform's own content area, and this app has no navigation/views/
-  // primaryAction/settings needs, so there's no chrome to set - just build
-  // straight into it.
+  const unlistedRoot = document.createElement('div'); // 'all' view only - stays empty, unused on 'contacts'
   container.append(heading, search, listRoot, unlistedRoot);
-
-  let debounceTimer = null;
-  search.addEventListener('input', () => {
-    applyFilter(search.value);
-    clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(() => resolveUnlisted(search.value), 300);
-  });
 
   function applyFilter(query) {
     const q = query.trim().toLowerCase();
@@ -161,102 +180,186 @@ export function mount(container, { qu, services, subscribe, syncFetch }) {
     }
   }
 
-  let unlistedToken = 0;
-  async function resolveUnlisted(query) {
-    const token = ++unlistedToken;
-    const trimmed = query.trim();
-    unlistedRoot.textContent = '';
-    if (trimmed.length !== FP_LENGTH) return;
-    if (listRoot.querySelector(`[data-pub="${trimmed}"]`)) return; // already a visible row
+  // ---------------------------------------------------------------------
+  // #/user-list - Contacts (default)
+  // ---------------------------------------------------------------------
+  function mountContactsView() {
+    search.addEventListener('input', () => applyFilter(search.value));
+    const rowActions = actionsForSlot(apps, CONTACT_ROW_SLOT);
 
-    const profile = await services.profile.getPublicProfile(trimmed);
-    if (stopped || token !== unlistedToken || !profile) return;
+    (async () => {
+      const mainKey = await identity.getMainKey();
+      const selfPub = QuCrypto.toBase64Url(mainKey.publicKey);
+      if (stopped) return;
 
-    const alias = formatActorLabel(trimmed, profile);
-    const li = document.createElement('li');
-    li.className = 'qu-user-unlisted';
-    li.appendChild(renderAvatarOrAsset(trimmed, alias, profile.avatar, { size: '2.2rem' }));
+      listRoot.qu = createPrivateStore(qu, identity);
+      // Backfills contacts added from a DIFFERENT session/device before this
+      // one connected (see <qu-list>'s own `.syncFetch` doc comment) -
+      // encryption is transparent to sync itself, which only ever replicates
+      // raw QuBits; createPrivateStore()'s getChildren() still decrypts them.
+      if (syncFetch) listRoot.syncFetch = syncFetch;
+      listRoot.innerHTML = `
+        <qu-list class="qu-user-list" parent="${paths.privateFlagParentPath(selfPub, 'favorite', 'user')}">
+          <template>
+            <li>
+              <span class="qu-user-avatar-slot"></span>
+              <a class="qu-user-info">
+                <span class="qu-user-alias-row"><span class="qu-user-alias"></span></span>
+                <span class="qu-user-pub"></span>
+              </a>
+              <span class="qu-user-actions-slot"></span>
+              <button type="button" class="qu-user-remove">${t('remove')}</button>
+            </li>
+          </template>
+        </qu-list>`;
 
-    const info = document.createElement('a');
-    info.className = 'qu-user-info';
-    info.href = `#/~${trimmed}`;
-    const aliasRow = document.createElement('span');
-    aliasRow.className = 'qu-user-alias-row';
-    const aliasEl = document.createElement('span');
-    aliasEl.className = 'qu-user-alias';
-    aliasEl.textContent = alias;
-    const badge = document.createElement('span');
-    badge.className = 'qu-user-badge';
-    badge.textContent = t('unlisted');
-    aliasRow.append(aliasEl, badge);
-    const pubEl = document.createElement('span');
-    pubEl.className = 'qu-user-pub';
-    pubEl.textContent = trimmed;
-    info.append(aliasRow, pubEl);
-    li.appendChild(info);
+      const list = listRoot.querySelector('qu-list');
+      list.onItemStamped = (els, contactPub) => {
+        const li = els[0];
+        li.querySelector('.qu-user-info').href = `#/~${contactPub}`;
+        li.querySelector('.qu-user-pub').textContent = contactPub;
 
-    li.appendChild(renderFlagToggle({
-      flags: {
-        hasPrivate: () => services.contacts.isContact(trimmed),
-        setPrivate: (_ft, _ek, _er, on) => (on ? services.contacts.addContact(trimmed) : services.contacts.removeContact(trimmed)),
-      },
-      flagType: 'favorite', entityKind: 'user', entityRef: trimmed,
-      icon: '☆', activeIcon: '★', title: t('contactAdd'), activeTitle: t('contactRemove'),
-    }));
+        (async () => {
+          const profile = await services.profile.getPublicProfile(contactPub);
+          if (stopped) return;
+          const alias = formatActorLabel(contactPub, profile);
+          li.querySelector('.qu-user-avatar-slot').replaceChildren(renderAvatarOrAsset(contactPub, alias, profile?.avatar, { size: '2.2rem' }));
+          li.querySelector('.qu-user-alias').textContent = alias;
+          applyFilter(search.value);
+        })();
 
-    unlistedRoot.appendChild(li);
+        const actionsSlot = li.querySelector('.qu-user-actions-slot');
+        for (const action of rowActions) {
+          const link = document.createElement('a');
+          link.className = 'qu-user-action';
+          link.href = resolveActionHref(action, { pub: contactPub });
+          link.title = action.label;
+          link.textContent = action.icon ?? action.label;
+          actionsSlot.appendChild(link);
+        }
+
+        li.querySelector('.qu-user-remove').addEventListener('click', () => {
+          services.contacts.removeContact(contactPub); // <qu-list> picks up the removal live - no manual refresh needed
+        });
+      };
+    })();
   }
 
-  (async () => {
-    const myPub = await services.actors.whoAmI();
-    if (stopped) return;
+  // ---------------------------------------------------------------------
+  // #/user-list/all - All users (the public Directory)
+  // ---------------------------------------------------------------------
+  function mountAllUsersView() {
+    // Defense in depth - a future shell would already subscribe to
+    // '/store/directory' by default, but this app shouldn't silently depend
+    // on that staying true.
+    subscribe?.('/store/directory');
 
-    listRoot.qu = createVerifiedDirectoryQu(qu, myPub);
-    // Backfills directory entries written before this session connected
-    // (see <qu-list>'s own `.syncFetch` doc comment) - subscribe() above
-    // only ever delivers FUTURE writes.
-    if (syncFetch) listRoot.syncFetch = syncFetch;
-    listRoot.innerHTML = `
-      <qu-list class="qu-user-list" parent="${paths.directoryEntriesParentPath()}">
-        <template>
-          <li>
-            <span class="qu-user-avatar-slot"></span>
-            <a class="qu-user-info">
-              <span class="qu-user-alias-row"><span class="qu-user-alias"></span></span>
-              <span class="qu-user-pub"></span>
-            </a>
-            <span class="qu-user-fav-slot"></span>
-          </li>
-        </template>
-      </qu-list>`;
+    search.addEventListener('input', () => {
+      applyFilter(search.value);
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => resolveUnlisted(search.value), 300);
+    });
 
-    const list = listRoot.querySelector('qu-list');
-    list.onItemStamped = (els, pub) => {
-      const li = els[0];
-      li.dataset.pub = pub;
-      li.querySelector('.qu-user-info').href = `#/~${pub}`;
-      li.querySelector('.qu-user-pub').textContent = pub;
+    let unlistedToken = 0;
+    async function resolveUnlisted(query) {
+      const token = ++unlistedToken;
+      const trimmed = query.trim();
+      unlistedRoot.textContent = '';
+      if (trimmed.length !== FP_LENGTH) return;
+      if (listRoot.querySelector(`[data-pub="${trimmed}"]`)) return; // already a visible row
 
-      (async () => {
-        const profile = await services.profile.getPublicProfile(pub);
-        if (stopped) return;
-        li.querySelector('.qu-user-avatar-slot').replaceChildren(renderAvatarOrAsset(pub, formatActorLabel(pub, profile), profile?.avatar, { size: '2.2rem' }));
-        li.querySelector('.qu-user-alias').textContent = formatActorLabel(pub, profile);
-        applyFilter(search.value); // a freshly resolved alias might newly match (or no longer match) the current search
-      })();
+      const profile = await services.profile.getPublicProfile(trimmed);
+      if (stopped || token !== unlistedToken || !profile) return;
 
-      const slot = li.querySelector('.qu-user-fav-slot');
-      const toggle = renderFlagToggle({
+      const alias = formatActorLabel(trimmed, profile);
+      const li = document.createElement('li');
+      li.className = 'qu-user-unlisted';
+      li.appendChild(renderAvatarOrAsset(trimmed, alias, profile.avatar, { size: '2.2rem' }));
+
+      const info = document.createElement('a');
+      info.className = 'qu-user-info';
+      info.href = `#/~${trimmed}`;
+      const aliasRow = document.createElement('span');
+      aliasRow.className = 'qu-user-alias-row';
+      const aliasEl = document.createElement('span');
+      aliasEl.className = 'qu-user-alias';
+      aliasEl.textContent = alias;
+      const badge = document.createElement('span');
+      badge.className = 'qu-user-badge';
+      badge.textContent = t('unlisted');
+      aliasRow.append(aliasEl, badge);
+      const pubEl = document.createElement('span');
+      pubEl.className = 'qu-user-pub';
+      pubEl.textContent = trimmed;
+      info.append(aliasRow, pubEl);
+      li.appendChild(info);
+
+      li.appendChild(renderFlagToggle({
         flags: {
-          hasPrivate: () => services.contacts.isContact(pub),
-          setPrivate: (_ft, _ek, _er, on) => (on ? services.contacts.addContact(pub) : services.contacts.removeContact(pub)),
+          hasPrivate: () => services.contacts.isContact(trimmed),
+          setPrivate: (_ft, _ek, _er, on) => (on ? services.contacts.addContact(trimmed) : services.contacts.removeContact(trimmed)),
         },
-        flagType: 'favorite', entityKind: 'user', entityRef: pub,
+        flagType: 'favorite', entityKind: 'user', entityRef: trimmed,
         icon: '☆', activeIcon: '★', title: t('contactAdd'), activeTitle: t('contactRemove'),
-      });
-      slot.replaceWith(toggle);
-    };
-  })();
+      }));
+
+      unlistedRoot.appendChild(li);
+    }
+
+    (async () => {
+      const myPub = await services.actors.whoAmI();
+      if (stopped) return;
+
+      listRoot.qu = createVerifiedDirectoryQu(qu, myPub);
+      // Backfills directory entries written before this session connected
+      // (see <qu-list>'s own `.syncFetch` doc comment) - subscribe() above
+      // only ever delivers FUTURE writes.
+      if (syncFetch) listRoot.syncFetch = syncFetch;
+      listRoot.innerHTML = `
+        <qu-list class="qu-user-list" parent="${paths.directoryEntriesParentPath()}">
+          <template>
+            <li>
+              <span class="qu-user-avatar-slot"></span>
+              <a class="qu-user-info">
+                <span class="qu-user-alias-row"><span class="qu-user-alias"></span></span>
+                <span class="qu-user-pub"></span>
+              </a>
+              <span class="qu-user-fav-slot"></span>
+            </li>
+          </template>
+        </qu-list>`;
+
+      const list = listRoot.querySelector('qu-list');
+      list.onItemStamped = (els, pub) => {
+        const li = els[0];
+        li.dataset.pub = pub;
+        li.querySelector('.qu-user-info').href = `#/~${pub}`;
+        li.querySelector('.qu-user-pub').textContent = pub;
+
+        (async () => {
+          const profile = await services.profile.getPublicProfile(pub);
+          if (stopped) return;
+          li.querySelector('.qu-user-avatar-slot').replaceChildren(renderAvatarOrAsset(pub, formatActorLabel(pub, profile), profile?.avatar, { size: '2.2rem' }));
+          li.querySelector('.qu-user-alias').textContent = formatActorLabel(pub, profile);
+          applyFilter(search.value); // a freshly resolved alias might newly match (or no longer match) the current search
+        })();
+
+        const slot = li.querySelector('.qu-user-fav-slot');
+        const toggle = renderFlagToggle({
+          flags: {
+            hasPrivate: () => services.contacts.isContact(pub),
+            setPrivate: (_ft, _ek, _er, on) => (on ? services.contacts.addContact(pub) : services.contacts.removeContact(pub)),
+          },
+          flagType: 'favorite', entityKind: 'user', entityRef: pub,
+          icon: '☆', activeIcon: '★', title: t('contactAdd'), activeTitle: t('contactRemove'),
+        });
+        slot.replaceWith(toggle);
+      };
+    })();
+  }
+
+  if (view === 'all') mountAllUsersView();
+  else mountContactsView();
 
   return () => {
     stopped = true;
