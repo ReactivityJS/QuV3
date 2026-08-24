@@ -60,7 +60,7 @@
 import { watchChildren } from '@qu/reactive';
 import { paths } from '@qu/services';
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme, mountAppTemplate } from '@qu/ui';
+import { injectStyle, ensureTheme } from '@qu/ui';
 
 const DICT = {
   en: {
@@ -100,7 +100,11 @@ export function mount(container, { qu, services, syncFetch }) {
   const heading = document.createElement('h1');
   heading.textContent = t('title');
   const listRoot = document.createElement('div');
-  mountAppTemplate(container, { render: (content) => content.append(heading, listRoot) });
+  // Chrome Inversion (`apps/shell/src/chrome.js`) - `container` is already
+  // the platform's own content area, and this app has no navigation/views/
+  // primaryAction/settings needs, so there's no chrome to set - just build
+  // straight into it.
+  container.append(heading, listRoot);
 
   async function render() {
     if (stopped) return;

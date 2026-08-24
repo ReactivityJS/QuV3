@@ -9,6 +9,21 @@
  * and dimensions (the content element handed to `render()` is already
  * constrained to exactly the remaining space), the app only owns content.
  *
+ * NO APP CALLS `mountAppTemplate()` DIRECTLY ANYMORE (Chrome Inversion,
+ * `docs/app-navigation-standard.md` Rule 5a) - an app drives its chrome via
+ * `ctx.chrome.set()` instead, and `apps/shell/src/chrome.js` mounts the
+ * actual sidebar/footer DOM once, for the whole session. This function is
+ * NOT deprecated or scheduled for removal, though - it's the exact building
+ * block `chrome.js`'s own `buildChrome()` (exported below) is extracted
+ * from, and every migrated app's own test suite's `fakeChrome()` helper
+ * calls it directly (`mountAppTemplate(chromeRoot, { render: () => {} })`,
+ * then `stopTemplate.update(partial)` per `chrome.set()` call) to get
+ * byte-identical chrome DOM to assert against, without importing
+ * `apps/shell`'s own internals into a different app's tests. Keep this
+ * module's own behavior and `AppConfig` shape exactly as `chrome.js` and
+ * every `fakeChrome()` helper already assume - a change here is a change to
+ * how EVERY app's chrome renders, not just this one call site's.
+ *
  * This is an ADDITIVE sibling to the rest of `docs/app-navigation-standard.md`,
  * not a replacement: the global shell header (`apps/shell/src/header.js`,
  * Back/Forward, `shell.headerNavPoints`) is unchanged, `renderSubpage()`
@@ -321,7 +336,15 @@ function primaryActionItems(primaryAction) {
   return Array.isArray(primaryAction) ? primaryAction : [primaryAction];
 }
 
-function buildLinkList(items, { activeId, className = 'qu-apptpl-list', itemActiveClass = 'qu-apptpl-item-active' } = {}) {
+/**
+ * Also reused by `apps/shell/src/chrome.js`'s own `list:`-backed reactive
+ * sections for their optional `prefixItems` - a small, static "aggregate"
+ * entry (e.g. Forum's "All channels") rendered ahead of a live `<qu-list>`,
+ * both as plain siblings inside the same `.qu-apptpl-section` (which already
+ * gives every direct child a consistent `gap` - see that file's own doc
+ * comment for why this needn't be one combined list).
+ */
+export function buildLinkList(items, { activeId, className = 'qu-apptpl-list', itemActiveClass = 'qu-apptpl-item-active' } = {}) {
   const ul = document.createElement('ul');
   ul.className = className;
   for (const item of items) {
@@ -397,9 +420,15 @@ function buildDesktopSidebar(cfg) {
  * A small, anchored popup trigger - the footer's shared shape for a
  * navigation/views pill and the settings gear alike. See this file's own top
  * doc comment for why this is a real-link popup, not a bottom sheet.
+ * `bodyEl`, when given, is appended into the popup INSTEAD of building
+ * static `<a>` links from `items`/`filter` - the caller (e.g.
+ * `apps/shell/src/chrome.js`'s own `list:`-backed footer pill) owns
+ * whatever's inside it, live-reactive or not; this function's own
+ * open/close/outside-click/Escape/close-on-link-click logic (event
+ * delegation on `menu`) already works unmodified against it either way.
  * @returns {{el: HTMLElement, cleanup: () => void}}
  */
-function buildPopupTrigger({ triggerEl, items, popupPosition = 'left', filter = false, filterPlaceholder }) {
+export function buildPopupTrigger({ triggerEl, items = [], bodyEl, popupPosition = 'left', filter = false, filterPlaceholder }) {
   const wrap = document.createElement('div');
   wrap.className = 'qu-apptpl-popup-wrap';
 
@@ -410,22 +439,26 @@ function buildPopupTrigger({ triggerEl, items, popupPosition = 'left', filter = 
     menu.style.right = '0';
   }
   menu.hidden = true;
-  if (filter) {
-    menu.appendChild(buildFilterInput(() => [...menu.querySelectorAll('a')].map((a) => ({ el: a, search: a.dataset.search })), { placeholder: filterPlaceholder }));
-  }
-  for (const item of items) {
-    const a = document.createElement('a');
-    a.href = item.href;
-    a.dataset.search = searchTextFor(item);
-    if (item.icon) {
-      const icon = document.createElement('span');
-      icon.textContent = item.icon;
-      a.appendChild(icon);
+  if (bodyEl) {
+    menu.appendChild(bodyEl);
+  } else {
+    if (filter) {
+      menu.appendChild(buildFilterInput(() => [...menu.querySelectorAll('a')].map((a) => ({ el: a, search: a.dataset.search })), { placeholder: filterPlaceholder }));
     }
-    const label = document.createElement('span');
-    label.textContent = item.label;
-    a.appendChild(label);
-    menu.appendChild(a);
+    for (const item of items) {
+      const a = document.createElement('a');
+      a.href = item.href;
+      a.dataset.search = searchTextFor(item);
+      if (item.icon) {
+        const icon = document.createElement('span');
+        icon.textContent = item.icon;
+        a.appendChild(icon);
+      }
+      const label = document.createElement('span');
+      label.textContent = item.label;
+      a.appendChild(label);
+      menu.appendChild(a);
+    }
   }
 
   wrap.append(triggerEl, menu);
@@ -463,27 +496,41 @@ function buildPopupTrigger({ triggerEl, items, popupPosition = 'left', filter = 
   };
 }
 
-function buildPill(section) {
-  const active = section.items.find((item) => item.id === section.activeId) ?? section.items[0];
+/**
+ * The pill's own chrome (button + label slot + caret), with no opinion on
+ * WHAT fills the label - a static section's active-item label (`buildPill()`
+ * below) and a `list:`-backed footer pill's live, `pillTemplate`-stamped
+ * label (`apps/shell/src/chrome.js`'s `buildReactiveFooterPill()`) both
+ * build on this. `titleText` becomes the button's own `title`/`aria-label`
+ * (a static section's own `heading ?? active.label`; the reactive case's own
+ * `heading`, or a generic fallback while nothing's resolved yet).
+ * @returns {{btn: HTMLButtonElement, labelEl: HTMLElement}}
+ */
+export function buildPillShell(titleText) {
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'qu-apptpl-pill';
-  btn.title = section.heading ?? active.label;
-  btn.setAttribute('aria-label', section.heading ?? active.label);
-  if (active.icon) {
-    const icon = document.createElement('span');
-    icon.textContent = active.icon;
-    btn.appendChild(icon);
-  }
-  const label = document.createElement('span');
-  label.className = 'qu-apptpl-pill-label';
-  label.textContent = active.label;
-  btn.appendChild(label);
+  btn.title = titleText;
+  btn.setAttribute('aria-label', titleText);
+  const labelEl = document.createElement('span');
+  labelEl.className = 'qu-apptpl-pill-label';
   const caret = document.createElement('span');
   caret.className = 'qu-apptpl-pill-caret';
   caret.textContent = '▾';
   caret.setAttribute('aria-hidden', 'true');
-  btn.appendChild(caret);
+  btn.append(labelEl, caret);
+  return { btn, labelEl };
+}
+
+function buildPill(section) {
+  const active = section.items.find((item) => item.id === section.activeId) ?? section.items[0];
+  const { btn, labelEl } = buildPillShell(section.heading ?? active.label);
+  if (active.icon) {
+    const icon = document.createElement('span');
+    icon.textContent = active.icon;
+    btn.insertBefore(icon, labelEl);
+  }
+  labelEl.textContent = active.label;
   return btn;
 }
 
@@ -581,22 +628,36 @@ function buildFab(items) {
  * caller-owned tree; the caller decides where those elements go and how any
  * previous ones get removed.
  * @param {ReturnType<typeof normalizeAppConfig>} cfg - already normalized.
+ * @param {{hasExternalMobileNav?: boolean}} [options] - `hasExternalMobileNav:
+ *   true` tells this function a mobile-footer nav/views section exists
+ *   OUTSIDE of `cfg` itself - `apps/shell/src/chrome.js`'s own `list:`-backed
+ *   footer pill, spliced in by the caller AFTER this returns (this function
+ *   never sees `cfg.navigation` for that case at all - `chrome.js` already
+ *   nulled it out before calling in). Without this, a route with ONLY a
+ *   `list:` navigation and no other chrome would incorrectly compute
+ *   `hasMobileFooterContent: false` (or `fabOnly: true` if a `primaryAction`
+ *   is also set) and never get a real footer bar built for the caller to
+ *   splice its own pill into.
  * @returns {{sidebarEl: HTMLElement|null, footerEl: HTMLElement|null,
  *   hasChrome: boolean, hasMobileFooterContent: boolean, fabOnly: boolean,
  *   cleanup: () => void}}
  */
-export function buildChrome(cfg) {
+export function buildChrome(cfg, { hasExternalMobileNav = false } = {}) {
   // `hasChrome` decides the DESKTOP sidebar - every section counts,
   // `desktopOnly` or not. The mobile footer only cares about sections
   // that AREN'T `desktopOnly` - see `AppConfig.navigation`'s own doc
   // comment above for why a section opts out of the footer entirely.
+  // `hasExternalMobileNav` is DELIBERATELY excluded from `hasChrome` -
+  // the desktop sidebar's own `list:` splicing is entirely `chrome.js`'s
+  // own business (it doesn't go through `cfg`/`buildDesktopSidebar()` at
+  // all), so this function has nothing to add there.
   const hasPrimaryAction = primaryActionItems(cfg.primaryAction).length > 0;
   const hasChrome = !!(hasPrimaryAction || cfg.navigation || cfg.views || cfg.settings);
   const mobileNav = cfg.navigation && !cfg.navigation.desktopOnly ? cfg.navigation : null;
   const mobileViews = cfg.views && !cfg.views.desktopOnly ? cfg.views : null;
   const mobileSettings = cfg.settings && !cfg.settings.desktopOnly ? cfg.settings : null;
-  const hasMobileFooterContent = !!(hasPrimaryAction || mobileNav || mobileViews || mobileSettings);
-  const fabOnly = hasMobileFooterContent && !mobileNav && !mobileViews && !mobileSettings && hasPrimaryAction;
+  const hasMobileFooterContent = !!(hasPrimaryAction || mobileNav || mobileViews || mobileSettings || hasExternalMobileNav);
+  const fabOnly = hasMobileFooterContent && !mobileNav && !mobileViews && !mobileSettings && !hasExternalMobileNav && hasPrimaryAction;
 
   const sidebarEl = hasChrome ? buildDesktopSidebar(cfg) : null;
   let footerEl = null;

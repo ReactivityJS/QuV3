@@ -9,6 +9,7 @@ import { installDom, waitFor } from '@qu/ui/testing';
 
 installDom();
 const { mount } = await import('../client.js');
+const { mountAppTemplate } = await import('@qu/ui');
 
 // The REAL apps/forum/client.js (not a synthetic fake) - proves the rich
 // rendering path end to end against actual production code, same "the REAL
@@ -55,6 +56,30 @@ function makeContainer() {
   const el = document.createElement('div');
   document.body.appendChild(el);
   return el;
+}
+
+/**
+ * A test-only stand-in for the platform-owned `ctx.chrome` handle (Chrome
+ * Inversion, `apps/shell/src/chrome.js`) - reuses `@qu/ui`'s own
+ * `mountAppTemplate()`, the exact same `buildChrome()` building blocks the
+ * real `chrome.js` itself reuses, so a test asserting on real chrome DOM
+ * gets byte-identical rendering without importing `apps/shell`'s own
+ * internals into a different app's test suite. Renders into `chromeRoot` -
+ * a SEPARATE element from whatever `container` the app's own `mount()`
+ * writes its business content into. Most tests in this file don't need
+ * this at all - `client.js`'s own `mount()` defaults `ctx.chrome` to a
+ * harmless no-op when absent.
+ */
+function fakeChrome(chromeRoot) {
+  let current = {};
+  const stopTemplate = mountAppTemplate(chromeRoot, { render: () => {} });
+  return {
+    get current() { return current; },
+    set(partial) {
+      current = { ...current, ...partial };
+      stopTemplate.update(current);
+    },
+  };
 }
 
 /** Simulates what `@qu/relay`'s `PushDeliveryService#writeInAppNotification()` does - a signed write into the owner's own notifications Thread. `THREAD_PRESETS.notifications()`'s `writers: '*'` means this identity itself may write into it too, exactly like any other writer. */
@@ -205,21 +230,25 @@ test('the views pill shows both routes as real links, with the current route mar
   const { qu, services, myPub } = await freshEnv();
   await seedNotification(services, myPub, { title: 'Hi', body: 'a' });
 
+  const chromeRoot = makeContainer();
+  const chrome = fakeChrome(chromeRoot);
   const container = makeContainer();
-  const stop = mount(container, { qu, services, subscribe: noopSubscribe, segments: ['notifications'] });
+  const stop = mount(container, { qu, services, subscribe: noopSubscribe, segments: ['notifications'], chrome });
   try {
     await waitFor(() => container.querySelector('.qu-notifications-item') !== null);
-    const popupLinks = [...container.querySelectorAll('.qu-apptpl-popup a')];
+    const popupLinks = [...chromeRoot.querySelectorAll('.qu-apptpl-popup a')];
     assert.deepEqual(popupLinks.map((a) => a.getAttribute('href')), ['#/notifications', '#/notifications/all']);
   } finally {
     stop();
   }
 
+  const chromeRoot2 = makeContainer();
+  const chrome2 = fakeChrome(chromeRoot2);
   const container2 = makeContainer();
-  const stop2 = mount(container2, { qu, services, subscribe: noopSubscribe, segments: ['notifications', 'all'] });
+  const stop2 = mount(container2, { qu, services, subscribe: noopSubscribe, segments: ['notifications', 'all'], chrome: chrome2 });
   try {
     await waitFor(() => container2.querySelector('.qu-notifications-item') !== null);
-    assert.ok(container2.querySelector('.qu-apptpl-pill').textContent.includes('All'));
+    assert.ok(chromeRoot2.querySelector('.qu-apptpl-pill').textContent.includes('All'));
   } finally {
     stop2();
   }

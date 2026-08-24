@@ -75,7 +75,7 @@
 import { QuCrypto } from '@qu/core';
 import { createI18n } from '@qu/i18n';
 import { rankFor } from '@qu/foundation';
-import { injectStyle, ensureTheme, mountAppTemplate } from '@qu/ui';
+import { injectStyle, ensureTheme } from '@qu/ui';
 
 /**
  * The fixed catalog of extension points this UI can reorder - native item
@@ -316,18 +316,15 @@ export async function mount(container, { identity, services, apps }) {
 
   const adminPubs = config?.adminPubs ?? [];
   if (!adminPubs.includes(myPub)) {
-    // Rule 5 (docs/app-navigation-standard.md) - even this single, chrome-
-    // less "not authorized" state routes through mountAppTemplate(), same
-    // as the real form below, rather than appending straight to `container`.
-    mountAppTemplate(container, {
-      render: (content) => {
-        const heading = document.createElement('h1');
-        heading.textContent = t('title');
-        const p = document.createElement('p');
-        p.textContent = t('notAuthorized');
-        content.append(heading, p);
-      },
-    });
+    // Chrome Inversion (`apps/shell/src/chrome.js`) - `container` is
+    // already the platform's own content area; this app has no
+    // navigation/views/primaryAction/settings needs, so there's no chrome
+    // to set - just build straight into it, same as the real form below.
+    const heading = document.createElement('h1');
+    heading.textContent = t('title');
+    const p = document.createElement('p');
+    p.textContent = t('notAuthorized');
+    container.append(heading, p);
     return () => { stopped = true; };
   }
 
@@ -485,17 +482,15 @@ export async function mount(container, { identity, services, apps }) {
 
   form.append(generalSection, appsSection, channelsSection, chatSection, linkPreviewsSection, ...orderSections.map((o) => o.section), flagTypesSection, saveBtn, status);
 
-  // Rule 5 (docs/app-navigation-standard.md) - none of `navigation`/`views`/
-  // `primaryAction`/`settings` fit a single settings form with no sibling
-  // "places" or create action, so `render` is all that's passed - the same
-  // chrome-less shape apps/search/client.js's own mount() uses.
-  mountAppTemplate(container, {
-    render: (content) => {
-      const heading = document.createElement('h1');
-      heading.textContent = t('title');
-      content.append(heading, form);
-    },
-  });
+  // Chrome Inversion (`apps/shell/src/chrome.js`) - none of
+  // `navigation`/`views`/`primaryAction`/`settings` fit a single settings
+  // form with no sibling "places" or create action, so there's no chrome
+  // to set - `container` is already the platform's own content area, just
+  // build straight into it, same shape `apps/search/client.js`'s own
+  // `mount()` uses for its own chrome-less parts.
+  const heading = document.createElement('h1');
+  heading.textContent = t('title');
+  container.append(heading, form);
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();

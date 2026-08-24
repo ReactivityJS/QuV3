@@ -132,10 +132,17 @@ that only makes sense on a specific sub-route — register your own
 `onContextChange` listener from inside `render()` to recompute and
 re-render on every route change within your app (`mountAppHeaderAction()`
 itself only re-renders on activate/deactivate, not on every internal route
-change). `apps/todo/client.js`'s own `shell.headerNavPoints` contribution is
-a working reference for this shape (Forum has since migrated its own
-route-dependent actions onto `mountAppTemplate()`'s `primaryAction`/
-`settings` instead - see Rule 5 below).
+change).
+
+**Status: no app currently contributes to `shell.headerNavPoints`.**
+Calendar was the last real contributor (its own async "first calendar I can
+edit" lookup); every app that used to use this point (Calendar, Chat, ToDo,
+Forum) has since migrated its "create X" action onto Rule 5a's `ctx.chrome`
+`primaryAction`/`settings` instead — see Rule 5a below, the current
+recommended path for every app. The point itself, `mountAppHeaderAction()`,
+and `renderNavPointsMenu()` are NOT removed (kept as generic, reusable
+infra for a genuinely future contributor, same shape as before), just
+unused today.
 
 The contributor's payload carries `getContext`/`onContextChange` (the current
 route) plus `services`/`qu`/`subscribe`/`syncFetch` — the same ones the
@@ -211,6 +218,19 @@ icon-only control, not optional polish.
 
 ### Rule 5 — The App Template / Footer-Sidebar Chrome
 
+> **`mountAppTemplate()` is no longer called directly by any app in this
+> codebase.** It is internal machinery now — `apps/shell/src/chrome.js`'s
+> `buildChrome()` reuses its exported builder functions, and every migrated
+> app's own test suite's `fakeChrome()` helper calls it directly to get
+> byte-identical chrome DOM for assertions, without importing `apps/shell`'s
+> own internals. **See Rule 5a below for the current, correct entry point**
+> (`ctx.chrome`) — every worked example in THIS rule still describes a real,
+> unchanged mechanism (the `AppConfig` shape, `buildChrome()`'s own
+> `hasChrome`/`fabOnly` decision tree, the sidebar/footer layout), just no
+> longer one an app calls itself; read it as "how the chrome your
+> `ctx.chrome.set()` call produces is actually built," not as instructions
+> for a new app to follow directly.
+
 Beyond the global header (Rules 1-2) and the Context Switcher (Rule 3), most
 apps eventually need some version of four more things: a way to switch
 between "places" that's reachable without going through a header slot, a way
@@ -257,14 +277,12 @@ button with no system behind it — every app that wanted one built its own,
 inconsistently, and it could sit wherever it liked on top of content. This
 FAB is different in kind: it's one field (`primaryAction`) in a single,
 Core-owned, data-driven template that every app renders identically, exactly
-the same reasoning that already justifies the App Navigation Points Slot
-(Rule 2) existing as a fixed, predictable location. The two aren't
-competing — `shell.headerNavPoints` remains valid for apps that already use
-it (Calendar, Chat, ToDo, Forum are not required to migrate), but **new**
-apps should reach for `mountAppTemplate()`'s `primaryAction` first: it keeps
-the "create X" action next to the rest of that app's own chrome
-(navigation/views/settings) instead of splitting it across the global header
-and the app's own UI.
+the same reasoning that already justified the App Navigation Points Slot
+(Rule 2) as a fixed, predictable location — since superseded by Rule 5a's
+`ctx.chrome`, which every app (Calendar, Chat, ToDo, Forum included) has now
+migrated onto: the "create X" action lives next to the rest of that app's
+own chrome (navigation/views/settings), platform-owned, instead of split
+across the global header and the app's own UI.
 
 **No bottom sheet, no drawer/scrim** — same reasoning as Rule 3's rejection
 of a JS-toggled overlay for the Context Switcher (no route, no Back/Forward
@@ -318,21 +336,19 @@ a rewrite of how the app boots.
 
 `apps/phone/client.js` is the example for a MULTI-ROUTE app where none of
 the four chrome fields fit any route: each of its 5 routes (call-starter,
-caller/audio, caller/video, callee, decline) is still its own
-chrome-less `mountAppTemplate(container, { render })` call — a real page with
-a real route, exactly per this rule — but none contributes a `navigation`
-item. `accept`/`decline` in particular are never reached through any menu at
-all (only via a notification click, an in-app toast action, or another app's
+caller/audio, caller/video, callee, decline) is a real page with a real
+route, chrome-less (no `navigation`/`views`/`settings`), exactly per this
+rule — but none contributes a `navigation` item. `accept`/`decline` in
+particular are never reached through any menu at all (only via a
+notification click, an in-app toast action, or another app's
 `content.chatRoomMenu` contribution) — a route doesn't need a nav entry to
-be a "real page" in this sense. The call view's own full-bleed, fixed-position
-styling (`.qu-phone-call-view`) is untouched by the wrap — a chrome-less
-`mountAppTemplate()` call adds no visible sidebar/footer, so a
-`position: fixed` overlay inside its `content` element behaves exactly as
-before. (Phone's own hand-rolled `position: fixed` predates the `fullHeight`
-option below — `apps/chat/client.js` is the app that actually needed it,
-since its room view ALSO needs a `navigation` sidebar alongside the fixed
-box, which Phone's call view never does; migrating Phone's own CSS onto
-`fullHeight: true` too is a reasonable follow-up, not required.)
+be a "real page" in this sense. The active-call and decline views'
+`.qu-phone-call-view` is now `chrome.set({fullHeight: true})` (Rule 5a) —
+the SAME `qu-apptpl-root--full-height` mechanism Chat's/Forum's own room/
+topic views already use, not its own hand-rolled `position: fixed` anymore
+(that predated `fullHeight` existing at all; the class now only needs
+`flex: 1; min-height: 0` to fill the `fullHeight` wrapper's own flex
+column).
 
 **`fullHeight: true`** binds `content` (and the sidebar, if any) to exactly
 the remaining VIEWPORT height below the shell header, real `position: fixed`
@@ -443,32 +459,81 @@ static/derived-in-app-code (e.g. `settings`, rarely more than a couple of
 fixed links) where mounting a whole reactive list would be overhead for no
 benefit.
 
-**Scoped for this round, not a silent gap**: a `list:`-registered section
-renders in the desktop sidebar only — it does NOT appear in the mobile
-footer pill/popup. An app whose mobile users genuinely need to switch
-between the same items from a footer pill (any app whose main view is a
-feed/list rather than the switched-to place itself — see Rule 5's own
-`desktopOnly` discussion) should keep `navigation`/`views` as a plain
-`items[]` snapshot for now, recomputed from its own `watch()` callback
-exactly as `mountAppTemplate()`-based apps already do — this is real,
-deliberate follow-up work once a second real app needs the reactive form on
-mobile too, not an oversight.
+**The mobile footer pill/popup too, genuinely live** — a `list:`-registered
+section renders in BOTH the desktop sidebar and the mobile footer's own
+pill+popup: a SECOND, independent `<qu-list>` bound to the same
+`path`/`parent` (cheap — the two are never visible at the same time
+anyway), inside a `buildPopupTrigger()`-style pill. The one thing a static
+`items[]` snapshot gave for free that a live list doesn't — the collapsed
+pill's own visible label, the CURRENTLY ACTIVE item's name — is solved with
+a SECOND, optional literal `<template>`, `pillTemplate` (same contract as
+`template` itself):
 
-**Migration status**: `apps/forum/client.js` is the first (and, as of this
-writing, only) app migrated onto `ctx.chrome` — the proof-of-concept for
-this whole mechanism, chosen because its own recurring `watch()`-driven
-navigation and async policy gates are the hardest real case in this
-codebase. Every other app still calls `mountAppTemplate()` directly, is
-unaffected, and is under no obligation to migrate — `ctx.chrome` is
-additive (`apps/shell/client.js` defaults it to a working no-op for any test
-harness that doesn't construct one), and `mountAppTemplate()` itself is
-completely unchanged (`chrome.js` reuses its own exported builder functions
-internally, so the two can never silently drift into two different chrome
-behaviors for the same `AppConfig` shape). **`mountAppTemplate()` stays the
-recommended entry point for a NEW app** (Rule 5's own checklist item below)
-until a second real app has migrated and the mobile-footer gap above is
-closed — copy `apps/_template/`, not `apps/forum/client.js`, when starting
-something new.
+```js
+ctx.chrome.set({
+  navigation: {
+    list: { path: paths.listPath(SPACE_ID, 'channels'), template: channelTemplate(), pillTemplate: channelPillTemplate(), onItemStamped },
+    activeId: currentChannelId, heading: 'Channels', filter: true,
+  },
+});
+```
+
+`pillTemplate` is stamped once per ACTIVE-ITEM CHANGE (not per data
+change — an unrelated list update never re-stamps it), its root elements'
+`.qu` set to the exact same live context the popup's own already-stamped row
+for that item has, so a `<qu-view field="...">` inside it is genuinely,
+continuously live — not a one-time snapshot with an accepted staleness
+tradeoff. No `pillTemplate` given (or no active item resolved yet) falls
+back to showing the section's own `heading`. **A NOTE ON DECRYPTION**:
+`<qu-view>`/`<qu-list>` read the Qu store directly, with no decryption — a
+curated item whose own document is genuinely encrypted (e.g. a RESTRICTED
+Forum channel, confirmed via `AccessService.writeOptionsFor()`) can't be
+shown via a raw `<qu-view field="...">`; resolve it through the item's own
+decrypt-aware Service inside `onItemStamped` instead (an imperative,
+per-item DOM write, same escape hatch `<qu-list>` already has for anything
+plain HTML can't express) — `apps/forum/client.js`'s own
+`buildChannelNavListSpec()` is the worked example. A section can also carry
+`prefixItems` — a small, static `{id, label, href}[]` rendered as a plain
+sibling ahead of the live list (never spliced into it, which would corrupt
+its own keyed reconciliation) for an "aggregate" destination that isn't
+itself a member of the underlying list (Forum's own "All channels", back to
+the merged board view, is the motivating case).
+
+**Migration status: `ctx.chrome` is the only supported path — every app in
+this codebase has migrated.** `apps/forum/client.js` was the first (the
+proof-of-concept, chosen for its recurring `watch()`-driven navigation and
+async policy gates), followed by `apps/user-list`/`apps/contact-list`/
+`apps/app-list` (trivial), `apps/profile`, and `apps/chat/client.js` (a
+second real test on a multi-view app; kept `navigation` as a plain `items[]`
+snapshot for a genuinely different reason than Forum's own original one —
+`listRooms()` merges two different sources plus computed unread state, so
+there's no single Qu-store path a `<qu-list>` could bind to at all). Once
+the mobile-footer `list:` gap above was closed, every remaining app
+followed: `apps/bookmarks`/`apps/relay-admin`/`apps/notifications`/
+`apps/search` (trivial), `apps/_template` (the reference app new apps copy —
+its own doc comment now teaches `ctx.chrome` as the pattern to follow, not
+`mountAppTemplate()`), `apps/todo`, and — the real proof the mobile-footer
+gap actually closed — `apps/forum/client.js`'s own board/channel views
+switched their `navigation` from the `items[]` snapshot they'd deliberately
+kept in the first migration wave onto the `list:` form above, dropping the
+manual `watch()`-recompute-`chrome.set()` cycle entirely (see
+`buildChannelNavListSpec()`). `apps/geochase` and `apps/calendar` followed
+(Calendar's old `shell.headerNavPoints` contribution — Rule 2 — retired
+entirely along with it, its async "first calendar I can edit" lookup
+collapsing into a synchronous check once it became this SAME view's own
+chrome instead of the global header's), and finally `apps/phone` (all 3
+routes chrome-less already; its own `.qu-phone-call-view` hand-rolled
+`position: fixed` CSS — predating `fullHeight` — replaced with real
+`chrome.set({fullHeight: true})`, the same mechanism Chat's/Forum's own
+room/topic views already used). `ctx.chrome` defaults to a harmless no-op
+in every app's own `mount()` for any test harness that doesn't construct
+one, and `mountAppTemplate()` itself is completely unchanged under all of
+this (`chrome.js` reuses its own exported builder functions internally, so
+the two can never silently drift into two different chrome behaviors for
+the same `AppConfig` shape) — it's simply no longer called by an app
+directly (see Rule 5's own redirect note above). Copy `apps/_template/`
+when starting something new — it's both the reference implementation and
+the one app whose own doc comments are written to teach this current path.
 
 ## Building a new app? A checklist
 
@@ -478,22 +543,20 @@ something new.
    purpose, so it's never itself bundled/catalog-listed).
 2. No custom back link, anywhere. `renderSubpage({ showBackLink: false })`
    for every subpage.
-3. Route your app's MAIN view through `mountAppTemplate()` (Rule 5), even if
-   you pass only `render` — that's the standard entry point now, chrome-less
-   by default. Add `primaryAction`/`navigation`/`views`/`settings` (any
-   combination, omit the rest) the moment your app actually has a "create new
-   X" action, more than one sibling place to switch between, more than one
-   way to view the current place, or app-level settings — never build that
-   chrome by hand. `mountAppTemplate()`'s `primaryAction` is now the
-   recommended home for a NEW app's "create new X" action; a plain
-   `shell.headerNavPoints` contribution (`renderNavPointsMenu()` renders 1
-   item as a plain link, 2+ as a dropdown) is still valid for apps that
-   already use it.
+3. Drive your app's MAIN view through `ctx.chrome.set()` (Rule 5a) — the
+   platform, not your own app, mounts the chrome, chrome-less by default
+   when your app never calls `.set()`. Add `primaryAction`/`navigation`/
+   `views`/`settings` (any combination, omit the rest) the moment your app
+   actually has a "create new X" action, more than one sibling place to
+   switch between, more than one way to view the current place, or
+   app-level settings — never build that chrome by hand.
+   `ctx.chrome`'s `primaryAction` is the one recommended home for a "create
+   new X" action; `shell.headerNavPoints` (Rule 2) is retired - every app
+   that used it has migrated onto `ctx.chrome` instead.
 4. `mountContextSwitcher()` if you need a channel/calendar-style switcher
-   OUTSIDE of `mountAppTemplate()`'s own `navigation` section (e.g. a
-   dedicated `variant: 'page'` management page) — `variant: 'tabs'` for a
-   short/stable list, `variant: 'page'` for a longer one or one with its own
-   management UI.
+   OUTSIDE of `ctx.chrome`'s own `navigation` section (e.g. a dedicated
+   `variant: 'page'` management page) — `variant: 'tabs'` for a short/stable
+   list, `variant: 'page'` for a longer one or one with its own management UI.
 5. Every icon-only control gets a `title` + `aria-label`.
 6. Read [`docs/building-an-app.md`](./building-an-app.md) for everything
    else — the `mount(container, ctx)` contract, Services, extension points,
@@ -639,29 +702,14 @@ textarea, and an optional attachment, the same upload lifecycle the topic
 view's own composer uses - rather than creating an empty topic that still
 needs its first reply typed separately.
 
-## What's explicitly out of scope (for now)
+## What's explicitly out of scope
 
-- **ToDo and Calendar are now on `mountAppTemplate()` too** — ToDo's list
-  picker/list page/"Mir zugewiesen" aggregate route through it with a
-  `navigation` switcher (built from the same list-fetching logic every page
-  already needed), a per-route `primaryAction` ("New list" everywhere, "New
-  task" only once a specific editable list is open) replacing the older
-  `shell.headerNavPoints` contribution entirely, and a `settings` entry for
-  "Listen verwalten" (`#/todo/manage` — previously unreachable from any link
-  in the app). Calendar's own calendars sidebar stays `mountContextSwitcher()`
-  (its per-item show/hide+share+delete UI still doesn't fit a plain link
-  list), but the whole view is now ALSO wrapped in `mountAppTemplate()` purely
-  for its `settings` gear — "Kalender verwalten" reaches `#/calendar/manage`
-  from there instead of the old inline "„Kalender" ›" title-row link, which is
-  now suppressed via `mountContextSwitcher()`'s new `hideTitleLink` option.
-- **Pins, Reactions** are unchanged — both only contribute to other apps'
-  extension points and have no `mount()` UI of their own, so `mountAppTemplate()`
-  doesn't apply. **Search and Relay Admin are now also on `mountAppTemplate()`**
-  (chrome-less — `render` only, since neither has a natural `navigation`/
-  `views`/`primaryAction`/`settings`), completing this doc's own migration
-  checklist for every app under `apps/*`. **Geo Chase** (`apps/geochase`) was
-  built after this doc's first pass, on the older pre-`mountAppTemplate()`
-  toolkit; it's since been migrated too — the game list (`#/geochase`) is the
-  one `mountAppTemplate()` call, `primaryAction: "Start a game"` replacing
-  both its old `shell.headerNavPoints` contribution and a second, duplicate
-  inline link in the page body.
+Nothing is left "not yet migrated" — see Rule 5a's own "Migration status"
+paragraph above, which is now the source of truth for which app does what
+and why (`ctx.chrome` is the only path; every per-app note that used to live
+here, including ToDo/Calendar/Search/Relay Admin/Geo Chase's own specifics,
+has moved there so it doesn't drift out of sync with this one). The one
+thing that's out of scope for a structural reason, not a migration-order
+one: **Pins, Reactions** — both only contribute to other apps' extension
+points and have no `mount()` UI of their own, so `ctx.chrome` doesn't apply
+to either at all.

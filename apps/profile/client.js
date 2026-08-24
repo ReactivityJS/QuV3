@@ -595,7 +595,7 @@ async function subscribeToPush(services) {
   return subscription;
 }
 
-export function mount(container, { qu, identity, services, segments = [], extensionPoints }) {
+export function mount(container, { qu, identity, services, segments = [], extensionPoints, chrome = { set() {} } }) {
   ensureTheme();
   injectStyle(STYLE_ID, STYLE);
   let stopped = false;
@@ -698,6 +698,15 @@ export function mount(container, { qu, identity, services, segments = [], extens
         saveState.justSaved = false;
         root.textContent = '';
         renderOwnProfile(root, own, services, myPub, saveState, justSaved);
+        // Chrome Inversion (`apps/shell/src/chrome.js`) - the "⚙️ Settings"
+        // link used to be a plain in-content <a>, the same kind of hand-
+        // built chrome element the platform-owned gear/settings convention
+        // (Forum's `applyNewChannelSettings()`) already replaces elsewhere.
+        // Never set for the isSettings/foreign-profile branches below -
+        // chrome already starts empty for this navigation (`chrome.begin()`
+        // in apps/shell/client.js), so simply not calling it there is
+        // correct, no explicit clear needed.
+        chrome.set({ settings: { items: [{ label: t('settingsLink'), href: `#/~${myPub}/settings` }] } });
         return;
       }
       const pub = await services.profile.getPublicProfile(targetPub);
@@ -926,11 +935,11 @@ function renderOwnProfile(root, own, services, myPub, saveState, justSaved) {
     fieldsList.appendChild(renderFieldRow(field, state.fields, persistFields, { isNew: true }));
   });
 
-  const settingsLink = document.createElement('a');
-  settingsLink.href = `#/~${myPub}/settings`;
-  settingsLink.textContent = `⚙️ ${t('settingsLink')}`;
-
-  view.append(header, status, fieldsList, addFieldBtn, settingsLink);
+  // The "⚙️ Settings" link used to live here as a plain in-content <a> -
+  // now a platform-owned chrome.set({settings}) entry instead, set by
+  // mount()'s own `render()` right after this function returns (Chrome
+  // Inversion, see that call site's own doc comment).
+  view.append(header, status, fieldsList, addFieldBtn);
   root.appendChild(view);
 }
 

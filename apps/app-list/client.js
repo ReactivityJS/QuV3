@@ -23,7 +23,7 @@
  *     `<qu-bind attr="checked">` has no way to express correctly.
  */
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme, renderFlagToggle, mountAppTemplate } from '@qu/ui';
+import { injectStyle, ensureTheme, renderFlagToggle } from '@qu/ui';
 import { paths, createTrustedCatalogStore } from '@qu/services';
 
 const DICT = {
@@ -58,7 +58,11 @@ export function mount(container, { qu, services, syncFetch }) {
   const heading = document.createElement('h1');
   heading.textContent = t('title');
   const listRoot = document.createElement('div');
-  mountAppTemplate(container, { render: (content) => content.append(heading, listRoot) });
+  // Chrome Inversion (`apps/shell/src/chrome.js`) - `container` is already
+  // the platform's own content area, and this app has no navigation/views/
+  // primaryAction/settings needs, so there's no chrome to set - just build
+  // straight into it.
+  container.append(heading, listRoot);
 
   (async () => {
     const res = await fetch('/config.json');

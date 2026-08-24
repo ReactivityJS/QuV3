@@ -12,6 +12,7 @@ import { installDom, waitFor } from '@qu/ui/testing';
 
 installDom();
 const { mount } = await import('../client.js');
+const { mountAppTemplate } = await import('@qu/ui');
 
 const TODO_SPACE_ID = '63f5cc6f-62f6-4a43-a889-33900138f8b0'; // real UUID from apps/todo/manifest.quapp
 
@@ -100,6 +101,18 @@ function makeContainer() {
   const el = document.createElement('div');
   document.body.appendChild(el);
   return el;
+}
+
+function fakeChrome(chromeRoot) {
+  let current = {};
+  const stopTemplate = mountAppTemplate(chromeRoot, { render: () => {} });
+  return {
+    get current() { return current; },
+    set(partial) {
+      current = { ...current, ...partial };
+      stopTemplate.update(current);
+    },
+  };
 }
 
 function segmentsFor(hash) {
@@ -505,26 +518,29 @@ test('the returned stop function tears down cleanly - no error thrown', async ()
 });
 
 /**
- * "New list"/"New task" now live as each route's own `mountAppTemplate()`
- * `primaryAction` (docs/app-navigation-standard.md Rule 5) instead of the
+ * "New list"/"New task" now live as each route's own `ctx.chrome.set()`
+ * `primaryAction` (docs/app-navigation-standard.md Rule 5a) instead of the
  * older `shell.headerNavPoints` slot - the same move `apps/chat/client.js`
  * already made for "+ New group". On mobile this renders as a circular FAB
  * (`.qu-apptpl-fab`); on desktop, a prominent link at the top of
  * the sidebar (`.qu-apptpl-primary-desktop`) - either is enough to prove the
- * action is wired up.
+ * action is wired up. Rendered into a `fakeChrome()` root, not `container` -
+ * see that helper's own doc comment above.
  */
-function primaryActionLink(container) {
-  return container.querySelector('.qu-apptpl-fab, .qu-apptpl-primary-desktop');
+function primaryActionLink(chromeRoot) {
+  return chromeRoot.querySelector('.qu-apptpl-fab, .qu-apptpl-primary-desktop');
 }
 
 test('#/todo\'s own primaryAction is always "New list", and the settings gear always reaches "Listen verwalten" (#/todo/manage)', async () => {
   const { qu, services } = await freshEnv();
   const container = makeContainer();
-  const stop = mount(container, { qu, services, segments: ['todo'], subscribe: noopSubscribe });
+  const chromeRoot = makeContainer();
+  const chrome = fakeChrome(chromeRoot);
+  const stop = mount(container, { qu, services, segments: ['todo'], subscribe: noopSubscribe, chrome });
   try {
-    await waitFor(() => primaryActionLink(container) !== null);
-    assert.equal(primaryActionLink(container).getAttribute('href'), '#/todo/new');
-    const settingsLink = [...container.querySelectorAll('a')].find((a) => a.getAttribute('href') === '#/todo/manage');
+    await waitFor(() => primaryActionLink(chromeRoot) !== null);
+    assert.equal(primaryActionLink(chromeRoot).getAttribute('href'), '#/todo/new');
+    const settingsLink = [...chromeRoot.querySelectorAll('a')].find((a) => a.getAttribute('href') === '#/todo/manage');
     assert.ok(settingsLink, 'expected a "Listen verwalten" settings link pointing at #/todo/manage');
   } finally {
     stop();
@@ -539,16 +555,13 @@ test('an open list\'s own primaryAction is "New task" once the list is editable,
   const [{ id: listId }] = await services.sharing.listMine('todo', 'list');
   stop();
 
-  // A fresh container (not a re-mount over `setupContainer`) - #/todo's own
-  // "New list" primaryAction would otherwise still be sitting in the DOM
-  // until the list page's OWN mountAppTemplate() call clears it, racing
-  // ahead of this still-in-flight render (see the "Copy link" test below's
-  // own doc comment for the same reasoning).
   const container = makeContainer();
-  stop = mount(container, { qu, services, segments: segmentsFor(`#/todo/${listId}`), subscribe: noopSubscribe });
+  const chromeRoot = makeContainer();
+  const chrome = fakeChrome(chromeRoot);
+  stop = mount(container, { qu, services, segments: segmentsFor(`#/todo/${listId}`), subscribe: noopSubscribe, chrome });
   try {
-    await waitFor(() => primaryActionLink(container) !== null);
-    assert.equal(primaryActionLink(container).getAttribute('href'), `#/todo/${listId}/new`);
+    await waitFor(() => primaryActionLink(chromeRoot) !== null);
+    assert.equal(primaryActionLink(chromeRoot).getAttribute('href'), `#/todo/${listId}/new`);
   } finally {
     stop();
   }
@@ -590,7 +603,7 @@ test('"Mir zugewiesen"/Assigned-to-me: each row can be checked off directly (dro
   stop();
 });
 
-test('list page and "Mir zugewiesen" both render a Lists <-> Mir-zugewiesen switcher (mountAppTemplate\'s desktop-only navigation sidebar) and a "Copy link" button for an absolute, shareable URL', async () => {
+test('list page and "Mir zugewiesen" both render a Lists <-> Mir-zugewiesen switcher (ctx.chrome\'s desktop-only navigation sidebar) and a "Copy link" button for an absolute, shareable URL', async () => {
   const { qu, services } = await freshEnv();
   const setupContainer = makeContainer();
   let stop = mount(setupContainer, { qu, services, segments: ['todo'], subscribe: noopSubscribe });
@@ -602,15 +615,12 @@ test('list page and "Mir zugewiesen" both render a Lists <-> Mir-zugewiesen swit
   const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
   Object.defineProperty(globalThis, 'navigator', { value: { clipboard: { writeText: async (text) => { written.push(text); } } }, configurable: true });
   try {
-    // A fresh container (not a re-mount over `setupContainer`) - #/todo's own
-    // mountAppTemplate() sidebar (settings only, no navigation) would
-    // otherwise still be sitting in the DOM until the list page's OWN
-    // mountAppTemplate() call clears it, racing ahead of this still-in-flight
-    // render (same reasoning the "mine" container below already documents).
     const container = makeContainer();
-    stop = mount(container, { qu, services, segments: segmentsFor(`#/todo/${listId}`), subscribe: noopSubscribe });
-    await waitFor(() => container.querySelector('.qu-apptpl-sidebar') !== null);
-    const sidebarLinks = [...container.querySelectorAll('.qu-apptpl-sidebar a')].map((a) => a.textContent);
+    const chromeRoot = makeContainer();
+    const chrome = fakeChrome(chromeRoot);
+    stop = mount(container, { qu, services, segments: segmentsFor(`#/todo/${listId}`), subscribe: noopSubscribe, chrome });
+    await waitFor(() => chromeRoot.querySelector('.qu-apptpl-sidebar') !== null);
+    const sidebarLinks = [...chromeRoot.querySelectorAll('.qu-apptpl-sidebar a')].map((a) => a.textContent);
     assert.ok(sidebarLinks.includes('Assigned to me'), 'expected "Mir zugewiesen" in the switcher sidebar');
     assert.ok(sidebarLinks.includes('Groceries'), 'expected the list itself in the switcher sidebar');
 
@@ -625,8 +635,10 @@ test('list page and "Mir zugewiesen" both render a Lists <-> Mir-zugewiesen swit
     // page's own stale nodes satisfying the very next waitFor() instantly,
     // racing ahead of the mine page's real (still in-flight) render.
     const mineContainer = makeContainer();
-    stop = mount(mineContainer, { qu, services, segments: ['todo', 'mine'], subscribe: noopSubscribe });
-    await waitFor(() => mineContainer.querySelector('.qu-apptpl-sidebar') !== null);
+    const mineChromeRoot = makeContainer();
+    const mineChrome = fakeChrome(mineChromeRoot);
+    stop = mount(mineContainer, { qu, services, segments: ['todo', 'mine'], subscribe: noopSubscribe, chrome: mineChrome });
+    await waitFor(() => mineChromeRoot.querySelector('.qu-apptpl-sidebar') !== null);
     mineContainer.querySelector('.qu-todo-copy-link').click();
     await waitFor(() => written.length === 2);
     assert.equal(written[1], 'http://localhost/#/todo/mine');

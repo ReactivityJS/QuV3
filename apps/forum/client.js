@@ -761,6 +761,62 @@ function channelsToNavItems(channels) {
 }
 
 /**
+ * The `list:`-registered counterpart to `channelsToNavItems()` above -
+ * shared by the board and channel views (the topic view's own navigation
+ * stays the plain `items[]` form above, unaffected - see that view's own
+ * `chrome.set()` call for why). Build ONCE per view mount (not per
+ * `render()`/watch callback) and reuse the SAME returned object across
+ * every `chrome.set()` call within that view's own lifetime - `template`
+ * must stay the SAME reference for `chrome.js`'s own `sameListRegistration()`
+ * to reuse the live `<qu-list>` instead of tearing it down and rebuilding it
+ * on every call (see that file's own doc comment).
+ *
+ * `onItemStamped` resolves each channel's own title through
+ * `ChannelService.getChannel()` (decrypt-aware for a RESTRICTED channel's
+ * genuinely encrypted document) instead of a `<qu-view field="title">`
+ * inside `template` itself - `chrome.js`'s own top doc comment has the full
+ * "NOTE ON DECRYPTION" reasoning for why a raw `<qu-view>` isn't safe for
+ * content that might be encrypted (confirmed empirically: a restricted
+ * channel's stored document is genuine ciphertext, `{iv, ct, to}`, no
+ * `title` field a `<qu-view>` could read). A channel's own title never
+ * changes after creation (`ChannelService` has no rename method) - so this
+ * one-time-per-item resolve carries none of the staleness a genuinely
+ * mutable field would.
+ *
+ * "All channels" (the board view's own destination, `#/forum`) is a
+ * `prefixItems` entry (`chrome.js`'s own doc comment), not a synthetic
+ * member of the underlying `channels` list itself - a real curated `<qu-list
+ * path="...">` only ever renders what's actually IN that list.
+ * @param {{services: object, SPACE_ID: string, isStopped: () => boolean}} deps
+ * @returns {{path: string, template: HTMLTemplateElement, prefixItems: Array, onItemStamped: Function}}
+ */
+function buildChannelNavListSpec({ services, SPACE_ID, isStopped }) {
+  const template = document.createElement('template');
+  template.innerHTML = '<li><a></a></li>';
+  return {
+    path: paths.listPath(SPACE_ID, 'channels'),
+    template,
+    prefixItems: [{ id: 'all', label: t('allChannels'), href: '#/forum' }],
+    onItemStamped: (els, itemId) => {
+      const a = els[0].querySelector('a');
+      a.href = `#/forum/c/${itemId}`;
+      services.channels.getChannel(SPACE_ID, itemId).then((channel) => {
+        if (isStopped() || !channel) return;
+        a.textContent = '';
+        if (channel.restricted) {
+          const icon = document.createElement('span');
+          icon.textContent = '🔒';
+          a.appendChild(icon);
+        }
+        const label = document.createElement('span');
+        label.textContent = channel.title;
+        a.appendChild(label);
+      });
+    },
+  };
+}
+
+/**
  * "+ New channel" - `settings` (gear icon), not `primaryAction` (that's
  * "+ New topic" now - see `docs/app-navigation-standard.md` Rule 5's forum
  * example) - policy-gated the same way the retired sidebar's own inline
@@ -915,20 +971,29 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID, chrome }
     root.appendChild(ul);
   }
 
-  // See docs/app-navigation-standard.md Rule 5 - `navigation` is NOT
-  // `desktopOnly` here (unlike an open topic's own room-style view, or
-  // apps/chat/client.js's room list): this view's own CONTENT is a merged
-  // activity FEED, not the channel list itself, so mobile genuinely needs
-  // the footer pill to reach a specific channel at all. Chrome Inversion:
+  // See docs/app-navigation-standard.md Rule 5a - Chrome Inversion:
   // `container` IS the platform-owned `chrome.contentSlot` already (see
   // `apps/shell/src/chrome.js`) - this view builds directly into it instead
   // of calling `mountAppTemplate()` itself, and drives its own chrome
   // (primaryAction/navigation/settings) through `chrome.set()` instead.
-  // `navigation` stays a plain `items[]` snapshot here, not the reactive
-  // `list:` form (`chrome.js`'s own doc comment) - that form only renders in
-  // the desktop sidebar this round, and this view's mobile footer pill (the
-  // "genuinely needs it" case above) still needs a real channel switcher.
+  // `navigation` is registered ONCE here as the reactive `list:` form
+  // (`buildChannelNavListSpec()` above) - the mobile-footer `list:` gap
+  // `chrome.js` closes is exactly what lets this view's own mobile footer
+  // pill reach a specific channel too (this view's own CONTENT is a merged
+  // activity FEED, not the channel list itself, so mobile genuinely needs
+  // it - `navigation` is NOT `desktopOnly` here, unlike an open topic's own
+  // room-style view or apps/chat/client.js's room list). The `<qu-list>`
+  // `chrome.js` mounts for it owns its own membership reactivity from here
+  // on - no more `channelsToNavItems()` recompute inside render() below.
   chrome.set({ primaryAction: { label: t('newTopicLink'), href: '#/forum/new-topic', icon: '✏️' } });
+  chrome.set({
+    navigation: {
+      list: buildChannelNavListSpec({ services, SPACE_ID, isStopped: () => stopped }),
+      activeId: 'all', // the board view IS the "All channels" entry
+      heading: t('channels'),
+      filter: true,
+    },
+  });
 
   const heading = document.createElement('h1');
   heading.textContent = t('title');
@@ -946,15 +1011,6 @@ function mountBoardView(container, { qu, services, syncFetch, SPACE_ID, chrome }
     if (stopped) return;
     const channels = await services.channels.listChannels(SPACE_ID);
     if (stopped || token !== renderToken) return;
-
-    chrome.set({
-      navigation: {
-        items: channelsToNavItems(channels),
-        activeId: 'all', // the board view IS the "All channels" entry
-        heading: t('channels'),
-        filter: true,
-      },
-    });
 
     // A per-channel topics-list watch, added once per channel (never
     // re-added on a later render() re-run) - `ChannelService`'s own
@@ -1024,26 +1080,23 @@ function mountChannelView(container, { qu, services, syncFetch, SPACE_ID, channe
 
   // See docs/app-navigation-standard.md Rule 1 (no bespoke back link - the
   // shell header's own Back/Forward already covers this, and the sidebar's
-  // own "All channels" entry covers the rest) and Rule 5 - same shape as
-  // mountBoardView()'s own chrome.set() calls above; `navigation` is NOT
-  // `desktopOnly` here either, for the same reason (and stays a plain
-  // `items[]` snapshot for the same mobile-footer-pill reason).
+  // own "All channels" entry covers the rest) and Rule 5a - same shape as
+  // mountBoardView()'s own chrome.set() calls above, including the reactive
+  // `list:` form; `navigation` is NOT `desktopOnly` here either, for the
+  // same reason. Registered ONCE, at mount - unlike the OLD `items[]` form,
+  // no per-change watch()/recompute is needed here anymore, the `<qu-list>`
+  // `chrome.js` mounts for it owns its own membership reactivity.
   chrome.set({ primaryAction: { label: t('newTopicLink'), href: `#/forum/c/${channelId}/new-topic`, icon: '✏️' } });
+  chrome.set({
+    navigation: {
+      list: buildChannelNavListSpec({ services, SPACE_ID, isStopped: () => stopped }),
+      activeId: channelId,
+      heading: t('channels'),
+      filter: true,
+    },
+  });
   container.append(heading, topicsRoot, inviteRoot);
   applyNewChannelSettings(chrome, services, () => stopped);
-  const offChannelList = watch(qu, paths.listPath(SPACE_ID, 'channels'), async () => {
-    if (stopped) return;
-    const channels = await services.channels.listChannels(SPACE_ID);
-    if (stopped) return;
-    chrome.set({
-      navigation: {
-        items: channelsToNavItems(channels),
-        activeId: channelId,
-        heading: t('channels'),
-        filter: true,
-      },
-    });
-  }, { syncFetch });
 
   let currentChannel = null;
   let topicsRenderToken = 0;
@@ -1133,7 +1186,6 @@ function mountChannelView(container, { qu, services, syncFetch, SPACE_ID, channe
     stopped = true;
     offTopics();
     offChannel();
-    offChannelList();
     topicsActivity.stop();
   };
 }

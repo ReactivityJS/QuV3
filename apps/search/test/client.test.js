@@ -12,6 +12,7 @@ import { installDom, waitFor } from '@qu/ui/testing';
 
 installDom();
 const { mount, renderHeaderSearch } = await import('../client.js');
+const { mountAppTemplate } = await import('@qu/ui');
 
 // The REAL apps/forum and apps/chat client.js (not synthetic fakes) - proves
 // the content.search/content.searchResultTemplate contract end to end
@@ -99,9 +100,35 @@ function makeContainer() {
   return el;
 }
 
+/**
+ * A test-only stand-in for the platform-owned `ctx.chrome` handle (Chrome
+ * Inversion, `apps/shell/src/chrome.js`) - reuses `@qu/ui`'s own
+ * `mountAppTemplate()`, the exact same `buildChrome()` building blocks the
+ * real `chrome.js` itself reuses, so a test asserting on real chrome DOM
+ * gets byte-identical rendering without importing `apps/shell`'s own
+ * internals into a different app's test suite. Renders into `chromeRoot` -
+ * a SEPARATE element from whatever `container` the app's own `mount()`
+ * writes its business content into. Most tests in this file don't need
+ * this at all - `client.js`'s own `mount()` defaults `ctx.chrome` to a
+ * harmless no-op when absent.
+ */
+function fakeChrome(chromeRoot) {
+  let current = {};
+  const stopTemplate = mountAppTemplate(chromeRoot, { render: () => {} });
+  return {
+    get current() { return current; },
+    set(partial) {
+      current = { ...current, ...partial };
+      stopTemplate.update(current);
+    },
+  };
+}
+
 // ===== tabs (no query typed yet - synchronous, no content.search fan-out needed) =====
 
 test('mount(): scope tabs reflect the route, the matching one is marked active, hrefs preserve context', async () => {
+  const chromeRoot = makeContainer();
+  const chrome = fakeChrome(chromeRoot);
   const container = makeContainer();
   const extensionPoints = new ExtensionPointHost([]);
   const stop = mount(container, {
@@ -109,11 +136,13 @@ test('mount(): scope tabs reflect the route, the matching one is marked active, 
     apps: [{ name: 'forum', label: 'Forum' }],
     segments: ['search', 'subpage', 'forum', 't', 'general'],
     extensionPoints,
+    chrome,
   });
   try {
-    // Rendered via mountAppTemplate()'s `views` field now (@qu/ui's own
-    // AppTemplateLinkItem shape/classes), not a hand-built tab strip.
-    const tabs = [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')];
+    // Rendered via chrome.set()'s `views` field now (Chrome Inversion,
+    // @qu/ui's own AppTemplateLinkItem shape/classes), not a hand-built
+    // tab strip.
+    const tabs = [...chromeRoot.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')];
     assert.equal(tabs.length, 3);
     assert.equal(tabs[0].textContent, 'Everywhere');
     assert.equal(tabs[0].getAttribute('href'), '#/search/global/forum/t/general');
@@ -129,15 +158,18 @@ test('mount(): scope tabs reflect the route, the matching one is marked active, 
 });
 
 test('mount(): with no context app at all, only the Global tab renders', async () => {
+  const chromeRoot = makeContainer();
+  const chrome = fakeChrome(chromeRoot);
   const container = makeContainer();
   const stop = mount(container, {
     services: { actors: { whoAmI: async () => 'me' } },
     apps: [],
     segments: ['search'],
     extensionPoints: new ExtensionPointHost([]),
+    chrome,
   });
   try {
-    const tabs = [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')];
+    const tabs = [...chromeRoot.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')];
     assert.equal(tabs.length, 1);
     assert.ok(tabs[0].classList.contains('qu-apptpl-item-active'));
   } finally {

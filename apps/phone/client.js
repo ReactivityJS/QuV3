@@ -44,7 +44,7 @@
  */
 import { createI18n } from '@qu/i18n';
 import { formatActorLabel } from '@qu/services';
-import { injectStyle, ensureTheme, mountAppTemplate } from '@qu/ui';
+import { injectStyle, ensureTheme } from '@qu/ui';
 import { createLogger } from '@qu/log';
 import { createPhoneCall, declinePhoneCall } from './src/call.js';
 
@@ -108,7 +108,12 @@ const STYLE = `
   .qu-phone-contacts button { padding: 0.35rem 0.7rem; border-radius: var(--qu-radius-md, 0.4rem); border: 1px solid var(--qu-color-border, #8884); background: var(--qu-color-accent, #5b5bd6); color: #fff; cursor: pointer; font: inherit; }
   .qu-phone-empty { opacity: 0.7; }
 
-  .qu-phone-call-view { position: fixed; top: 3.25rem; right: 0; bottom: 0; left: 0; display: flex; flex-direction: column; background: #000; z-index: 10; }
+  /* Full-bleed, below the shell header - driven via chrome.set({fullHeight:
+     true}) now (Chrome Inversion), the same qu-apptpl-root--full-height
+     mechanism Chat's/Forum's own room/topic views already use, not a
+     hand-rolled position:fixed of its own anymore - this class only needs
+     to fill the fullHeight wrapper's own flex column now. */
+  .qu-phone-call-view { flex: 1; min-height: 0; display: flex; flex-direction: column; background: #000; }
   .qu-phone-remote-video { flex: 1; width: 100%; height: 100%; object-fit: cover; background: #111; }
   .qu-phone-local-video { position: absolute; top: 0.75rem; right: 0.75rem; width: 28vw; max-width: 9rem; aspect-ratio: 3 / 4; object-fit: cover; border-radius: var(--qu-radius-md, 0.4rem); border: 2px solid #fff4; background: #222; }
   .qu-phone-peer-name { position: absolute; top: 0.75rem; left: 0.75rem; color: #fff; font-weight: 700; font-size: 1.05em; text-shadow: 0 1px 3px #000a; max-width: 65%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -155,57 +160,52 @@ export function mount(container, ctx) {
 // ===========================================================================
 function mountCallStarter(container, { services }) {
   let stopped = false;
-  const stopTemplate = mountAppTemplate(container, {
-    render: (content) => {
-      const h1 = document.createElement('h1');
-      h1.textContent = t('title');
+  const h1 = document.createElement('h1');
+  h1.textContent = t('title');
 
-      const list = document.createElement('ul');
-      list.className = 'qu-phone-contacts';
-      content.append(h1, list);
+  const list = document.createElement('ul');
+  list.className = 'qu-phone-contacts';
+  container.append(h1, list);
 
-      (async () => {
-        const contacts = await services.contacts.listContacts();
-        if (stopped) return;
-        if (contacts.length === 0) {
-          const empty = document.createElement('li');
-          empty.className = 'qu-phone-empty';
-          empty.textContent = t('noContacts');
-          list.appendChild(empty);
-          return;
-        }
-        for (const { actorPub, profile } of contacts) {
-          const li = document.createElement('li');
-          const name = document.createElement('span');
-          name.className = 'qu-phone-contact-name';
-          name.textContent = formatActorLabel(actorPub, profile); // same alias-or-truncated-pubkey convention apps/contact-list/apps/user-list already use
-          const callBtn = document.createElement('button');
-          callBtn.type = 'button';
-          callBtn.textContent = t('call');
-          callBtn.addEventListener('click', () => { window.location.hash = `#/phone/${actorPub}`; });
-          li.append(name, callBtn);
-          list.appendChild(li);
-        }
-      })();
-    },
-  });
-  return () => {
-    stopped = true;
-    stopTemplate();
-  };
+  (async () => {
+    const contacts = await services.contacts.listContacts();
+    if (stopped) return;
+    if (contacts.length === 0) {
+      const empty = document.createElement('li');
+      empty.className = 'qu-phone-empty';
+      empty.textContent = t('noContacts');
+      list.appendChild(empty);
+      return;
+    }
+    for (const { actorPub, profile } of contacts) {
+      const li = document.createElement('li');
+      const name = document.createElement('span');
+      name.className = 'qu-phone-contact-name';
+      name.textContent = formatActorLabel(actorPub, profile); // same alias-or-truncated-pubkey convention apps/contact-list/apps/user-list already use
+      const callBtn = document.createElement('button');
+      callBtn.type = 'button';
+      callBtn.textContent = t('call');
+      callBtn.addEventListener('click', () => { window.location.hash = `#/phone/${actorPub}`; });
+      li.append(name, callBtn);
+      list.appendChild(li);
+    }
+  })();
+
+  return () => { stopped = true; };
 }
 
 // ===========================================================================
 // Decline - #/phone/<remotePub>/decline - no camera/mic, no active-call UI.
 // ===========================================================================
-function mountDecline(container, { qu, identity, services, iceServers }, spaceId, remotePub) {
+function mountDecline(container, { qu, identity, services, iceServers, chrome = { set() {} } }, spaceId, remotePub) {
+  chrome.set({ fullHeight: true }); // same full-bleed, header-offset layout as mountActiveCall() below - see .qu-phone-call-view's own doc comment
   const view = document.createElement('div');
   view.className = 'qu-phone-call-view';
   const status = document.createElement('div');
   status.className = 'qu-phone-error';
   status.textContent = '…';
   view.appendChild(status);
-  mountAppTemplate(container, { render: (content) => content.appendChild(view) });
+  container.appendChild(view);
 
   // Alias-first, same as mountActiveCall()'s own peerName - "declined" alone
   // doesn't say WHO was declined, and a raw pub is unhelpful. Resolved
@@ -239,7 +239,8 @@ function mountActiveCall(container, ctx, spaceId, remotePub, { initiator, callMo
   // came from (a Forum thread, a Chat room, wherever a toast's "Annehmen"
   // was clicked from) when there is one, `#/phone` otherwise. Falls back to
   // a plain hash assignment if an older/test ctx doesn't provide it.
-  const { qu, identity, services, iceServers, negotiationTimeoutMs, subscribe, syncFetch, goBack: ctxGoBack } = ctx;
+  const { qu, identity, services, iceServers, negotiationTimeoutMs, subscribe, syncFetch, goBack: ctxGoBack, chrome = { set() {} } } = ctx;
+  chrome.set({ fullHeight: true }); // see .qu-phone-call-view's own doc comment - full-bleed, below the shell header, same mechanism Chat's/Forum's own room/topic views already use
 
   const view = document.createElement('div');
   view.className = 'qu-phone-call-view';
@@ -305,7 +306,7 @@ function mountActiveCall(container, ctx, spaceId, remotePub, { initiator, callMo
   localVideo.hidden = callMode !== 'video';
 
   view.append(remoteVideo, localVideo, peerName, status, controls);
-  mountAppTemplate(container, { render: (content) => content.appendChild(view) });
+  container.appendChild(view);
 
   let call = null;
   let stopped = false;

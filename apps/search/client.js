@@ -45,7 +45,7 @@
  * needs to be shareable/bookmarkable, not WHAT was typed.
  */
 import { createI18n } from '@qu/i18n';
-import { injectStyle, ensureTheme, mountAppTemplate } from '@qu/ui';
+import { injectStyle, ensureTheme } from '@qu/ui';
 
 const DICT = {
   en: {
@@ -106,7 +106,7 @@ const STYLE = `
 export function mount(container, ctx) {
   ensureTheme();
   injectStyle(STYLE_ID, STYLE);
-  const { services, qu, syncFetch, apps, segments = [], extensionPoints } = ctx;
+  const { services, qu, syncFetch, apps, segments = [], extensionPoints, chrome = { set() {} } } = ctx;
   let stopped = false;
 
   // A result row's own `<qu-asset>` (rendered by a contributor's
@@ -155,23 +155,21 @@ export function mount(container, ctx) {
   const resultsRoot = document.createElement('div');
   resultsRoot.className = 'qu-search-results';
 
-  // Rule 5 (docs/app-navigation-standard.md) - the app's scope tabs are a
-  // real route already (global/app/subpage, each a real `#/search/...`
-  // href, same "switching is a real navigation, not client-side button
-  // state" shape apps/notifications/client.js's own unread/all `views`
-  // already uses) - `views` renders them instead of a hand-built tab strip,
-  // same active-state highlighting, same links, one less bespoke component.
+  // Chrome Inversion (`apps/shell/src/chrome.js`) - the app's scope tabs
+  // are a real route already (global/app/subpage, each a real
+  // `#/search/...` href, same "switching is a real navigation, not
+  // client-side button state" shape apps/notifications/client.js's own
+  // unread/all `views` already uses) - `chrome.set({views})` renders them
+  // instead of a hand-built tab strip, same active-state highlighting,
+  // same links, one less bespoke component. `container` is already the
+  // platform's own content area - build straight into it.
   const viewItems = [{ id: 'global', label: t('scopeGlobal'), href: `#/search/global${contextSuffix}` }];
   if (contextAppId) {
     viewItems.push({ id: 'app', label: t('scopeApp', { app: contextLabel }), href: `#/search/app${contextSuffix}` });
     if (rest.length > 0) viewItems.push({ id: 'subpage', label: t('scopeSubpage'), href: `#/search/subpage${contextSuffix}` });
   }
-  mountAppTemplate(container, {
-    views: { items: viewItems, activeId: scope },
-    render: (content) => {
-      content.append(heading, controls, resultsRoot);
-    },
-  });
+  chrome.set({ views: { items: viewItems, activeId: scope } });
+  container.append(heading, controls, resultsRoot);
 
   function renderHint(text) {
     resultsRoot.textContent = '';

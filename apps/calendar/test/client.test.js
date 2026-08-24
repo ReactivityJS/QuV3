@@ -10,7 +10,8 @@ import {
 import { installDom, waitFor } from '@qu/ui/testing';
 
 installDom();
-const { mount, createEventMenuItem, renderHeaderNavPoints } = await import('../client.js');
+const { mount, createEventMenuItem } = await import('../client.js');
+const { mountAppTemplate } = await import('@qu/ui');
 
 const CAL_SPACE_ID = 'ff73365b-144a-4285-8e98-ac7f9928a95f'; // real UUID from apps/calendar/manifest.quapp
 
@@ -121,6 +122,18 @@ function segmentsFor(hash) {
   return hash.replace(/^#\//, '').split('/');
 }
 
+function fakeChrome(chromeRoot) {
+  let current = {};
+  const stopTemplate = mountAppTemplate(chromeRoot, { render: () => {} });
+  return {
+    get current() { return current; },
+    set(partial) {
+      current = { ...current, ...partial };
+      stopTemplate.update(current);
+    },
+  };
+}
+
 /** `@qu/ui/testing`'s waitFor() never awaits an async predicate (documented gotcha, docs/building-an-app.md §9) - a real poll loop for conditions that themselves need an `await qu.get(...)`. */
 async function waitForAsync(check, { timeout = 1000, interval = 5 } = {}) {
   const start = Date.now();
@@ -160,9 +173,9 @@ test('creating a calendar via the sidebar form shows it under "My calendars" and
     await createCalendarViaForm(container);
     assert.equal(container.querySelector('.qu-cal-row-title').textContent, 'Team calendar');
     assert.equal(container.querySelector('.qu-cal-month-grid') !== null, true);
-    // No FAB/inline "+ New event" link anymore - that's the global header's
-    // App Navigation Points Slot now (renderHeaderNavPoints, tested in
-    // isolation below), reachable at every width instead of only on mobile.
+    // No FAB/inline "+ New event" link anymore - that's ctx.chrome's own
+    // primaryAction now (tested in isolation below), reachable at every
+    // width instead of only on mobile.
     assert.equal(container.querySelector('.qu-cal-fab'), null);
     assert.equal(container.querySelector('.qu-cal-new-event-inline'), null);
   } finally {
@@ -174,17 +187,21 @@ test('creating a calendar via the sidebar form shows it under "My calendars" and
 // `.qu-apptpl-list`, "Manage calendars") - scope selectors to the section
 // that has NO `qu-apptpl-section--settings` modifier (`views`, `navigation`
 // - Calendar never passes `navigation`, so this is unambiguously `views`).
-function viewSwitchLinks(container) {
-  return [...container.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-section:not(.qu-apptpl-section--settings) .qu-apptpl-list a')];
+// Rendered into a `fakeChrome()` root, not `container` - see that helper's
+// own doc comment above.
+function viewSwitchLinks(chromeRoot) {
+  return [...chromeRoot.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-section:not(.qu-apptpl-section--settings) .qu-apptpl-list a')];
 }
 
-test('the day/week/month/list switch renders as mountAppTemplate()\'s own `views` field - 4 real links, the current one active, each carrying the current cursor date', async () => {
+test('the day/week/month/list switch renders as ctx.chrome\'s own `views` field - 4 real links, the current one active, each carrying the current cursor date', async () => {
   const { qu, services } = await freshEnv();
+  const chromeRoot = makeContainer();
+  const chrome = fakeChrome(chromeRoot);
   const container = makeContainer();
-  const stop = mount(container, { qu, services, segments: ['calendar'], subscribe: noopSubscribe });
+  const stop = mount(container, { qu, services, segments: ['calendar'], subscribe: noopSubscribe, chrome });
   try {
-    await waitFor(() => viewSwitchLinks(container).length > 0);
-    const items = viewSwitchLinks(container);
+    await waitFor(() => viewSwitchLinks(chromeRoot).length > 0);
+    const items = viewSwitchLinks(chromeRoot);
     assert.equal(items.length, 4);
     const labels = items.map((a) => a.textContent);
     assert.deepEqual(labels, ['Day', 'Week', 'Month', 'Agenda']);
@@ -209,15 +226,17 @@ test('navigating to #/calendar/<view>/<cursorMs> opens that exact view on that e
   stop();
 
   // A FRESH container - stop() only stops watchers, it doesn't clear the
-  // DOM (mountAppTemplate() does that on its own NEXT call) - reusing the
-  // same container would let the first mount's stale heading satisfy a
-  // waitFor() below without the second mount ever actually rendering.
+  // DOM (renderMain() does that on its own NEXT call) - reusing the same
+  // container would let the first mount's stale heading satisfy a waitFor()
+  // below without the second mount ever actually rendering.
+  const chromeRoot2 = makeContainer();
+  const chrome2 = fakeChrome(chromeRoot2);
   const container2 = makeContainer();
   const targetDate = new Date('2026-03-15T00:00:00Z').getTime();
-  const stop2 = mount(container2, { qu, services, segments: ['calendar', 'week', String(targetDate)], subscribe: noopSubscribe });
+  const stop2 = mount(container2, { qu, services, segments: ['calendar', 'week', String(targetDate)], subscribe: noopSubscribe, chrome: chrome2 });
   try {
     await waitFor(() => container2.querySelector('.qu-cal-heading') !== null);
-    const weekLink = viewSwitchLinks(container2).find((a) => a.textContent === 'Week');
+    const weekLink = viewSwitchLinks(chromeRoot2).find((a) => a.textContent === 'Week');
     assert.ok(weekLink.classList.contains('qu-apptpl-item-active'));
     // The heading reflects the routed date, not "today" - proves `cursor`
     // was actually seeded from the URL's 3rd segment, not reset on mount.
@@ -229,30 +248,34 @@ test('navigating to #/calendar/<view>/<cursorMs> opens that exact view on that e
 
 test('an invalid/garbage cursor segment falls back to today instead of crashing', async () => {
   const { qu, services } = await freshEnv();
+  const chromeRoot = makeContainer();
+  const chrome = fakeChrome(chromeRoot);
   const container = makeContainer();
-  const stop = mount(container, { qu, services, segments: ['calendar', 'day', 'not-a-number'], subscribe: noopSubscribe });
+  const stop = mount(container, { qu, services, segments: ['calendar', 'day', 'not-a-number'], subscribe: noopSubscribe, chrome });
   try {
-    await waitFor(() => viewSwitchLinks(container).length > 0);
-    const dayLink = viewSwitchLinks(container).find((a) => a.textContent === 'Day');
+    await waitFor(() => viewSwitchLinks(chromeRoot).length > 0);
+    const dayLink = viewSwitchLinks(chromeRoot).find((a) => a.textContent === 'Day');
     assert.ok(dayLink.classList.contains('qu-apptpl-item-active'));
   } finally {
     stop();
   }
 });
 
-test('the main view has exactly one way to reach "Kalender verwalten" (mountAppTemplate\'s settings gear) - no inline title-row link, no bespoke hamburger/off-canvas drawer', async () => {
+test('the main view has exactly one way to reach "Kalender verwalten" (ctx.chrome\'s settings gear) - no inline title-row link, no bespoke hamburger/off-canvas drawer', async () => {
   const { qu, services } = await freshEnv();
+  const chromeRoot = makeContainer();
+  const chrome = fakeChrome(chromeRoot);
   const container = makeContainer();
-  const stop = mount(container, { qu, services, segments: ['calendar'], subscribe: noopSubscribe });
+  const stop = mount(container, { qu, services, segments: ['calendar'], subscribe: noopSubscribe, chrome });
   try {
     await waitFor(() => container.querySelector('.qu-ctxswitch-root') !== null);
     assert.equal(container.querySelector('.qu-cal-menu-btn'), null);
     assert.equal(container.querySelector('.qu-cal-scrim'), null);
     // mountContextSwitcher's own inline "„Kalender" ›" title-row link is
     // hidden now (hideTitleLink: true) - reaching #/calendar/manage happens
-    // through mountAppTemplate's settings gear instead, never both at once.
+    // through ctx.chrome's settings gear instead, never both at once.
     assert.equal(container.querySelector('.qu-ctxswitch-title-link'), null);
-    const settingsLink = container.querySelector('.qu-apptpl-section--settings a[href="#/calendar/manage"]');
+    const settingsLink = chromeRoot.querySelector('.qu-apptpl-section--settings a[href="#/calendar/manage"]');
     assert.ok(settingsLink);
   } finally {
     stop();
@@ -298,30 +321,41 @@ test('every subpage (new event, event detail, share) has no bespoke back link - 
   }
 });
 
-// ===== renderHeaderNavPoints() - the shell.headerNavPoints contributor (see docs/app-navigation-standard.md Rule 2) =====
+// ===== ctx.chrome's primaryAction ("+ New event") - see docs/app-navigation-standard.md
+// Rule 5a. Used to be the `shell.headerNavPoints` contributor's own async
+// lookup (`renderHeaderNavPoints()`, now retired - see client.js's own top
+// doc comment for why it collapsed into a synchronous find() once this
+// became the SAME view's own chrome instead of the global header's) =====
 
-test('renderHeaderNavPoints(): hidden while another app is active, shown with a "+" link once Calendar becomes active and an editable calendar resolves', async () => {
+test('the main view\'s own primaryAction is "+ New event", pointing at the first calendar this identity can edit', async () => {
   const { qu, services } = await freshEnv();
+  const chromeRoot = makeContainer();
+  const chrome = fakeChrome(chromeRoot);
   const container = makeContainer();
-  const stop = mount(makeContainer(), { qu, services, segments: ['calendar'], subscribe: noopSubscribe });
-  await createCalendarViaForm(document.body.lastElementChild);
-  const [{ id: calId }] = await services.flags.listPrivate('calendar', 'calendar');
-  stop();
+  const stop = mount(container, { qu, services, segments: ['calendar'], subscribe: noopSubscribe, chrome });
+  try {
+    await createCalendarViaForm(container);
+    const [{ id: calId }] = await services.flags.listPrivate('calendar', 'calendar');
+    await waitFor(() => chromeRoot.querySelector('.qu-apptpl-fab, .qu-apptpl-primary-desktop') !== null);
+    const link = chromeRoot.querySelector('.qu-apptpl-fab, .qu-apptpl-primary-desktop');
+    assert.equal(link.getAttribute('href'), `#/calendar/${calId}/new`);
+  } finally {
+    stop();
+  }
+});
 
-  let appId = 'chat';
-  const listeners = [];
-  renderHeaderNavPoints(container, {
-    getContext: () => ({ appId, segments: [appId] }),
-    onContextChange: (cb) => listeners.push(cb),
-    services, qu,
-  });
-  const wrap = container.querySelector('.qu-app-header-action');
-  assert.equal(wrap.hidden, true);
-
-  appId = 'calendar';
-  listeners.forEach((cb) => cb());
-  assert.equal(wrap.hidden, false);
-  await waitFor(() => wrap.querySelector('a')?.getAttribute('href') === `#/calendar/${calId}/new`);
+test('no primaryAction at all when this identity has no calendar it can edit', async () => {
+  const { qu, services } = await freshEnv();
+  const chromeRoot = makeContainer();
+  const chrome = fakeChrome(chromeRoot);
+  const container = makeContainer();
+  const stop = mount(container, { qu, services, segments: ['calendar'], subscribe: noopSubscribe, chrome });
+  try {
+    await waitFor(() => container.querySelector('.qu-cal-empty') !== null);
+    assert.equal(chromeRoot.querySelector('.qu-apptpl-fab, .qu-apptpl-primary-desktop'), null);
+  } finally {
+    stop();
+  }
 });
 
 test('a newly created calendar is real, ACL-protected storage: owner-only writer, real member list', async () => {

@@ -11,6 +11,7 @@ import { listMyGames } from '../src/game-service.js';
 installFakeRTCPeerConnection();
 installDom();
 const { mount } = await import('../client.js');
+const { mountAppTemplate } = await import('@qu/ui');
 
 const SPACE_ID = '65a3739c-e0a5-443b-a5ef-4005c8412659'; // real UUID from apps/geochase/manifest.quapp
 const APPS = [{ name: 'geochase', spaceId: SPACE_ID }];
@@ -82,6 +83,18 @@ function segmentsFor(hash) {
   return hash.replace(/^#\//, '').split('/');
 }
 
+function fakeChrome(chromeRoot) {
+  let current = {};
+  const stopTemplate = mountAppTemplate(chromeRoot, { render: () => {} });
+  return {
+    get current() { return current; },
+    set(partial) {
+      current = { ...current, ...partial };
+      stopTemplate.update(current);
+    },
+  };
+}
+
 /**
  * Mounts `#/geochase/new` (the draft settings form - see client.js's own
  * `renderNewGamePage()` doc comment: NOTHING is written to the store just
@@ -117,12 +130,14 @@ async function createGameViaNewPage(container, mountOptions) {
 
 test('renders the empty state when there are no games yet', async () => {
   const { qu, services } = await freshEnv();
+  const chromeRoot = makeContainer();
+  const chrome = fakeChrome(chromeRoot);
   const container = makeContainer();
-  const stop = mount(container, { qu, services, apps: APPS, segments: ['geochase'], subscribe: noopSubscribe });
+  const stop = mount(container, { qu, services, apps: APPS, segments: ['geochase'], subscribe: noopSubscribe, chrome });
   try {
     await waitFor(() => container.querySelector('.qu-geochase-empty') !== null);
     assert.match(container.querySelector('.qu-geochase-empty').textContent, /No games yet/);
-    assert.ok(container.querySelector('a[href="#/geochase/new"]'), 'expected a "Start a game" link');
+    assert.ok(chromeRoot.querySelector('a[href="#/geochase/new"]'), 'expected a "Start a game" link');
   } finally {
     stop();
   }
@@ -292,25 +307,28 @@ test('the "Copy link" button copies an absolute, shareable game URL', async () =
 });
 
 /**
- * "Start a game" now lives as the game-list view's own `mountAppTemplate()`
- * `primaryAction` (docs/app-navigation-standard.md Rule 5) instead of a
+ * "Start a game" now lives as the game-list view's own `ctx.chrome`
+ * `primaryAction` (docs/app-navigation-standard.md Rule 5a) instead of a
  * `shell.headerNavPoints` contribution AND a duplicate inline link in the
  * page body - see client.js's own top doc comment. On mobile this renders as
  * a circular FAB (`.qu-apptpl-fab`); on desktop, a prominent link at the top
  * of the sidebar (`.qu-apptpl-primary-desktop`) - either is enough to prove
- * the action is wired up.
+ * the action is wired up. Rendered into a `fakeChrome()` root, not
+ * `container` - see that helper's own doc comment above.
  */
-function primaryActionLink(container) {
-  return container.querySelector('.qu-apptpl-fab, .qu-apptpl-primary-desktop');
+function primaryActionLink(chromeRoot) {
+  return chromeRoot.querySelector('.qu-apptpl-fab, .qu-apptpl-primary-desktop');
 }
 
 test('the game list\'s own primaryAction is "Start a game", pointing at #/geochase/new', async () => {
   const { qu, services } = await freshEnv();
+  const chromeRoot = makeContainer();
+  const chrome = fakeChrome(chromeRoot);
   const container = makeContainer();
-  const stop = mount(container, { qu, services, apps: APPS, segments: ['geochase'], subscribe: noopSubscribe });
+  const stop = mount(container, { qu, services, apps: APPS, segments: ['geochase'], subscribe: noopSubscribe, chrome });
   try {
-    await waitFor(() => primaryActionLink(container) !== null);
-    assert.equal(primaryActionLink(container).getAttribute('href'), '#/geochase/new');
+    await waitFor(() => primaryActionLink(chromeRoot) !== null);
+    assert.equal(primaryActionLink(chromeRoot).getAttribute('href'), '#/geochase/new');
   } finally {
     stop();
   }
