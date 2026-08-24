@@ -9,6 +9,21 @@
  * and dimensions (the content element handed to `render()` is already
  * constrained to exactly the remaining space), the app only owns content.
  *
+ * NO APP CALLS `mountAppTemplate()` DIRECTLY ANYMORE (Chrome Inversion,
+ * `docs/app-navigation-standard.md` Rule 5a) - an app drives its chrome via
+ * `ctx.chrome.set()` instead, and `apps/shell/src/chrome.js` mounts the
+ * actual sidebar/footer DOM once, for the whole session. This function is
+ * NOT deprecated or scheduled for removal, though - it's the exact building
+ * block `chrome.js`'s own `buildChrome()` (exported below) is extracted
+ * from, and every migrated app's own test suite's `fakeChrome()` helper
+ * calls it directly (`mountAppTemplate(chromeRoot, { render: () => {} })`,
+ * then `stopTemplate.update(partial)` per `chrome.set()` call) to get
+ * byte-identical chrome DOM to assert against, without importing
+ * `apps/shell`'s own internals into a different app's tests. Keep this
+ * module's own behavior and `AppConfig` shape exactly as `chrome.js` and
+ * every `fakeChrome()` helper already assume - a change here is a change to
+ * how EVERY app's chrome renders, not just this one call site's.
+ *
  * This is an ADDITIVE sibling to the rest of `docs/app-navigation-standard.md`,
  * not a replacement: the global shell header (`apps/shell/src/header.js`,
  * Back/Forward, `shell.headerNavPoints`) is unchanged, `renderSubpage()`
