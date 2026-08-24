@@ -84,6 +84,43 @@
  * scope) - a second axis of "is this list-backed" for `views` too isn't
  * asked for by any real use case yet.
  *
+ * `prefixItems` (`navigation.list.prefixItems`, optional) - a small array of
+ * STATIC `{id, label, href}` items (Forum's own "All channels" aggregate
+ * entry is the motivating, and so far only, real case) rendered as plain
+ * `<li><a>`s (via `@qu/ui`'s own `buildLinkList()`) immediately BEFORE the
+ * live `<qu-list>`, as its own sibling inside the same `.qu-apptpl-section`
+ * - not spliced into the `<qu-list>` element itself (its own reconciliation
+ * in `components.js`'s `_render()` assumes it exclusively owns every
+ * non-`<template>` child; a foreign leading node would corrupt its own
+ * cursor-based reordering, confirmed by reading that code, not assumed).
+ * Captured ONCE at first build, same as `template`/`onItemStamped` already
+ * are - not refreshed by a later `chrome.set()` on an already-built section
+ * (Forum's own prefix entry never changes, so a genuinely changing
+ * `prefixItems` set is untested - it would need its own design, not
+ * assumed free here). Active-highlighting and the footer pill's own label
+ * both check `prefixItems` FIRST (a plain, synchronous `id === activeId`
+ * match - no template/stamping needed, unlike a real list item) before
+ * falling through to the `<qu-list>`-stamped-item / `heading`-fallback
+ * paths below.
+ *
+ * A NOTE ON DECRYPTION - `<qu-view>`/`<qu-list>` (`components.js`) read the
+ * Qu store DIRECTLY, with no decryption: a curated item whose own document
+ * was written via `AccessService.writeOptionsFor()` with restricted
+ * `readers` (e.g. Forum's own restricted channels) is genuine ciphertext at
+ * that raw path (confirmed empirically, not assumed - `{iv, ct, to}`, no
+ * `title` field at all) - a `<qu-view field="...">` bound to it resolves to
+ * `undefined`, not a useful fallback. Neither `template` nor `pillTemplate`
+ * are safe defaults for content that MIGHT be encrypted; a caller in that
+ * position resolves each item's real value through its own decrypt-aware
+ * Service inside `onItemStamped` instead (an app-level, imperative
+ * callback, never `<qu-view>`) - Forum's own `ChannelService.getChannel()`
+ * is the first real example (see its own `client.js` usage) - the same
+ * "imperative escape hatch, not a second templating mechanism"
+ * `onItemStamped` was already built for (`components.js`'s own doc
+ * comment). A caller whose list items are never encrypted stays free to use
+ * `<qu-view>`/`pillTemplate` directly, same as `apps/app-list`'s own
+ * existing usage already does.
+ *
  * `menuThreshold` overflow truncation (below) still applies ONLY to
  * `buildChrome()`'s plain `items[]` sections (primaryAction/views/settings),
  * in BOTH sidebar and footer - a `list:`-backed section is exempt in both
@@ -93,7 +130,7 @@
  * region (`.qu-apptpl-popup`'s own `max-height`/`overflow-y`), unlike the
  * sidebar's own unbounded column.
  */
-import { buildChrome, normalizeAppConfig, ensureStyle, buildFilterInput, buildPopupTrigger, buildPillShell } from '@qu/ui';
+import { buildChrome, normalizeAppConfig, ensureStyle, buildFilterInput, buildPopupTrigger, buildPillShell, buildLinkList } from '@qu/ui';
 
 const BREAKPOINT = '720px';
 
@@ -179,6 +216,14 @@ function buildReactiveNavSection(listSpec, { qu, syncFetch, heading, filter, fil
     link?.classList.toggle('qu-apptpl-item-active', itemId != null && itemId === currentActiveId);
   }
 
+  // See this file's own top doc comment's "prefixItems" paragraph - a
+  // separate, plain `<ul class="qu-apptpl-list">` sibling of the `<qu-list>`
+  // below, NOT spliced into it (that would corrupt `<qu-list>`'s own
+  // cursor-based child reconciliation).
+  const prefixItems = listSpec.prefixItems ?? [];
+  const prefixEl = prefixItems.length ? buildLinkList(prefixItems) : null;
+  if (prefixEl) wrap.appendChild(prefixEl);
+
   const listEl = createBoundList(listSpec, {
     qu, syncFetch,
     onStamped: (els, itemId, item) => {
@@ -195,12 +240,20 @@ function buildReactiveNavSection(listSpec, { qu, syncFetch, heading, filter, fil
   }
   wrap.appendChild(listEl);
 
+  function syncPrefixActive(activeId) {
+    if (!prefixEl) return;
+    [...prefixEl.children].forEach((li, i) => {
+      li.querySelector('a')?.classList.toggle('qu-apptpl-item-active', prefixItems[i]?.id === activeId);
+    });
+  }
+
   // Handles the OTHER direction: activeId changes on an ALREADY-stamped,
   // otherwise-unchanged list (navigating between channels, no new item
   // added/removed) - `onItemStamped` only fires for NEWLY stamped items,
   // so already-stamped ones need this explicit walk instead.
   function syncActive(activeId) {
     currentActiveId = activeId;
+    syncPrefixActive(activeId);
     for (const child of listEl.children) {
       if (child.tagName === 'TEMPLATE') continue;
       const ownPath = child.qu?.ownPath;
@@ -234,10 +287,12 @@ function buildReactiveNavSection(listSpec, { qu, syncFetch, heading, filter, fil
  */
 function buildReactiveFooterPill(listSpec, { qu, syncFetch, heading, filter, filterPlaceholder }) {
   let currentActiveId = null;
-  let appliedOwnPath = null;
+  let appliedKey = null; // a stamped item's own `ownPath`, or `prefix:<id>` for a prefixItems match - see applyPillForPrefix() below
 
   const { btn, labelEl } = buildPillShell(heading ?? 'Menu');
   labelEl.textContent = heading ?? '';
+
+  const prefixItems = listSpec.prefixItems ?? [];
 
   /**
    * `targetEl` is either a STABLE, already-inserted `<qu-list>` child
@@ -252,8 +307,8 @@ function buildReactiveFooterPill(listSpec, { qu, syncFetch, heading, filter, fil
    */
   function applyPillFor(targetEl) {
     const ownPath = targetEl?.qu?.ownPath ?? null;
-    if (ownPath === appliedOwnPath) return; // unchanged - do not re-stamp
-    appliedOwnPath = ownPath;
+    if (ownPath === appliedKey) return; // unchanged - do not re-stamp
+    appliedKey = ownPath;
     labelEl.textContent = '';
     if (targetEl && listSpec.pillTemplate) {
       const clone = listSpec.pillTemplate.content.cloneNode(true);
@@ -268,7 +323,22 @@ function buildReactiveFooterPill(listSpec, { qu, syncFetch, heading, filter, fil
     }
   }
 
+  // A `prefixItems` match (see this file's own top doc comment) is static,
+  // already-known data - no template/stamping/decryption needed, unlike a
+  // real `<qu-list>` item, so this is a plain, synchronous text swap. Kept
+  // as its own sentinel key (`prefix:<id>`, distinct from any real
+  // `ownPath` string) so a transition to/from a real stamped item is never
+  // mistaken for "unchanged".
+  function applyPillForPrefix(item) {
+    const key = `prefix:${item.id}`;
+    if (key === appliedKey) return;
+    appliedKey = key;
+    labelEl.textContent = item.label;
+  }
+
   function applyPill() {
+    const prefixMatch = prefixItems.find((it) => it.id === currentActiveId);
+    if (prefixMatch) { applyPillForPrefix(prefixMatch); return; }
     applyPillFor(resolveActiveChild(listEl, currentActiveId));
   }
 
@@ -282,6 +352,7 @@ function buildReactiveFooterPill(listSpec, { qu, syncFetch, heading, filter, fil
 
   const bodyWrap = document.createElement('div');
   bodyWrap.className = 'qu-apptpl-section';
+  if (prefixItems.length) bodyWrap.appendChild(buildLinkList(prefixItems));
   if (filter) {
     bodyWrap.appendChild(buildFilterInput(
       () => [...listEl.children].filter((c) => c.tagName !== 'TEMPLATE').map((el) => ({ el, search: el.dataset.search ?? '' })),

@@ -13,7 +13,7 @@ import { register as registerForum } from '../index.js';
 
 installDom();
 const { mount, searchForum, renderSearchResult } = await import('../client.js');
-const { mountAppTemplate } = await import('@qu/ui');
+const { mountChrome } = await import('../../shell/src/chrome.js');
 
 function createQu() {
   const qu = new QuStore();
@@ -201,29 +201,30 @@ function makeContainer() {
 }
 
 /**
- * A test-only stand-in for the platform-owned `ctx.chrome` handle
- * (Chrome Inversion, `apps/shell/src/chrome.js`) - reuses `@qu/ui`'s own
- * `mountAppTemplate()`, the exact same `buildChrome()` building blocks the
- * real `chrome.js` itself reuses, so tests that need to assert on real
- * chrome DOM (sidebar/fab/gear/mobile footer) get byte-identical rendering
- * without importing apps/shell's own internals from a different app's test
- * suite. Renders into `chromeRoot` - a SEPARATE element from whatever
- * `container` Forum's own `mount()` writes its business content into,
- * mirroring the real architecture (the platform's sidebar/footer are
- * siblings of the app's own `chrome.contentSlot`, not nested inside it).
- * Most tests in this file don't need this at all - `client.js`'s own
- * `mount()` defaults `ctx.chrome` to a harmless no-op when absent.
+ * A test-only stand-in for the platform-owned `ctx.chrome` handle, built on
+ * the REAL `apps/shell/src/chrome.js` `mountChrome()` - not `@qu/ui`'s own
+ * `mountAppTemplate()` (the pattern every other migrated app's own test
+ * suite still uses). Forum is the one real consumer of the `navigation.list`
+ * form (`buildChannelNavListSpec()`, `client.js`) - that reactive `<qu-list>`
+ * splicing is `chrome.js`'s OWN logic (`buildReactiveNavSection()` et al.),
+ * deliberately never folded into `@qu/ui`'s `buildChrome()` (that file's own
+ * top doc comment explains why), so `mountAppTemplate()` alone genuinely
+ * cannot render it - a `fakeChrome()` built on it would silently show
+ * nothing for Forum's own real channel nav. Renders into `chromeRoot` - a
+ * SEPARATE element from whatever `container` Forum's own `mount()` writes
+ * its business content into, mirroring the real architecture (the
+ * platform's sidebar/footer are siblings of the app's own
+ * `chrome.contentSlot`, not nested inside it). Most tests in this file
+ * don't need this at all - `client.js`'s own `mount()` defaults `ctx.chrome`
+ * to a harmless no-op when absent.
+ * @param {HTMLElement} chromeRoot
+ * @param {{qu: object, syncFetch?: Function}} deps - the SAME `qu` (and
+ *   `syncFetch`, if any) instance passed to `mount()` below, so the real
+ *   `<qu-list>` `chrome.js` mounts for `navigation.list` reads from the
+ *   correct store.
  */
-function fakeChrome(chromeRoot) {
-  let current = {};
-  const stopTemplate = mountAppTemplate(chromeRoot, { render: () => {} });
-  return {
-    get current() { return current; },
-    set(partial) {
-      current = { ...current, ...partial };
-      stopTemplate.update(current);
-    },
-  };
+function fakeChrome(chromeRoot, { qu, syncFetch } = {}) {
+  return mountChrome(chromeRoot, { qu, syncFetch }).begin();
 }
 
 /** jsdom's own scrollHeight/clientHeight are fixed getter-only 0s - same helper as apps/chat/test/client.test.js's own identical simulateScroll(), needed to give the geometry-based scroll listener real numbers to compare. */
@@ -1481,11 +1482,19 @@ test('board view (#/forum, no sub-segments) lists the migrated "General" channel
   await a.services.messages.postMessage(FORUM_SPACE_ID, topic._id, { body: 'first ever post' });
 
   const chromeRoot = makeContainer();
-  const chrome = fakeChrome(chromeRoot);
+  const chrome = fakeChrome(chromeRoot, { qu: a.qu });
   const container = makeContainer();
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'], chrome });
   try {
-    await waitFor(() => chromeRoot.querySelector('.qu-apptpl-sidebar .qu-apptpl-list a') !== null);
+    // The static "All channels" prefixItems entry (chrome.js's own doc
+    // comment) shares the sidebar's `.qu-apptpl-list` class with the real,
+    // reactive `<qu-list>` right next to it (consistent styling/filtering -
+    // see that same doc comment) - so waiting for just ANY `a` here would
+    // resolve on the prefix entry alone, before the channel's own item has
+    // even stamped in (its title resolves via a separate, decrypt-aware
+    // async fetch - see `buildChannelNavListSpec()`'s own doc comment in
+    // client.js). Wait for the real channel's own text explicitly instead.
+    await waitFor(() => [...chromeRoot.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')].some((a2) => /General/.test(a2.textContent)));
     const links = [...chromeRoot.querySelectorAll('.qu-apptpl-sidebar .qu-apptpl-list a')];
     assert.equal(links[0].textContent, 'All channels');
     assert.equal(links[0].getAttribute('href'), '#/forum');
@@ -1520,12 +1529,15 @@ test('board view: explicitly backfills each channel\'s OWN topics list via syncF
 test('board view: the mobile footer shows a channel pill whose popup lists the same entries as the sidebar, "All channels" as the active label', async () => {
   const a = await freshEnv('Ada');
   const chromeRoot = makeContainer();
-  const chrome = fakeChrome(chromeRoot);
+  const chrome = fakeChrome(chromeRoot, { qu: a.qu });
   const container = makeContainer();
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'], chrome });
   try {
-    await waitFor(() => chromeRoot.querySelector('.qu-apptpl-pill') !== null);
     assert.equal(chromeRoot.querySelector('.qu-apptpl-pill-label').textContent, 'All channels');
+    // Same reasoning as the sidebar's own equivalent test above - the
+    // channel's own popup row resolves its real (decrypt-aware) title
+    // asynchronously, after the prefixItems entry is already showing.
+    await waitFor(() => [...chromeRoot.querySelectorAll('.qu-apptpl-popup a')].some((l) => l.getAttribute('href') === '#/forum/c/general-channel' && l.textContent.includes('General')));
     const popupLinks = [...chromeRoot.querySelectorAll('.qu-apptpl-popup a')];
     assert.ok(popupLinks.some((l) => l.getAttribute('href') === '#/forum/c/general-channel' && l.textContent.includes('General')));
   } finally {
@@ -1538,7 +1550,7 @@ test('board view: a restricted channel shows a 🔒 badge in the persistent side
   await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Secret Stuff', restricted: true, memberPubs: [] });
 
   const chromeRoot = makeContainer();
-  const chrome = fakeChrome(chromeRoot);
+  const chrome = fakeChrome(chromeRoot, { qu: a.qu });
   const container = makeContainer();
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'], chrome });
   try {
@@ -1558,7 +1570,7 @@ test('board view: no "New channel" settings entry for a non-admin when channels.
   t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ adminPubs: [], settings: { channels: { allowMemberCreate: false, allowMemberRestricted: false } } }), { status: 200 }));
 
   const chromeRoot = makeContainer();
-  const chrome = fakeChrome(chromeRoot);
+  const chrome = fakeChrome(chromeRoot, { qu: a.qu });
   const container = makeContainer();
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'], chrome });
   try {
@@ -1576,7 +1588,7 @@ test('board view: shows a "New channel" settings entry for this relay\'s own adm
   t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ adminPubs: [a.myPub], settings: { channels: { allowMemberCreate: false, allowMemberRestricted: false } } }), { status: 200 }));
 
   const chromeRoot = makeContainer();
-  const chrome = fakeChrome(chromeRoot);
+  const chrome = fakeChrome(chromeRoot, { qu: a.qu });
   const container = makeContainer();
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum'], chrome });
   try {
@@ -1595,7 +1607,7 @@ test('channel view: "New topic" primaryAction links into this specific channel, 
   const chan2 = await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Second', restricted: false, memberPubs: [] });
 
   const chromeRoot = makeContainer();
-  const chrome = fakeChrome(chromeRoot);
+  const chrome = fakeChrome(chromeRoot, { qu: a.qu });
   const container = makeContainer();
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', 'general-channel'], chrome });
   try {
@@ -1606,7 +1618,7 @@ test('channel view: "New topic" primaryAction links into this specific channel, 
     // Switching to a different channel view updates the active sidebar entry.
     stop();
     const chromeRoot2 = makeContainer();
-    const chrome2 = fakeChrome(chromeRoot2);
+    const chrome2 = fakeChrome(chromeRoot2, { qu: a.qu });
     const container2 = makeContainer();
     const stop2 = mount(container2, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', chan2._id], chrome: chrome2 });
     await waitFor(() => chromeRoot2.querySelector('a.qu-apptpl-fab') !== null);
@@ -1982,7 +1994,7 @@ test('channel view: the app-template sidebar lists every channel and highlights 
   await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Off-topic' });
 
   const chromeRoot = makeContainer();
-  const chrome = fakeChrome(chromeRoot);
+  const chrome = fakeChrome(chromeRoot, { qu: a.qu });
   const container = makeContainer();
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: ['forum', 'c', announcements._id], chrome });
   try {
@@ -2002,7 +2014,7 @@ test('topic view: a desktopOnly app-template sidebar lists every channel alongsi
   await a.services.channels.createChannel(FORUM_SPACE_ID, { title: 'Off-topic' });
 
   const chromeRoot = makeContainer();
-  const chrome = fakeChrome(chromeRoot);
+  const chrome = fakeChrome(chromeRoot, { qu: a.qu });
   const container = makeContainer();
   const stop = mount(container, { qu: a.qu, services: a.services, apps: FORUM_APPS, subscribe: noopSubscribe, segments: TOPIC_SEGMENTS, chrome });
   try {

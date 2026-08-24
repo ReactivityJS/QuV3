@@ -321,7 +321,15 @@ function primaryActionItems(primaryAction) {
   return Array.isArray(primaryAction) ? primaryAction : [primaryAction];
 }
 
-function buildLinkList(items, { activeId, className = 'qu-apptpl-list', itemActiveClass = 'qu-apptpl-item-active' } = {}) {
+/**
+ * Also reused by `apps/shell/src/chrome.js`'s own `list:`-backed reactive
+ * sections for their optional `prefixItems` - a small, static "aggregate"
+ * entry (e.g. Forum's "All channels") rendered ahead of a live `<qu-list>`,
+ * both as plain siblings inside the same `.qu-apptpl-section` (which already
+ * gives every direct child a consistent `gap` - see that file's own doc
+ * comment for why this needn't be one combined list).
+ */
+export function buildLinkList(items, { activeId, className = 'qu-apptpl-list', itemActiveClass = 'qu-apptpl-item-active' } = {}) {
   const ul = document.createElement('ul');
   ul.className = className;
   for (const item of items) {

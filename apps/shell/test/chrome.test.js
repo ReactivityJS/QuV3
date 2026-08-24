@@ -177,6 +177,34 @@ test('list:-registered navigation active-item highlighting toggles on activeId c
   assert.equal(activeHref(), '#/forum/c/2');
 });
 
+test('list:-registered navigation with prefixItems renders them as a static sibling ahead of the live <qu-list>, active-highlighted independently', async () => {
+  const qu = fakeQu({ '/channels': [{ path: '/store/c/1' }], '/store/c/1': { title: 'General' } });
+  const container = makeContainer();
+  const chrome = mountChrome(container, { qu });
+  const handle = chrome.begin();
+  const prefixItems = [{ id: 'all', label: 'All channels', href: '#/forum' }];
+  const template = channelTemplate(); // same reference across both set() calls below - see sameListRegistration()'s own doc comment
+  handle.set({
+    navigation: { list: { path: '/channels', template, prefixItems }, activeId: 'all', desktopOnly: true },
+  });
+  await waitFor(() => container.querySelector('.qu-apptpl-sidebar qu-list li a')?.textContent === 'General');
+
+  const sidebar = container.querySelector('.qu-apptpl-sidebar');
+  const prefixLink = [...sidebar.querySelectorAll('a')].find((a) => a.textContent === 'All channels');
+  assert.ok(prefixLink, 'expected the static "All channels" prefix item');
+  assert.equal(prefixLink.getAttribute('href'), '#/forum');
+  assert.ok(prefixLink.classList.contains('qu-apptpl-item-active'), 'prefix item is the active one at activeId "all"');
+  // Not a child of <qu-list> itself - a separate sibling, per this file's
+  // own top doc comment on why (qu-list's own reconciliation would break).
+  assert.equal(sidebar.querySelector('qu-list').contains(prefixLink), false);
+
+  handle.set({
+    navigation: { list: { path: '/channels', template, prefixItems }, activeId: '1', desktopOnly: true },
+  });
+  assert.equal(prefixLink.classList.contains('qu-apptpl-item-active'), false, 'no longer active once a real channel is');
+  assert.ok(container.querySelector('.qu-apptpl-sidebar qu-list li a.qu-apptpl-item-active'), 'the real channel is now active');
+});
+
 // ===== list: in the mobile footer (§A - a SECOND, independent <qu-list>
 // in a pill+popup, alongside the sidebar's own) ==============================
 
@@ -419,6 +447,35 @@ test('begin() and stop() correctly tear down the footer pill\'s own document-lev
   assert.doesNotThrow(() => chrome.stop());
   assert.doesNotThrow(() => document.dispatchEvent(new window.Event('click')));
   assert.doesNotThrow(() => document.dispatchEvent(new window.Event('keydown')));
+});
+
+test('the footer popup includes the same static prefixItems entry as the sidebar, and the pill shows its label (not heading) when it is the active one', async () => {
+  const qu = fakeQu({ '/channels': [{ path: '/store/c/1' }], '/store/c/1': { title: 'General' } });
+  const container = makeContainer();
+  const chrome = mountChrome(container, { qu });
+  const handle = chrome.begin();
+  const prefixItems = [{ id: 'all', label: 'All channels', href: '#/forum' }];
+  const template = channelTemplate(); // same reference across both set() calls below - see sameListRegistration()'s own doc comment
+  handle.set({
+    navigation: { list: { path: '/channels', template, prefixItems }, activeId: 'all', heading: 'Channels' },
+  });
+  await waitFor(() => container.querySelector('.qu-apptpl-footer qu-list li a')?.textContent === 'General');
+
+  assert.equal(container.querySelector('.qu-apptpl-footer .qu-apptpl-pill-label').textContent, 'All channels');
+  const popupPrefixLink = [...container.querySelectorAll('.qu-apptpl-footer .qu-apptpl-popup a')].find((a) => a.textContent === 'All channels');
+  assert.ok(popupPrefixLink, 'expected the popup to also list the static prefix entry');
+  assert.equal(popupPrefixLink.getAttribute('href'), '#/forum');
+
+  // No pillTemplate given here, so a REAL channel (not a prefixItems match)
+  // falls back to the section heading, same as any other list:-registered
+  // pill with no pillTemplate - see this file's own top doc comment's
+  // "NOTE ON DECRYPTION" paragraph for why Forum's own real usage makes
+  // this exact choice (a channel's title may be genuine ciphertext, not
+  // safely readable via a raw <qu-view>).
+  handle.set({
+    navigation: { list: { path: '/channels', template, prefixItems }, activeId: '1', heading: 'Channels' },
+  });
+  assert.equal(container.querySelector('.qu-apptpl-footer .qu-apptpl-pill-label').textContent, 'Channels');
 });
 
 test('stop() tears down cleanly - no error thrown, no lingering document listeners from an open popup', () => {
