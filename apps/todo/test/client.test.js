@@ -127,16 +127,16 @@ async function waitForAsync(check, { timeout = 1000, interval = 5 } = {}) {
   }
 }
 
-async function createListViaForm(container, title = 'Groceries') {
+async function createListViaForm(container, services, title = 'Groceries') {
   await waitFor(() => container.querySelector('.qu-todo-new input') !== null);
-  const before = container.querySelectorAll('.qu-todo-row-title').length;
+  const before = (await services.sharing.listMine('todo', 'list')).length;
   const input = container.querySelector('.qu-todo-new input');
   input.value = title;
   container.querySelector('form.qu-todo-new').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
   // Count-based (not existence-based): a SECOND call in the same container
-  // would otherwise resolve instantly against the FIRST list's already-
-  // present row, racing ahead of this call's own (still in-flight) qu.put().
-  await waitFor(() => container.querySelectorAll('.qu-todo-row-title').length > before);
+  // would otherwise resolve instantly against a list already created by an
+  // EARLIER call, racing ahead of this call's own (still in-flight) qu.put().
+  await waitForAsync(async () => (await services.sharing.listMine('todo', 'list')).length > before);
 }
 
 // ===== mount() - main view =================================================
@@ -153,14 +153,20 @@ test('renders the empty state when there are no lists yet', async () => {
   }
 });
 
-test('creating a list via the sidebar form shows it under "My lists" and navigating into it shows the empty task state', async () => {
+test('creating a list from the default My Tasks page\'s empty state creates a real, unshared list, reachable from the switcher sidebar', async () => {
   const { qu, services } = await freshEnv();
   const container = makeContainer();
-  const stop = mount(container, { qu, services, segments: ['todo'], subscribe: noopSubscribe });
+  const chromeRoot = makeContainer();
+  const chrome = fakeChrome(chromeRoot);
+  const stop = mount(container, { qu, services, segments: ['todo'], subscribe: noopSubscribe, chrome });
   try {
-    await createListViaForm(container);
-    assert.equal(container.querySelector('.qu-todo-row-title').textContent, 'Groceries');
-    assert.equal(container.querySelector('.qu-todo-badge'), null); // owner's own list carries no "shared" badge
+    await createListViaForm(container, services);
+    const [{ id: listId }] = await services.sharing.listMine('todo', 'list');
+    assert.ok(listId);
+
+    await waitFor(() => [...chromeRoot.querySelectorAll('.qu-apptpl-sidebar a')].some((a) => a.textContent.includes('Groceries')));
+    const listLink = [...chromeRoot.querySelectorAll('.qu-apptpl-sidebar a')].find((a) => a.textContent.includes('Groceries'));
+    assert.equal(listLink.querySelector('.qu-apptpl-badge'), null, 'owner\'s own list carries no "shared" badge');
   } finally {
     stop();
   }
@@ -170,11 +176,11 @@ test('every page has no bespoke back link - only the shell header\'s Back/Forwar
   const { qu, services } = await freshEnv();
   const container = makeContainer();
   const stop = mount(container, { qu, services, segments: ['todo'], subscribe: noopSubscribe });
-  await createListViaForm(container);
+  await createListViaForm(container, services);
   const [{ id: listId }] = await services.sharing.listMine('todo', 'list');
   stop();
 
-  for (const hash of ['#/todo', `#/todo/${listId}`, `#/todo/${listId}/new`, '#/todo/mine', '#/todo/manage']) {
+  for (const hash of ['#/todo', `#/todo/${listId}`, `#/todo/${listId}/new`, '#/todo/all', '#/todo/manage']) {
     const c = makeContainer();
     const s = mount(c, { qu, services, segments: segmentsFor(hash), subscribe: noopSubscribe });
     await waitFor(() => c.children.length > 0);
@@ -187,7 +193,7 @@ test('a newly created list is real, ACL-protected storage: owner-only writer, a 
   const { qu, services, myPub } = await freshEnv();
   const container = makeContainer();
   const stop = mount(container, { qu, services, segments: ['todo'], subscribe: noopSubscribe });
-  await createListViaForm(container);
+  await createListViaForm(container, services);
   stop();
 
   const [{ id: listId }] = await services.sharing.listMine('todo', 'list');
@@ -217,7 +223,7 @@ test('adding a task through the New Task page makes it show up in the list, and 
   const { qu, services } = await freshEnv();
   const container = makeContainer();
   let stop = mount(container, { qu, services, segments: ['todo'], subscribe: noopSubscribe });
-  await createListViaForm(container);
+  await createListViaForm(container, services);
   const [{ id: listId }] = await services.sharing.listMine('todo', 'list');
   stop();
 
@@ -268,7 +274,7 @@ test('a subtask renders indented under its parent, and deleting the parent also 
   const { qu, services } = await freshEnv();
   const container = makeContainer();
   let stop = mount(container, { qu, services, segments: ['todo'], subscribe: noopSubscribe });
-  await createListViaForm(container);
+  await createListViaForm(container, services);
   const [{ id: listId }] = await services.sharing.listMine('todo', 'list');
   stop();
 
@@ -305,8 +311,8 @@ test('the New Task page offers a list picker (defaulting to the list navigated f
   const { qu, services, myPub } = await freshEnv();
   const container = makeContainer();
   let stop = mount(container, { qu, services, segments: ['todo'], subscribe: noopSubscribe });
-  await createListViaForm(container, 'List A');
-  await createListViaForm(container, 'List B');
+  await createListViaForm(container, services, 'List A');
+  await createListViaForm(container, services, 'List B');
   const mine = await services.sharing.listMine('todo', 'list');
   assert.equal(mine.length, 2);
   const [listA, listB] = mine.map((l) => l.id);
@@ -339,7 +345,7 @@ test('a subtask\'s New Task page locks the list picker to its parent\'s own list
   const { qu, services } = await freshEnv();
   const container = makeContainer();
   let stop = mount(container, { qu, services, segments: ['todo'], subscribe: noopSubscribe });
-  await createListViaForm(container);
+  await createListViaForm(container, services);
   const [{ id: listId }] = await services.sharing.listMine('todo', 'list');
   stop();
 
@@ -372,7 +378,7 @@ test('the share picker only offers Contacts - a non-contact with a published pro
 
   const container = makeContainer();
   let stop = mount(container, { qu, services, segments: ['todo'], subscribe: noopSubscribe });
-  await createListViaForm(container);
+  await createListViaForm(container, services);
   const [{ id: listId }] = await services.sharing.listMine('todo', 'list');
   stop();
 
@@ -404,7 +410,7 @@ test('inviteMember flow: inviting a contact grants them editor by default, grows
 
   const container = makeContainer();
   let stop = mount(container, { qu, services, segments: ['todo'], subscribe: noopSubscribe });
-  await createListViaForm(container);
+  await createListViaForm(container, services);
   const [{ id: listId }] = await services.sharing.listMine('todo', 'list');
   stop();
 
@@ -439,7 +445,7 @@ test('an invited member sees the shared list (and can only be assigned tasks - n
 
   const ownerContainer = makeContainer();
   let stop = mount(ownerContainer, { qu: ownerQu, services: ownerServices, segments: ['todo'], subscribe: noopSubscribe });
-  await createListViaForm(ownerContainer);
+  await createListViaForm(ownerContainer, ownerServices);
   const [{ id: listId }] = await ownerServices.sharing.listMine('todo', 'list');
   stop();
 
@@ -480,16 +486,20 @@ test('an invited member sees the shared list (and can only be assigned tasks - n
   ]);
   await mirrorChildren(ownerQu, guestQu, paths.threadMessagesParentPath(TODO_SPACE_ID, `invite-${guestPub}`));
 
+  // The guest's default landing view (#/todo, "Assigned to me") shows the
+  // just-assigned task directly, and the switcher sidebar carries the
+  // shared list with a "shared" badge (an owner's own list never gets one -
+  // see the "creating a list..." test above).
   const guestContainer = makeContainer();
-  stop = mount(guestContainer, { qu: guestQu, services: guestServices, segments: ['todo'], subscribe: noopSubscribe });
-  await waitFor(() => guestContainer.querySelector('.qu-todo-row-title') !== null);
-  assert.equal(guestContainer.querySelector('.qu-todo-row-title').textContent, 'Groceries');
-  assert.ok(guestContainer.querySelector('.qu-todo-badge'), 'expected the shared list to carry a "shared" badge for the guest');
-  stop();
-
-  stop = mount(guestContainer, { qu: guestQu, services: guestServices, segments: ['todo', 'mine'], subscribe: noopSubscribe });
+  const guestChromeRoot = makeContainer();
+  const guestChrome = fakeChrome(guestChromeRoot);
+  stop = mount(guestContainer, { qu: guestQu, services: guestServices, segments: ['todo'], subscribe: noopSubscribe, chrome: guestChrome });
   await waitFor(() => guestContainer.querySelector('.qu-todo-tasks a') !== null);
   assert.match(guestContainer.querySelector('.qu-todo-tasks a').textContent, /Book venue/);
+
+  await waitFor(() => [...guestChromeRoot.querySelectorAll('.qu-apptpl-sidebar a')].some((a) => a.textContent.includes('Groceries')));
+  const sharedListLink = [...guestChromeRoot.querySelectorAll('.qu-apptpl-sidebar a')].find((a) => a.textContent.includes('Groceries'));
+  assert.ok(sharedListLink.querySelector('.qu-apptpl-badge'), 'expected the shared list to carry a "shared" badge for the guest');
   stop();
 });
 
@@ -500,7 +510,7 @@ test('a list can never be deleted or renamed by a non-owner, not just hidden fro
 
   const ownerContainer = makeContainer();
   let stop = mount(ownerContainer, { qu: ownerQu, services: ownerServices, segments: ['todo'], subscribe: noopSubscribe });
-  await createListViaForm(ownerContainer);
+  await createListViaForm(ownerContainer, ownerServices);
   const [{ id: listId }] = await ownerServices.sharing.listMine('todo', 'list');
   stop();
 
@@ -551,7 +561,7 @@ test('an open list\'s own primaryAction is "New task" once the list is editable,
   const { qu, services } = await freshEnv();
   const setupContainer = makeContainer();
   let stop = mount(setupContainer, { qu, services, segments: ['todo'], subscribe: noopSubscribe });
-  await createListViaForm(setupContainer);
+  await createListViaForm(setupContainer, services);
   const [{ id: listId }] = await services.sharing.listMine('todo', 'list');
   stop();
 
@@ -571,7 +581,7 @@ test('"Mir zugewiesen"/Assigned-to-me: each row can be checked off directly (dro
   const { qu, services, myPub } = await freshEnv();
   const container = makeContainer();
   let stop = mount(container, { qu, services, segments: ['todo'], subscribe: noopSubscribe });
-  await createListViaForm(container);
+  await createListViaForm(container, services);
   const [{ id: listId }] = await services.sharing.listMine('todo', 'list');
   stop();
 
@@ -581,7 +591,7 @@ test('"Mir zugewiesen"/Assigned-to-me: each row can be checked off directly (dro
   await createTaskViaForm(container, { title: 'Buy milk' });
   stop();
 
-  stop = mount(container, { qu, services, segments: ['todo', 'mine'], subscribe: noopSubscribe });
+  stop = mount(container, { qu, services, segments: ['todo'], subscribe: noopSubscribe });
   await waitFor(() => container.querySelector('.qu-todo-task-title') !== null);
   assert.equal(container.querySelector('.qu-todo-task-title').textContent, 'Buy milk');
 
@@ -607,7 +617,7 @@ test('list page and "Mir zugewiesen" both render a Lists <-> Mir-zugewiesen swit
   const { qu, services } = await freshEnv();
   const setupContainer = makeContainer();
   let stop = mount(setupContainer, { qu, services, segments: ['todo'], subscribe: noopSubscribe });
-  await createListViaForm(setupContainer);
+  await createListViaForm(setupContainer, services);
   const [{ id: listId }] = await services.sharing.listMine('todo', 'list');
   stop();
 
@@ -622,6 +632,7 @@ test('list page and "Mir zugewiesen" both render a Lists <-> Mir-zugewiesen swit
     await waitFor(() => chromeRoot.querySelector('.qu-apptpl-sidebar') !== null);
     const sidebarLinks = [...chromeRoot.querySelectorAll('.qu-apptpl-sidebar a')].map((a) => a.textContent);
     assert.ok(sidebarLinks.includes('Assigned to me'), 'expected "Mir zugewiesen" in the switcher sidebar');
+    assert.ok(sidebarLinks.includes('All tasks'), 'expected "Alle Aufgaben" (all tasks, across every list) in the switcher sidebar');
     assert.ok(sidebarLinks.includes('Groceries'), 'expected the list itself in the switcher sidebar');
 
     container.querySelector('.qu-todo-copy-link').click();
@@ -637,11 +648,11 @@ test('list page and "Mir zugewiesen" both render a Lists <-> Mir-zugewiesen swit
     const mineContainer = makeContainer();
     const mineChromeRoot = makeContainer();
     const mineChrome = fakeChrome(mineChromeRoot);
-    stop = mount(mineContainer, { qu, services, segments: ['todo', 'mine'], subscribe: noopSubscribe, chrome: mineChrome });
+    stop = mount(mineContainer, { qu, services, segments: ['todo'], subscribe: noopSubscribe, chrome: mineChrome });
     await waitFor(() => mineChromeRoot.querySelector('.qu-apptpl-sidebar') !== null);
     mineContainer.querySelector('.qu-todo-copy-link').click();
     await waitFor(() => written.length === 2);
-    assert.equal(written[1], 'http://localhost/#/todo/mine');
+    assert.equal(written[1], 'http://localhost/#/todo');
   } finally {
     stop();
     Object.defineProperty(globalThis, 'navigator', originalDescriptor);
@@ -660,6 +671,72 @@ test('#/todo/new creates a list and redirects straight to it', async () => {
     await waitFor(() => /^#\/todo\/[^/]+$/.test(window.location.hash));
     const [{ id: listId }] = await services.sharing.listMine('todo', 'list');
     assert.equal(window.location.hash, `#/todo/${listId}`);
+  } finally {
+    stop();
+  }
+});
+
+// ===== Default view + "All tasks" filtering ================================
+
+test('#/todo (the default landing view) only shows tasks assigned to ME, while #/todo/all shows every task in every list regardless of assignee - two genuinely different sets', async () => {
+  const { qu, services, myPub } = await freshEnv();
+  const guestPub = await createPeer(qu, { alias: 'Ada' }).then((peer) => peer.myPub);
+  await services.contacts.addContact(guestPub, {});
+
+  const container = makeContainer();
+  let stop = mount(container, { qu, services, segments: ['todo'], subscribe: noopSubscribe });
+  await createListViaForm(container, services);
+  const [{ id: listId }] = await services.sharing.listMine('todo', 'list');
+  stop();
+
+  // Share the list so the guest becomes a valid assignee.
+  stop = mount(container, { qu, services, segments: segmentsFor(`#/todo/${listId}/share`), subscribe: noopSubscribe });
+  await waitFor(() => container.querySelector('.qu-actor-picker input') !== null);
+  const picker = container.querySelector('.qu-actor-picker input');
+  picker.value = 'Ada';
+  picker.dispatchEvent(new window.Event('input', { bubbles: true }));
+  await waitFor(() => container.querySelector('.qu-actor-picker-option') !== null);
+  container.querySelector('.qu-actor-picker-option').click();
+  await waitForAsync(async () => (await services.access.getAcl(TODO_SPACE_ID, 'docs', `todo-${listId}-items`)).writers.length === 2);
+  stop();
+
+  // A task assigned to ME.
+  stop = mount(container, { qu, services, segments: segmentsFor(`#/todo/${listId}/new`), subscribe: noopSubscribe });
+  await waitFor(() => container.querySelector('.qu-todo-assignee-select') !== null);
+  container.querySelector('.qu-todo-assignee-select').value = myPub;
+  await createTaskViaForm(container, { title: 'My task' });
+  stop();
+
+  // A task assigned to the GUEST, not me.
+  stop = mount(container, { qu, services, segments: segmentsFor(`#/todo/${listId}/new`), subscribe: noopSubscribe });
+  await waitFor(() => container.querySelector('.qu-todo-assignee-select') !== null);
+  container.querySelector('.qu-todo-assignee-select').value = guestPub;
+  await createTaskViaForm(container, { title: 'Guest task' });
+  stop();
+
+  // #/todo - "assigned to me" - only ever shows MY task.
+  stop = mount(container, { qu, services, segments: ['todo'], subscribe: noopSubscribe });
+  await waitFor(() => container.querySelector('.qu-todo-task-title') !== null);
+  await waitForAsync(async () => container.querySelectorAll('.qu-todo-task-title').length === 1);
+  assert.deepEqual([...container.querySelectorAll('.qu-todo-task-title')].map((a) => a.textContent), ['My task']);
+  stop();
+
+  // #/todo/all - literally every task, regardless of who it's assigned to.
+  stop = mount(container, { qu, services, segments: segmentsFor('#/todo/all'), subscribe: noopSubscribe });
+  await waitForAsync(async () => container.querySelectorAll('.qu-todo-task-title').length === 2);
+  const allTitles = [...container.querySelectorAll('.qu-todo-task-title')].map((a) => a.textContent).sort();
+  assert.deepEqual(allTitles, ['Guest task', 'My task']);
+  stop();
+});
+
+test('#/todo/all falls back to the "create your first list" empty state exactly like #/todo does, when there are no lists yet', async () => {
+  const { qu, services } = await freshEnv();
+  const container = makeContainer();
+  const stop = mount(container, { qu, services, segments: segmentsFor('#/todo/all'), subscribe: noopSubscribe });
+  try {
+    await waitFor(() => container.querySelector('.qu-todo-empty') !== null);
+    assert.match(container.querySelector('.qu-todo-empty').textContent, /No lists yet/);
+    assert.ok(container.querySelector('.qu-todo-new input'), 'expected the inline "create a list" form too');
   } finally {
     stop();
   }
