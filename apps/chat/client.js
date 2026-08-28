@@ -364,6 +364,17 @@ const STYLE = `
   .qu-chat-room-ts { font-size: 0.75em; opacity: 0.6; flex-shrink: 0; }
   .qu-chat-room-preview { font-size: 0.85em; opacity: 0.7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .qu-chat-room-unread { display: inline-block; width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--qu-color-accent, #5b5bd6); flex-shrink: 0; }
+  /* ROOM-LIST THUMBNAIL - a small cover image next to the text preview when
+     the last message is a photo, same "📷 Photo" + tiny thumbnail combo
+     Telegram/WhatsApp both show (previewLabelFor() already provides the
+     text half; this is the image half). <qu-asset>'s own img rule
+     (asset-components.js's STYLE) caps thumbnails at max-height: 20rem,
+     sized for a message bubble - overridden here down to a small fixed
+     square via a MORE SPECIFIC selector (two classes, beats that rule's one
+     regardless of <style> injection order). */
+  .qu-chat-room-thumb { flex-shrink: 0; width: 2.6rem; height: 2.6rem; }
+  .qu-chat-room-thumb .qu-asset-image-wrap { display: block; width: 100%; height: 100%; }
+  .qu-chat-room-thumb .qu-asset img { width: 100%; height: 100%; max-width: none; max-height: none; object-fit: cover; border-radius: var(--qu-radius-sm, 0.3rem); cursor: default; }
   /* MESSAGE REQUESTS - see ChatService's own "1:1 DISCOVERY" doc comment.
      A visually separate block ABOVE the normal room list (not just another
      room row) - accepting/declining is a decision, not navigation, so it
@@ -877,6 +888,9 @@ function mountRoomListView(container, { qu, services, subscribe, syncFetch, SPAC
     main.append(nameRow, preview);
     a.appendChild(main);
 
+    const thumb = roomThumbFor(room.lastMessage);
+    if (thumb) a.appendChild(thumb);
+
     if (room.unread) {
       const dot = document.createElement('span');
       dot.className = 'qu-chat-room-unread';
@@ -884,6 +898,40 @@ function mountRoomListView(container, { qu, services, subscribe, syncFetch, SPAC
     }
     li.appendChild(a);
     return li;
+  }
+
+  /**
+   * A small cover-image thumbnail for the room list's last-message preview
+   * (see this file's own STYLE comment on `.qu-chat-room-thumb`) - `null`
+   * for anything that isn't a plain image attachment (text, voice,
+   * location, video, file: `previewLabelFor()`'s own text label already
+   * covers those, a thumbnail here would either not apply or need a
+   * player/icon this small preview isn't the place for).
+   * @param {object|null|undefined} message
+   * @returns {HTMLElement|null}
+   */
+  function roomThumbFor(message) {
+    const attachment = message?.attachments?.[0];
+    if (!attachment?.mime?.startsWith('image/')) return null;
+    const thumb = document.createElement('span');
+    thumb.className = 'qu-chat-room-thumb';
+    // <qu-asset>'s own image click opens a fullscreen lightbox (asset-
+    // components.js) - fine inside a message bubble, but this thumbnail
+    // sits inside the room row's <a>, so an uncontested click would BOTH
+    // pop the lightbox AND navigate to the room. A capture-phase listener
+    // here runs before that click ever reaches the <img> (capturing walks
+    // DOWN to the target before any target/bubble listener fires), so
+    // stopPropagation() here keeps it from reaching <qu-asset>'s handler at
+    // all - the row's own <a> still navigates normally either way, since
+    // that's the browser's default action, not something contingent on the
+    // event bubbling back up through a JS listener.
+    thumb.addEventListener('click', (e) => e.stopPropagation(), true);
+    const assetEl = document.createElement('qu-asset');
+    assetEl.setAttribute('space-id', SPACE_ID);
+    assetEl.setAttribute('asset-id', attachment.assetId);
+    assetEl.setAttribute('kind', 'image');
+    thumb.appendChild(assetEl);
+    return thumb;
   }
 
   /**

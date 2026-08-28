@@ -1817,6 +1817,41 @@ test('the room list\'s primaryAction ("+ New group") links to #/chat/new-group, 
   }
 });
 
+test('the room list shows a small cover-image thumbnail next to the text preview when the last message is a photo (Telegram/WhatsApp-style "📷 Photo" + thumbnail), but never for a text-only last message', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  const carol = await freshEnv('Carol');
+  await mirrorProfileInto(bob, alice.qu);
+  await mirrorProfileInto(carol, alice.qu);
+  await alice.services.contacts.addContact(bob.myPub);
+  await alice.services.contacts.addContact(carol.myPub);
+
+  const bobRoomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, bobRoomId, {
+    body: '', extra: { attachments: [{ assetId: 'photo1', mime: 'image/png', name: 'photo.png', size: 100 }] },
+  });
+  const carolRoomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, carol.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, carolRoomId, { body: 'just text, no attachment' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat'] });
+  try {
+    await waitFor(() => container.querySelectorAll('.qu-chat-room-row').length === 2);
+
+    const bobRow = container.querySelector(`a[href="#/chat/${bob.myPub}"]`);
+    const thumb = bobRow.querySelector('.qu-chat-room-thumb qu-asset');
+    assert.ok(thumb, 'expected a room-list thumbnail for a photo last-message');
+    assert.equal(thumb.getAttribute('space-id'), CHAT_SPACE_ID);
+    assert.equal(thumb.getAttribute('asset-id'), 'photo1');
+    assert.equal(thumb.getAttribute('kind'), 'image');
+
+    const carolRow = container.querySelector(`a[href="#/chat/${carol.myPub}"]`);
+    assert.equal(carolRow.querySelector('.qu-chat-room-thumb'), null, 'a text-only last message must not grow a thumbnail');
+  } finally {
+    stop();
+  }
+});
+
 test('an open room\'s navigation sidebar lists every room (1:1 + group), the current one active, on desktop only - no primaryAction and no mobile footer at all', async () => {
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');
