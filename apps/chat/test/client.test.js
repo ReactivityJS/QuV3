@@ -1180,6 +1180,87 @@ test('a mention with no resolvable profile falls back to the truncated-pubkey di
   }
 });
 
+test('MESSAGE GROUPING: consecutive messages from the same author collapse into one visual burst - the author-name label shows only on the first of a run and the row gets a tighter ".qu-chat-bubble-row-grouped" margin, but switching author always starts a fresh, ungrouped row', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  await mirrorProfileInto(alice, bob.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+
+  // showAliasIn1to1 - a 1:1 room only shows the author-name label at all
+  // once this per-identity setting (renderChatSettings()) is on, same
+  // toggle the settings test above drives.
+  const settingsContainer = makeContainer();
+  await renderChatSettings(settingsContainer, { myPub: alice.myPub, services: alice.services });
+  const aliasCheckbox = settingsContainer.querySelector('input[type="checkbox"]');
+  aliasCheckbox.checked = true;
+  aliasCheckbox.dispatchEvent(new window.Event('change'));
+  await waitFor(() => settingsContainer.querySelector('.qu-chat-settings-status')?.hidden === false);
+
+  // Bob posts twice in a row (own store, mirrored in - the standard
+  // cross-identity technique this file's own tests already use), then
+  // Alice replies, then Bob posts once more - real wall-clock ts order,
+  // no clock mocking needed.
+  const bobRoomId = await bob.services.chat.ensureRoom(CHAT_SPACE_ID, alice.myPub);
+  assert.equal(bobRoomId, roomId);
+  await bob.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'first from bob' });
+  await bob.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'second from bob, right after' });
+  await mirrorThreadInto(bob, alice.qu, CHAT_SPACE_ID, roomId);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'now alice replies' });
+  await bob.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'bob again' });
+  await mirrorThreadInto(bob, alice.qu, CHAT_SPACE_ID, roomId);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelectorAll('.qu-chat-bubble-row').length === 4);
+    const rows = [...container.querySelectorAll('.qu-chat-bubble-row')];
+
+    assert.equal(rows[0].classList.contains('qu-chat-bubble-row-grouped'), false);
+    assert.ok(rows[0].querySelector('.qu-chat-bubble-author'), 'first message of a run shows the author label');
+
+    assert.equal(rows[1].classList.contains('qu-chat-bubble-row-grouped'), true, 'same author, right after -> grouped');
+    assert.equal(rows[1].querySelector('.qu-chat-bubble-author'), null, 'a grouped follow-up never repeats the author label');
+
+    assert.equal(rows[2].classList.contains('qu-chat-bubble-row-grouped'), false, 'a different author (Alice, replying) always breaks the group');
+
+    assert.equal(rows[3].classList.contains('qu-chat-bubble-row-grouped'), false, 'switching back to Bob after Alice also starts a fresh row');
+    assert.ok(rows[3].querySelector('.qu-chat-bubble-author'), 'and shows the author label again');
+  } finally {
+    stop();
+  }
+});
+
+test('COMPACT MODE: the "compactMode" chat setting toggles a ".qu-chat-compact" class on the room view, tightening the message list without changing its content', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'hello' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-bubble-text')?.textContent.includes('hello'));
+    assert.equal(container.querySelector('.qu-chat-room-view').classList.contains('qu-chat-compact'), false);
+
+    const settingsContainer = makeContainer();
+    await renderChatSettings(settingsContainer, { myPub: alice.myPub, services: alice.services });
+    const compactCheckbox = [...settingsContainer.querySelectorAll('input[type="checkbox"]')][1]; // alias, THEN compact - renderChatSettings()'s own field order
+    compactCheckbox.checked = true;
+    compactCheckbox.dispatchEvent(new window.Event('change'));
+    await waitFor(() => settingsContainer.querySelector('.qu-chat-settings-status')?.hidden === false);
+
+    // Nothing pushes the setting change into an already-open room - the
+    // NEXT render (a real message list update) is what re-applies it, same
+    // as chatSettings.ownColor/showAliasIn1to1 already work.
+    await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'triggers a re-render' });
+    await waitFor(() => container.querySelector('.qu-chat-room-view').classList.contains('qu-chat-compact'));
+  } finally {
+    stop();
+  }
+});
+
 test('two files attached in sequence both ride along on one message.attachments[] - the "clean schema" plural-attachment adoption', async () => {
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');
@@ -1203,7 +1284,10 @@ test('two files attached in sequence both ride along on one message.attachments[
 
     container.querySelector('.qu-content-editor-submit-slot button').click();
 
-    await waitFor(() => container.querySelectorAll('.qu-chat-bubble-attachment').length === 2, { timeout: 5000 });
+    // Two IMAGE attachments on one message render as an album grid, not two
+    // stacked previews - see renderMessageText()'s own "ALBUM GRID" doc
+    // comment.
+    await waitFor(() => container.querySelectorAll('.qu-chat-bubble-attachment-grid qu-asset').length === 2, { timeout: 5000 });
     const roomId = await ChatService.roomId([alice.myPub, bob.myPub]);
     const { messages } = await alice.services.messages.listMessages(CHAT_SPACE_ID, roomId);
     assert.equal(messages[0].attachments.length, 2);
@@ -1812,6 +1896,41 @@ test('the room list\'s primaryAction ("+ New group") links to #/chat/new-group, 
     const footer = chromeRoot.querySelector('.qu-apptpl-footer');
     assert.equal(footer.classList.contains('qu-apptpl-footer--fab-only'), true);
     assert.equal(footer.querySelector('.qu-apptpl-pill'), null);
+  } finally {
+    stop();
+  }
+});
+
+test('the room list shows a small cover-image thumbnail next to the text preview when the last message is a photo (Telegram/WhatsApp-style "📷 Photo" + thumbnail), but never for a text-only last message', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  const carol = await freshEnv('Carol');
+  await mirrorProfileInto(bob, alice.qu);
+  await mirrorProfileInto(carol, alice.qu);
+  await alice.services.contacts.addContact(bob.myPub);
+  await alice.services.contacts.addContact(carol.myPub);
+
+  const bobRoomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, bobRoomId, {
+    body: '', extra: { attachments: [{ assetId: 'photo1', mime: 'image/png', name: 'photo.png', size: 100 }] },
+  });
+  const carolRoomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, carol.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, carolRoomId, { body: 'just text, no attachment' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat'] });
+  try {
+    await waitFor(() => container.querySelectorAll('.qu-chat-room-row').length === 2);
+
+    const bobRow = container.querySelector(`a[href="#/chat/${bob.myPub}"]`);
+    const thumb = bobRow.querySelector('.qu-chat-room-thumb qu-asset');
+    assert.ok(thumb, 'expected a room-list thumbnail for a photo last-message');
+    assert.equal(thumb.getAttribute('space-id'), CHAT_SPACE_ID);
+    assert.equal(thumb.getAttribute('asset-id'), 'photo1');
+    assert.equal(thumb.getAttribute('kind'), 'image');
+
+    const carolRow = container.querySelector(`a[href="#/chat/${carol.myPub}"]`);
+    assert.equal(carolRow.querySelector('.qu-chat-room-thumb'), null, 'a text-only last message must not grow a thumbnail');
   } finally {
     stop();
   }
