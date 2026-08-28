@@ -2353,6 +2353,33 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
 
   let stopHeartbeat = null;
 
+  // PUSH ONLY WHILE ACTUALLY BACKGROUNDED/CLOSED - PushDeliveryService
+  // (packages/relay/src/push-delivery.js) already skips sending a Web Push
+  // whenever PresenceTracker.isRecentlyOnline() sees this identity's status
+  // as 'online' and fresh (see that file's own doc comment) - the ONLY gap
+  // was that the heartbeat above published 'online' unconditionally every
+  // 5s for as long as this room view stayed MOUNTED, backgrounded tab or
+  // not, so a merely-backgrounded (not closed) chat kept suppressing push
+  // indefinitely. Tying the heartbeat itself to document.visibilityState
+  // closes that gap with NO new signal/protocol/relay change at all -
+  // `stopHeartbeat()` already publishes 'offline' the instant it's called
+  // (startHeartbeat()'s own doc comment), which is now exactly what
+  // happens the moment the tab backgrounds, not just once this view
+  // unmounts entirely. Same mechanism `apps/shell/client.js`'s own
+  // visibilitychange listener already uses for its own, unrelated
+  // "refresh subscriptions on return" purpose - this one is scoped to
+  // just this room view (removed in the teardown below), not global.
+  function onVisibilityChange() {
+    if (stopped || !roomReady) return;
+    if (document.visibilityState === 'hidden') {
+      stopHeartbeat?.();
+      stopHeartbeat = null;
+    } else if (!stopHeartbeat) {
+      stopHeartbeat = services.presence.startHeartbeat(SPACE_ID, roomId);
+    }
+  }
+  document.addEventListener('visibilitychange', onVisibilityChange);
+
   (async () => {
     myPub = await services.actors.whoAmI();
     if (stopped) return;
@@ -2456,7 +2483,11 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     await refreshHeaderMuted();
     if (stopped) return;
 
-    stopHeartbeat = services.presence.startHeartbeat(SPACE_ID, roomId);
+    // Not an unconditional startHeartbeat() call - onVisibilityChange()
+    // (above) only actually starts it while the tab is genuinely visible
+    // right now, same as it does for every LATER visibility flip too - see
+    // that function's own doc comment.
+    onVisibilityChange();
     renderPresence();
     presenceTimer = setInterval(renderPresence, 5_000);
 
@@ -2515,6 +2546,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     composer?.stop(); // may never have been constructed - e.g. a group that turned out not to exist (roomReady never became true)
     resizeObserver?.disconnect();
     viewportResizeTarget.removeEventListener('resize', onViewportResize);
+    document.removeEventListener('visibilitychange', onVisibilityChange);
   };
 }
 

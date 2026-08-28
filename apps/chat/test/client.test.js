@@ -104,6 +104,12 @@ function makeContainer() {
   return el;
 }
 
+/** jsdom's own document.visibilityState is a getter, not directly settable - see mountRoomView()'s own onVisibilityChange() doc comment for what this drives. */
+function setDocumentVisibility(state) {
+  Object.defineProperty(document, 'visibilityState', { value: state, configurable: true });
+  document.dispatchEvent(new window.Event('visibilitychange'));
+}
+
 /**
  * A test-only stand-in for the platform-owned `ctx.chrome` handle (Chrome
  * Inversion, `apps/shell/src/chrome.js`) - reuses `@qu/ui`'s own
@@ -1026,6 +1032,49 @@ test('TYPING INDICATOR: typing in the composer publishes it; clearing the draft 
     await waitFor(async () => (await alice.qu.get(presencePath))?.val?.typing === false);
   } finally {
     stop();
+  }
+});
+
+test('PUSH ONLY WHILE VISIBLE: backgrounding the tab immediately publishes "offline" (closes the gap PresenceTracker.isRecentlyOnline() otherwise leaves for a merely-backgrounded, not closed, chat - see mountRoomView()\'s own onVisibilityChange() doc comment); returning to the foreground resumes "online"', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
+    await waitFor(async () => (await alice.services.presence.getPresence(CHAT_SPACE_ID, roomId, [alice.myPub]))[alice.myPub]?.status === 'online');
+
+    setDocumentVisibility('hidden');
+    await waitFor(async () => (await alice.services.presence.getPresence(CHAT_SPACE_ID, roomId, [alice.myPub]))[alice.myPub]?.status === 'offline');
+
+    setDocumentVisibility('visible');
+    await waitFor(async () => (await alice.services.presence.getPresence(CHAT_SPACE_ID, roomId, [alice.myPub]))[alice.myPub]?.status === 'online');
+  } finally {
+    stop();
+    setDocumentVisibility('visible');
+  }
+});
+
+test('PUSH ONLY WHILE VISIBLE: mounting a room view while the tab is ALREADY hidden never starts the heartbeat at all - no "online" is ever published', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+
+  setDocumentVisibility('hidden');
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const presence = await alice.services.presence.getPresence(CHAT_SPACE_ID, roomId, [alice.myPub]);
+    assert.equal(presence[alice.myPub], undefined);
+  } finally {
+    stop();
+    setDocumentVisibility('visible');
   }
 });
 
