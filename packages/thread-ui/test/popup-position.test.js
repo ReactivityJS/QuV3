@@ -78,6 +78,50 @@ test('flipUpIfNeeded(): no horizontal shift when the panel already fits with roo
   assert.equal(panel.style.transform, '');
 });
 
+test('flipUpIfNeeded(): clamps against the nearest overflow-y:auto ancestor (a sidebar-adjacent content column), not the raw window - a panel that fits the WINDOW but overflows past that column\'s own left edge still gets shifted', () => {
+  window.innerWidth = 1000;
+  window.innerHeight = 600;
+
+  // A desktop sidebar + scrollable content column layout, e.g. .qu-apptpl-
+  // sidebar (14rem/224px) beside .qu-chat-messages-scroll - the column's
+  // own bounding rect starts at 224, well short of the window's own 0.
+  const scrollContainer = document.createElement('div');
+  scrollContainer.style.overflowY = 'auto';
+  rectStub(scrollContainer, { left: 224, right: 1000 });
+  const trigger = document.createElement('button');
+  scrollContainer.appendChild(trigger);
+  document.body.appendChild(scrollContainer);
+  try {
+    rectStub(trigger, { top: 100, bottom: 120 });
+    const panel = document.createElement('div');
+    // Anchored via the context menu's own "right: 0" - sits comfortably
+    // inside the 1000px WINDOW, but its left edge (200) is still 24px
+    // short of the scroll container's own left edge (224).
+    rectStub(panel, { height: 50, left: 200, right: 300, width: 100 });
+
+    flipUpIfNeeded(panel, trigger, 'flip-up');
+    assert.equal(panel.style.transform, 'translateX(24px)'); // 224 (column's own left edge) - 200 (panel's left) - the column's edge already dominates the 8px margin, not on top of it
+  } finally {
+    scrollContainer.remove();
+  }
+});
+
+test('flipUpIfNeeded(): with NO scrollable ancestor at all (e.g. the composer\'s own emoji trigger, outside the message list), the clamp still falls back to the full window - unchanged from before', () => {
+  window.innerWidth = 1000;
+  window.innerHeight = 600;
+  const trigger = document.createElement('button');
+  document.body.appendChild(trigger);
+  try {
+    rectStub(trigger, { top: 100, bottom: 120 });
+    const panel = document.createElement('div');
+    rectStub(panel, { height: 50, left: 200, right: 300, width: 100 }); // well within the window - no ancestor bound is tighter than that
+    flipUpIfNeeded(panel, trigger, 'flip-up');
+    assert.equal(panel.style.transform, '');
+  } finally {
+    trigger.remove();
+  }
+});
+
 test('flipUpIfNeeded(): prefers window.visualViewport over window.innerHeight/innerWidth when available - the mobile on-screen-keyboard case', () => {
   // A real mobile browser's innerHeight stays the full LAYOUT viewport even
   // once the keyboard is showing (e.g. a composer's emoji trigger, focused

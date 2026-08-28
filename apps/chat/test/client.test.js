@@ -1461,7 +1461,7 @@ test('COMPACT MODE: the "compactMode" chat setting toggles a ".qu-chat-compact" 
 
     const settingsContainer = makeContainer();
     await renderChatSettings(settingsContainer, { myPub: alice.myPub, services: alice.services });
-    const compactCheckbox = [...settingsContainer.querySelectorAll('input[type="checkbox"]')][1]; // alias, THEN compact - renderChatSettings()'s own field order
+    const compactCheckbox = [...settingsContainer.querySelectorAll('input[type="checkbox"]')][2]; // alias, showOwnName, THEN compact - renderChatSettings()'s own field order
     compactCheckbox.checked = true;
     compactCheckbox.dispatchEvent(new window.Event('change'));
     await waitFor(() => settingsContainer.querySelector('.qu-chat-settings-status')?.hidden === false);
@@ -1471,6 +1471,41 @@ test('COMPACT MODE: the "compactMode" chat setting toggles a ".qu-chat-compact" 
     // as chatSettings.ownColor/showAliasIn1to1 already work.
     await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'triggers a re-render' });
     await waitFor(() => container.querySelector('.qu-chat-room-view').classList.contains('qu-chat-compact'));
+  } finally {
+    stop();
+  }
+});
+
+test('SHOW OWN NAME: the "showOwnNameAboveMessage" chat setting shows a "You" author label (with avatar) above your own messages too, independent of showAliasIn1to1', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'hello' });
+
+  // Off by default - own messages show no author label at all (1:1, showAliasIn1to1 also off).
+  const before = makeContainer();
+  const stopBefore = mount(before, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  await waitFor(() => before.querySelector('.qu-chat-bubble-text')?.textContent.includes('hello'));
+  assert.equal(before.querySelector('.qu-chat-bubble-author'), null);
+  stopBefore();
+
+  const settingsContainer = makeContainer();
+  await renderChatSettings(settingsContainer, { myPub: alice.myPub, services: alice.services });
+  const showOwnNameCheckbox = [...settingsContainer.querySelectorAll('input[type="checkbox"]')][1]; // alias, THEN showOwnName - renderChatSettings()'s own field order
+  showOwnNameCheckbox.checked = true;
+  showOwnNameCheckbox.dispatchEvent(new window.Event('change'));
+  await waitFor(() => settingsContainer.querySelector('.qu-chat-settings-status')?.hidden === false);
+
+  // A fresh mount's own first render picks up the now-saved setting.
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-bubble-text')?.textContent.includes('hello'));
+    const authorEl = container.querySelector('.qu-chat-bubble-author');
+    assert.ok(authorEl, 'own message now shows an author label too');
+    assert.match(authorEl.textContent, /You/);
+    assert.ok(authorEl.querySelector('.qu-avatar'), 'the label carries an avatar too, same as any other author label');
   } finally {
     stop();
   }
