@@ -32,9 +32,9 @@ test('re-registering a type replaces its definition', () => {
   assert.equal(registry.get('widget').content, true);
 });
 
-test('defaultEntityTypes has all seven Quniverse V4 seed types', () => {
+test('defaultEntityTypes has all seven Quniverse V4 seed types, plus apps/cms\'s own "cms-template" type', () => {
   const types = defaultEntityTypes.list().map((entry) => entry.type);
-  assert.deepEqual(types, ['topic', 'message', 'article', 'page', 'notification', 'task', 'event']);
+  assert.deepEqual(types, ['topic', 'message', 'article', 'page', 'cms-template', 'notification', 'task', 'event']);
 });
 
 test('defaultEntityTypes: topic is commentable/reactable/followable/attachable, with content', () => {

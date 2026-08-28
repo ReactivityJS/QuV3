@@ -83,6 +83,17 @@ export const DEFAULT_RELAY_SETTINGS = Object.freeze({
   // server-side enforcement needs a distinguishable path/kind for a chat
   // group's thread config the same way `channels`' own note describes.
   chat: Object.freeze({ allowMemberCreateGroup: true }),
+  // `apps/cms` - which Content Editors a page owner may choose between
+  // (`allowedEditors`), and which one a brand-new page starts with
+  // (`defaultEditor`). Admin CONFIGURES the module here; the individual user
+  // still picks their own preferred editor (`apps/cms`'s own per-user
+  // settings document), constrained to whatever this list currently allows -
+  // same "admin default/allowed set, user override among admin-allowed
+  // alternatives" shape `docs/v4-concept.md` §10.2 already recorded as the
+  // intended direction for editor/toolbar configurability generally. No
+  // separate `cms.enabled` flag - activating/deactivating the module entirely
+  // is already covered by the generic `disabledApps` toggle above.
+  cms: Object.freeze({ allowedEditors: Object.freeze(['markdown', 'richtext']), defaultEditor: 'markdown' }),
   // Admin-editable, cross-app-consistent ordering for extension-point items
   // - `{[point]: [id, ...]}`, consulted by `@qu/foundation`'s
   // `ExtensionPointHost` (via `rankFor()`, see that module's own doc
@@ -168,7 +179,7 @@ export const DEFAULT_RELAY_SETTINGS = Object.freeze({
 
 /**
  * @param {import('@qu/core').QuStore} qu
- * @returns {Promise<{defaultLocale: string, rateLimits: {maxMessagesPerMinute: number}, disabledApps: string[], hiddenFromAppList: string[], flagTypes: Array<{id: string, label: string, icon: string, mode: string, entityKinds: string[]}>, channels: {allowMemberCreate: boolean, allowMemberRestricted: boolean}, chat: {allowMemberCreateGroup: boolean}, extensionOrder: Record<string, string[]>, linkPreviews: {enabled: boolean}, chrome: {menuThreshold: number}}>}
+ * @returns {Promise<{defaultLocale: string, rateLimits: {maxMessagesPerMinute: number}, disabledApps: string[], hiddenFromAppList: string[], flagTypes: Array<{id: string, label: string, icon: string, mode: string, entityKinds: string[]}>, channels: {allowMemberCreate: boolean, allowMemberRestricted: boolean}, chat: {allowMemberCreateGroup: boolean}, cms: {allowedEditors: string[], defaultEditor: string}, extensionOrder: Record<string, string[]>, linkPreviews: {enabled: boolean}, chrome: {menuThreshold: number}}>}
  *   Always fully populated - missing fields fall back to `DEFAULT_RELAY_SETTINGS`.
  */
 export async function getSettings(qu) {
@@ -180,6 +191,7 @@ export async function getSettings(qu) {
     rateLimits: { ...DEFAULT_RELAY_SETTINGS.rateLimits, ...val.rateLimits },
     channels: { ...DEFAULT_RELAY_SETTINGS.channels, ...val.channels },
     chat: { ...DEFAULT_RELAY_SETTINGS.chat, ...val.chat },
+    cms: { ...DEFAULT_RELAY_SETTINGS.cms, ...val.cms },
     extensionOrder: { ...DEFAULT_RELAY_SETTINGS.extensionOrder, ...val.extensionOrder },
     linkPreviews: { ...DEFAULT_RELAY_SETTINGS.linkPreviews, ...val.linkPreviews },
     chrome: { ...DEFAULT_RELAY_SETTINGS.chrome, ...val.chrome },
