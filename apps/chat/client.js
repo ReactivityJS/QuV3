@@ -290,6 +290,7 @@ const DICT = {
     you: 'You',
     read: 'Read', sent: 'Sent',
     showAliasIn1to1: 'Show sender name in 1:1 chats',
+    showOwnNameAboveMessage: 'Show your own name above your messages',
     ownColor: 'Your message color',
     compactMode: 'Compact view (tighter message list)',
     saved: 'Saved.',
@@ -344,6 +345,7 @@ const DICT = {
     you: 'Du',
     read: 'Gelesen', sent: 'Gesendet',
     showAliasIn1to1: 'Absendername in 1:1-Chats anzeigen',
+    showOwnNameAboveMessage: 'Eigenen Namen über eigenen Nachrichten anzeigen',
     ownColor: 'Deine Nachrichtenfarbe',
     compactMode: 'Kompakte Ansicht (dichtere Nachrichtenliste)',
     saved: 'Gespeichert.',
@@ -587,7 +589,7 @@ function chatSettingsPath(myPub) {
   return `/store/actors/~${myPub}/private/chat-settings`;
 }
 
-const DEFAULT_CHAT_SETTINGS = { showAliasIn1to1: false, ownColor: '', compactMode: false };
+const DEFAULT_CHAT_SETTINGS = { showAliasIn1to1: false, showOwnNameAboveMessage: false, ownColor: '', compactMode: false };
 
 async function getChatSettings(qu, identity, myPub) {
   const stored = await getPrivate(qu, identity, chatSettingsPath(myPub));
@@ -625,6 +627,12 @@ export async function renderChatSettings(container, { myPub, services }) {
   aliasInput.checked = current.showAliasIn1to1;
   aliasLabel.append(aliasInput, document.createTextNode(t('showAliasIn1to1')));
 
+  const showOwnNameLabel = document.createElement('label');
+  const showOwnNameInput = document.createElement('input');
+  showOwnNameInput.type = 'checkbox';
+  showOwnNameInput.checked = current.showOwnNameAboveMessage;
+  showOwnNameLabel.append(showOwnNameInput, document.createTextNode(t('showOwnNameAboveMessage')));
+
   const colorLabel = document.createElement('label');
   const colorInput = document.createElement('input');
   colorInput.type = 'color';
@@ -641,16 +649,18 @@ export async function renderChatSettings(container, { myPub, services }) {
   status.className = 'qu-chat-settings-status';
   status.hidden = true;
 
-  form.append(aliasLabel, colorLabel, compactLabel, status);
+  form.append(aliasLabel, showOwnNameLabel, colorLabel, compactLabel, status);
 
   async function save() {
     await setChatSettings(qu, identity, myPub, {
-      showAliasIn1to1: aliasInput.checked, ownColor: colorInput.value, compactMode: compactInput.checked,
+      showAliasIn1to1: aliasInput.checked, showOwnNameAboveMessage: showOwnNameInput.checked,
+      ownColor: colorInput.value, compactMode: compactInput.checked,
     });
     status.textContent = t('saved');
     status.hidden = false;
   }
   aliasInput.addEventListener('change', save);
+  showOwnNameInput.addEventListener('change', save);
   colorInput.addEventListener('change', save);
   compactInput.addEventListener('change', save);
 
@@ -1995,10 +2005,18 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     bubble.className = 'qu-chat-bubble' + (mine ? ' qu-chat-bubble-mine' : '');
     if (mine && chatSettings.ownColor) bubble.style.background = chatSettings.ownColor;
 
+    // showOwnNameAboveMessage (renderChatSettings()'s own checkbox) is a
+    // SEPARATE, independent toggle from showAuthor below - "show me my own
+    // name too" is a distinct ask from "show senders' names at all", not
+    // implied by (or gated behind) the other.
     const showAuthor = (target.kind === 'group' || chatSettings.showAliasIn1to1) && !grouped;
-    if (showAuthor && !mine) {
+    const showOwnName = mine && chatSettings.showOwnNameAboveMessage && !grouped;
+    if ((showAuthor && !mine) || showOwnName) {
       const profile = await resolveAuthor(message.author);
-      const label = formatActorLabel(message.author, profile);
+      // "You"/"Du" for your own messages - reads more naturally on your
+      // own client than your own alias would, same convention the reply
+      // banner/context menu already use (mine ? t('you') : ...).
+      const label = mine ? t('you') : formatActorLabel(message.author, profile);
       const authorEl = document.createElement('div');
       authorEl.className = 'qu-chat-bubble-author';
       // Same renderAvatarOrAsset() the room list/header already use for
