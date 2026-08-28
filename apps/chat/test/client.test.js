@@ -104,6 +104,12 @@ function makeContainer() {
   return el;
 }
 
+/** jsdom's own document.visibilityState is a getter, not directly settable - see mountRoomView()'s own onVisibilityChange() doc comment for what this drives. */
+function setDocumentVisibility(state) {
+  Object.defineProperty(document, 'visibilityState', { value: state, configurable: true });
+  document.dispatchEvent(new window.Event('visibilitychange'));
+}
+
 /**
  * A test-only stand-in for the platform-owned `ctx.chrome` handle (Chrome
  * Inversion, `apps/shell/src/chrome.js`) - reuses `@qu/ui`'s own
@@ -531,6 +537,82 @@ test('the "Reply" menu item (native, any message) opens the reply banner and tag
   }
 });
 
+test('SWIPE-TO-REPLY: a horizontal drag past the threshold opens the reply banner, same as the "Reply" menu item', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'swipe me' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-bubble-text')?.textContent.includes('swipe me'));
+    const row = container.querySelector('.qu-chat-bubble-row');
+
+    row.dispatchEvent(new window.TouchEvent('touchstart', { touches: [{ clientX: 20, clientY: 100 }] }));
+    row.dispatchEvent(new window.TouchEvent('touchmove', { touches: [{ clientX: 90, clientY: 102 }] })); // clearly horizontal, dx=70 past SWIPE_REPLY_THRESHOLD_PX (56)
+    assert.ok(row.classList.contains('qu-chat-bubble-row-swipe-armed'));
+    row.dispatchEvent(new window.TouchEvent('touchend', { touches: [] }));
+
+    await waitFor(() => container.querySelector('.qu-chat-reply-banner')?.hidden === false);
+    assert.match(container.querySelector('.qu-chat-reply-banner').textContent, /Replying to You/);
+    assert.equal(row.classList.contains('qu-chat-bubble-row-swipe-armed'), false); // reset() on touchend always clears the armed state too
+  } finally {
+    stop();
+  }
+});
+
+test('SWIPE-TO-REPLY: a mostly-vertical drag never arms or replies - the messages list\'s own vertical scroll stays untouched', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'do not swipe me' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-bubble-text')?.textContent.includes('do not swipe me'));
+    const row = container.querySelector('.qu-chat-bubble-row');
+
+    row.dispatchEvent(new window.TouchEvent('touchstart', { touches: [{ clientX: 20, clientY: 100 }] }));
+    row.dispatchEvent(new window.TouchEvent('touchmove', { touches: [{ clientX: 25, clientY: 160 }] })); // mostly vertical
+    row.dispatchEvent(new window.TouchEvent('touchend', { touches: [] }));
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(container.querySelector('.qu-chat-reply-banner').hidden, true);
+    assert.equal(row.classList.contains('qu-chat-bubble-row-swipe-armed'), false);
+  } finally {
+    stop();
+  }
+});
+
+test('SWIPE-TO-REPLY: a horizontal drag that never reaches the threshold snaps back without replying', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'just a little swipe' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-bubble-text')?.textContent.includes('just a little swipe'));
+    const row = container.querySelector('.qu-chat-bubble-row');
+
+    row.dispatchEvent(new window.TouchEvent('touchstart', { touches: [{ clientX: 20, clientY: 100 }] }));
+    row.dispatchEvent(new window.TouchEvent('touchmove', { touches: [{ clientX: 45, clientY: 101 }] })); // horizontal, dx=25, under the 56px threshold
+    assert.equal(row.classList.contains('qu-chat-bubble-row-swipe-armed'), false);
+    row.dispatchEvent(new window.TouchEvent('touchend', { touches: [] }));
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(container.querySelector('.qu-chat-reply-banner').hidden, true);
+  } finally {
+    stop();
+  }
+});
+
 // ===== content.chatRoomMenu - the room header's own "⋮" menu =====
 
 /** Opens the room header's own "⋮" menu (content.chatRoomMenu) - see openMessageMenu()'s own doc comment for why this needs its own scoped selector rather than a bare `.qu-thread-ui-context-menu-trigger` query. */
@@ -863,6 +945,136 @@ test('clicking the read (✓✓) tick reveals a popover with WHEN it was read, a
     assert.equal(container.querySelector('.qu-chat-bubble-tick-popover'), null);
   } finally {
     stop();
+  }
+});
+
+test('TYPING INDICATOR: a DM peer typing shows "typing…" instead of online/last-seen', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+
+  // Bob is typing, mirrored into Alice's store BEFORE her room view even
+  // mounts - same putSealed() technique the read-receipt tests above
+  // already use. See PresenceService.setPresence()'s own "typing" doc
+  // comment.
+  await bob.services.presence.setPresence(CHAT_SPACE_ID, roomId, 'online', { typing: true });
+  const presencePath = paths.threadPresencePath(CHAT_SPACE_ID, roomId, bob.myPub);
+  await alice.qu.putSealed(presencePath, await bob.qu.get(presencePath));
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-header-status')?.textContent === 'typing…');
+  } finally {
+    stop();
+  }
+});
+
+test('TYPING INDICATOR: a DM peer who is online but NOT typing still shows the plain "online" status (regression guard)', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+
+  await bob.services.presence.setPresence(CHAT_SPACE_ID, roomId, 'online');
+  const presencePath = paths.threadPresencePath(CHAT_SPACE_ID, roomId, bob.myPub);
+  await alice.qu.putSealed(presencePath, await bob.qu.get(presencePath));
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-header-status')?.textContent === 'online');
+  } finally {
+    stop();
+  }
+});
+
+test('TYPING INDICATOR: in a group, a typing member\'s name replaces the "N online" summary', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  await mirrorProfileInto(alice, bob.qu);
+  const { groupId } = await alice.services.chat.createGroup(CHAT_SPACE_ID, { name: 'Team Rocket', memberPubs: [bob.myPub] });
+
+  await bob.services.presence.setPresence(CHAT_SPACE_ID, groupId, 'online', { typing: true });
+  const presencePath = paths.threadPresencePath(CHAT_SPACE_ID, groupId, bob.myPub);
+  await alice.qu.putSealed(presencePath, await bob.qu.get(presencePath));
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', 'g', groupId] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-header-status')?.textContent === 'Bob typing…');
+  } finally {
+    stop();
+  }
+});
+
+test('TYPING INDICATOR: typing in the composer publishes it; clearing the draft (or sending) publishes "stopped" right away, not after the idle timer', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  const presencePath = paths.threadPresencePath(CHAT_SPACE_ID, roomId, alice.myPub);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('textarea') !== null);
+    const textarea = container.querySelector('textarea');
+
+    textarea.value = 'hi bob';
+    textarea.dispatchEvent(new window.Event('input', { bubbles: true }));
+    await waitFor(async () => (await alice.qu.get(presencePath))?.val?.typing === true);
+
+    textarea.value = '';
+    textarea.dispatchEvent(new window.Event('input', { bubbles: true }));
+    await waitFor(async () => (await alice.qu.get(presencePath))?.val?.typing === false);
+  } finally {
+    stop();
+  }
+});
+
+test('PUSH ONLY WHILE VISIBLE: backgrounding the tab immediately publishes "offline" (closes the gap PresenceTracker.isRecentlyOnline() otherwise leaves for a merely-backgrounded, not closed, chat - see mountRoomView()\'s own onVisibilityChange() doc comment); returning to the foreground resumes "online"', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
+    await waitFor(async () => (await alice.services.presence.getPresence(CHAT_SPACE_ID, roomId, [alice.myPub]))[alice.myPub]?.status === 'online');
+
+    setDocumentVisibility('hidden');
+    await waitFor(async () => (await alice.services.presence.getPresence(CHAT_SPACE_ID, roomId, [alice.myPub]))[alice.myPub]?.status === 'offline');
+
+    setDocumentVisibility('visible');
+    await waitFor(async () => (await alice.services.presence.getPresence(CHAT_SPACE_ID, roomId, [alice.myPub]))[alice.myPub]?.status === 'online');
+  } finally {
+    stop();
+    setDocumentVisibility('visible');
+  }
+});
+
+test('PUSH ONLY WHILE VISIBLE: mounting a room view while the tab is ALREADY hidden never starts the heartbeat at all - no "online" is ever published', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+
+  setDocumentVisibility('hidden');
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const presence = await alice.services.presence.getPresence(CHAT_SPACE_ID, roomId, [alice.myPub]);
+    assert.equal(presence[alice.myPub], undefined);
+  } finally {
+    stop();
+    setDocumentVisibility('visible');
   }
 });
 
@@ -1218,6 +1430,9 @@ test('MESSAGE GROUPING: consecutive messages from the same author collapse into 
 
     assert.equal(rows[0].classList.contains('qu-chat-bubble-row-grouped'), false);
     assert.ok(rows[0].querySelector('.qu-chat-bubble-author'), 'first message of a run shows the author label');
+    // A small avatar rides along with the name (renderAvatarOrAsset(),
+    // the SAME helper the room list/header already use) - not just plain text.
+    assert.ok(rows[0].querySelector('.qu-chat-bubble-author .qu-avatar'), 'the author label also shows a small avatar, not just text');
 
     assert.equal(rows[1].classList.contains('qu-chat-bubble-row-grouped'), true, 'same author, right after -> grouped');
     assert.equal(rows[1].querySelector('.qu-chat-bubble-author'), null, 'a grouped follow-up never repeats the author label');

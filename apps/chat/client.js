@@ -254,6 +254,8 @@ const DICT = {
     online: 'online',
     lastSeen: 'last seen {time}',
     membersOnline: '{count} members, {online} online',
+    isTyping: 'typing…',
+    typingNames: '{names} typing…',
     composerPlaceholder: 'Message',
     send: 'Send',
     edit: 'Edit', save: 'Save', cancel: 'Cancel',
@@ -306,6 +308,8 @@ const DICT = {
     online: 'online',
     lastSeen: 'zuletzt online {time}',
     membersOnline: '{count} Mitglieder, {online} online',
+    isTyping: 'tippt gerade …',
+    typingNames: '{names} tippt gerade …',
     composerPlaceholder: 'Nachricht',
     send: 'Senden',
     edit: 'Bearbeiten', save: 'Speichern', cancel: 'Abbrechen',
@@ -434,10 +438,21 @@ const STYLE = `
      grouped row can override it down to a tighter value below - "gap"
      applies uniformly to every row in a flex container, with no per-item
      override. */
-  .qu-chat-bubble-row { display: flex; margin-top: 0.5rem; }
+  .qu-chat-bubble-row { display: flex; margin-top: 0.5rem; position: relative; touch-action: pan-y; }
   .qu-chat-bubble-row:first-child { margin-top: 0; }
   .qu-chat-bubble-row-grouped { margin-top: 0.15rem; }
   .qu-chat-bubble-row-mine { justify-content: flex-end; }
+  /* SWIPE-TO-REPLY (mobile) - attachSwipeToReply()'s own doc comment.
+     touch-action: pan-y (above) tells the browser's own gesture recognizer
+     this row's DEFAULT touch behavior is vertical scrolling, so it doesn't
+     fight our own preventDefault() once a horizontal drag actually commits.
+     -swipe-reset only applies the snap-back transition on release, never
+     while actively dragging (would read as laggy, one frame behind the
+     finger) - touchmove sets "transform" directly with no transition. The
+     ↩️ hint is a ::before, not a real element - nothing else needs to
+     account for an extra child node inside every message row. */
+  .qu-chat-bubble-row-swipe-reset { transition: transform 0.2s ease; }
+  .qu-chat-bubble-row-swipe-armed::before { content: '↩️'; position: absolute; left: 0.25rem; top: 50%; transform: translateY(-50%); opacity: 0.8; font-size: 1.1em; }
   /* PERMALINKS - see this file's own top doc comment. Landing on
      #/chat/.../m/<id> scrollIntoView()s this row (block: 'center', so the
      target isn't glued to the very top edge, right under the fixed header)
@@ -464,7 +479,7 @@ const STYLE = `
   .qu-chat-compact .qu-chat-bubble-row { margin-top: 0.25rem; }
   .qu-chat-compact .qu-chat-bubble-row-grouped { margin-top: 0.05rem; }
   .qu-chat-compact .qu-chat-bubble { padding: 0.3rem 0.55rem; }
-  .qu-chat-bubble-author { font-size: 0.78em; font-weight: 600; opacity: 0.8; margin-bottom: 0.1rem; }
+  .qu-chat-bubble-author { display: flex; align-items: center; gap: 0.3rem; font-size: 0.78em; font-weight: 600; opacity: 0.8; margin-bottom: 0.1rem; }
   .qu-chat-bubble-reply { display: block; border-left: 2px solid var(--qu-color-accent, #5b5bd6); padding-left: 0.4rem; margin-bottom: 0.25rem; font-size: 0.82em; opacity: 0.75; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; text-decoration: none; cursor: pointer; }
   .qu-chat-bubble-reply:hover { opacity: 1; text-decoration: underline; }
   .qu-chat-bubble-text { overflow-wrap: anywhere; white-space: pre-wrap; }
@@ -1326,6 +1341,26 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   composerErrorEl.hidden = true;
   let composer = null;
 
+  // TYPING INDICATOR - PresenceService.setPresence()'s own `typing` option
+  // (see that method's doc comment); renderPresence() (below) reads it back
+  // via the same getPresence() the online/last-seen status already uses.
+  // `isTypingNow` guards against a redundant write on every keystroke (only
+  // the ACTUAL true<->false transition publishes); `typingStopTimer` is a
+  // plain client-side idle timeout, not the (much longer) presence
+  // staleness window - "stopped typing" must reach peers within a few
+  // seconds of a real pause, not only once the whole presence record ages
+  // out. Declared here (not inside the room-resolution IIFE below, where
+  // the composer itself is built) so the outer teardown function can clear
+  // the timer without it needing its own separate close-over-a-closure path.
+  let isTypingNow = false;
+  let typingStopTimer = null;
+  const TYPING_IDLE_MS = 3_000;
+  function publishTyping(typing) {
+    if (stopped || isTypingNow === typing) return;
+    isTypingNow = typing;
+    services.presence.setPresence(SPACE_ID, roomId, 'online', { typing }).catch(() => {});
+  }
+
   composerWrap.append(replyBanner, composerErrorEl, composerRoot);
 
   roomView.append(heading, toolbarRoot, messagesScroll, composerWrap);
@@ -1559,6 +1594,19 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     label.textContent = t('replyingTo', { name: authorLabel });
     const cancelBtn = createIconButton({ icon: '✕', label: t('cancel'), onClick: () => setReplyingTo(null) });
     replyBanner.append(label, cancelBtn);
+  }
+
+  /**
+   * Starts replying to `message` - the ONE place both the context menu's
+   * "Reply" item and the swipe-to-reply gesture (renderMessage()'s own
+   * `attachSwipeToReply()`, below) trigger this, so the two entry points
+   * can never drift into two different notions of what "reply" does.
+   * @param {object} message @param {boolean} mine
+   */
+  async function startReplyTo(message, mine) {
+    const authorLabel = mine ? t('you') : formatActorLabel(message.author, await resolveAuthor(message.author));
+    setReplyingTo(message, authorLabel);
+    composer?.editor.focus();
   }
 
   const profileCache = new Map();
@@ -1950,9 +1998,18 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     const showAuthor = (target.kind === 'group' || chatSettings.showAliasIn1to1) && !grouped;
     if (showAuthor && !mine) {
       const profile = await resolveAuthor(message.author);
+      const label = formatActorLabel(message.author, profile);
       const authorEl = document.createElement('div');
       authorEl.className = 'qu-chat-bubble-author';
-      authorEl.textContent = formatActorLabel(message.author, profile);
+      // Same renderAvatarOrAsset() the room list/header already use for
+      // this identity - a tiny avatar next to the name makes "who's
+      // talking" scannable at a glance in a group, the same first-message-
+      // of-a-run identity cue Telegram/WhatsApp/Signal all show, not just a
+      // plain text label.
+      authorEl.appendChild(renderAvatarOrAsset(message.author, label, profile?.avatar, { size: '1.1rem' }));
+      const nameEl = document.createElement('span');
+      nameEl.textContent = label;
+      authorEl.appendChild(nameEl);
       bubble.appendChild(authorEl);
     }
 
@@ -1984,7 +2041,84 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     bubble.appendChild(footer);
 
     row.appendChild(bubble);
+    attachSwipeToReply(row, message, mine);
     return row;
+  }
+
+  /**
+   * SWIPE-TO-REPLY (mobile) - a touch-drag of `row` to the right past
+   * `SWIPE_REPLY_THRESHOLD_PX` calls `startReplyTo()`, same as the context
+   * menu's own "Reply" item (see that helper's own doc comment) - a
+   * one-handed shortcut real chat apps (Telegram/WhatsApp/Signal) already
+   * offer, instead of "long-press -> find Reply in a menu" every time.
+   *
+   * Only commits to the gesture once a touch move is CLEARLY more
+   * horizontal than vertical (`isHorizontal` below) - anything else is left
+   * alone so the messages list's own vertical scroll keeps working exactly
+   * as before; `touchmove`'s listener is `{ passive: false }` ONLY so
+   * `preventDefault()` can suppress that scroll, but ONLY once already
+   * committed - never on the very first move, before direction is known.
+   * `row.style.transform` is reset (with a short transition for the
+   * snap-back) on `touchend`/`touchcancel` either way, whether or not the
+   * threshold was reached.
+   *
+   * TESTED VIA SYNTHETIC TouchEvents (this file's own test suite - jsdom
+   * happens to accept a plain `{clientX, clientY}` object as a Touch,
+   * unlike its lack of any real layout/rendering `<qu-asset>`'s own
+   * lightbox pan/zoom can't get around) - covers the horizontal-vs-
+   * vertical direction gate and the arm/reset threshold logic. What that
+   * CANNOT cover: how the drag actually FEELS on a real device (touch
+   * latency, the CSS transition timing, `touch-action: pan-y`'s real
+   * interaction with the browser's own native scroll gesture recognizer) -
+   * worth a real-device pass before calling this done.
+   * @param {HTMLElement} row @param {object} message @param {boolean} mine
+   */
+  function attachSwipeToReply(row, message, mine) {
+    const SWIPE_REPLY_THRESHOLD_PX = 56;
+    const SWIPE_MAX_PX = 72;
+    let startX = 0;
+    let startY = 0;
+    let dragging = false;
+    let resetTimer = null;
+
+    function reset() {
+      row.classList.add('qu-chat-bubble-row-swipe-reset');
+      row.style.transform = '';
+      row.classList.remove('qu-chat-bubble-row-swipe-armed');
+      clearTimeout(resetTimer);
+      resetTimer = setTimeout(() => row.classList.remove('qu-chat-bubble-row-swipe-reset'), 200);
+    }
+
+    row.addEventListener('touchstart', (e) => {
+      if (e.touches.length !== 1) return;
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+      dragging = false;
+      row.classList.remove('qu-chat-bubble-row-swipe-reset');
+    }, { passive: true });
+
+    row.addEventListener('touchmove', (e) => {
+      if (e.touches.length !== 1) return;
+      const dx = e.touches[0].clientX - startX;
+      const dy = e.touches[0].clientY - startY;
+      if (!dragging) {
+        const isHorizontal = Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy) * 1.5;
+        if (!isHorizontal) return; // could still be a vertical scroll - leave it alone
+        dragging = true;
+      }
+      e.preventDefault(); // committed to the swipe now, not a scroll
+      const clamped = Math.max(0, Math.min(SWIPE_MAX_PX, dx));
+      row.style.transform = `translateX(${clamped}px)`;
+      row.classList.toggle('qu-chat-bubble-row-swipe-armed', clamped >= SWIPE_REPLY_THRESHOLD_PX);
+    }, { passive: false });
+
+    row.addEventListener('touchend', () => {
+      const armed = row.classList.contains('qu-chat-bubble-row-swipe-armed');
+      reset();
+      if (dragging && armed) startReplyTo(message, mine);
+      dragging = false;
+    });
+    row.addEventListener('touchcancel', () => { reset(); dragging = false; });
   }
 
   /**
@@ -2014,14 +2148,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
             getItems: async () => {
               const nativeItems = [];
               if (mine) nativeItems.push({ id: 'edit', label: t('edit'), icon: '✏️', onClick: () => renderMessageEdit(textWrap, message) });
-              nativeItems.push({
-                id: 'reply', label: t('reply'), icon: '↩️',
-                onClick: async () => {
-                  const authorLabel = mine ? t('you') : formatActorLabel(message.author, await resolveAuthor(message.author));
-                  setReplyingTo(message, authorLabel);
-                  composer?.editor.focus();
-                },
-              });
+              nativeItems.push({ id: 'reply', label: t('reply'), icon: '↩️', onClick: () => startReplyTo(message, mine) });
               nativeItems.push({ id: 'copyText', label: t('copyText'), icon: '📋', onClick: () => copyToClipboard(message.body) });
               nativeItems.push({ id: 'copyLink', label: t('copyLink'), icon: '🔗', onClick: () => copyToClipboard(absoluteMessagePermalink(message)) });
               const pluginItems = extensionPoints ? await extensionPoints.collect('content.messageMenu', menuPayload) : [];
@@ -2195,6 +2322,11 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   }
 
   // ---- presence: polled, not pushed - see this file's own top doc comment ----
+  // TYPING INDICATOR: PresenceService.setPresence()'s own `typing` option
+  // (see its doc comment) - one write path, no separate service/thread.
+  // Below, the composer's own textarea 'input' listener drives
+  // `publishTyping()`; this render function only ever READS it back via
+  // the same getPresence() call the online/last-seen status already uses.
   let presenceTimer = null;
   async function renderPresence() {
     if (stopped || !roomReady) return;
@@ -2203,14 +2335,50 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     if (stopped) return;
     if (target.kind === 'dm') {
       const p = presence[target.peerPub];
-      headerStatusEl.textContent = p?.online ? t('online') : (p ? t('lastSeen', { time: formatTs(p.lastSeen) }) : '');
+      headerStatusEl.textContent = p?.typing ? t('isTyping')
+        : p?.online ? t('online')
+        : p ? t('lastSeen', { time: formatTs(p.lastSeen) }) : '';
     } else {
-      const online = Object.values(presence).filter((p) => p.online).length;
-      headerStatusEl.textContent = t('membersOnline', { count: memberPubs.length, online });
+      const typingPubs = otherMembers.filter((pub) => presence[pub]?.typing);
+      if (typingPubs.length > 0) {
+        const names = await Promise.all(typingPubs.map(async (pub) => formatActorLabel(pub, await resolveAuthor(pub))));
+        if (stopped) return;
+        headerStatusEl.textContent = t('typingNames', { names: names.join(', ') });
+      } else {
+        const online = Object.values(presence).filter((p) => p.online).length;
+        headerStatusEl.textContent = t('membersOnline', { count: memberPubs.length, online });
+      }
     }
   }
 
   let stopHeartbeat = null;
+
+  // PUSH ONLY WHILE ACTUALLY BACKGROUNDED/CLOSED - PushDeliveryService
+  // (packages/relay/src/push-delivery.js) already skips sending a Web Push
+  // whenever PresenceTracker.isRecentlyOnline() sees this identity's status
+  // as 'online' and fresh (see that file's own doc comment) - the ONLY gap
+  // was that the heartbeat above published 'online' unconditionally every
+  // 5s for as long as this room view stayed MOUNTED, backgrounded tab or
+  // not, so a merely-backgrounded (not closed) chat kept suppressing push
+  // indefinitely. Tying the heartbeat itself to document.visibilityState
+  // closes that gap with NO new signal/protocol/relay change at all -
+  // `stopHeartbeat()` already publishes 'offline' the instant it's called
+  // (startHeartbeat()'s own doc comment), which is now exactly what
+  // happens the moment the tab backgrounds, not just once this view
+  // unmounts entirely. Same mechanism `apps/shell/client.js`'s own
+  // visibilitychange listener already uses for its own, unrelated
+  // "refresh subscriptions on return" purpose - this one is scoped to
+  // just this room view (removed in the teardown below), not global.
+  function onVisibilityChange() {
+    if (stopped || !roomReady) return;
+    if (document.visibilityState === 'hidden') {
+      stopHeartbeat?.();
+      stopHeartbeat = null;
+    } else if (!stopHeartbeat) {
+      stopHeartbeat = services.presence.startHeartbeat(SPACE_ID, roomId);
+    }
+  }
+  document.addEventListener('visibilitychange', onVisibilityChange);
 
   (async () => {
     myPub = await services.actors.whoAmI();
@@ -2264,6 +2432,8 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
       ],
       onSubmit: async (content) => {
         composerErrorEl.hidden = true;
+        clearTimeout(typingStopTimer);
+        publishTyping(false); // sending IS "done typing" - no reason to wait out the idle timer
         const extra = {};
         if (content.attachments.length) extra.attachments = content.attachments;
         if (content.location) extra.location = content.location;
@@ -2282,6 +2452,20 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
         }
       },
     });
+    // See `publishTyping()`'s own doc comment - an empty box always means
+    // "not typing" immediately (clearing a draft is itself a real "stopped"
+    // signal, no reason to wait out the idle timer for it either), a
+    // non-empty one (re)starts/refreshes the idle timeout on every
+    // keystroke.
+    composer.editor.textarea.addEventListener('input', () => {
+      clearTimeout(typingStopTimer);
+      if (composer.editor.textarea.value.trim() === '') {
+        publishTyping(false);
+        return;
+      }
+      publishTyping(true);
+      typingStopTimer = setTimeout(() => publishTyping(false), TYPING_IDLE_MS);
+    });
     // `content.topicToolbar` (Pins' own "📌 Pinned" bar) - `roomId` only
     // resolves here, not at `toolbarRoot`'s own creation site above, so this
     // is the earliest point it can render. `messagePermalink` wraps this
@@ -2299,7 +2483,11 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     await refreshHeaderMuted();
     if (stopped) return;
 
-    stopHeartbeat = services.presence.startHeartbeat(SPACE_ID, roomId);
+    // Not an unconditional startHeartbeat() call - onVisibilityChange()
+    // (above) only actually starts it while the tab is genuinely visible
+    // right now, same as it does for every LATER visibility flip too - see
+    // that function's own doc comment.
+    onVisibilityChange();
     renderPresence();
     presenceTimer = setInterval(renderPresence, 5_000);
 
@@ -2353,10 +2541,12 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     offMessages();
     offReadReceipts();
     stopHeartbeat?.();
+    clearTimeout(typingStopTimer);
     if (presenceTimer) clearInterval(presenceTimer);
     composer?.stop(); // may never have been constructed - e.g. a group that turned out not to exist (roomReady never became true)
     resizeObserver?.disconnect();
     viewportResizeTarget.removeEventListener('resize', onViewportResize);
+    document.removeEventListener('visibilitychange', onVisibilityChange);
   };
 }
 
