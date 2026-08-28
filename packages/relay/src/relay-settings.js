@@ -39,7 +39,7 @@ export const DEFAULT_RELAY_SETTINGS = Object.freeze({
   //     links), `app-list` (itself - listing itself inside itself is
   //     circular), `search` (the header's always-visible search icon),
   //     `relay-admin` (the avatar menu's own Relay Admin link, admin-only).
-  hiddenFromAppList: Object.freeze(['pins', 'reactions', 'notifications', 'profile', 'app-list', 'search', 'relay-admin']),
+  hiddenFromAppList: Object.freeze(['pins', 'reactions', 'notifications', 'profile', 'app-list', 'search', 'relay-admin', 'relay-federation']),
   // Admin-editable Flag TYPE catalog - what a "flag" even IS is data, not
   // code, same reasoning as `disabledApps`. Shipped with a sane starter set
   // so liking/favoriting works out of the box with zero admin action; the
@@ -174,6 +174,18 @@ export const DEFAULT_RELAY_SETTINGS = Object.freeze({
     // `relay-hello` from, or auto-learn from a client suggestion, even if
     // `autoLearn` is on. Checked before `autoLearn` ever applies.
     blacklist: Object.freeze([]),
+    // CLIENT-FACING suggest UI gates (see `apps/relay-federation`) - OFF by
+    // default, and not merely a UI hint: `http-router.js`'s
+    // `#handleFederationSuggest()` rejects `POST /federation/suggest`
+    // outright with a 403 unless AT LEAST ONE of these is true, regardless
+    // of which UI (if any) actually triggered the request - the server has
+    // no way to tell "came from the Settings field" apart from "came from
+    // an invite link" apart from "someone called the API directly", so
+    // these two flags jointly gate the ENDPOINT, and separately/individually
+    // gate which client-side UI is even shown (see `apps/relay-federation/
+    // client.js`'s own doc comment).
+    allowClientSuggestViaSettings: false, // a text field in #/~<pub>/settings
+    allowClientSuggestViaShare: false, // generating + opening a #/relay-federation/invite/<url> link
   }),
 });
 

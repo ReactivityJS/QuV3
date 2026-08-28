@@ -47,6 +47,10 @@ test('the <qu-asset-upload> element is configured with the right space-id/assetS
   assert.equal(uploadEl.getAttribute('space-id'), 'gallery');
   assert.equal(uploadEl.assetService, service);
   assert.ok(uploadEl.hasAttribute('hide-picker'));
+  // A message's own attachments[] was already multi-value - this lets ONE
+  // native file-dialog trip pick several at once (see <qu-asset-upload>'s
+  // own "multiple" doc comment, @qu/ui's asset-components.js).
+  assert.ok(uploadEl.hasAttribute('multiple'));
 });
 
 test('a completed upload contributes the attachment and renders a removable chip', async () => {

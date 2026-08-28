@@ -191,6 +191,9 @@ const DICT = {
     federationHint: 'Connect this relay to other Qu relays: it dials out to each one, subscribes to whatever prefixes you configure (eager replication), and can forward a cache miss to them on demand (bounded by the hop limit below). See the README for how a client can also learn a foreign relay and suggest it here.',
     federationAutoLearn: 'Auto-learn client-suggested relays',
     federationAutoLearnHint: 'When off (recommended), a relay a client discovers and reports lands in "Pending suggestions" below for you to approve. When on, a validated Qu relay URL is added automatically as soon as it is not on the blacklist.',
+    federationAllowSuggestViaSettings: 'Allow suggesting a relay from user settings',
+    federationAllowSuggestViaShare: 'Allow suggesting a relay via a shared invite link',
+    federationAllowSuggestHint: 'Both off by default - the underlying suggestion endpoint itself refuses every request unless at least one of these is on, not just the corresponding UI being hidden. See apps/relay-federation.',
     federationHopLimit: 'Hop limit (on-demand forwarding)',
     federationHopLimitHint: 'How many further relays a single forwarded query may transit before giving up.',
     federationHopTimeoutMs: 'Per-hop timeout (ms)',
@@ -266,6 +269,9 @@ const DICT = {
     federationHint: 'Dieses Relay mit anderen Qu-Relays verbinden: Es verbindet sich zu jedem konfigurierten Relay, abonniert die eingestellten Prefixe (aktive Replikation) und kann bei Bedarf einen lokalen Cache-Miss dorthin weiterleiten (begrenzt durch das Hop-Limit unten). Ein Client kann außerdem ein fremdes Relay "lernen" und hier vorschlagen.',
     federationAutoLearn: 'Von Clients vorgeschlagene Relays automatisch übernehmen',
     federationAutoLearnHint: 'Standardmäßig aus (empfohlen): ein von einem Client gemeldetes Relay landet unten unter "Vorschläge" zur manuellen Bestätigung. Bei "an" wird eine validierte Qu-Relay-URL automatisch hinzugefügt, sofern sie nicht auf der Blacklist steht.',
+    federationAllowSuggestViaSettings: 'Relay-Vorschlag über Nutzer-Einstellungen erlauben',
+    federationAllowSuggestViaShare: 'Relay-Vorschlag über geteilten Einladungslink erlauben',
+    federationAllowSuggestHint: 'Beide standardmäßig aus - der zugrundeliegende Vorschlag-Endpunkt lehnt jede Anfrage ab, solange keine der beiden Optionen aktiv ist, nicht nur die jeweilige UI wird versteckt. Siehe apps/relay-federation.',
     federationHopLimit: 'Hop-Limit (bedarfsgesteuertes Routing)',
     federationHopLimitHint: 'Wie viele weitere Relays eine einzelne weitergeleitete Anfrage maximal durchlaufen darf.',
     federationHopTimeoutMs: 'Timeout pro Hop (ms)',
@@ -646,6 +652,21 @@ export async function mount(container, { identity, services, apps }) {
   autoLearnHint.className = 'qu-relay-admin-hint';
   autoLearnHint.textContent = t('federationAutoLearnHint');
 
+  const allowSuggestSettingsLabel = document.createElement('label');
+  const allowSuggestSettingsInput = document.createElement('input');
+  allowSuggestSettingsInput.type = 'checkbox';
+  allowSuggestSettingsInput.checked = settings.federation?.allowClientSuggestViaSettings ?? false;
+  allowSuggestSettingsLabel.append(allowSuggestSettingsInput, document.createTextNode(t('federationAllowSuggestViaSettings')));
+
+  const allowSuggestShareLabel = document.createElement('label');
+  const allowSuggestShareInput = document.createElement('input');
+  allowSuggestShareInput.type = 'checkbox';
+  allowSuggestShareInput.checked = settings.federation?.allowClientSuggestViaShare ?? false;
+  allowSuggestShareLabel.append(allowSuggestShareInput, document.createTextNode(t('federationAllowSuggestViaShare')));
+  const allowSuggestHint = document.createElement('p');
+  allowSuggestHint.className = 'qu-relay-admin-hint';
+  allowSuggestHint.textContent = t('federationAllowSuggestHint');
+
   const hopLimitLabel = document.createElement('label');
   const hopLimitInput = document.createElement('input');
   hopLimitInput.type = 'number';
@@ -834,6 +855,7 @@ export async function mount(container, { identity, services, apps }) {
   federationSection.append(
     federationTitle, federationHint,
     autoLearnLabel, autoLearnHint,
+    allowSuggestSettingsLabel, allowSuggestShareLabel, allowSuggestHint,
     hopLimitLabel, hopLimitHint, hopTimeoutLabel, tryLimitLabel, tryLimitHint,
     peersTitle, peersHint, peersList, addPeerRow,
     pendingTitle, pendingList,
@@ -888,6 +910,8 @@ export async function mount(container, { identity, services, apps }) {
         extensionOrder: Object.fromEntries(orderSections.map((o) => [o.point, o.getOrder()])),
         federation: {
           autoLearn: autoLearnInput.checked,
+          allowClientSuggestViaSettings: allowSuggestSettingsInput.checked,
+          allowClientSuggestViaShare: allowSuggestShareInput.checked,
           hopLimit: Math.max(0, Number(hopLimitInput.value) || 0),
           hopTimeoutMs: Math.max(100, Number(hopTimeoutInput.value) || 3000),
           tryLimit: Math.max(1, Number(tryLimitInput.value) || 10),

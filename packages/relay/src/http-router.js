@@ -235,6 +235,17 @@ export class HttpRouter {
       res.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'federation not enabled on this relay' }));
       return;
     }
+    // Gated by EITHER client-suggest flag (see relay-settings.js's own doc
+    // comment on both) - the server can't tell which UI (if any) actually
+    // triggered this POST, so it enforces "at least one client-facing path
+    // is enabled at all", never a per-path distinction. Checked before
+    // touching the request body at all - the cheapest possible rejection
+    // when an admin hasn't opted into either.
+    const settings = await getSettings(this.qu);
+    if (!settings.federation.allowClientSuggestViaSettings && !settings.federation.allowClientSuggestViaShare) {
+      res.writeHead(403, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'client relay suggestions are disabled on this relay' }));
+      return;
+    }
     let body;
     try {
       body = await readJsonBody(req);

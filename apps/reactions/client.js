@@ -20,12 +20,30 @@
  * V3's own first-round forum implementation (a fixed 5-emoji row, always
  * visible, whether used or not): only emoji that actually have >=1 reactor
  * render, as small pills with a count, the current identity's own reaction
- * (if any) highlighted - plus a single, always-present "+" trigger
+ * (if any) highlighted - plus a single, always-present trigger
  * (`@qu/thread-ui`'s `renderEmojiPicker()`, unmodified - the same shared
- * primitive the forum composer's own emoji-insert button already uses) that
+ * primitive the forum composer's own emoji-insert button already uses,
+ * including its own `'😀'` default glyph - see TRIGGER GLYPH below) that
  * reveals the full curated emoji grid to add a new reaction. A message with
- * zero reactions so far shows just the "+" - never an empty row of unused
- * quick-picks.
+ * zero reactions so far shows just the trigger - never an empty row of
+ * unused quick-picks.
+ *
+ * TRIGGER GLYPH: `renderEmojiPicker()`'s `trigger` is set to `'😀'` here,
+ * overriding its own bare-"+" default - matching `emojiExtension()`'s
+ * composer insert-button (`packages/content-ui/src/extensions.js`, its own
+ * `trigger = '😀'` default), the SAME "click here to pick an emoji" visual
+ * language already established there, rather than a bare "+" that doesn't
+ * read as emoji-related at a glance, or one of the ACTUAL curated reaction
+ * choices (EMOJI_QUICK/EMOJI_EXTENDED, `@qu/thread-ui`'s emoji.js) which
+ * would misleadingly read as an already-picked reaction rather than an
+ * open invitation to pick one.
+ *
+ * A quick-pick row (renderEmojiPicker()'s own `quick` option, hover/long-
+ * press to reveal) was tried here and reverted - it fought with the
+ * trigger's own click-to-open-grid interaction (long-press didn't
+ * reliably arm on touch, and it could swallow a plain "+" tap so the full
+ * grid stopped opening) for little real benefit once actually used - see
+ * this file's own git history if revisiting.
  *
  * LIVENESS: `ExtensionPointHost.renderSlot()` is fire-and-forget - a
  * contributor's rendered DOM gets no teardown callback threaded back to the
@@ -151,11 +169,15 @@ class QuReactionsRowElement extends HTMLElement {
       row.appendChild(btn);
     }
 
-    row.appendChild(renderEmojiPicker({
+    // '😀', not renderEmojiPicker()'s own bare-"+" default - same glyph
+    // emojiExtension() already uses for the composer's insert button, see
+    // this file's own top doc comment's "TRIGGER GLYPH" section.
+    const picker = renderEmojiPicker({
       onPick: (emoji) => this.#setReaction(emoji === myReaction ? null : emoji),
-      trigger: '+',
+      trigger: '😀',
       triggerTitle: t('react'),
-    }));
+    });
+    row.appendChild(picker);
     this.appendChild(row);
   }
 }

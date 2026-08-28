@@ -30,7 +30,7 @@ function basePayload({ qu, services, myPub }) {
   return { services, qu, spaceId: 'forum-space', threadId: 'topic1', messageId: 'msg1', myPub };
 }
 
-test('a message with no reactions yet shows only the "+" trigger, no pills', async () => {
+test('a message with no reactions yet shows only the trigger, no pills', async () => {
   const env = await freshEnv();
   const container = makeContainer();
   await renderReactionWidget(container, basePayload(env));
@@ -39,7 +39,7 @@ test('a message with no reactions yet shows only the "+" trigger, no pills', asy
   assert.ok(container.querySelector('.qu-thread-ui-emoji-trigger'));
 });
 
-test('reacting via the "+" picker renders a pill with a count of 1, highlighted as mine', async () => {
+test('reacting via the picker renders a pill with a count of 1, highlighted as mine', async () => {
   const env = await freshEnv();
   const container = makeContainer();
   await renderReactionWidget(container, basePayload(env));
@@ -82,6 +82,14 @@ test('a reaction set elsewhere in the SAME store appears live in an already-moun
   assert.equal(container.querySelector('.qu-reactions-pill').textContent, '👍 1');
 });
 
+test('the trigger uses the "😀" glyph, not a bare "+" or an actual reaction choice - see this app\'s own "TRIGGER GLYPH" doc comment', async () => {
+  const env = await freshEnv();
+  const container = makeContainer();
+  await renderReactionWidget(container, basePayload(env));
+  await waitFor(() => container.querySelector('.qu-thread-ui-emoji-trigger') !== null);
+  assert.equal(container.querySelector('.qu-thread-ui-emoji-trigger').textContent, '😀');
+});
+
 test('disconnecting the widget from the DOM tears down its live subscription (no error, no further updates)', async () => {
   const env = await freshEnv();
   const container = makeContainer();
@@ -98,7 +106,7 @@ function entityPayload({ qu, services, myPub }) {
   return { services, qu, spaceId: 'forum-space', entityId: 'topic1', myPub };
 }
 
-test('renderEntityReactionWidget(): reacting via the "+" picker renders a pill, using the entity-scoped service methods', async () => {
+test('renderEntityReactionWidget(): reacting via the picker renders a pill, using the entity-scoped service methods', async () => {
   const env = await freshEnv();
   const container = makeContainer();
   await renderEntityReactionWidget(container, entityPayload(env));
