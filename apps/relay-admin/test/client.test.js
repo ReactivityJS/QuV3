@@ -32,6 +32,7 @@ const DEFAULT_SETTINGS = {
   flagTypes: [{ id: 'favorite', label: 'Favorite', icon: '⭐', mode: 'private', entityKinds: ['app', 'user'] }],
   channels: { allowMemberCreate: true, allowMemberRestricted: false },
   chat: { allowMemberCreateGroup: true },
+  cms: { allowedEditors: ['markdown', 'richtext'], defaultEditor: 'markdown' },
   linkPreviews: { enabled: true },
 };
 
@@ -41,9 +42,9 @@ const APPS = [
   { name: 'pins', label: 'pins', icon: '📌', contributes: [{ point: 'content.messageMenu', export: 'pinMenuItem' }] },
 ];
 
-/** section:nth-of-type - order-section index depends on how many sections come before it (see mount()'s own form.append() order: general, apps, channels, chat, linkPreviews, then the order sections). */
-const FOOTER_ORDER_SECTION = 'form > section:nth-of-type(6)';
-const MENU_ORDER_SECTION = 'form > section:nth-of-type(7)';
+/** section:nth-of-type - order-section index depends on how many sections come before it (see mount()'s own form.append() order: general, apps, channels, chat, cms, linkPreviews, then the order sections). */
+const FOOTER_ORDER_SECTION = 'form > section:nth-of-type(7)';
+const MENU_ORDER_SECTION = 'form > section:nth-of-type(8)';
 
 function orderRowLabels(section) {
   return [...section.querySelectorAll('.qu-relay-admin-order-row')].map((row) => row.querySelector('span').textContent);
@@ -90,7 +91,12 @@ test('an admin identity sees the settings form, pre-populated from /config.json'
     const chatCheckboxes = [...container.querySelectorAll('form > section:nth-of-type(4) input[type="checkbox"]')];
     assert.equal(chatCheckboxes[0].checked, false); // allowMemberCreateGroup
 
-    const linkPreviewsCheckboxes = [...container.querySelectorAll('form > section:nth-of-type(5) input[type="checkbox"]')];
+    const cmsCheckboxes = [...container.querySelectorAll('form > section:nth-of-type(5) input[type="checkbox"]')];
+    assert.equal(cmsCheckboxes[0].checked, true); // markdown, from DEFAULT_SETTINGS.cms.allowedEditors
+    assert.equal(cmsCheckboxes[1].checked, true); // richtext, from DEFAULT_SETTINGS.cms.allowedEditors
+    assert.equal(container.querySelector('form > section:nth-of-type(5) select').value, 'markdown');
+
+    const linkPreviewsCheckboxes = [...container.querySelectorAll('form > section:nth-of-type(6) input[type="checkbox"]')];
     assert.equal(linkPreviewsCheckboxes[0].checked, false); // linkPreviews.enabled
 
     assert.match(container.querySelector('.qu-relay-admin-flagtypes').textContent, /Favorite/);
@@ -194,12 +200,38 @@ test('toggling link previews off includes { enabled: false } in the saved settin
   try {
     await waitFor(() => container.querySelector('form') !== null);
     assert.match(container.textContent, /internal network/); // the SSRF-safety hint text renders
-    const linkPreviewsCheckbox = container.querySelector('form > section:nth-of-type(5) input[type="checkbox"]');
+    const linkPreviewsCheckbox = container.querySelector('form > section:nth-of-type(6) input[type="checkbox"]');
     linkPreviewsCheckbox.checked = false;
     container.querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
 
     await waitFor(() => capturedBody !== null);
     assert.deepEqual(capturedBody.settings.linkPreviews, { enabled: false });
+  } finally {
+    stop?.();
+  }
+});
+
+test('unchecking an allowed editor and changing the default editor saves both in the cms patch', async (t) => {
+  const env = await freshEnv();
+  let capturedBody = null;
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    if (url === '/config.json') return new Response(JSON.stringify({ adminPubs: [env.myPub], settings: DEFAULT_SETTINGS }), { status: 200 });
+    capturedBody = JSON.parse(init.body);
+    return new Response(JSON.stringify({ ...capturedBody.settings }), { status: 200 });
+  });
+
+  const container = makeContainer();
+  const stop = await mount(container, { identity: env.identity, services: env.services, apps: APPS });
+  try {
+    await waitFor(() => container.querySelector('form') !== null);
+    const cmsSection = container.querySelector('form > section:nth-of-type(5)');
+    const cmsCheckboxes = [...cmsSection.querySelectorAll('input[type="checkbox"]')];
+    cmsCheckboxes[1].checked = false; // uncheck richtext
+    cmsSection.querySelector('select').value = 'markdown';
+    container.querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+
+    await waitFor(() => capturedBody !== null);
+    assert.deepEqual(capturedBody.settings.cms, { allowedEditors: ['markdown'], defaultEditor: 'markdown' });
   } finally {
     stop?.();
   }

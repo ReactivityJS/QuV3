@@ -1,0 +1,12 @@
+{
+  "name": "cms",
+  "version": "1.0.0",
+  "kind": "app",
+  "main": "./index.js",
+  "clientMain": "./dist/client.js",
+  "label": "CMS",
+  "icon": "📄",
+  "navOrder": 16,
+  "spaceId": "c9e6b279-2835-4388-aa0e-4805339e3495",
+  "requires": []
+}

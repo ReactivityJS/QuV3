@@ -110,10 +110,33 @@ defaultEntityTypes.register('article', {
 });
 
 defaultEntityTypes.register('page', {
-  fields: { title: 'text', route: 'text' },
+  // `route` is a full, slash-separated path within the page's own space
+  // (`''` = that space's own root/home page, `'about-me'` a top-level page,
+  // `'blog/2026-08-28/my-post'` a nested one) - `apps/cms` derives its whole
+  // navigation tree from this one field, no separate `parentId`. `order`
+  // (sibling sort within the tree), `templateId` (`apps/cms`'s
+  // `STANDARD_TEMPLATES` catalog, or a `'cms-template'` Entity in the same
+  // space), `editor` ('markdown'|'richtext', constrained at write time to
+  // the relay's `settings.cms.allowedEditors`) and `style` (a small validated
+  // CSS-custom-property override, see `apps/cms/client.js`'s own
+  // `applyPageStyle()`) are `apps/cms`-specific, still just descriptive here
+  // (see this file's own class doc comment - fields are never enforced).
+  fields: { title: 'text', route: 'text', order: 'number', templateId: 'text', editor: 'text', style: 'object' },
   content: true,
   capabilities: ['attachable'],
   contentFormat: 'markdown',
+});
+
+// `apps/cms`'s user-defined templates (a named, reusable `{layout, style}`
+// preset - see that app's own doc comment) - no `content` field, deliberately
+// distinct from a 'page' so listing "every page in a space" (filtering
+// `entitiesParentPath()`'s results by `_type`) never has to also filter out
+// template entities by some other heuristic.
+defaultEntityTypes.register('cms-template', {
+  fields: { label: 'text', layout: 'text' },
+  content: false,
+  capabilities: [],
+  contentFormat: 'plain',
 });
 
 defaultEntityTypes.register('notification', {

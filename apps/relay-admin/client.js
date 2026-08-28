@@ -41,6 +41,16 @@
  * that field for why chat needs no `allowMemberRestricted` counterpart (a
  * chat room/group is ALWAYS reader-restricted, never a public option).
  *
+ * CMS SECTION (added alongside `apps/cms`): edits `settings.cms.allowedEditors`/
+ * `.defaultEditor` - the admin-configured framework `apps/cms` operates
+ * within (which Content Editors a page owner may pick between, and which one
+ * a new page starts with). Activating/deactivating the module itself is
+ * already covered by the generic Apps section above - no separate
+ * `cms.enabled` toggle here, same reasoning `chat`/`channels` already have no
+ * one either. `KNOWN_EDITORS` is the fixed catalog this UI knows how to
+ * offer - same "fixed native catalog" shape `KNOWN_ORDER_POINTS`' own
+ * `nativeItems` already uses.
+ *
  * MESSAGE ROW / MENU ORDER SECTIONS (added alongside the same round's
  * message-chrome redesign - see `apps/forum/client.js`'s own top doc
  * comment on `content.messageFooter`/`content.messageMenu`): edits
@@ -101,6 +111,17 @@ import { injectStyle, ensureTheme } from '@qu/ui';
  * `titleKey`/`nativeLabelKey`s are `DICT` keys, resolved at render time
  * (after `t` exists) rather than stored as already-resolved strings here.
  */
+/**
+ * The fixed catalog of Content Editors `apps/cms` knows how to mount -
+ * `settings.cms.allowedEditors` is an admin allow-list drawn from this same
+ * set (`id`s), same "fixed native catalog, admin picks a subset" shape
+ * `KNOWN_ORDER_POINTS`' own `nativeItems` already uses.
+ */
+const KNOWN_EDITORS = [
+  { id: 'markdown', labelKey: 'cmsEditorMarkdown' },
+  { id: 'richtext', labelKey: 'cmsEditorRichtext' },
+];
+
 const KNOWN_ORDER_POINTS = [
   {
     point: 'content.messageFooter',
@@ -143,6 +164,13 @@ const DICT = {
     chat: 'Chat',
     allowMemberCreateGroup: 'Members may create chat groups',
     chatHint: 'This relay\'s own admins can always create a chat group, regardless of this setting. 1:1 chats between contacts are never gated.',
+    cms: 'CMS',
+    cmsHint: 'Configures the framework apps/cms operates within - the module itself is activated/deactivated via the Apps section above, like any other app.',
+    cmsAllowedEditors: 'Allowed content editors',
+    cmsAllowedEditorsHint: 'Which editors a page owner may choose between. This relay\'s users can only pick among the ones checked here.',
+    cmsEditorMarkdown: 'Markdown',
+    cmsEditorRichtext: 'WYSIWYG (rich text)',
+    cmsDefaultEditor: 'Default editor for new pages',
     linkPreviews: 'Link previews',
     linkPreviewsEnabled: 'Fetch link preview cards (title/description/image) for URLs in messages',
     linkPreviewsHint: 'This relay fetches each URL server-side (never the viewer\'s own browser) to build the preview, with built-in protection against being used to probe this relay\'s own internal network - that protection is not configurable here, only whether the feature runs at all.',
@@ -214,6 +242,13 @@ const DICT = {
     chat: 'Chat',
     allowMemberCreateGroup: 'Mitglieder dürfen Chat-Gruppen anlegen',
     chatHint: 'Admins dieses Relays dürfen unabhängig von dieser Einstellung immer eine Chat-Gruppe anlegen. 1:1-Chats zwischen Kontakten sind nie eingeschränkt.',
+    cms: 'CMS',
+    cmsHint: 'Legt die Rahmenbedingungen für apps/cms fest - das Modul selbst wird wie jede andere App oben unter "Apps" aktiviert/deaktiviert.',
+    cmsAllowedEditors: 'Erlaubte Content-Editoren',
+    cmsAllowedEditorsHint: 'Zwischen welchen Editoren ein Seiten-Besitzer wählen darf. Nutzer dieses Relays können nur aus den hier angehakten Editoren wählen.',
+    cmsEditorMarkdown: 'Markdown',
+    cmsEditorRichtext: 'WYSIWYG (Rich-Text)',
+    cmsDefaultEditor: 'Standard-Editor für neue Seiten',
     linkPreviews: 'Link-Vorschauen',
     linkPreviewsEnabled: 'Vorschaukarten (Titel/Beschreibung/Bild) für Links in Nachrichten abrufen',
     linkPreviewsHint: 'Dieses Relay ruft jede URL serverseitig ab (nie der Browser des Betrachters), mit eingebautem Schutz davor, damit das interne Netzwerk dieses Relays ausgekundschaftet zu werden - dieser Schutz ist hier nicht konfigurierbar, nur ob das Feature überhaupt aktiv ist.',
@@ -526,6 +561,42 @@ export async function mount(container, { identity, services, apps }) {
   chatHint.textContent = t('chatHint');
   chatSection.append(chatTitle, allowCreateGroupLabel, chatHint);
 
+  // ---- CMS ----
+  const cmsSection = document.createElement('section');
+  const cmsTitle = document.createElement('h2');
+  cmsTitle.textContent = t('cms');
+  const cmsHint = document.createElement('p');
+  cmsHint.className = 'qu-relay-admin-hint';
+  cmsHint.textContent = t('cmsHint');
+  const cmsEditorsLabel = document.createElement('p');
+  cmsEditorsLabel.textContent = t('cmsAllowedEditors');
+  const cmsEditorsList = document.createElement('div');
+  cmsEditorsList.className = 'qu-relay-admin-apps-list';
+  const allowedEditors = new Set(settings.cms?.allowedEditors ?? []);
+  const editorCheckboxes = KNOWN_EDITORS.map(({ id, labelKey }) => {
+    const label = document.createElement('label');
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = allowedEditors.has(id);
+    label.append(checkbox, document.createTextNode(t(labelKey)));
+    cmsEditorsList.appendChild(label);
+    return { id, checkbox };
+  });
+  const cmsEditorsHint = document.createElement('p');
+  cmsEditorsHint.className = 'qu-relay-admin-hint';
+  cmsEditorsHint.textContent = t('cmsAllowedEditorsHint');
+  const cmsDefaultLabel = document.createElement('label');
+  const cmsDefaultSelect = document.createElement('select');
+  for (const { id, labelKey } of KNOWN_EDITORS) {
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = t(labelKey);
+    if (id === (settings.cms?.defaultEditor ?? 'markdown')) opt.selected = true;
+    cmsDefaultSelect.appendChild(opt);
+  }
+  cmsDefaultLabel.append(document.createTextNode(t('cmsDefaultEditor')), cmsDefaultSelect);
+  cmsSection.append(cmsTitle, cmsHint, cmsEditorsLabel, cmsEditorsList, cmsEditorsHint, cmsDefaultLabel);
+
   // ---- Link previews ----
   const linkPreviewsSection = document.createElement('section');
   const linkPreviewsTitle = document.createElement('h2');
@@ -799,7 +870,7 @@ export async function mount(container, { identity, services, apps }) {
   status.className = 'qu-relay-admin-status';
   status.hidden = true;
 
-  form.append(generalSection, appsSection, channelsSection, chatSection, linkPreviewsSection, ...orderSections.map((o) => o.section), flagTypesSection, federationSection, saveBtn, status);
+  form.append(generalSection, appsSection, channelsSection, chatSection, cmsSection, linkPreviewsSection, ...orderSections.map((o) => o.section), flagTypesSection, federationSection, saveBtn, status);
 
   // Chrome Inversion (`apps/shell/src/chrome.js`) - none of
   // `navigation`/`views`/`primaryAction`/`settings` fit a single settings
@@ -826,6 +897,10 @@ export async function mount(container, { identity, services, apps }) {
         hiddenFromAppList: newHiddenFromAppList,
         channels: { allowMemberCreate: allowCreateInput.checked, allowMemberRestricted: allowRestrictedInput.checked },
         chat: { allowMemberCreateGroup: allowCreateGroupInput.checked },
+        cms: {
+          allowedEditors: editorCheckboxes.filter(({ checkbox }) => checkbox.checked).map(({ id }) => id),
+          defaultEditor: cmsDefaultSelect.value,
+        },
         linkPreviews: { enabled: linkPreviewsEnabledInput.checked },
         // extensionOrder replaces the WHOLE map on save (see relay-settings.js's
         // own doc comment on that field) - every known point from
