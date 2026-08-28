@@ -289,6 +289,7 @@ const DICT = {
     read: 'Read', sent: 'Sent',
     showAliasIn1to1: 'Show sender name in 1:1 chats',
     ownColor: 'Your message color',
+    compactMode: 'Compact view (tighter message list)',
     saved: 'Saved.',
     searchResultIn: 'in "{room}"',
     permalink: 'Link to this message',
@@ -340,6 +341,7 @@ const DICT = {
     read: 'Gelesen', sent: 'Gesendet',
     showAliasIn1to1: 'Absendername in 1:1-Chats anzeigen',
     ownColor: 'Deine Nachrichtenfarbe',
+    compactMode: 'Kompakte Ansicht (dichtere Nachrichtenliste)',
     saved: 'Gespeichert.',
     searchResultIn: 'in „{room}“',
     permalink: 'Link zu dieser Nachricht',
@@ -426,8 +428,15 @@ const STYLE = `
   .qu-chat-scroll-bottom-btn:hover { filter: brightness(1.08); }
   .qu-chat-scroll-bottom-btn[hidden] { display: none; }
   .qu-chat-scroll-bottom-btn-unseen { background: var(--qu-color-danger, #d64545); }
-  .qu-chat-messages { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; max-width: 40rem; }
-  .qu-chat-bubble-row { display: flex; }
+  .qu-chat-messages { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; max-width: 40rem; }
+  /* MESSAGE GROUPING (renderMessage()'s own "grouped" param/doc comment) -
+     margin-top on every row but the first, not "gap" on the list, so a
+     grouped row can override it down to a tighter value below - "gap"
+     applies uniformly to every row in a flex container, with no per-item
+     override. */
+  .qu-chat-bubble-row { display: flex; margin-top: 0.5rem; }
+  .qu-chat-bubble-row:first-child { margin-top: 0; }
+  .qu-chat-bubble-row-grouped { margin-top: 0.15rem; }
   .qu-chat-bubble-row-mine { justify-content: flex-end; }
   /* PERMALINKS - see this file's own top doc comment. Landing on
      #/chat/.../m/<id> scrollIntoView()s this row (block: 'center', so the
@@ -445,6 +454,16 @@ const STYLE = `
      flat-colored text blocks. */
   .qu-chat-bubble { max-width: 75%; padding: 0.45rem 0.7rem; border-radius: var(--qu-radius-lg, 0.9rem) var(--qu-radius-lg, 0.9rem) var(--qu-radius-lg, 0.9rem) var(--qu-radius-sm, 0.25rem); background: var(--qu-color-surface, #8882); box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
   .qu-chat-bubble-mine { background: color-mix(in srgb, var(--qu-color-accent, #5b5bd6) 25%, transparent); border-radius: var(--qu-radius-lg, 0.9rem) var(--qu-radius-lg, 0.9rem) var(--qu-radius-sm, 0.25rem) var(--qu-radius-lg, 0.9rem); }
+  /* COMPACT MODE - renderChatSettings()'s own "compactMode" checkbox
+     (per-identity, applied via renderMessages()'s own ".qu-chat-compact"
+     toggle on "roomView"). Tightens exactly the vertical rhythm a
+     high-volume chatter feels most - scroll padding, row spacing, bubble
+     padding - never touching layout structure/max-width, so it's a pure
+     density knob, not a different visual design. */
+  .qu-chat-compact .qu-chat-messages-scroll { padding: 0.5rem; }
+  .qu-chat-compact .qu-chat-bubble-row { margin-top: 0.25rem; }
+  .qu-chat-compact .qu-chat-bubble-row-grouped { margin-top: 0.05rem; }
+  .qu-chat-compact .qu-chat-bubble { padding: 0.3rem 0.55rem; }
   .qu-chat-bubble-author { font-size: 0.78em; font-weight: 600; opacity: 0.8; margin-bottom: 0.1rem; }
   .qu-chat-bubble-reply { display: block; border-left: 2px solid var(--qu-color-accent, #5b5bd6); padding-left: 0.4rem; margin-bottom: 0.25rem; font-size: 0.82em; opacity: 0.75; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; text-decoration: none; cursor: pointer; }
   .qu-chat-bubble-reply:hover { opacity: 1; text-decoration: underline; }
@@ -480,6 +499,16 @@ const STYLE = `
   .qu-chat-bubble-tick-popover { position: absolute; z-index: 20; bottom: 100%; right: 0; margin-bottom: 0.3rem; padding: 0.3rem 0.6rem; border-radius: var(--qu-radius-sm, 0.3rem); background: var(--qu-color-surface, #ffffff); border: 1px solid var(--qu-color-border, #8884); box-shadow: 0 0.3rem 0.8rem rgba(0,0,0,0.2); font-size: 0.85em; white-space: nowrap; }
   .qu-chat-bubble-tick-popover-flip-up { bottom: 100%; }
   .qu-chat-bubble-attachment { margin-top: 0.4rem; max-width: 16rem; }
+  /* ALBUM GRID - renderMessageText()'s own "several images in one message"
+     doc comment. Fixed 2 columns/square tiles (object-fit: cover, via a
+     more-specific selector than <qu-asset>'s own STYLE in
+     asset-components.js - same override technique .qu-chat-room-thumb
+     already uses) - a 3rd/5th odd tile just leaves the last grid cell
+     half-empty rather than needing a special-cased layout, an acceptable
+     trade for how rarely message photo counts land on an even number. */
+  .qu-chat-bubble-attachment-grid { margin-top: 0.4rem; max-width: 16rem; display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.15rem; border-radius: var(--qu-radius-md, 0.4rem); overflow: hidden; }
+  .qu-chat-bubble-attachment-grid .qu-asset-image-wrap { display: block; width: 100%; height: 100%; }
+  .qu-chat-bubble-attachment-grid .qu-asset img { width: 100%; height: 100%; max-width: none; max-height: none; aspect-ratio: 1; object-fit: cover; border-radius: 0; }
   .qu-chat-edit-row { display: flex; flex-direction: column; gap: 0.3rem; position: relative; }
   .qu-chat-edit-row textarea { font: inherit; padding: 0.35rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); resize: vertical; }
   .qu-chat-edit-row-buttons { display: flex; gap: 0.4rem; }
@@ -543,7 +572,7 @@ function chatSettingsPath(myPub) {
   return `/store/actors/~${myPub}/private/chat-settings`;
 }
 
-const DEFAULT_CHAT_SETTINGS = { showAliasIn1to1: false, ownColor: '' };
+const DEFAULT_CHAT_SETTINGS = { showAliasIn1to1: false, ownColor: '', compactMode: false };
 
 async function getChatSettings(qu, identity, myPub) {
   const stored = await getPrivate(qu, identity, chatSettingsPath(myPub));
@@ -587,19 +616,28 @@ export async function renderChatSettings(container, { myPub, services }) {
   colorInput.value = current.ownColor || '#5b5bd6';
   colorLabel.append(document.createTextNode(t('ownColor')), colorInput);
 
+  const compactLabel = document.createElement('label');
+  const compactInput = document.createElement('input');
+  compactInput.type = 'checkbox';
+  compactInput.checked = current.compactMode;
+  compactLabel.append(compactInput, document.createTextNode(t('compactMode')));
+
   const status = document.createElement('div');
   status.className = 'qu-chat-settings-status';
   status.hidden = true;
 
-  form.append(aliasLabel, colorLabel, status);
+  form.append(aliasLabel, colorLabel, compactLabel, status);
 
   async function save() {
-    await setChatSettings(qu, identity, myPub, { showAliasIn1to1: aliasInput.checked, ownColor: colorInput.value });
+    await setChatSettings(qu, identity, myPub, {
+      showAliasIn1to1: aliasInput.checked, ownColor: colorInput.value, compactMode: compactInput.checked,
+    });
     status.textContent = t('saved');
     status.hidden = false;
   }
   aliasInput.addEventListener('change', save);
   colorInput.addEventListener('change', save);
+  compactInput.addEventListener('change', save);
 
   container.append(heading, form);
 }
@@ -1576,6 +1614,22 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     return true;
   }
 
+  // MESSAGE GROUPING - Telegram/WhatsApp-style "consecutive messages from
+  // the same person collapse into one visual burst" (renderMessage()'s own
+  // `grouped` param): the SAME author, within this window of their own
+  // previous message, only gets the author-name label on the FIRST message
+  // of the run, and a tighter row-to-row margin (see STYLE's own
+  // `.qu-chat-bubble-row-grouped`) - a long back-and-forth doesn't repeat a
+  // name/avatar-height gap on every single line the way an ungrouped list
+  // would. 5 minutes, same "still one burst" cutoff Telegram/WhatsApp both
+  // use - long enough to cover a quick multi-message thought, short enough
+  // that a message sent minutes later reads as a new turn, not a
+  // continuation.
+  const GROUPED_WITHIN_MS = 5 * 60 * 1000;
+  function isGroupedWithPrevious(message, previous) {
+    return !!previous && previous.author === message.author && message.ts - previous.ts < GROUPED_WITHIN_MS;
+  }
+
   /**
    * NO SPURIOUS JUMPS: `messagesRoot.textContent = ''` (the full-rebuild
    * path below) collapses `messagesScroll`'s own `scrollHeight` to ~0 for
@@ -1614,6 +1668,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     myPub = await services.actors.whoAmI();
     chatSettings = await getChatSettings(qu, services.messages.identity, myPub);
     if (stopped || token !== renderToken) return;
+    roomView.classList.toggle('qu-chat-compact', chatSettings.compactMode); // see STYLE's own ".qu-chat-compact" rules - a per-identity setting (renderChatSettings()), re-applied on every render since chatSettings itself is re-fetched here every time (nothing pushes a change into an already-open room otherwise)
     // No pagination/windowing here - every message in the room renders into
     // the DOM, each with its own content.messageFooter/messageMenu slot
     // instances (same "fine at community scale, not designed to scale past
@@ -1656,11 +1711,13 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     if (!pendingScrollTarget && isSimpleAppend(lastRenderedSnapshot, currentSnapshot)) {
       const appended = messages.slice(lastRenderedSnapshot.length);
       const ul = messagesRoot.querySelector('.qu-chat-messages');
+      let previous = messages[lastRenderedSnapshot.length - 1] ?? null; // see isGroupedWithPrevious()'s own doc comment - the tail of what's ALREADY rendered, not just this batch
       for (const message of appended) {
         renderedMessagesById.set(message.id, message);
-        const li = await renderMessage(message, renderedMessagesById, readReceipts);
+        const li = await renderMessage(message, renderedMessagesById, readReceipts, isGroupedWithPrevious(message, previous));
         if (stopped || token !== renderToken) return;
         ul.appendChild(li);
+        previous = message;
       }
       lastRenderedSnapshot = currentSnapshot;
       hasRenderedOnce = true;
@@ -1685,10 +1742,12 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     if (messages.length > 0) {
       const ul = document.createElement('ul');
       ul.className = 'qu-chat-messages';
+      let previous = null;
       for (const message of messages) {
-        const li = await renderMessage(message, renderedMessagesById, readReceipts);
+        const li = await renderMessage(message, renderedMessagesById, readReceipts, isGroupedWithPrevious(message, previous));
         if (stopped || token !== renderToken) return;
         ul.appendChild(li);
+        previous = message;
       }
       messagesRoot.appendChild(ul);
     }
@@ -1867,10 +1926,17 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     }, 0);
   }
 
-  async function renderMessage(message, byId, readReceipts) {
+  /**
+   * @param {object} message @param {Map<string, object>} byId @param {Record<string, object>} readReceipts
+   * @param {boolean} [grouped] - See isGroupedWithPrevious()'s own doc
+   *   comment: true when this message directly continues the same author's
+   *   previous one - suppresses the repeated author-name label and tightens
+   *   the row's own top margin (STYLE's `.qu-chat-bubble-row-grouped`).
+   */
+  async function renderMessage(message, byId, readReceipts, grouped = false) {
     const mine = message.author === myPub;
     const row = document.createElement('li');
-    row.className = 'qu-chat-bubble-row' + (mine ? ' qu-chat-bubble-row-mine' : '');
+    row.className = 'qu-chat-bubble-row' + (mine ? ' qu-chat-bubble-row-mine' : '') + (grouped ? ' qu-chat-bubble-row-grouped' : '');
     // The permalink scroll target (see mountRoomView()'s own doc comment on
     // "PERMALINKS + scroll-follow") - `id` for a real, shareable DOM anchor,
     // `dataset` so renderMessages() can find this row by message id without
@@ -1881,7 +1947,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     bubble.className = 'qu-chat-bubble' + (mine ? ' qu-chat-bubble-mine' : '');
     if (mine && chatSettings.ownColor) bubble.style.background = chatSettings.ownColor;
 
-    const showAuthor = target.kind === 'group' || chatSettings.showAliasIn1to1;
+    const showAuthor = (target.kind === 'group' || chatSettings.showAliasIn1to1) && !grouped;
     if (showAuthor && !mine) {
       const profile = await resolveAuthor(message.author);
       const authorEl = document.createElement('div');
@@ -2050,12 +2116,33 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
       preview.setAttribute('url', firstLink.value);
       root.appendChild(preview);
     }
-    for (const attachment of attachments) {
-      const assetEl = document.createElement('qu-asset');
-      assetEl.className = 'qu-chat-bubble-attachment';
-      assetEl.setAttribute('space-id', SPACE_ID);
-      assetEl.setAttribute('asset-id', attachment.assetId);
-      root.appendChild(assetEl);
+    // ALBUM GRID - two or more attachments, all images (mixed with a
+    // video/audio/file stays the plain vertical stack below - a square
+    // video tile or a file-link squeezed into a grid cell reads wrong).
+    // Same "several photos posted together" case WhatsApp/Telegram both
+    // show as a grid rather than one full-width image after another -
+    // confirmed here as the more compact, scannable layout once there's
+    // more than one.
+    const isPhotoAlbum = attachments.length > 1 && attachments.every((a) => a.mime?.startsWith('image/'));
+    if (isPhotoAlbum) {
+      const grid = document.createElement('div');
+      grid.className = 'qu-chat-bubble-attachment-grid';
+      for (const attachment of attachments) {
+        const assetEl = document.createElement('qu-asset');
+        assetEl.setAttribute('space-id', SPACE_ID);
+        assetEl.setAttribute('asset-id', attachment.assetId);
+        assetEl.setAttribute('kind', 'image');
+        grid.appendChild(assetEl);
+      }
+      root.appendChild(grid);
+    } else {
+      for (const attachment of attachments) {
+        const assetEl = document.createElement('qu-asset');
+        assetEl.className = 'qu-chat-bubble-attachment';
+        assetEl.setAttribute('space-id', SPACE_ID);
+        assetEl.setAttribute('asset-id', attachment.assetId);
+        root.appendChild(assetEl);
+      }
     }
     if (message.location) {
       const { lat, lng } = message.location;
