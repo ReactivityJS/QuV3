@@ -49,12 +49,28 @@ export class PresenceService {
    * ungraceful disconnect (closing a tab) never gets a chance to publish
    * 'offline'.
    * @param {string|number} spaceId @param {string} threadId @param {'online'|'offline'} status
-   * @param {{asSpaceId?: string|number}} [options]
+   * @param {{asSpaceId?: string|number, typing?: boolean}} [options] -
+   *   `typing` (the chat composer's own "is currently typing" tracker,
+   *   apps/chat/client.js) rides along on this SAME QuBit rather than a
+   *   second write path - one presence record per member per thread,
+   *   same as before this existed. OMITTED (not `false`) preserves
+   *   whatever the last EXPLICIT typing write already set, via a
+   *   read-modify-write below - critical for `startHeartbeat()`'s own
+   *   periodic 'online' calls below, which know nothing about typing
+   *   state and must never silently flip an active "is typing" signal
+   *   back off just because a routine heartbeat tick happened to land
+   *   mid-typing-burst. Only an EXPLICIT `true`/`false` (the composer's
+   *   own real "started/stopped typing" transition) ever changes it.
    */
-  async setPresence(spaceId, threadId, status, { asSpaceId = null } = {}) {
+  async setPresence(spaceId, threadId, status, { asSpaceId = null, typing } = {}) {
     const signKey = await this.#signingKey(asSpaceId);
     const path = threadPresencePath(spaceId, threadId, QuCrypto.toBase64Url(signKey.publicKey));
-    await this.qu.put(path, { status, lastSeen: Date.now() }, { signWith: signKey.privateKeyPkcs8, writerPub: signKey.publicKey });
+    let nextTyping = typing;
+    if (nextTyping === undefined) {
+      const existing = await this.qu.get(path);
+      nextTyping = existing?.val?.typing ?? false;
+    }
+    await this.qu.put(path, { status, lastSeen: Date.now(), typing: nextTyping }, { signWith: signKey.privateKeyPkcs8, writerPub: signKey.publicKey });
   }
 
   /**
@@ -64,7 +80,7 @@ export class PresenceService {
    *   default heartbeat (5s, see `startHeartbeat()`) - tight enough that
    *   "online" flips to "offline" within a few seconds of really going
    *   away, loose enough not to falsely flash offline on one missed beat.
-   * @returns {Promise<Record<string, {status: string, lastSeen: number, online: boolean}>>}
+   * @returns {Promise<Record<string, {status: string, lastSeen: number, online: boolean, typing: boolean}>>}
    */
   async getPresence(spaceId, threadId, memberPubs, { staleAfterMs = 15_000 } = {}) {
     const now = Date.now();
@@ -72,8 +88,14 @@ export class PresenceService {
     await Promise.all(memberPubs.map(async (pub) => {
       const quBit = await this.qu.get(threadPresencePath(spaceId, threadId, pub));
       if (!quBit?.val) return;
-      const { status, lastSeen } = quBit.val;
-      result[pub] = { status, lastSeen, online: status === 'online' && now - lastSeen < staleAfterMs };
+      const { status, lastSeen, typing } = quBit.val;
+      const online = status === 'online' && now - lastSeen < staleAfterMs;
+      // Gated by `online` too, not just the raw stored flag - a stale
+      // record (the composer's own idle-timeout write went missing, or the
+      // tab just vanished mid-burst) must never show "typing" forever;
+      // `online` flipping to false already covers that same staleness
+      // window.
+      result[pub] = { status, lastSeen, online, typing: online && !!typing };
     }));
     return result;
   }

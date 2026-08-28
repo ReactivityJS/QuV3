@@ -866,6 +866,93 @@ test('clicking the read (✓✓) tick reveals a popover with WHEN it was read, a
   }
 });
 
+test('TYPING INDICATOR: a DM peer typing shows "typing…" instead of online/last-seen', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+
+  // Bob is typing, mirrored into Alice's store BEFORE her room view even
+  // mounts - same putSealed() technique the read-receipt tests above
+  // already use. See PresenceService.setPresence()'s own "typing" doc
+  // comment.
+  await bob.services.presence.setPresence(CHAT_SPACE_ID, roomId, 'online', { typing: true });
+  const presencePath = paths.threadPresencePath(CHAT_SPACE_ID, roomId, bob.myPub);
+  await alice.qu.putSealed(presencePath, await bob.qu.get(presencePath));
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-header-status')?.textContent === 'typing…');
+  } finally {
+    stop();
+  }
+});
+
+test('TYPING INDICATOR: a DM peer who is online but NOT typing still shows the plain "online" status (regression guard)', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+
+  await bob.services.presence.setPresence(CHAT_SPACE_ID, roomId, 'online');
+  const presencePath = paths.threadPresencePath(CHAT_SPACE_ID, roomId, bob.myPub);
+  await alice.qu.putSealed(presencePath, await bob.qu.get(presencePath));
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-header-status')?.textContent === 'online');
+  } finally {
+    stop();
+  }
+});
+
+test('TYPING INDICATOR: in a group, a typing member\'s name replaces the "N online" summary', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  await mirrorProfileInto(alice, bob.qu);
+  const { groupId } = await alice.services.chat.createGroup(CHAT_SPACE_ID, { name: 'Team Rocket', memberPubs: [bob.myPub] });
+
+  await bob.services.presence.setPresence(CHAT_SPACE_ID, groupId, 'online', { typing: true });
+  const presencePath = paths.threadPresencePath(CHAT_SPACE_ID, groupId, bob.myPub);
+  await alice.qu.putSealed(presencePath, await bob.qu.get(presencePath));
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', 'g', groupId] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-header-status')?.textContent === 'Bob typing…');
+  } finally {
+    stop();
+  }
+});
+
+test('TYPING INDICATOR: typing in the composer publishes it; clearing the draft (or sending) publishes "stopped" right away, not after the idle timer', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  const presencePath = paths.threadPresencePath(CHAT_SPACE_ID, roomId, alice.myPub);
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('textarea') !== null);
+    const textarea = container.querySelector('textarea');
+
+    textarea.value = 'hi bob';
+    textarea.dispatchEvent(new window.Event('input', { bubbles: true }));
+    await waitFor(async () => (await alice.qu.get(presencePath))?.val?.typing === true);
+
+    textarea.value = '';
+    textarea.dispatchEvent(new window.Event('input', { bubbles: true }));
+    await waitFor(async () => (await alice.qu.get(presencePath))?.val?.typing === false);
+  } finally {
+    stop();
+  }
+});
+
 test('clicking the sent-only (✓) tick does nothing - no read time to reveal yet', async () => {
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');
@@ -1218,6 +1305,9 @@ test('MESSAGE GROUPING: consecutive messages from the same author collapse into 
 
     assert.equal(rows[0].classList.contains('qu-chat-bubble-row-grouped'), false);
     assert.ok(rows[0].querySelector('.qu-chat-bubble-author'), 'first message of a run shows the author label');
+    // A small avatar rides along with the name (renderAvatarOrAsset(),
+    // the SAME helper the room list/header already use) - not just plain text.
+    assert.ok(rows[0].querySelector('.qu-chat-bubble-author .qu-avatar'), 'the author label also shows a small avatar, not just text');
 
     assert.equal(rows[1].classList.contains('qu-chat-bubble-row-grouped'), true, 'same author, right after -> grouped');
     assert.equal(rows[1].querySelector('.qu-chat-bubble-author'), null, 'a grouped follow-up never repeats the author label');

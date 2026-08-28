@@ -150,6 +150,86 @@ test('backlog notifications from BEFORE this session started do not pop a toast 
   }
 });
 
+/** Restores document.visibilityState to jsdom's own default after a test overrides it. */
+function setVisibility(state) {
+  Object.defineProperty(document, 'visibilityState', { value: state, configurable: true });
+}
+
+test('FOREGROUND SUPPRESSION: no toast when the tab is visible AND the current hash is already the notification\'s own room', async () => {
+  const { qu, services, myPub } = await freshEnv();
+  setVisibility('visible');
+  window.location.hash = '#/chat/peer-a';
+  const container = makeContainer();
+  const stop = mountNotificationPopups(container, { qu, services, subscribe: noopSubscribe });
+  try {
+    const spaceId = paths.notificationsSpaceId(myPub);
+    await services.messages.createThread(spaceId, paths.NOTIFICATIONS_THREAD_ID, THREAD_PRESETS.notifications(myPub));
+    await services.messages.postMessage(spaceId, paths.NOTIFICATIONS_THREAD_ID, {
+      body: 'hi', extra: { title: 'New message', url: '#/chat/peer-a/m/msg1' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(container.querySelector('.qu-toast'), null);
+  } finally {
+    stop();
+    setVisibility('visible');
+  }
+});
+
+test('FOREGROUND SUPPRESSION: still pops a toast when the tab is HIDDEN, even for the currently-open room', async () => {
+  const { qu, services, myPub } = await freshEnv();
+  setVisibility('hidden');
+  window.location.hash = '#/chat/peer-a';
+  const container = makeContainer();
+  const stop = mountNotificationPopups(container, { qu, services, subscribe: noopSubscribe });
+  try {
+    const spaceId = paths.notificationsSpaceId(myPub);
+    await services.messages.createThread(spaceId, paths.NOTIFICATIONS_THREAD_ID, THREAD_PRESETS.notifications(myPub));
+    await services.messages.postMessage(spaceId, paths.NOTIFICATIONS_THREAD_ID, {
+      body: 'hi', extra: { title: 'New message', url: '#/chat/peer-a/m/msg1' },
+    });
+    await waitFor(() => container.querySelector('.qu-toast') !== null);
+  } finally {
+    stop();
+    setVisibility('visible');
+  }
+});
+
+test('FOREGROUND SUPPRESSION: still pops a toast when visible but a DIFFERENT room is open', async () => {
+  const { qu, services, myPub } = await freshEnv();
+  setVisibility('visible');
+  window.location.hash = '#/chat/peer-b'; // a different conversation than the notification below
+  const container = makeContainer();
+  const stop = mountNotificationPopups(container, { qu, services, subscribe: noopSubscribe });
+  try {
+    const spaceId = paths.notificationsSpaceId(myPub);
+    await services.messages.createThread(spaceId, paths.NOTIFICATIONS_THREAD_ID, THREAD_PRESETS.notifications(myPub));
+    await services.messages.postMessage(spaceId, paths.NOTIFICATIONS_THREAD_ID, {
+      body: 'hi', extra: { title: 'New message', url: '#/chat/peer-a/m/msg1' },
+    });
+    await waitFor(() => container.querySelector('.qu-toast') !== null);
+  } finally {
+    stop();
+    setVisibility('visible');
+  }
+});
+
+test('FOREGROUND SUPPRESSION: a notification with no "url" at all can never be matched against the current room - always pops', async () => {
+  const { qu, services, myPub } = await freshEnv();
+  setVisibility('visible');
+  window.location.hash = '#/chat/peer-a';
+  const container = makeContainer();
+  const stop = mountNotificationPopups(container, { qu, services, subscribe: noopSubscribe });
+  try {
+    const spaceId = paths.notificationsSpaceId(myPub);
+    await services.messages.createThread(spaceId, paths.NOTIFICATIONS_THREAD_ID, THREAD_PRESETS.notifications(myPub));
+    await services.messages.postMessage(spaceId, paths.NOTIFICATIONS_THREAD_ID, { body: 'hi', extra: { title: 'No url' } });
+    await waitFor(() => container.querySelector('.qu-toast') !== null);
+  } finally {
+    stop();
+    setVisibility('visible');
+  }
+});
+
 test('stop() removes the toast host - no further toasts, even if more notifications land', async () => {
   const { qu, services, myPub } = await freshEnv();
   const container = makeContainer();

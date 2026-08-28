@@ -254,6 +254,8 @@ const DICT = {
     online: 'online',
     lastSeen: 'last seen {time}',
     membersOnline: '{count} members, {online} online',
+    isTyping: 'typing…',
+    typingNames: '{names} typing…',
     composerPlaceholder: 'Message',
     send: 'Send',
     edit: 'Edit', save: 'Save', cancel: 'Cancel',
@@ -306,6 +308,8 @@ const DICT = {
     online: 'online',
     lastSeen: 'zuletzt online {time}',
     membersOnline: '{count} Mitglieder, {online} online',
+    isTyping: 'tippt gerade …',
+    typingNames: '{names} tippt gerade …',
     composerPlaceholder: 'Nachricht',
     send: 'Senden',
     edit: 'Bearbeiten', save: 'Speichern', cancel: 'Abbrechen',
@@ -464,7 +468,7 @@ const STYLE = `
   .qu-chat-compact .qu-chat-bubble-row { margin-top: 0.25rem; }
   .qu-chat-compact .qu-chat-bubble-row-grouped { margin-top: 0.05rem; }
   .qu-chat-compact .qu-chat-bubble { padding: 0.3rem 0.55rem; }
-  .qu-chat-bubble-author { font-size: 0.78em; font-weight: 600; opacity: 0.8; margin-bottom: 0.1rem; }
+  .qu-chat-bubble-author { display: flex; align-items: center; gap: 0.3rem; font-size: 0.78em; font-weight: 600; opacity: 0.8; margin-bottom: 0.1rem; }
   .qu-chat-bubble-reply { display: block; border-left: 2px solid var(--qu-color-accent, #5b5bd6); padding-left: 0.4rem; margin-bottom: 0.25rem; font-size: 0.82em; opacity: 0.75; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; text-decoration: none; cursor: pointer; }
   .qu-chat-bubble-reply:hover { opacity: 1; text-decoration: underline; }
   .qu-chat-bubble-text { overflow-wrap: anywhere; white-space: pre-wrap; }
@@ -1326,6 +1330,26 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   composerErrorEl.hidden = true;
   let composer = null;
 
+  // TYPING INDICATOR - PresenceService.setPresence()'s own `typing` option
+  // (see that method's doc comment); renderPresence() (below) reads it back
+  // via the same getPresence() the online/last-seen status already uses.
+  // `isTypingNow` guards against a redundant write on every keystroke (only
+  // the ACTUAL true<->false transition publishes); `typingStopTimer` is a
+  // plain client-side idle timeout, not the (much longer) presence
+  // staleness window - "stopped typing" must reach peers within a few
+  // seconds of a real pause, not only once the whole presence record ages
+  // out. Declared here (not inside the room-resolution IIFE below, where
+  // the composer itself is built) so the outer teardown function can clear
+  // the timer without it needing its own separate close-over-a-closure path.
+  let isTypingNow = false;
+  let typingStopTimer = null;
+  const TYPING_IDLE_MS = 3_000;
+  function publishTyping(typing) {
+    if (stopped || isTypingNow === typing) return;
+    isTypingNow = typing;
+    services.presence.setPresence(SPACE_ID, roomId, 'online', { typing }).catch(() => {});
+  }
+
   composerWrap.append(replyBanner, composerErrorEl, composerRoot);
 
   roomView.append(heading, toolbarRoot, messagesScroll, composerWrap);
@@ -1950,9 +1974,18 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     const showAuthor = (target.kind === 'group' || chatSettings.showAliasIn1to1) && !grouped;
     if (showAuthor && !mine) {
       const profile = await resolveAuthor(message.author);
+      const label = formatActorLabel(message.author, profile);
       const authorEl = document.createElement('div');
       authorEl.className = 'qu-chat-bubble-author';
-      authorEl.textContent = formatActorLabel(message.author, profile);
+      // Same renderAvatarOrAsset() the room list/header already use for
+      // this identity - a tiny avatar next to the name makes "who's
+      // talking" scannable at a glance in a group, the same first-message-
+      // of-a-run identity cue Telegram/WhatsApp/Signal all show, not just a
+      // plain text label.
+      authorEl.appendChild(renderAvatarOrAsset(message.author, label, profile?.avatar, { size: '1.1rem' }));
+      const nameEl = document.createElement('span');
+      nameEl.textContent = label;
+      authorEl.appendChild(nameEl);
       bubble.appendChild(authorEl);
     }
 
@@ -2195,6 +2228,11 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   }
 
   // ---- presence: polled, not pushed - see this file's own top doc comment ----
+  // TYPING INDICATOR: PresenceService.setPresence()'s own `typing` option
+  // (see its doc comment) - one write path, no separate service/thread.
+  // Below, the composer's own textarea 'input' listener drives
+  // `publishTyping()`; this render function only ever READS it back via
+  // the same getPresence() call the online/last-seen status already uses.
   let presenceTimer = null;
   async function renderPresence() {
     if (stopped || !roomReady) return;
@@ -2203,10 +2241,19 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     if (stopped) return;
     if (target.kind === 'dm') {
       const p = presence[target.peerPub];
-      headerStatusEl.textContent = p?.online ? t('online') : (p ? t('lastSeen', { time: formatTs(p.lastSeen) }) : '');
+      headerStatusEl.textContent = p?.typing ? t('isTyping')
+        : p?.online ? t('online')
+        : p ? t('lastSeen', { time: formatTs(p.lastSeen) }) : '';
     } else {
-      const online = Object.values(presence).filter((p) => p.online).length;
-      headerStatusEl.textContent = t('membersOnline', { count: memberPubs.length, online });
+      const typingPubs = otherMembers.filter((pub) => presence[pub]?.typing);
+      if (typingPubs.length > 0) {
+        const names = await Promise.all(typingPubs.map(async (pub) => formatActorLabel(pub, await resolveAuthor(pub))));
+        if (stopped) return;
+        headerStatusEl.textContent = t('typingNames', { names: names.join(', ') });
+      } else {
+        const online = Object.values(presence).filter((p) => p.online).length;
+        headerStatusEl.textContent = t('membersOnline', { count: memberPubs.length, online });
+      }
     }
   }
 
@@ -2264,6 +2311,8 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
       ],
       onSubmit: async (content) => {
         composerErrorEl.hidden = true;
+        clearTimeout(typingStopTimer);
+        publishTyping(false); // sending IS "done typing" - no reason to wait out the idle timer
         const extra = {};
         if (content.attachments.length) extra.attachments = content.attachments;
         if (content.location) extra.location = content.location;
@@ -2281,6 +2330,20 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
           composerErrorEl.hidden = false;
         }
       },
+    });
+    // See `publishTyping()`'s own doc comment - an empty box always means
+    // "not typing" immediately (clearing a draft is itself a real "stopped"
+    // signal, no reason to wait out the idle timer for it either), a
+    // non-empty one (re)starts/refreshes the idle timeout on every
+    // keystroke.
+    composer.editor.textarea.addEventListener('input', () => {
+      clearTimeout(typingStopTimer);
+      if (composer.editor.textarea.value.trim() === '') {
+        publishTyping(false);
+        return;
+      }
+      publishTyping(true);
+      typingStopTimer = setTimeout(() => publishTyping(false), TYPING_IDLE_MS);
     });
     // `content.topicToolbar` (Pins' own "📌 Pinned" bar) - `roomId` only
     // resolves here, not at `toolbarRoot`'s own creation site above, so this
@@ -2353,6 +2416,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     offMessages();
     offReadReceipts();
     stopHeartbeat?.();
+    clearTimeout(typingStopTimer);
     if (presenceTimer) clearInterval(presenceTimer);
     composer?.stop(); // may never have been constructed - e.g. a group that turned out not to exist (roomReady never became true)
     resizeObserver?.disconnect();

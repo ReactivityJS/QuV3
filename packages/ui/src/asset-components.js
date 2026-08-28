@@ -156,6 +156,15 @@ export class QuAssetUploadElement extends HTMLElement {
     const fileInput = document.createElement('input');
     fileInput.type = 'file';
     fileInput.hidden = true;
+    // Opt-in, not the default - a caller with a genuinely single-file
+    // meaning (e.g. apps/profile's own avatar picker) must keep getting
+    // exactly one file back; `attachmentExtension()` (@qu/content-ui,
+    // chat's/forum's own composer "attach" trigger) is the one caller that
+    // sets this, since a message's own `attachments[]` was already
+    // multi-value (multiple SEQUENTIAL picks already worked - see
+    // `_upload()`'s own doc comment on the change handler below) and just
+    // couldn't be selected in one native file-dialog trip before.
+    if (this.hasAttribute('multiple')) fileInput.multiple = true;
     const pickBtn = document.createElement('button');
     pickBtn.type = 'button';
     pickBtn.textContent = this.getAttribute('label') ?? '📎';
@@ -169,10 +178,19 @@ export class QuAssetUploadElement extends HTMLElement {
     this.append(picker, status);
     this._fileInput = fileInput;
 
-    fileInput.addEventListener('change', () => {
-      const file = fileInput.files[0];
+    // One or several files (fileInput.multiple, above) - uploaded ONE AT A
+    // TIME (awaited in order), never concurrently: `status` is a single
+    // shared progress element, and `_upload()` writes phase/percentage
+    // into it as it goes - two in-flight uploads would race and garble it.
+    // Each still fires its own `qu-asset-uploaded` event as it finishes, so
+    // a host that already handles repeated sequential picks (e.g.
+    // `attachmentExtension()`'s own `pending` array) needs no change at all
+    // to also handle "picked several at once" - same events, just fired
+    // faster.
+    fileInput.addEventListener('change', async () => {
+      const files = [...fileInput.files];
       fileInput.value = '';
-      if (file) this._upload(file, status);
+      for (const file of files) await this._upload(file, status);
     });
   }
 
