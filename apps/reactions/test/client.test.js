@@ -82,6 +82,44 @@ test('a reaction set elsewhere in the SAME store appears live in an already-moun
   assert.equal(container.querySelector('.qu-reactions-pill').textContent, '👍 1');
 });
 
+test('quick-react: the 8 EMOJI_QUICK buttons are always in the DOM (hidden at rest via CSS - see STYLE\'s own doc comment) - clicking one directly reacts, no need to open the full grid', async () => {
+  const env = await freshEnv();
+  const container = makeContainer();
+  await renderReactionWidget(container, basePayload(env));
+  await waitFor(() => container.querySelector('.qu-thread-ui-emoji-trigger') !== null);
+
+  const picker = container.querySelector('.qu-reactions-quick-picker');
+  assert.ok(picker, 'the picker root gets the quick-picker class addQuickReveal() adds');
+  const quickButtons = [...container.querySelectorAll('.qu-thread-ui-emoji-quick')];
+  assert.equal(quickButtons.length, 8); // EMOJI_QUICK's own length
+  assert.equal(picker.classList.contains('qu-reactions-quick-revealed'), false);
+
+  quickButtons[0].click();
+  await waitFor(() => container.querySelector('.qu-reactions-pill') !== null);
+  assert.equal(container.querySelector('.qu-reactions-pill').textContent, `${quickButtons[0].textContent} 1`);
+  assert.equal(picker.classList.contains('qu-reactions-quick-revealed'), false); // picking one also collapses any reveal state
+});
+
+test('quick-react: a real long-press (past the threshold) reveals the quick row; a quick tap or a released touch before the threshold never does', async () => {
+  const env = await freshEnv();
+  const container = makeContainer();
+  await renderReactionWidget(container, basePayload(env));
+  await waitFor(() => container.querySelector('.qu-reactions-quick-picker') !== null);
+  const picker = container.querySelector('.qu-reactions-quick-picker');
+
+  // A quick tap - touchstart immediately followed by touchend - never reveals, even after the long-press window would have elapsed.
+  picker.dispatchEvent(new window.TouchEvent('touchstart', { touches: [{}] }));
+  picker.dispatchEvent(new window.TouchEvent('touchend', { touches: [] }));
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.equal(picker.classList.contains('qu-reactions-quick-revealed'), false);
+
+  // A real hold past the threshold reveals it; touchcancel then hides it again.
+  picker.dispatchEvent(new window.TouchEvent('touchstart', { touches: [{}] }));
+  await waitFor(() => picker.classList.contains('qu-reactions-quick-revealed'), { timeout: 1000 });
+  picker.dispatchEvent(new window.TouchEvent('touchcancel', { touches: [] }));
+  assert.equal(picker.classList.contains('qu-reactions-quick-revealed'), false);
+});
+
 test('disconnecting the widget from the DOM tears down its live subscription (no error, no further updates)', async () => {
   const env = await freshEnv();
   const container = makeContainer();

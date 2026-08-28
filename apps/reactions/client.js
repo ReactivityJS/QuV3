@@ -27,6 +27,14 @@
  * zero reactions so far shows just the "+" - never an empty row of unused
  * quick-picks.
  *
+ * QUICK-REACT: `renderEmojiPicker()` is passed `EMOJI_QUICK` (its own
+ * `quick` option - already existed there, simply never wired up by any
+ * caller before this) so the 8 most common reactions never need the full
+ * grid at all - one click/tap once revealed. Kept OFF the resting view by
+ * default (see STYLE's own doc comment) and revealed by hovering (desktop)
+ * or long-pressing (`addQuickReveal()`, below - touch has no :hover
+ * equivalent) the "+" trigger - a plain tap still opens the full grid.
+ *
  * LIVENESS: `ExtensionPointHost.renderSlot()` is fire-and-forget - a
  * contributor's rendered DOM gets no teardown callback threaded back to the
  * host app (see that class's own doc comment: contributors are expected to
@@ -66,7 +74,7 @@ import { watchChildren } from '@qu/reactive';
 import { paths } from '@qu/services';
 import { createI18n } from '@qu/i18n';
 import { injectStyle, ensureTheme } from '@qu/ui';
-import { renderEmojiPicker } from '@qu/thread-ui';
+import { renderEmojiPicker, EMOJI_QUICK } from '@qu/thread-ui';
 
 const DICT = {
   en: { react: 'React' },
@@ -79,7 +87,47 @@ const STYLE = `
   .qu-reactions-row { display: flex; gap: 0.3rem; margin-top: 0.4rem; flex-wrap: wrap; align-items: center; }
   .qu-reactions-pill { border: 1px solid var(--qu-color-border, #8884); border-radius: 999px; background: transparent; cursor: pointer; padding: 0.1rem 0.5rem; font-size: 0.9em; }
   .qu-reactions-pill-mine { background: color-mix(in srgb, var(--qu-color-accent, #5b5bd6) 20%, transparent); border-color: var(--qu-color-accent, #5b5bd6); }
+  /* QUICK-REACT ON HOVER/LONG-PRESS - renderEmojiPicker()'s own "quick"
+     buttons (@qu/thread-ui's emoji.js) are always in the DOM (passed
+     EMOJI_QUICK below) so no extra fetch/re-render is needed to reveal
+     them - only CSS visibility toggles. Hidden at rest (a resting message
+     row showing 8 extra glyphs next to every "+" would be noisy - the
+     ALWAYS-there pills for reactions people actually used are enough),
+     revealed either by a plain CSS :hover (desktop, free) or the
+     "qu-reactions-quick-revealed" class addQuickReveal() below adds for a
+     touch long-press (no native :hover-equivalent there). Scoped to
+     ".qu-reactions-row" specifically - a future, unrelated
+     renderEmojiPicker({quick}) caller elsewhere is untouched. */
+  .qu-reactions-row .qu-reactions-quick-picker .qu-thread-ui-emoji-quick { display: none; }
+  .qu-reactions-row .qu-reactions-quick-picker:hover .qu-thread-ui-emoji-quick,
+  .qu-reactions-row .qu-reactions-quick-picker.qu-reactions-quick-revealed .qu-thread-ui-emoji-quick { display: inline-block; }
 `;
+
+/**
+ * Wires up the touch-only half of "QUICK-REACT ON HOVER/LONG-PRESS" (see
+ * STYLE's own doc comment) - `:hover` already covers desktop for free, but
+ * touch has no equivalent, so a held touchstart on `pickerRoot` (the
+ * element `renderEmojiPicker()` returns, holding both the hidden-until-
+ * revealed quick buttons AND the "+" trigger) times a long-press instead.
+ * Released early (a normal tap) never reveals anything - clicking "+" still
+ * opens the full curated grid exactly as before. Picking a quick emoji (or
+ * a touchcancel) collapses the reveal again, back to the resting state.
+ * @param {HTMLElement} pickerRoot
+ */
+function addQuickReveal(pickerRoot) {
+  pickerRoot.classList.add('qu-reactions-quick-picker');
+  const LONG_PRESS_MS = 350;
+  let longPressTimer = null;
+  function reveal() { pickerRoot.classList.add('qu-reactions-quick-revealed'); }
+  function hide() { pickerRoot.classList.remove('qu-reactions-quick-revealed'); }
+  pickerRoot.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) return;
+    longPressTimer = setTimeout(reveal, LONG_PRESS_MS);
+  }, { passive: true });
+  pickerRoot.addEventListener('touchend', () => clearTimeout(longPressTimer));
+  pickerRoot.addEventListener('touchcancel', () => { clearTimeout(longPressTimer); hide(); });
+  for (const btn of pickerRoot.querySelectorAll('.qu-thread-ui-emoji-quick')) btn.addEventListener('click', hide);
+}
 
 class QuReactionsRowElement extends HTMLElement {
   /**
@@ -151,11 +199,14 @@ class QuReactionsRowElement extends HTMLElement {
       row.appendChild(btn);
     }
 
-    row.appendChild(renderEmojiPicker({
+    const picker = renderEmojiPicker({
       onPick: (emoji) => this.#setReaction(emoji === myReaction ? null : emoji),
+      quick: EMOJI_QUICK,
       trigger: '+',
       triggerTitle: t('react'),
-    }));
+    });
+    addQuickReveal(picker);
+    row.appendChild(picker);
     this.appendChild(row);
   }
 }

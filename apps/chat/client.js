@@ -438,10 +438,21 @@ const STYLE = `
      grouped row can override it down to a tighter value below - "gap"
      applies uniformly to every row in a flex container, with no per-item
      override. */
-  .qu-chat-bubble-row { display: flex; margin-top: 0.5rem; }
+  .qu-chat-bubble-row { display: flex; margin-top: 0.5rem; position: relative; touch-action: pan-y; }
   .qu-chat-bubble-row:first-child { margin-top: 0; }
   .qu-chat-bubble-row-grouped { margin-top: 0.15rem; }
   .qu-chat-bubble-row-mine { justify-content: flex-end; }
+  /* SWIPE-TO-REPLY (mobile) - attachSwipeToReply()'s own doc comment.
+     touch-action: pan-y (above) tells the browser's own gesture recognizer
+     this row's DEFAULT touch behavior is vertical scrolling, so it doesn't
+     fight our own preventDefault() once a horizontal drag actually commits.
+     -swipe-reset only applies the snap-back transition on release, never
+     while actively dragging (would read as laggy, one frame behind the
+     finger) - touchmove sets "transform" directly with no transition. The
+     ↩️ hint is a ::before, not a real element - nothing else needs to
+     account for an extra child node inside every message row. */
+  .qu-chat-bubble-row-swipe-reset { transition: transform 0.2s ease; }
+  .qu-chat-bubble-row-swipe-armed::before { content: '↩️'; position: absolute; left: 0.25rem; top: 50%; transform: translateY(-50%); opacity: 0.8; font-size: 1.1em; }
   /* PERMALINKS - see this file's own top doc comment. Landing on
      #/chat/.../m/<id> scrollIntoView()s this row (block: 'center', so the
      target isn't glued to the very top edge, right under the fixed header)
@@ -1585,6 +1596,19 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     replyBanner.append(label, cancelBtn);
   }
 
+  /**
+   * Starts replying to `message` - the ONE place both the context menu's
+   * "Reply" item and the swipe-to-reply gesture (renderMessage()'s own
+   * `attachSwipeToReply()`, below) trigger this, so the two entry points
+   * can never drift into two different notions of what "reply" does.
+   * @param {object} message @param {boolean} mine
+   */
+  async function startReplyTo(message, mine) {
+    const authorLabel = mine ? t('you') : formatActorLabel(message.author, await resolveAuthor(message.author));
+    setReplyingTo(message, authorLabel);
+    composer?.editor.focus();
+  }
+
   const profileCache = new Map();
   async function resolveAuthor(pub) {
     if (!profileCache.has(pub)) profileCache.set(pub, services.profile.getPublicProfile(pub).catch(() => null));
@@ -2017,7 +2041,84 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     bubble.appendChild(footer);
 
     row.appendChild(bubble);
+    attachSwipeToReply(row, message, mine);
     return row;
+  }
+
+  /**
+   * SWIPE-TO-REPLY (mobile) - a touch-drag of `row` to the right past
+   * `SWIPE_REPLY_THRESHOLD_PX` calls `startReplyTo()`, same as the context
+   * menu's own "Reply" item (see that helper's own doc comment) - a
+   * one-handed shortcut real chat apps (Telegram/WhatsApp/Signal) already
+   * offer, instead of "long-press -> find Reply in a menu" every time.
+   *
+   * Only commits to the gesture once a touch move is CLEARLY more
+   * horizontal than vertical (`isHorizontal` below) - anything else is left
+   * alone so the messages list's own vertical scroll keeps working exactly
+   * as before; `touchmove`'s listener is `{ passive: false }` ONLY so
+   * `preventDefault()` can suppress that scroll, but ONLY once already
+   * committed - never on the very first move, before direction is known.
+   * `row.style.transform` is reset (with a short transition for the
+   * snap-back) on `touchend`/`touchcancel` either way, whether or not the
+   * threshold was reached.
+   *
+   * TESTED VIA SYNTHETIC TouchEvents (this file's own test suite - jsdom
+   * happens to accept a plain `{clientX, clientY}` object as a Touch,
+   * unlike its lack of any real layout/rendering `<qu-asset>`'s own
+   * lightbox pan/zoom can't get around) - covers the horizontal-vs-
+   * vertical direction gate and the arm/reset threshold logic. What that
+   * CANNOT cover: how the drag actually FEELS on a real device (touch
+   * latency, the CSS transition timing, `touch-action: pan-y`'s real
+   * interaction with the browser's own native scroll gesture recognizer) -
+   * worth a real-device pass before calling this done.
+   * @param {HTMLElement} row @param {object} message @param {boolean} mine
+   */
+  function attachSwipeToReply(row, message, mine) {
+    const SWIPE_REPLY_THRESHOLD_PX = 56;
+    const SWIPE_MAX_PX = 72;
+    let startX = 0;
+    let startY = 0;
+    let dragging = false;
+    let resetTimer = null;
+
+    function reset() {
+      row.classList.add('qu-chat-bubble-row-swipe-reset');
+      row.style.transform = '';
+      row.classList.remove('qu-chat-bubble-row-swipe-armed');
+      clearTimeout(resetTimer);
+      resetTimer = setTimeout(() => row.classList.remove('qu-chat-bubble-row-swipe-reset'), 200);
+    }
+
+    row.addEventListener('touchstart', (e) => {
+      if (e.touches.length !== 1) return;
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+      dragging = false;
+      row.classList.remove('qu-chat-bubble-row-swipe-reset');
+    }, { passive: true });
+
+    row.addEventListener('touchmove', (e) => {
+      if (e.touches.length !== 1) return;
+      const dx = e.touches[0].clientX - startX;
+      const dy = e.touches[0].clientY - startY;
+      if (!dragging) {
+        const isHorizontal = Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy) * 1.5;
+        if (!isHorizontal) return; // could still be a vertical scroll - leave it alone
+        dragging = true;
+      }
+      e.preventDefault(); // committed to the swipe now, not a scroll
+      const clamped = Math.max(0, Math.min(SWIPE_MAX_PX, dx));
+      row.style.transform = `translateX(${clamped}px)`;
+      row.classList.toggle('qu-chat-bubble-row-swipe-armed', clamped >= SWIPE_REPLY_THRESHOLD_PX);
+    }, { passive: false });
+
+    row.addEventListener('touchend', () => {
+      const armed = row.classList.contains('qu-chat-bubble-row-swipe-armed');
+      reset();
+      if (dragging && armed) startReplyTo(message, mine);
+      dragging = false;
+    });
+    row.addEventListener('touchcancel', () => { reset(); dragging = false; });
   }
 
   /**
@@ -2047,14 +2148,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
             getItems: async () => {
               const nativeItems = [];
               if (mine) nativeItems.push({ id: 'edit', label: t('edit'), icon: '✏️', onClick: () => renderMessageEdit(textWrap, message) });
-              nativeItems.push({
-                id: 'reply', label: t('reply'), icon: '↩️',
-                onClick: async () => {
-                  const authorLabel = mine ? t('you') : formatActorLabel(message.author, await resolveAuthor(message.author));
-                  setReplyingTo(message, authorLabel);
-                  composer?.editor.focus();
-                },
-              });
+              nativeItems.push({ id: 'reply', label: t('reply'), icon: '↩️', onClick: () => startReplyTo(message, mine) });
               nativeItems.push({ id: 'copyText', label: t('copyText'), icon: '📋', onClick: () => copyToClipboard(message.body) });
               nativeItems.push({ id: 'copyLink', label: t('copyLink'), icon: '🔗', onClick: () => copyToClipboard(absoluteMessagePermalink(message)) });
               const pluginItems = extensionPoints ? await extensionPoints.collect('content.messageMenu', menuPayload) : [];

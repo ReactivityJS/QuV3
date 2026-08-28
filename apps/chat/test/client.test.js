@@ -531,6 +531,82 @@ test('the "Reply" menu item (native, any message) opens the reply banner and tag
   }
 });
 
+test('SWIPE-TO-REPLY: a horizontal drag past the threshold opens the reply banner, same as the "Reply" menu item', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'swipe me' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-bubble-text')?.textContent.includes('swipe me'));
+    const row = container.querySelector('.qu-chat-bubble-row');
+
+    row.dispatchEvent(new window.TouchEvent('touchstart', { touches: [{ clientX: 20, clientY: 100 }] }));
+    row.dispatchEvent(new window.TouchEvent('touchmove', { touches: [{ clientX: 90, clientY: 102 }] })); // clearly horizontal, dx=70 past SWIPE_REPLY_THRESHOLD_PX (56)
+    assert.ok(row.classList.contains('qu-chat-bubble-row-swipe-armed'));
+    row.dispatchEvent(new window.TouchEvent('touchend', { touches: [] }));
+
+    await waitFor(() => container.querySelector('.qu-chat-reply-banner')?.hidden === false);
+    assert.match(container.querySelector('.qu-chat-reply-banner').textContent, /Replying to You/);
+    assert.equal(row.classList.contains('qu-chat-bubble-row-swipe-armed'), false); // reset() on touchend always clears the armed state too
+  } finally {
+    stop();
+  }
+});
+
+test('SWIPE-TO-REPLY: a mostly-vertical drag never arms or replies - the messages list\'s own vertical scroll stays untouched', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'do not swipe me' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-bubble-text')?.textContent.includes('do not swipe me'));
+    const row = container.querySelector('.qu-chat-bubble-row');
+
+    row.dispatchEvent(new window.TouchEvent('touchstart', { touches: [{ clientX: 20, clientY: 100 }] }));
+    row.dispatchEvent(new window.TouchEvent('touchmove', { touches: [{ clientX: 25, clientY: 160 }] })); // mostly vertical
+    row.dispatchEvent(new window.TouchEvent('touchend', { touches: [] }));
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(container.querySelector('.qu-chat-reply-banner').hidden, true);
+    assert.equal(row.classList.contains('qu-chat-bubble-row-swipe-armed'), false);
+  } finally {
+    stop();
+  }
+});
+
+test('SWIPE-TO-REPLY: a horizontal drag that never reaches the threshold snaps back without replying', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.messages.postMessage(CHAT_SPACE_ID, roomId, { body: 'just a little swipe' });
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => container.querySelector('.qu-chat-bubble-text')?.textContent.includes('just a little swipe'));
+    const row = container.querySelector('.qu-chat-bubble-row');
+
+    row.dispatchEvent(new window.TouchEvent('touchstart', { touches: [{ clientX: 20, clientY: 100 }] }));
+    row.dispatchEvent(new window.TouchEvent('touchmove', { touches: [{ clientX: 45, clientY: 101 }] })); // horizontal, dx=25, under the 56px threshold
+    assert.equal(row.classList.contains('qu-chat-bubble-row-swipe-armed'), false);
+    row.dispatchEvent(new window.TouchEvent('touchend', { touches: [] }));
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(container.querySelector('.qu-chat-reply-banner').hidden, true);
+  } finally {
+    stop();
+  }
+});
+
 // ===== content.chatRoomMenu - the room header's own "⋮" menu =====
 
 /** Opens the room header's own "⋮" menu (content.chatRoomMenu) - see openMessageMenu()'s own doc comment for why this needs its own scoped selector rather than a bare `.qu-thread-ui-context-menu-trigger` query. */
