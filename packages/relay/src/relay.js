@@ -12,6 +12,7 @@ import { QuLoader, discoverLocalPackages } from '@qu/loader';
 import { createLogger } from '@qu/log';
 
 import { WebSocketServerTransport } from './transports/websocket-server-transport.js';
+import { FederationManager } from './federation-manager.js';
 import { PresenceTracker } from './presence-tracker.js';
 import { setupVapidKeys } from './vapid-key-store.js';
 import { PushDeliveryService, createManifestNotificationResolver } from './push-delivery.js';
@@ -167,7 +168,7 @@ export class QuRelay {
     // partway through `boot()` (see below), and by construction time here
     // neither module's factory has run yet either (RuntimeContainer
     // factories are lazy).
-    this._state = { transport: null, vapidKeys: null, relayPub: null };
+    this._state = { transport: null, vapidKeys: null, relayPub: null, federationManager: null };
 
     this.runtime.register('presence', () => new PresenceTracker());
     this.runtime.register('adminHttp', () => new AdminHttp(this.qu, { adminPubs: this.options.adminPubs, storeDir: this.options.storeDir, blobDir: this.options.blobDir, identity: this.identity, loader: this.loader }, this._state));
@@ -206,6 +207,8 @@ export class QuRelay {
     this._wss = null;
     this.sync = null;
     this.transport = null;
+    this.federationManager = null;
+    this.federationSync = null;
   }
 
   /** @returns {number} The actual listening port (resolves `options.port: 0` to the OS-assigned port). Only valid after boot(). */
@@ -307,10 +310,44 @@ export class QuRelay {
     this.transport = new WebSocketServerTransport(this._wss, { maxMessagesPerMinute: settings.rateLimits.maxMessagesPerMinute });
     this._state.transport = this.transport;
 
+    // RELAY FEDERATION - see FederationManager's own top doc comment.
+    // Constructed BEFORE `this.sync` because `this.sync` itself needs
+    // `onLocalMiss`/`onRelayHello` hooks bound to it (an ordinary browser
+    // client's cache miss benefits from federation forwarding exactly like
+    // a forwarded relay-to-relay miss does - see FederationManager.forward()'s
+    // own doc comment for why this is not gated to "relays only").
+    // `federationSync` - the OUTBOUND-only counterpart, one relay peer per
+    // configured URL, aggregated behind `federationManager.transport` (see
+    // FederationTransport's own doc comment for why a single `SyncEngine`
+    // still works across N simultaneous outbound peers) - is constructed
+    // right after, then wired back into `federationManager` via
+    // `attachSyncEngine()` (resolves the circular need: the manager's own
+    // hooks reference the engine, the engine's own hooks reference the
+    // manager - see that method's own doc comment).
+    const federationManager = new FederationManager(this.qu, this.identity);
+    this.federationManager = federationManager;
+    this._state.federationManager = federationManager;
+
     const presence = this.runtime.resolve('presence');
     this.sync = new SyncEngine(this.qu, this.transport, {
       onPeerIdentified: (_peerId, actorPub) => presence.recordSeen(actorPub),
+      onLocalMiss: (req) => federationManager.forward(req),
+      onRelayHello: (message, peerId) => federationManager.handleRelayHello(message, peerId, this.transport),
+      onRelayHelloAck: (message, peerId) => federationManager.handleRelayHelloAck(message, peerId),
     });
+
+    this.federationSync = new SyncEngine(this.qu, federationManager.transport, {
+      onLocalMiss: (req) => federationManager.forward(req),
+      onRelayHello: (message, peerId) => federationManager.handleRelayHello(message, peerId, federationManager.transport),
+      onRelayHelloAck: (message, peerId) => federationManager.handleRelayHelloAck(message, peerId),
+    });
+    federationManager.attachSyncEngine(this.federationSync);
+    // Dials every already-configured peer (federation.peers[]) right away -
+    // same "apply live settings at boot" pattern rateLimits/disabledApps
+    // already follow a few lines below (publishAppsCatalog) - a relay that
+    // restarts with peers already configured reconnects to them
+    // immediately, not only after the next admin settings save.
+    await federationManager.reconcile(settings.federation);
 
     // Push delivery fires for EVERY thread message write this relay ever
     // sees, whether authored locally (rare - the relay itself is never a
@@ -357,6 +394,8 @@ export class QuRelay {
   /** Shuts down the HTTP/WebSocket server. */
   async close() {
     this.sync?.close();
+    this.federationSync?.close();
+    this.federationManager?.close(); // closes every outbound federation link - see FederationManager's own doc comment
     // Must terminate live connections before closing the servers - both
     // WebSocketServer.close() and http.Server.close() wait indefinitely for
     // existing connections to end on their own otherwise, so a single

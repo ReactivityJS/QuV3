@@ -44,6 +44,7 @@ export class WebSocketClientTransport extends Transport {
   #ws = null;
   #callbacks = [];
   #reconnectCallbacks = [];
+  #reconnectAttemptCallbacks = []; // see onReconnectAttempt()
   #peerId = `peer-${Math.random().toString(36).slice(2)}-${Date.now()}`;
   /** @type {object[]} Messages sent before the socket reached OPEN, flushed once it does. */
   #sendQueue = [];
@@ -122,6 +123,13 @@ export class WebSocketClientTransport extends Transport {
     const delay = base * (0.5 + Math.random() * 0.5); // 50-100% of base, so many clients don't retry in lockstep
     this.#reconnectAttempt++;
     log.debug(`connection to ${this.url} dropped - reconnecting in ${Math.round(delay)}ms (attempt ${this.#reconnectAttempt})`);
+    for (const cb of this.#reconnectAttemptCallbacks) cb(this.#reconnectAttempt);
+    // A try-limit caller (see onReconnectAttempt()'s own doc comment) may
+    // have called close() synchronously from within the callback loop just
+    // above - re-check here rather than unconditionally scheduling the next
+    // attempt regardless of that call, same guard the 'close' event listener
+    // above already applies for the exact same reason.
+    if (this.#manuallyClosed) return;
     this.#reconnectTimer = setTimeout(() => {
       this.#connectOnce().catch((err) => {
         // #connectOnce()'s promise only rejects via the 'error' listener
@@ -168,6 +176,25 @@ export class WebSocketClientTransport extends Transport {
    */
   onReconnect(callback) {
     this.#reconnectCallbacks.push(callback);
+  }
+
+  /**
+   * Registers a callback fired every time a connection attempt FAILS and a
+   * retry gets scheduled (i.e. every `#scheduleReconnect()` call) - the
+   * counterpart to `onReconnect()` above, which only ever fires on SUCCESS.
+   * Never fires for a deliberate `close()` (which disables retrying
+   * entirely, same as `#scheduleReconnect()`'s own guard). Exists for a
+   * caller that needs to detect a peer that's been unreachable for many
+   * consecutive attempts (e.g. relay federation's dead-peer detection, see
+   * `@qu/relay`'s `FederationManager`) - this transport itself retries
+   * forever with no such concept, by design (see this class's own top doc
+   * comment on AUTO-RECONNECT); a caller wanting a try-limit has to count
+   * these itself and call `close()` once it decides to give up.
+   * @param {(attempt: number) => void} callback - `attempt` is the same
+   *   1-based counter logged above (1 on the very first failed retry).
+   */
+  onReconnectAttempt(callback) {
+    this.#reconnectAttemptCallbacks.push(callback);
   }
 
   /** Closes the underlying connection. Also drops anything still queued - a closed transport has nowhere left to flush to. Disables auto-reconnect - this is a DELIBERATE disconnect. */

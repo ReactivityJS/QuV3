@@ -32,7 +32,7 @@ export class AdminHttp {
    *   `disabledApps` change - both are stable, already-constructed
    *   references by the time this module is ever resolved (unlike
    *   `state.transport` below, neither is populated lazily during `boot()`).
-   * @param {{transport: import('./transports/websocket-server-transport.js').WebSocketServerTransport|null}} [state] -
+   * @param {{transport: import('./transports/websocket-server-transport.js').WebSocketServerTransport|null, federationManager?: import('./federation-manager.js').FederationManager|null}} [state] -
    *   Optional, a mutable shared reference (same pattern `http-router.js`
    *   uses) - if `state.transport` is set by the time a settings change
    *   including `rateLimits` arrives (see `handleSettings()`), it applies
@@ -42,6 +42,8 @@ export class AdminHttp {
    *   since `transport` isn't created until partway through `boot()` (see
    *   `relay.js`) - by the time any HTTP request can actually arrive it
    *   will be, but this module doesn't need to assume that ordering itself.
+   *   `state.federationManager` is the same pattern, one level newer - see
+   *   `handleSettings()`'s own `federation` handling below.
    */
   constructor(qu, { adminPubs, storeDir, blobDir, identity, loader }, state = { transport: null }) {
     this.qu = qu;
@@ -129,9 +131,43 @@ export class AdminHttp {
     // <qu-list parent="/store/apps/catalog"> reacts to, no relay restart
     // needed (see apps-catalog-store.js's own doc comment).
     if (settings.disabledApps || settings.hiddenFromAppList) await publishAppsCatalog(this.qu, this.identity, this.loader, merged);
+    // Same "apply live, no restart" pattern as rateLimits above - reconciles
+    // outbound federation connections (peers added/removed/reconfigured,
+    // hopLimit/hopTimeoutMs/tryLimit changed) against the just-saved
+    // settings. See FederationManager.reconcile()'s own doc comment for why
+    // this direct call, not a storage-change watcher, is this codebase's
+    // actual convention for "a settings change takes live effect".
+    if (settings.federation) await this.state.federationManager?.reconcile(merged.federation);
 
     log.info(`settings updated by ~${actorPub.slice(0, 10)}…:`, Object.keys(settings).join(', '));
     res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(merged));
+  }
+
+  /**
+   * `POST /admin/federation/retry` - re-arms a `dead` federation peer (see
+   * `FederationManager.retryPeer()`'s own doc comment) - unlike
+   * `POST /federation/suggest` (any signed actor), this is a genuine LIVE
+   * ACTION on the relay's own outbound connections, so it's admin-gated
+   * like every other route in this class.
+   * @param {import('node:http').IncomingMessage} req @param {import('node:http').ServerResponse} res
+   */
+  async handleFederationRetry(req, res) {
+    let body;
+    try {
+      body = await this.#readJsonBody(req);
+    } catch (err) {
+      res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: err.message }));
+      return;
+    }
+    const { actorPub, url, signature } = body ?? {};
+    if (typeof actorPub !== 'string' || typeof signature !== 'string' || typeof url !== 'string') {
+      res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'expected { actorPub, url, signature }' }));
+      return;
+    }
+    if (!(await this.#verifyAdmin(res, actorPub, signature, { url }))) return;
+
+    const ok = this.state.federationManager?.retryPeer(url) ?? false;
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ retried: ok }));
   }
 
   /**

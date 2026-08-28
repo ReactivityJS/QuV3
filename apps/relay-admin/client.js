@@ -63,6 +63,23 @@
  * HTML5 drag-event wiring to maintain) that's exactly as capable for a
  * short, few-item list like either point has today.
  *
+ * FEDERATION SECTION: edits `settings.federation` (see
+ * `packages/relay/src/relay-settings.js`'s own doc comment on that field,
+ * and `packages/relay/src/federation-manager.js` for the mechanism it
+ * drives) - peers/pending/blacklist are plain arrays edited in local,
+ * in-memory copies (`federationPeers`/`federationPending`, same "batch
+ * edit, one submit" convention every other section here already uses) and
+ * only actually persisted on this form's own Save. The one exception is the
+ * per-peer "Retry" button (shown only for a `dead` peer) - a genuine LIVE
+ * action on the relay's own outbound connection (`POST
+ * /admin/federation/retry`), not a settings edit, so it fires immediately
+ * rather than waiting for Save. Live connection STATUS (connecting/
+ * connected/backoff/dead) is never part of `settings` at all - it's read
+ * fresh from `/config.json`'s own `federationStatus` field on mount, same
+ * "state isn't in settings, read it separately" pattern this file has no
+ * other example of yet, because no other section here has anything this
+ * transient to show.
+ *
  * LINK PREVIEWS SECTION: `settings.linkPreviews.enabled` is a plain on/off
  * kill switch for `@qu/relay`'s `link-preview.js`/its `/link-preview` route
  * - see that module's own doc comment for what it fetches and why (server-
@@ -142,6 +159,35 @@ const DICT = {
     orderCoreReply: 'Reply (chat)',
     orderMoveUp: 'Move up',
     orderMoveDown: 'Move down',
+    federation: 'Relay federation',
+    federationHint: 'Connect this relay to other Qu relays: it dials out to each one, subscribes to whatever prefixes you configure (eager replication), and can forward a cache miss to them on demand (bounded by the hop limit below). See the README for how a client can also learn a foreign relay and suggest it here.',
+    federationAutoLearn: 'Auto-learn client-suggested relays',
+    federationAutoLearnHint: 'When off (recommended), a relay a client discovers and reports lands in "Pending suggestions" below for you to approve. When on, a validated Qu relay URL is added automatically as soon as it is not on the blacklist.',
+    federationHopLimit: 'Hop limit (on-demand forwarding)',
+    federationHopLimitHint: 'How many further relays a single forwarded query may transit before giving up.',
+    federationHopTimeoutMs: 'Per-hop timeout (ms)',
+    federationTryLimit: 'Reconnect try-limit',
+    federationTryLimitHint: 'Consecutive failed connection attempts before a peer is marked dead and this relay stops auto-retrying it (it stays configured - retry it manually below).',
+    federationPeers: 'Federated relays',
+    federationPeersHint: 'Prefixes are comma-separated path prefixes this relay actively subscribes to and backfills from that peer (e.g. "/store/forum"). Leave empty to only allow on-demand forwarding to/from this peer, without eager replication.',
+    federationAddPlaceholder: 'wss://relay.example.com',
+    federationAdd: 'Add',
+    federationPrefixesPlaceholder: 'prefixes, comma-separated',
+    federationRemove: 'Remove',
+    federationRetry: 'Retry',
+    federationNoPeers: 'No federated relays configured yet.',
+    federationStateConnecting: 'Connecting…',
+    federationStateConnected: 'Connected',
+    federationStateBackoff: 'Reconnecting…',
+    federationStateDead: 'Dead',
+    federationStateUntrusted: 'Untrusted (relayId mismatch)',
+    federationStateUnknown: 'Unknown',
+    federationPending: 'Pending suggestions',
+    federationNoPending: 'No pending suggestions.',
+    federationApprove: 'Approve',
+    federationReject: 'Reject',
+    federationBlacklist: 'Blacklist',
+    federationBlacklistHint: 'One URL or relayId per line. Never dialed, never accepted, never auto-learned, even with auto-learn on.',
     save: 'Save settings',
     saved: 'Saved.',
     saveFailed: 'Save failed: {error}',
@@ -181,6 +227,35 @@ const DICT = {
     orderCoreReply: 'Antworten (Chat)',
     orderMoveUp: 'Nach oben',
     orderMoveDown: 'Nach unten',
+    federation: 'Relay-Föderation',
+    federationHint: 'Dieses Relay mit anderen Qu-Relays verbinden: Es verbindet sich zu jedem konfigurierten Relay, abonniert die eingestellten Prefixe (aktive Replikation) und kann bei Bedarf einen lokalen Cache-Miss dorthin weiterleiten (begrenzt durch das Hop-Limit unten). Ein Client kann außerdem ein fremdes Relay "lernen" und hier vorschlagen.',
+    federationAutoLearn: 'Von Clients vorgeschlagene Relays automatisch übernehmen',
+    federationAutoLearnHint: 'Standardmäßig aus (empfohlen): ein von einem Client gemeldetes Relay landet unten unter "Vorschläge" zur manuellen Bestätigung. Bei "an" wird eine validierte Qu-Relay-URL automatisch hinzugefügt, sofern sie nicht auf der Blacklist steht.',
+    federationHopLimit: 'Hop-Limit (bedarfsgesteuertes Routing)',
+    federationHopLimitHint: 'Wie viele weitere Relays eine einzelne weitergeleitete Anfrage maximal durchlaufen darf.',
+    federationHopTimeoutMs: 'Timeout pro Hop (ms)',
+    federationTryLimit: 'Reconnect-Versuchslimit',
+    federationTryLimitHint: 'Aufeinanderfolgende fehlgeschlagene Verbindungsversuche, bevor ein Peer als "tot" markiert wird und automatische Reconnects gestoppt werden (bleibt konfiguriert - unten manuell erneut versuchbar).',
+    federationPeers: 'Föderierte Relays',
+    federationPeersHint: 'Prefixe sind kommagetrennte Pfad-Prefixe, die dieses Relay aktiv von diesem Peer abonniert und nachlädt (z. B. "/store/forum"). Leer lassen, um mit diesem Peer nur bedarfsgesteuertes Routing zu erlauben, ohne aktive Replikation.',
+    federationAddPlaceholder: 'wss://relay.example.com',
+    federationAdd: 'Hinzufügen',
+    federationPrefixesPlaceholder: 'Prefixe, kommagetrennt',
+    federationRemove: 'Entfernen',
+    federationRetry: 'Erneut versuchen',
+    federationNoPeers: 'Noch keine föderierten Relays konfiguriert.',
+    federationStateConnecting: 'Verbinde…',
+    federationStateConnected: 'Verbunden',
+    federationStateBackoff: 'Verbindung wird wiederhergestellt…',
+    federationStateDead: 'Tot',
+    federationStateUntrusted: 'Nicht vertrauenswürdig (relayId stimmt nicht überein)',
+    federationStateUnknown: 'Unbekannt',
+    federationPending: 'Vorschläge',
+    federationNoPending: 'Keine offenen Vorschläge.',
+    federationApprove: 'Bestätigen',
+    federationReject: 'Ablehnen',
+    federationBlacklist: 'Blacklist',
+    federationBlacklistHint: 'Eine URL oder relayId pro Zeile. Wird nie angewählt, nie akzeptiert, nie automatisch gelernt - auch bei aktiviertem Auto-Learn.',
     save: 'Einstellungen speichern',
     saved: 'Gespeichert.',
     saveFailed: 'Speichern fehlgeschlagen: {error}',
@@ -207,6 +282,17 @@ const STYLE = `
   .qu-relay-admin-order-row-buttons { display: flex; gap: 0.2rem; flex-shrink: 0; }
   .qu-relay-admin-order-row-buttons button { background: none; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-sm, 0.3rem); cursor: pointer; font: inherit; line-height: 1; padding: 0.2rem 0.4rem; }
   .qu-relay-admin-order-row-buttons button:disabled { opacity: 0.35; cursor: default; }
+  .qu-relay-admin-federation-list { display: flex; flex-direction: column; gap: 0.3rem; margin: 0.4rem 0; }
+  .qu-relay-admin-federation-row { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; padding: 0.35rem 0.5rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-sm, 0.3rem); }
+  .qu-relay-admin-federation-url { font-family: monospace; font-size: 0.9em; word-break: break-all; }
+  .qu-relay-admin-federation-row input[type="text"] { flex: 1 1 12rem; min-width: 8rem; }
+  .qu-relay-admin-federation-status { font-size: 0.78em; padding: 0.1rem 0.45rem; border-radius: 999px; border: 1px solid var(--qu-color-border, #8884); white-space: nowrap; }
+  .qu-relay-admin-federation-status-connected { color: var(--qu-color-success, #2e8b57); border-color: var(--qu-color-success, #2e8b57); }
+  .qu-relay-admin-federation-status-dead, .qu-relay-admin-federation-status-untrusted { color: var(--qu-color-danger, #d64545); border-color: var(--qu-color-danger, #d64545); }
+  .qu-relay-admin-federation-status-connecting, .qu-relay-admin-federation-status-backoff { opacity: 0.75; }
+  .qu-relay-admin-federation-add { display: flex; gap: 0.4rem; margin-top: 0.3rem; }
+  .qu-relay-admin-federation-add input[type="text"] { flex: 1; }
+  .qu-relay-admin textarea { font: inherit; padding: 0.3rem 0.5rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); width: 100%; max-width: 28rem; box-sizing: border-box; }
 `;
 
 /**
@@ -472,6 +558,217 @@ export async function mount(container, { identity, services, apps }) {
   }
   flagTypesSection.append(flagTypesTitle, flagTypesHint, flagTypesList);
 
+  // ---- Federation ----
+  const federationSection = document.createElement('section');
+  const federationTitle = document.createElement('h2');
+  federationTitle.textContent = t('federation');
+  const federationHint = document.createElement('p');
+  federationHint.className = 'qu-relay-admin-hint';
+  federationHint.textContent = t('federationHint');
+
+  const autoLearnLabel = document.createElement('label');
+  const autoLearnInput = document.createElement('input');
+  autoLearnInput.type = 'checkbox';
+  autoLearnInput.checked = settings.federation?.autoLearn ?? false;
+  autoLearnLabel.append(autoLearnInput, document.createTextNode(t('federationAutoLearn')));
+  const autoLearnHint = document.createElement('p');
+  autoLearnHint.className = 'qu-relay-admin-hint';
+  autoLearnHint.textContent = t('federationAutoLearnHint');
+
+  const hopLimitLabel = document.createElement('label');
+  const hopLimitInput = document.createElement('input');
+  hopLimitInput.type = 'number';
+  hopLimitInput.min = '0';
+  hopLimitInput.value = String(settings.federation?.hopLimit ?? 3);
+  hopLimitLabel.append(document.createTextNode(t('federationHopLimit')), hopLimitInput);
+  const hopLimitHint = document.createElement('p');
+  hopLimitHint.className = 'qu-relay-admin-hint';
+  hopLimitHint.textContent = t('federationHopLimitHint');
+
+  const hopTimeoutLabel = document.createElement('label');
+  const hopTimeoutInput = document.createElement('input');
+  hopTimeoutInput.type = 'number';
+  hopTimeoutInput.min = '100';
+  hopTimeoutInput.step = '100';
+  hopTimeoutInput.value = String(settings.federation?.hopTimeoutMs ?? 3000);
+  hopTimeoutLabel.append(document.createTextNode(t('federationHopTimeoutMs')), hopTimeoutInput);
+
+  const tryLimitLabel = document.createElement('label');
+  const tryLimitInput = document.createElement('input');
+  tryLimitInput.type = 'number';
+  tryLimitInput.min = '1';
+  tryLimitInput.value = String(settings.federation?.tryLimit ?? 10);
+  tryLimitLabel.append(document.createTextNode(t('federationTryLimit')), tryLimitInput);
+  const tryLimitHint = document.createElement('p');
+  tryLimitHint.className = 'qu-relay-admin-hint';
+  tryLimitHint.textContent = t('federationTryLimitHint');
+
+  // Local, mutable copies - nothing here is persisted until the surrounding
+  // form's own Save (same "batch edit, one submit" convention every other
+  // section in this file already uses), except the dedicated Retry button
+  // below, which is a genuine LIVE action, not a settings edit.
+  let federationPeers = (settings.federation?.peers ?? []).map((p) => ({ ...p }));
+  let federationPending = (settings.federation?.pending ?? []).map((p) => ({ ...p }));
+  const federationStatusByUrl = new Map((config.federationStatus ?? []).map((s) => [s.url, s]));
+
+  const peersTitle = document.createElement('h3');
+  peersTitle.textContent = t('federationPeers');
+  const peersHint = document.createElement('p');
+  peersHint.className = 'qu-relay-admin-hint';
+  peersHint.textContent = t('federationPeersHint');
+  const peersList = document.createElement('div');
+  peersList.className = 'qu-relay-admin-federation-list';
+
+  function renderFederationPeers() {
+    peersList.textContent = '';
+    if (federationPeers.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'qu-relay-admin-hint';
+      empty.textContent = t('federationNoPeers');
+      peersList.appendChild(empty);
+      return;
+    }
+    for (const peer of federationPeers) {
+      const row = document.createElement('div');
+      row.className = 'qu-relay-admin-federation-row';
+
+      const urlSpan = document.createElement('span');
+      urlSpan.className = 'qu-relay-admin-federation-url';
+      urlSpan.textContent = peer.url;
+
+      const status = federationStatusByUrl.get(peer.url);
+      const statusBadge = document.createElement('span');
+      const state = status?.state ?? 'unknown';
+      statusBadge.className = `qu-relay-admin-federation-status qu-relay-admin-federation-status-${state}`;
+      statusBadge.textContent = t(`federationState${state.charAt(0).toUpperCase()}${state.slice(1)}`);
+
+      const prefixesInput = document.createElement('input');
+      prefixesInput.type = 'text';
+      prefixesInput.placeholder = t('federationPrefixesPlaceholder');
+      prefixesInput.value = (peer.prefixes ?? []).join(', ');
+      prefixesInput.addEventListener('input', () => {
+        peer.prefixes = prefixesInput.value.split(',').map((s) => s.trim()).filter(Boolean);
+      });
+
+      row.append(urlSpan, statusBadge, prefixesInput);
+
+      if (state === 'dead') {
+        const retryBtn = document.createElement('button');
+        retryBtn.type = 'button';
+        retryBtn.textContent = t('federationRetry');
+        retryBtn.addEventListener('click', async () => {
+          retryBtn.disabled = true;
+          try {
+            const mainKey = await identity.getMainKey();
+            const signature = await QuCrypto.sign(new TextEncoder().encode(JSON.stringify({ url: peer.url })), mainKey.privateKeyPkcs8);
+            const res = await fetch('/admin/federation/retry', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ actorPub: myPub, url: peer.url, signature: QuCrypto.toBase64Url(signature) }),
+            });
+            if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? `HTTP ${res.status}`);
+          } catch (err) {
+            console.error('[relay-admin] federation retry failed:', err);
+          } finally {
+            retryBtn.disabled = false;
+          }
+        });
+        row.appendChild(retryBtn);
+      }
+
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.textContent = t('federationRemove');
+      removeBtn.addEventListener('click', () => {
+        federationPeers = federationPeers.filter((p) => p.url !== peer.url);
+        renderFederationPeers();
+      });
+      row.appendChild(removeBtn);
+
+      peersList.appendChild(row);
+    }
+  }
+  renderFederationPeers();
+
+  const addPeerRow = document.createElement('div');
+  addPeerRow.className = 'qu-relay-admin-federation-add';
+  const addPeerInput = document.createElement('input');
+  addPeerInput.type = 'text';
+  addPeerInput.placeholder = t('federationAddPlaceholder');
+  const addPeerBtn = document.createElement('button');
+  addPeerBtn.type = 'button';
+  addPeerBtn.textContent = t('federationAdd');
+  addPeerBtn.addEventListener('click', () => {
+    const url = addPeerInput.value.trim();
+    if (!url || federationPeers.some((p) => p.url === url)) return;
+    federationPeers.push({ url, relayId: null, label: url, prefixes: [], addedAt: Date.now(), addedBy: myPub, source: 'manual' });
+    addPeerInput.value = '';
+    renderFederationPeers();
+  });
+  addPeerRow.append(addPeerInput, addPeerBtn);
+
+  const pendingTitle = document.createElement('h3');
+  pendingTitle.textContent = t('federationPending');
+  const pendingList = document.createElement('div');
+  pendingList.className = 'qu-relay-admin-federation-list';
+
+  function renderFederationPending() {
+    pendingList.textContent = '';
+    if (federationPending.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'qu-relay-admin-hint';
+      empty.textContent = t('federationNoPending');
+      pendingList.appendChild(empty);
+      return;
+    }
+    for (const item of federationPending) {
+      const row = document.createElement('div');
+      row.className = 'qu-relay-admin-federation-row';
+      const label = document.createElement('span');
+      label.className = 'qu-relay-admin-federation-url';
+      label.textContent = `${item.url} (~${(item.suggestedBy ?? '').slice(0, 10)}…)`;
+      const approveBtn = document.createElement('button');
+      approveBtn.type = 'button';
+      approveBtn.textContent = t('federationApprove');
+      approveBtn.addEventListener('click', () => {
+        federationPending = federationPending.filter((p) => p.url !== item.url);
+        if (!federationPeers.some((p) => p.url === item.url)) {
+          federationPeers.push({ url: item.url, relayId: item.relayId ?? null, label: item.url, prefixes: [], addedAt: Date.now(), addedBy: item.suggestedBy, source: 'client-learned' });
+        }
+        renderFederationPending();
+        renderFederationPeers();
+      });
+      const rejectBtn = document.createElement('button');
+      rejectBtn.type = 'button';
+      rejectBtn.textContent = t('federationReject');
+      rejectBtn.addEventListener('click', () => {
+        federationPending = federationPending.filter((p) => p.url !== item.url);
+        renderFederationPending();
+      });
+      row.append(label, approveBtn, rejectBtn);
+      pendingList.appendChild(row);
+    }
+  }
+  renderFederationPending();
+
+  const blacklistLabel = document.createElement('h3');
+  blacklistLabel.textContent = t('federationBlacklist');
+  const blacklistHint = document.createElement('p');
+  blacklistHint.className = 'qu-relay-admin-hint';
+  blacklistHint.textContent = t('federationBlacklistHint');
+  const blacklistTextarea = document.createElement('textarea');
+  blacklistTextarea.rows = 3;
+  blacklistTextarea.value = (settings.federation?.blacklist ?? []).join('\n');
+
+  federationSection.append(
+    federationTitle, federationHint,
+    autoLearnLabel, autoLearnHint,
+    hopLimitLabel, hopLimitHint, hopTimeoutLabel, tryLimitLabel, tryLimitHint,
+    peersTitle, peersHint, peersList, addPeerRow,
+    pendingTitle, pendingList,
+    blacklistLabel, blacklistHint, blacklistTextarea
+  );
+
   // ---- Save ----
   const saveBtn = document.createElement('button');
   saveBtn.type = 'submit';
@@ -480,7 +777,7 @@ export async function mount(container, { identity, services, apps }) {
   status.className = 'qu-relay-admin-status';
   status.hidden = true;
 
-  form.append(generalSection, appsSection, channelsSection, chatSection, linkPreviewsSection, ...orderSections.map((o) => o.section), flagTypesSection, saveBtn, status);
+  form.append(generalSection, appsSection, channelsSection, chatSection, linkPreviewsSection, ...orderSections.map((o) => o.section), flagTypesSection, federationSection, saveBtn, status);
 
   // Chrome Inversion (`apps/shell/src/chrome.js`) - none of
   // `navigation`/`views`/`primaryAction`/`settings` fit a single settings
@@ -514,6 +811,15 @@ export async function mount(container, { identity, services, apps }) {
         // doesn't show is simply never in the patch (nothing to preserve -
         // this UI is currently the only writer of extensionOrder at all).
         extensionOrder: Object.fromEntries(orderSections.map((o) => [o.point, o.getOrder()])),
+        federation: {
+          autoLearn: autoLearnInput.checked,
+          hopLimit: Math.max(0, Number(hopLimitInput.value) || 0),
+          hopTimeoutMs: Math.max(100, Number(hopTimeoutInput.value) || 3000),
+          tryLimit: Math.max(1, Number(tryLimitInput.value) || 10),
+          peers: federationPeers,
+          pending: federationPending,
+          blacklist: blacklistTextarea.value.split('\n').map((s) => s.trim()).filter(Boolean),
+        },
       };
       const mainKey = await identity.getMainKey();
       const signature = await QuCrypto.sign(new TextEncoder().encode(JSON.stringify(patch)), mainKey.privateKeyPkcs8);
