@@ -1,0 +1,11 @@
+{
+  "name": "data-manager",
+  "version": "1.0.0",
+  "kind": "app",
+  "main": "./index.js",
+  "clientMain": "./dist/client.js",
+  "label": "Data Manager",
+  "icon": "🗂️",
+  "navOrder": 95,
+  "requires": []
+}
