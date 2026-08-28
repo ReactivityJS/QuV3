@@ -34,7 +34,45 @@
  * exactly when a keyboard is very likely showing), so a check against them
  * can conclude "there's room below" while the keyboard is actually
  * covering that space. `visualViewport` tracks the REAL visible area.
+ *
+ * HORIZONTAL CLAMP BOUNDS: the raw browser viewport width is too generous
+ * a bound once a persistent desktop sidebar is on screen
+ * (`packages/ui/src/app-template.js`'s `.qu-apptpl-sidebar`, a FLEX
+ * SIBLING of the content column, `.qu-apptpl-content`) - confirmed live as
+ * a message's context menu opening UNDER/BEHIND the sidebar, because
+ * "room to the left" was measured against the whole window, which very
+ * much includes the sidebar's own screen area even though it isn't part
+ * of the scrollable content column the menu's trigger actually lives in.
+ * `nearestScrollableAncestor()` below walks up from the trigger to find
+ * that column (chat's/forum's own `overflow-y: auto` message list,
+ * `.qu-chat-messages-scroll`/`.qu-forum-messages-scroll` - a flex sibling
+ * of the sidebar, so its OWN bounding rect already excludes the sidebar's
+ * width) and clamps against THAT instead, whenever one exists. Falls back
+ * to the full viewport - today's original behavior, unchanged - for any
+ * trigger with no such ancestor (e.g. the composer's own emoji button,
+ * which sits outside the scrollable message list entirely).
  */
+
+/**
+ * @param {HTMLElement} el
+ * @returns {HTMLElement|null} The nearest ancestor styled `overflow-y:
+ *   auto` or `scroll`, or `null` if none exists (the caller then falls
+ *   back to the full viewport, its original bound) - see this file's own
+ *   top doc comment's "HORIZONTAL CLAMP BOUNDS" section. Deliberately
+ *   never `document.documentElement` itself as that fallback value - its
+ *   own `getBoundingClientRect()` doesn't reliably track the viewport
+ *   (zeroed out entirely absent real layout, e.g. this package's own test
+ *   DOM) the way `window.innerWidth` already does.
+ */
+function nearestScrollableAncestor(el) {
+  let node = el.parentElement;
+  while (node) {
+    const overflowY = window.getComputedStyle(node).overflowY;
+    if (overflowY === 'auto' || overflowY === 'scroll') return node;
+    node = node.parentElement;
+  }
+  return null;
+}
 
 function viewportSize() {
   const vv = typeof window !== 'undefined' ? window.visualViewport : null;
@@ -67,8 +105,18 @@ export function flipUpIfNeeded(panel, trigger, flipClass, { margin = 8 } = {}) {
   // Flipping (if it happened above) only ever changes the panel's TOP/
   // BOTTOM anchor via the flip class, never its horizontal position - the
   // rect measured before flipping is still accurate for this clamp.
-  const overflowRight = panelRect.right - (viewportWidth - margin);
-  const overflowLeft = margin - panelRect.left;
+  //
+  // Bounded by the nearest scrollable ancestor when one exists (a sidebar-
+  // adjacent content column), not the raw browser viewport - see this
+  // file's own top doc comment's "HORIZONTAL CLAMP BOUNDS" section. No
+  // such ancestor -> the exact original {0, viewportWidth} bound (the
+  // max/min below is then a no-op either way).
+  const boundsEl = nearestScrollableAncestor(trigger);
+  const boundsRect = boundsEl ? boundsEl.getBoundingClientRect() : { left: 0, right: viewportWidth };
+  const leftBound = Math.max(margin, boundsRect.left);
+  const rightBound = Math.min(viewportWidth - margin, boundsRect.right);
+  const overflowRight = panelRect.right - rightBound;
+  const overflowLeft = leftBound - panelRect.left;
   if (overflowRight > 0) {
     panel.style.transform = `translateX(-${overflowRight}px)`;
   } else if (overflowLeft > 0) {
