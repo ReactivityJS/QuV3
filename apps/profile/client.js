@@ -687,8 +687,14 @@ export function mount(container, { qu, identity, services, segments = [], extens
         // is undefined in a context that doesn't provide one (e.g. this
         // app's own unit tests calling mount() directly with a partial ctx),
         // same "optional dependency, no crash" treatment every other
-        // best-effort ctx field in this codebase already gets.
-        if (extensionPoints) await extensionPoints.renderSlot('userSettings.contributions', extRoot, { myPub, services });
+        // best-effort ctx field in this codebase already gets. `identity` is
+        // included alongside `myPub`/`services` (this file's own `mount()`
+        // ctx field, unchanged otherwise) so a contributor that needs to
+        // sign something (e.g. `apps/relay-federation`'s "suggest a relay"
+        // field, which POSTs a signed payload to the relay) doesn't have to
+        // re-derive it - this app never reads or depends on what a
+        // contributor does with it.
+        if (extensionPoints) await extensionPoints.renderSlot('userSettings.contributions', extRoot, { myPub, services, identity });
         return;
       }
       if (isOwn) {

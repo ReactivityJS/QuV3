@@ -469,7 +469,7 @@ test('booting with the REAL repo apps/ directory also loads app-list/user-list/p
   try {
     const relay = await new QuRelay({ storeDir: join(base, 'store'), blobDir: join(base, 'blob'), appsDir: REPO_APPS_DIR, port: 0 }).boot();
     try {
-      for (const name of ['app-list', 'user-list', 'profile', 'forum', 'bookmarks', 'notifications', 'reactions', 'pins', 'relay-admin', 'chat', 'search', 'calendar', 'geochase', 'todo', 'phone']) assert.equal(relay.loader.isLoaded(name), true);
+      for (const name of ['app-list', 'user-list', 'profile', 'forum', 'bookmarks', 'notifications', 'reactions', 'pins', 'relay-admin', 'relay-federation', 'chat', 'search', 'calendar', 'geochase', 'todo', 'phone']) assert.equal(relay.loader.isLoaded(name), true);
 
       const res = await fetch(`http://localhost:${relay.port}/apps.json`);
       const catalog = await res.json();
@@ -500,7 +500,14 @@ test('booting with the REAL repo apps/ directory also loads app-list/user-list/p
       // (client.js's own top doc comment), which now carries both the
       // default Contacts view and the former user-list's own "all public
       // users" view, switched via chrome.set({views}).
-      assert.deepEqual(names, ['app-list', 'bookmarks', 'calendar', 'chat', 'forum', 'geochase', 'notifications', 'phone', 'pins', 'profile', 'reactions', 'relay-admin', 'search', 'todo', 'user-list']);
+      // apps/relay-federation is the newest addition: a client-facing,
+      // admin-toggleable "suggest a relay" UI (userSettings.contributions
+      // contribution + its own #/relay-federation/invite/<url> route - see
+      // its own client.js top doc comment) - hidden from the app list
+      // (relay-settings.js's own hiddenFromAppList default) since it has no
+      // reason to be browsed to directly, only reached via Settings or an
+      // invite link, same reasoning apps/relay-admin already has.
+      assert.deepEqual(names, ['app-list', 'bookmarks', 'calendar', 'chat', 'forum', 'geochase', 'notifications', 'phone', 'pins', 'profile', 'reactions', 'relay-admin', 'relay-federation', 'search', 'todo', 'user-list']);
       for (const app of catalog) assert.equal(app.clientMainUrl, `/apps/${app.name}/dist/client.js`);
     } finally {
       await relay.close();

@@ -1,0 +1,13 @@
+{
+  "name": "relay-federation",
+  "version": "1.0.0",
+  "kind": "app",
+  "main": "./index.js",
+  "clientMain": "./dist/client.js",
+  "label": "Relay Federation",
+  "icon": "🌐",
+  "requires": [],
+  "contributes": [
+    { "point": "userSettings.contributions", "export": "renderSettingsContribution", "kind": "ui" }
+  ]
+}
