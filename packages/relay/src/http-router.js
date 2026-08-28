@@ -1,3 +1,4 @@
+import { QuCrypto } from '@qu/core';
 import { createLogger } from '@qu/log';
 
 import { getSettings } from './relay-settings.js';
@@ -25,7 +26,7 @@ export class HttpRouter {
    *   fresh on every request via `loader.listManifests()`, so apps loaded
    *   partway through `boot()` (see `relay.js`) show up the moment they're
    *   actually loaded, not just after `boot()` fully completes.
-   * @param {{adminPubs: string[], appsDir: string, serveShell: boolean, shellDir: string, state: {transport: object|null, vapidKeys: {publicKey: string}|null}, iceServers?: Array<object>, getLinkPreviewImpl?: typeof getLinkPreview}} options -
+   * @param {{adminPubs: string[], appsDir: string, serveShell: boolean, shellDir: string, state: {transport: object|null, vapidKeys: {publicKey: string}|null, federationManager?: import('./federation-manager.js').FederationManager|null}, iceServers?: Array<object>, getLinkPreviewImpl?: typeof getLinkPreview}} options -
    *   `state` is a mutable, shared reference the caller keeps populating as
    *   the relay boots (`transport`/`vapidKeys` aren't known until partway
    *   through `boot()` - see `relay.js`) - read fresh on every request
@@ -97,7 +98,47 @@ export class HttpRouter {
       // ever render the button.
       if (req.url === '/config.json') {
         const settings = await getSettings(this.qu);
-        res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }).end(JSON.stringify({ adminPubs: this.adminPubs, relayPub: this.state.relayPub, settings, iceServers: this.iceServers }));
+        // `federationStatus` is LIVE connection state (connecting/connected/
+        // backoff/dead, handshake result) - unlike everything else here,
+        // this is never persisted in `settings` itself (see
+        // FederationManager.getStatus()'s own doc comment), so it has to be
+        // read fresh from the manager on every request, same "state isn't
+        // known until partway through boot()" reasoning `relayPub`/
+        // `vapidKeys` already have elsewhere in this class.
+        const federationStatus = this.state.federationManager?.getStatus() ?? [];
+        res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }).end(JSON.stringify({ adminPubs: this.adminPubs, relayPub: this.state.relayPub, settings, iceServers: this.iceServers, federationStatus }));
+        return;
+      }
+
+      // RELAY FEDERATION - "is this URL a genuine Qu relay?" probe (see
+      // `FederationManager.getRelayInfo()`/`probeRelayInfo()`). Deliberately
+      // unauthenticated, same reasoning as `/config.json` just above -
+      // `relayId` is already public, the signature only ever proves key
+      // possession, never trustworthiness (that decision happens entirely
+      // on the CALLING relay's side - blacklist/autoLearn/admin approval).
+      // 404s (not empty-200) when federation isn't wired up at all, so a
+      // prober can tell "no federation support" apart from "federation
+      // support but nothing to report" - there is no such empty state here,
+      // this route always has an answer once federation exists at all.
+      if (req.url === '/relay-info') {
+        if (!this.state.federationManager) {
+          res.writeHead(404, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }).end(JSON.stringify({ error: 'federation not enabled on this relay' }));
+          return;
+        }
+        const info = await this.state.federationManager.getRelayInfo();
+        res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }).end(JSON.stringify(info));
+        return;
+      }
+
+      // RELAY FEDERATION - the client-learned-peer flow (see
+      // `FederationManager.suggestPeer()`'s own doc comment). Signed by the
+      // reporting client's own identity (any logged-in actor, NOT gated by
+      // `adminPubs` like the `/admin/*` routes below - suggesting a peer is
+      // a much smaller privilege than administering this relay, and
+      // `autoLearn`/blacklist/admin-approval are the actual gates on what
+      // happens next).
+      if (req.url === '/federation/suggest' && req.method === 'POST') {
+        await this.#handleFederationSuggest(req, res);
         return;
       }
 
@@ -111,6 +152,10 @@ export class HttpRouter {
       }
       if (req.url === '/admin/data/import' && req.method === 'POST') {
         await this.adminHttp.handleDataImport(req, res);
+        return;
+      }
+      if (req.url === '/admin/federation/retry' && req.method === 'POST') {
+        await this.adminHttp.handleFederationRetry(req, res);
         return;
       }
 
@@ -174,4 +219,71 @@ export class HttpRouter {
       }
     }
   }
+
+  /**
+   * `POST /federation/suggest` - see this method's own call site for why
+   * this is signed-but-not-admin-gated. `{actorPub, url, signature}`,
+   * `signature` over `JSON.stringify({url})` - deliberately the SMALLEST
+   * possible signed payload (just the url, not a nested object shape that
+   * could accidentally admit ambiguity about what was actually signed),
+   * unlike `admin-http.js`'s own settings/query payloads which sign a
+   * larger object because there's more than one field to protect.
+   * @param {import('node:http').IncomingMessage} req @param {import('node:http').ServerResponse} res
+   */
+  async #handleFederationSuggest(req, res) {
+    if (!this.state.federationManager) {
+      res.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'federation not enabled on this relay' }));
+      return;
+    }
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch (err) {
+      res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: err.message }));
+      return;
+    }
+    const { actorPub, url, signature } = body ?? {};
+    if (typeof actorPub !== 'string' || typeof signature !== 'string' || typeof url !== 'string' || !url) {
+      res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'expected { actorPub, url, signature }' }));
+      return;
+    }
+    let verified = false;
+    try {
+      verified = await QuCrypto.verify(
+        new TextEncoder().encode(JSON.stringify({ url })),
+        QuCrypto.fromBase64Url(signature),
+        QuCrypto.fromBase64Url(actorPub)
+      );
+    } catch {
+      verified = false; // malformed base64/signature - same "treat exactly like did not verify" convention as admin-http.js's own #verifyAdmin()
+    }
+    if (!verified) {
+      res.writeHead(403, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'signature does not verify' }));
+      return;
+    }
+    try {
+      const result = await this.state.federationManager.suggestPeer(url, actorPub);
+      log.info(`federation peer suggestion from ~${actorPub.slice(0, 10)}…: ${url} -> ${result.status}`);
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(result));
+    } catch (err) {
+      res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: err.message }));
+    }
+  }
+}
+
+/**
+ * @param {import('node:http').IncomingMessage} req
+ * @param {number} [maxBytes=8KiB] - A `{actorPub, url, signature}` payload is tiny.
+ * @returns {Promise<object>} Parsed JSON body.
+ * @throws {Error} On a body over `maxBytes` or malformed JSON.
+ */
+async function readJsonBody(req, maxBytes = 8 * 1024) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > maxBytes) throw new Error('request body too large');
+    chunks.push(chunk);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }

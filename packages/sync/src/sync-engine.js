@@ -15,7 +15,7 @@ import { assertWriteAuthorized } from '@qu/engines';
  * accidentally leak or receive it. Any future local-only secret should live
  * under this same prefix to get this guarantee for free.
  */
-const LOCAL_ONLY_PREFIX = '/store/secure/';
+export const LOCAL_ONLY_PREFIX = '/store/secure/';
 
 /**
  * @param {object} quBit
@@ -127,6 +127,10 @@ export class SyncEngine {
   #reconnectCallbacks = []; // app-level onReconnect() listeners (see below) - separate from the transport's OWN reconnect hook, which this class already consumes internally to replay subscriptions
   #outbox; // see outbox.js - only ever set for a publishAllTo (client) SyncEngine
   #onPeerIdentified; // see constructor's own doc comment
+  #onLocalMiss; // see constructor's own doc comment - relay federation on-demand forwarding
+  #onRelayHello; // see constructor's own doc comment - relay federation handshake
+  #onRelayHelloAck; // see constructor's own doc comment - relay federation handshake
+  #recentBroadcasts = new Map(); // "path:ts" -> expiry ms - see #shouldSkipRebroadcast()
 
   /**
    * @param {import('@qu/core').QuStore} qu
@@ -165,13 +169,35 @@ export class SyncEngine {
    *   because the recipient is visibly still connected. Left unset (the
    *   default) for a peer with no reason to care who's connected, e.g. a
    *   plain client SyncEngine.
+   *   `onLocalMiss({kind, path, prefix, hops, excludePeerId})`: consulted by
+   *   `#handleRequest`/`#handlePrefixRequest` when a `request`/
+   *   `prefix-request` arrives for something this peer doesn't have locally
+   *   AND `hops !== 0` (see `#handleRequest`'s own doc comment for the full
+   *   `null`-vs-`0`-vs-number contract) - relay federation's on-demand query
+   *   routing. Left unset (the default) for any SyncEngine with nothing else
+   *   to forward to (a plain client, or a relay's own client-facing engine
+   *   before federation is wired in) - a miss is then simply answered
+   *   `null`/empty, identical to today's behavior. Returns the QuBit (for
+   *   `kind: 'request'`) or an entries array (for `kind: 'prefix-request'`),
+   *   or `null`/nothing found - this class has no opinion on HOW the hook
+   *   fills the miss (which peers it asks, whether it decides to ask
+   *   anyone at all), it only ever offers the hook a miss to fill.
+   *   `onRelayHello(message, peerId)` / `onRelayHelloAck(message, peerId)`:
+   *   dispatched verbatim for the two wire messages relay federation adds
+   *   (see `#handleIncoming`) - this class does not verify, sign, or reply
+   *   to either one itself; it has no relay identity/signing key of its own
+   *   to do so with. Left unset (the default) means these message types are
+   *   simply ignored, same as any other unknown `type` used to be.
    */
-  constructor(qu, transport, { publishAllTo = null, outbox = null, onPeerIdentified = null } = {}) {
+  constructor(qu, transport, { publishAllTo = null, outbox = null, onPeerIdentified = null, onLocalMiss = null, onRelayHello = null, onRelayHelloAck = null } = {}) {
     this.#qu = qu;
     this.#transport = transport;
     this.#publishAllTo = publishAllTo;
     this.#outbox = outbox;
     this.#onPeerIdentified = onPeerIdentified;
+    this.#onLocalMiss = onLocalMiss;
+    this.#onRelayHello = onRelayHello;
+    this.#onRelayHelloAck = onRelayHelloAck;
 
     this.#unsubscribeLocalWrites = this.#qu.onStorageChange(async ({ path, quBit, origin }) => {
       // `origin === 'sync'` means this notify came from QuStore.putSealed()
@@ -451,16 +477,30 @@ export class SyncEngine {
    * @param {string} path
    * @param {string|null} [targetPeerId]
    * @param {number} [timeoutMs=10000]
+   * @param {number|null} [hops=null] - RELAY FEDERATION ON-DEMAND ROUTING: if
+   *   the peer answering this request doesn't have `path` locally either, it
+   *   may forward the miss on to ITS OWN federation peers (see
+   *   `onLocalMiss` in the constructor's own doc comment) - see
+   *   `#handleRequest`'s own doc comment for the full `null` vs `0` vs a
+   *   positive number contract this deliberately three-valued parameter
+   *   uses to tell "a fresh, not-yet-forwarded request" apart from "already
+   *   N hops into a forwarding chain, N of them left". `null` (the default)
+   *   means "not part of any forwarding chain" - every existing caller of
+   *   `fetch()` is therefore completely unaffected by this parameter's
+   *   addition; passing `0` explicitly means "forward nothing further",
+   *   distinct from `null` even though both look like "don't forward" at a
+   *   glance - see `#handleRequest`'s own doc comment for why that
+   *   distinction has to exist at all.
    * @returns {Promise<object|null>} The QuBit, or null if the peer doesn't have it.
    */
-  async fetch(path, targetPeerId = null, timeoutMs = 10000) {
+  async fetch(path, targetPeerId = null, timeoutMs = 10000, hops = null) {
     const requestId = `${Date.now()}-${this.#requestCounter++}`;
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.#pendingRequests.delete(requestId);
         reject(new Error(`SyncEngine.fetch: timed out waiting for "${path}"`));
       }, timeoutMs);
-      const message = { type: 'request', requestId, path, requester: this.#transport.getPeerId() };
+      const message = { type: 'request', requestId, path, requester: this.#transport.getPeerId(), hops };
       // `message`/`targetPeerId` kept alongside the resolver so a reconnect
       // mid-flight (see the constructor's own onReconnect wiring and
       // #replayPendingRequests()) can re-send this EXACT request instead of
@@ -558,6 +598,9 @@ export class SyncEngine {
    * @param {string} prefix
    * @param {string|null} [targetPeerId]
    * @param {number} [timeoutMs=15000]
+   * @param {number|null} [hops=null] - See `fetch()`'s own identical
+   *   parameter and `#handleRequest`'s doc comment for the full `null` vs
+   *   `0` vs positive-number contract.
    * @returns {Promise<number>} How many QuBits actually passed validation
    *   (see `#validateIncomingWrite()`) AND were persisted - not merely how
    *   many entries the peer sent back. An entry that fails validation is
@@ -565,14 +608,14 @@ export class SyncEngine {
    *   anti-regression ts-guard, or one whose persistence itself failed, is
    *   not counted either.
    */
-  async fetchPrefix(prefix, targetPeerId = null, timeoutMs = 15000) {
+  async fetchPrefix(prefix, targetPeerId = null, timeoutMs = 15000, hops = null) {
     const requestId = `${Date.now()}-${this.#requestCounter++}`;
     const entries = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.#pendingPrefixRequests.delete(requestId);
         reject(new Error(`SyncEngine.fetchPrefix: timed out waiting for "${prefix}"`));
       }, timeoutMs);
-      const message = { type: 'prefix-request', requestId, prefix, requester: this.#transport.getPeerId() };
+      const message = { type: 'prefix-request', requestId, prefix, requester: this.#transport.getPeerId(), hops };
       // See fetch()'s own identical comment - #replayPendingRequests() needs
       // `message`/`targetPeerId` to re-send this exact request after a
       // mid-flight reconnect instead of losing it to its own timeout. This
@@ -615,6 +658,25 @@ export class SyncEngine {
     }
   }
 
+  /**
+   * @param {string} path @param {number} ts
+   * @returns {boolean} Whether a rebroadcast of this exact path+ts combo was
+   *   already sent within the last `REBROADCAST_DEDUP_TTL_MS` - see
+   *   `#handleSync`'s own call site for why this exists (mesh bandwidth,
+   *   never correctness). Cheap by design: `ts` is already the LWW
+   *   discriminant `#persistDirectly` uses and unique per genuine write, so
+   *   it doubles as a free content-identity proxy - no separate hashing.
+   */
+  #shouldSkipRebroadcast(path, ts) {
+    const key = `${path}:${ts}`;
+    const now = Date.now();
+    const expiry = this.#recentBroadcasts.get(key);
+    if (expiry && expiry > now) return true;
+    this.#recentBroadcasts.set(key, now + REBROADCAST_DEDUP_TTL_MS);
+    capCache(this.#recentBroadcasts, MAX_DEDUP_CACHE_ENTRIES);
+    return false;
+  }
+
   #handleIncoming(message, peerId) {
     switch (message.type) {
       case 'sync':
@@ -633,6 +695,14 @@ export class SyncEngine {
         return this.#addSubscriber(message.path, peerId);
       case 'unsubscribe':
         return this.#removeSubscriber(message.path, peerId);
+      // RELAY FEDERATION HANDSHAKE - see the constructor's own doc comment
+      // on `onRelayHello`/`onRelayHelloAck`. This class only ever dispatches
+      // these verbatim to an optional hook; it has no relay identity of its
+      // own to verify or sign anything with.
+      case 'relay-hello':
+        return this.#onRelayHello?.(message, peerId);
+      case 'relay-hello-ack':
+        return this.#onRelayHelloAck?.(message, peerId);
       default:
         console.warn(`[SyncEngine] unknown message type "${message.type}"`);
     }
@@ -716,7 +786,19 @@ export class SyncEngine {
     // second client, which defeats the entire point of a shared relay (see
     // the class doc comment's validation note for what this re-broadcast
     // does and does not additionally guarantee).
-    this.#broadcastToSubscribers(path, { type: 'sync', path, quBit }, originPeerId);
+    //
+    // REBROADCAST DEDUP (relay federation): `#broadcastToSubscribers` only
+    // ever excludes the IMMEDIATE sender, not the whole path a write already
+    // took - fine for a star (one relay, many clients, no cycles possible),
+    // but a small MESH of federated relays (A subscribed to B subscribed to
+    // C subscribed to A) can otherwise cycle the same write indefinitely.
+    // Correctness never depends on this (`#persistDirectly`'s ts-guard makes
+    // any redundant re-delivery a no-op), so this is purely a bandwidth
+    // mitigation: skip re-broadcasting the SAME path+ts combo more than once
+    // within a short window - see `#shouldSkipRebroadcast()`.
+    if (!this.#shouldSkipRebroadcast(path, quBit.ts)) {
+      this.#broadcastToSubscribers(path, { type: 'sync', path, quBit }, originPeerId);
+    }
     // Unconditional ack back to whoever sent this - see outbox.js. A peer
     // with no outbox configured (a relay's own SyncEngine, a plain Node
     // test peer, ...) just never registers a 'sync-ack' handler's worth of
@@ -724,7 +806,24 @@ export class SyncEngine {
     this.#transport.sendTo(originPeerId, { type: 'sync-ack', path, ts: quBit.ts });
   }
 
-  async #handleRequest({ requestId, path }, peerId) {
+  /**
+   * @param {{requestId: string, path: string, hops?: number|null}} message -
+   *   RELAY FEDERATION ON-DEMAND ROUTING. `hops` is deliberately
+   *   three-valued, not a plain boolean/count: `null` (what every existing
+   *   caller's request always carries, including a fresh browser client's -
+   *   see `fetch()`'s own default) means "not part of any forwarding chain
+   *   yet" - `onLocalMiss`'s own caller (`FederationManager`) is the one
+   *   that decides what budget a FRESH miss gets (its own configured
+   *   `hopLimit`), not this class. A NUMBER means "already forwarded this
+   *   many times, this many hops of budget left" - `onLocalMiss` is
+   *   responsible for decrementing it for the NEXT hop it forwards to (see
+   *   that hook's own contract), never this method. Explicit `0` means "a
+   *   forwarding chain that has now run out of budget" - forwarding is
+   *   skipped for `0` specifically, but NOT for `null`, which is why this
+   *   checks `hops !== 0` rather than `hops > 0`.
+   * @param {string} peerId
+   */
+  async #handleRequest({ requestId, path, hops = null }, peerId) {
     if (path.startsWith(LOCAL_ONLY_PREFIX)) {
       console.warn(`[SyncEngine] refusing to serve fetch() request for local-only path "${path}"`);
       this.#transport.sendTo(peerId, { type: 'response', requestId, path, quBit: null });
@@ -732,7 +831,15 @@ export class SyncEngine {
     }
     try {
       const { adapter, rel } = this.#qu.resolveMount(path);
-      const quBit = await adapter.get(rel);
+      let quBit = await adapter.get(rel);
+      // See this method's own doc comment for the `hops` contract. Never
+      // awaited past its own failure: a forwarding attempt that errors or
+      // times out degrades to the same "not found" response a local-only
+      // miss already returns today, not a new failure mode for the
+      // original requester.
+      if (!quBit && hops !== 0 && this.#onLocalMiss) {
+        quBit = await this.#onLocalMiss({ kind: 'request', path, hops, excludePeerId: peerId }).catch(() => null);
+      }
       this.#transport.sendTo(peerId, { type: 'response', requestId, path, quBit: quBit ?? null });
     } catch (err) {
       console.error(`[SyncEngine] error handling request for "${path}":`, err);
@@ -760,14 +867,23 @@ export class SyncEngine {
     pending.resolve(quBit);
   }
 
-  /** @param {{requestId: string, prefix: string}} message @param {string} peerId - see fetchPrefix() */
-  async #handlePrefixRequest({ requestId, prefix }, peerId) {
+  /** @param {{requestId: string, prefix: string, hops?: number|null}} message - `hops` see `#handleRequest`'s own doc comment for the full contract. @param {string} peerId - see fetchPrefix() */
+  async #handlePrefixRequest({ requestId, prefix, hops = null }, peerId) {
     try {
       const raw = await this.#qu.getAllUnderMount(prefix);
       // Same hard rail as #handleRequest()'s single-path fetch() - a peer
       // can never learn a local-only secret via prefix catch-up either,
       // regardless of how broad a prefix it asks for (e.g. the mount root).
-      const entries = raw.filter(({ path }) => !path.startsWith(LOCAL_ONLY_PREFIX));
+      let entries = raw.filter(({ path }) => !path.startsWith(LOCAL_ONLY_PREFIX));
+      // RELAY FEDERATION ON-DEMAND ROUTING - see #handleRequest()'s
+      // identical `hops` contract. Only attempted on a genuine LOCAL miss
+      // (nothing under this prefix at all) - a prefix this peer partially
+      // has is answered from what it has, never merged with a forwarded
+      // result.
+      if (entries.length === 0 && hops !== 0 && this.#onLocalMiss) {
+        const forwarded = await this.#onLocalMiss({ kind: 'prefix-request', prefix, hops, excludePeerId: peerId }).catch(() => null);
+        if (Array.isArray(forwarded)) entries = forwarded;
+      }
       this.#transport.sendTo(peerId, { type: 'prefix-response', requestId, entries });
     } catch (err) {
       console.error(`[SyncEngine] error handling prefix-request for "${prefix}":`, err);
@@ -885,6 +1001,9 @@ function capCache(map, maxEntries = MAX_ACK_CACHE_ENTRIES) {
     map.delete(map.keys().next().value);
   }
 }
+
+const REBROADCAST_DEDUP_TTL_MS = 60_000; // see #shouldSkipRebroadcast() - long enough to absorb a mesh's own immediate re-delivery storm, short enough that a genuinely repeated write (same path, coincidentally same ts) is never suppressed for long
+const MAX_DEDUP_CACHE_ENTRIES = 4000; // see #shouldSkipRebroadcast() - same defensive capping approach as MAX_ACK_CACHE_ENTRIES above
 
 const FETCH_PREFIX_CONCURRENCY = 8; // see fetchPrefix()'s own doc comment for why bounding (not unbounding) this is the right call
 

@@ -114,6 +114,56 @@ export const DEFAULT_RELAY_SETTINGS = Object.freeze({
   // `chrome.js`'s `applyMenuThreshold()` doc comment for why capping a live,
   // keyed-reconciliation list needs its own separate solution, not this one.
   chrome: Object.freeze({ menuThreshold: 8 }),
+  // RELAY FEDERATION - see `@qu/relay`'s `FederationManager` for the
+  // mechanism this config drives (relay-to-relay sync, built on the exact
+  // same `@qu/sync` protocol client<->relay sync already uses).
+  federation: Object.freeze({
+    // OFF by default - a client-suggested peer (see `http-router.js`'s
+    // `POST /federation/suggest`) lands in `pending` for an admin to
+    // approve, rather than being dialed automatically the instant a
+    // (possibly compromised) client reports a URL. An admin who wants
+    // automatic onboarding of client-discovered relays can opt in.
+    autoLearn: false,
+    // How many further relays a single on-demand forwarded query (a local
+    // cache miss - see `SyncEngine`'s `onLocalMiss` hook) may transit
+    // before giving up - bounds worst-case fan-out/latency in a mesh of
+    // federated relays, not a security boundary (this relay has no
+    // read/subscribe ACL to begin with - see `FederationManager.forward()`'s
+    // own doc comment).
+    hopLimit: 3,
+    // Per-hop timeout for that same on-demand forwarding - deliberately its
+    // own, shorter budget, independent of whatever timeout the ORIGINAL
+    // requester is itself waiting on (see `FederationManager.forward()`).
+    hopTimeoutMs: 3000,
+    // Consecutive failed (re)connect attempts to a peer before it's marked
+    // `dead` and this relay stops auto-retrying it (see
+    // `FederationManager#connectPeer()`) - the peer configuration itself is
+    // NEVER removed, only its live connection attempts stop; an admin can
+    // retry it manually.
+    tryLimit: 10,
+    // Every relay THIS relay dials out to, as an ordinary outbound
+    // WebSocket client of that peer's own public sync endpoint - see
+    // `FederationManager`'s own top doc comment. Each entry:
+    // `{url, relayId, label, prefixes, addedAt, addedBy, source}` -
+    // `relayId` starts unset and gets trust-on-first-use PINNED (persisted
+    // back here) the first time a `relay-hello-ack` verifies; `prefixes` is
+    // what this relay actively subscribes to + backfills from that peer
+    // (eager replication) - a peer with an empty `prefixes` list is still
+    // dialed/handshaked (so it can serve on-demand forwarded lookups - see
+    // `FederationManager.forward()`) but replicates nothing proactively.
+    peers: Object.freeze([]),
+    // Client-suggested peers (see `POST /federation/suggest`) awaiting
+    // admin approval, since `autoLearn` defaults to off - each entry:
+    // `{url, relayId, suggestedBy, suggestedAt}`. An admin approves one by
+    // moving it into `peers` (and removing it from here) via the admin UI's
+    // own federation section, or rejects it by removing it from here alone.
+    pending: Object.freeze([]),
+    // URLs and/or relayIds (either form - see `FederationManager`'s own
+    // `#isBlacklisted()`) this relay will never dial out to, accept a
+    // `relay-hello` from, or auto-learn from a client suggestion, even if
+    // `autoLearn` is on. Checked before `autoLearn` ever applies.
+    blacklist: Object.freeze([]),
+  }),
 });
 
 /**
@@ -133,6 +183,7 @@ export async function getSettings(qu) {
     extensionOrder: { ...DEFAULT_RELAY_SETTINGS.extensionOrder, ...val.extensionOrder },
     linkPreviews: { ...DEFAULT_RELAY_SETTINGS.linkPreviews, ...val.linkPreviews },
     chrome: { ...DEFAULT_RELAY_SETTINGS.chrome, ...val.chrome },
+    federation: { ...DEFAULT_RELAY_SETTINGS.federation, ...val.federation },
   };
 }
 
