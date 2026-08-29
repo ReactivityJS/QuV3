@@ -247,6 +247,14 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
   // own "defense in depth" use of it) - a no-op when sync never connected,
   // never a throw.
   const subscribe = (prefix) => sync?.subscribe(prefix);
+  // TELEMETRY - a getter, not the raw `sync`/`transport` themselves (neither
+  // is otherwise ever threaded into a mounted app's `ctx` - apps only ever
+  // get the narrow `subscribe`/`syncFetch` closures above), so `apps/debug`'s
+  // header badge and settings contribution can read live byte/rate counters
+  // without this file handing out its own SyncEngine reference wholesale.
+  // All-zero when sync never connected, same "no-op, never a throw" shape
+  // every other sync-derived closure here already has.
+  const syncStats = { getStats: () => sync?.getTransportStats() ?? { bytesIn: 0, bytesOut: 0, rateIn: 0, rateOut: 0 } };
 
   const services = createClientServices(qu, identity, { syncFetch: fetchOne, getGeneration: () => sync?.getGeneration() ?? 0 });
 
@@ -331,7 +339,7 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
   } catch { /* offline/unreachable - header renders no shell.headerAction contributors, everything else still works */ }
   let stopHeader = null;
   try {
-    stopHeader = mountHeader(headerRoot, { qu, services, adminPubs, subscribe, syncFetch, apps: bootApps, pwa });
+    stopHeader = mountHeader(headerRoot, { qu, services, adminPubs, subscribe, syncFetch, apps: bootApps, pwa, syncStats });
   } catch (err) {
     log.warn('shell header unavailable in this environment:', err.message);
   }
@@ -458,7 +466,7 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
     // placeholder rather than throwing on `mod.mount is not a function`.
     if (typeof mod.mount !== 'function') { renderPlaceholder(t('appNotFound')); return; }
     const extensionPoints = new ExtensionPointHost(apps, { extensionOrder });
-    const stopFn = (await mod.mount(chrome.contentSlot, { qu, identity, services, apps, segments, subscribe, syncFetch, extensionPoints, iceServers, goBack, chrome: chromeHandle })) ?? null;
+    const stopFn = (await mod.mount(chrome.contentSlot, { qu, identity, services, apps, segments, subscribe, syncFetch, extensionPoints, iceServers, goBack, chrome: chromeHandle, syncStats })) ?? null;
     if (stopped || token !== navToken) {
       // A newer navigation already won control of `chrome.contentSlot`
       // while this mount() call was itself in flight - never leave this one

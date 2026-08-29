@@ -112,4 +112,24 @@ export class FederationTransport extends Transport {
     for (const transport of this.#peers.values()) transport.close();
     this.#peers.clear();
   }
+
+  /**
+   * TELEMETRY - each per-peer entry here is a genuine `WebSocketClientTransport`
+   * (see `addPeer()`), which already tracks its OWN byte/rate counters (see
+   * that class's `getBytesIn()`/`getCurrentRateIn()` doc comments) - this
+   * just sums them across every currently-configured federation peer, so
+   * `@qu/relay`'s `traffic-stats.js` has one number for "outbound federation
+   * traffic" instead of needing to enumerate peers itself.
+   * @returns {{bytesIn: number, bytesOut: number, rateIn: number, rateOut: number}}
+   */
+  getAggregateStats() {
+    const stats = { bytesIn: 0, bytesOut: 0, rateIn: 0, rateOut: 0 };
+    for (const transport of this.#peers.values()) {
+      stats.bytesIn += transport.getBytesIn();
+      stats.bytesOut += transport.getBytesOut();
+      stats.rateIn += transport.getCurrentRateIn();
+      stats.rateOut += transport.getCurrentRateOut();
+    }
+    return stats;
+  }
 }

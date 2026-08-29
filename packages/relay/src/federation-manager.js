@@ -62,6 +62,7 @@ export class FederationManager {
   #hopTimeoutMs = 3000;
   #tryLimit = 10;
   #maxReconnectDelayMs = 30_000;
+  #inFlightForwards = new Map(); // "kind:path" -> Promise<result> - see forward()'s own in-flight dedup
 
   /**
    * @param {import('@qu/core').QuStore} qu
@@ -403,14 +404,46 @@ export class FederationManager {
     const budget = hops == null ? this.#hopLimit : hops;
     if (budget <= 0) return null;
 
+    // IN-FLIGHT DEDUP: a burst of near-simultaneous requests for the SAME
+    // path/prefix (e.g. several clients hitting a genuine cache miss at
+    // once, or a mesh where the same miss reaches this relay via more than
+    // one route within the hop budget) would otherwise each independently
+    // fan out to every candidate peer - real, unbounded duplication `hops`
+    // alone doesn't prevent (`hops` only bounds DEPTH, not how many
+    // concurrent forwards happen at this relay for the same thing). An
+    // already-running forward for this exact key is reused instead of
+    // duplicated; the map entry clears the moment it settles, so a LATER,
+    // genuinely new request (once the in-flight one is done) always starts
+    // fresh - this is concurrency dedup, not a TTL cache. Two concurrent
+    // callers with slightly different `excludePeerId`/`hops` may share the
+    // first caller's exact candidate set/budget - an acceptable, harmless
+    // trade-off for what this exists to prevent (mesh fan-out multiplication).
+    const dedupKey = `${kind}:${kind === 'request' ? path : prefix}`;
+    const existing = this.#inFlightForwards.get(dedupKey);
+    if (existing) return existing;
+
+    const promise = this.#doForward({ kind, path, prefix, budget, excludePeerId }).finally(() => {
+      this.#inFlightForwards.delete(dedupKey);
+    });
+    this.#inFlightForwards.set(dedupKey, promise);
+    return promise;
+  }
+
+  /** @param {{kind: 'request'|'prefix-request', path?: string, prefix?: string, budget: number, excludePeerId: string}} req - see forward()'s own doc comment; `budget` is already resolved (never `null` here). */
+  async #doForward({ kind, path, prefix, budget, excludePeerId }) {
     const candidates = this.#federationTransport.peerIds().filter((peerId) => peerId !== excludePeerId && this.#handshaked.has(peerId));
     if (candidates.length === 0) return null;
 
     if (kind === 'request') {
-      const results = await Promise.all(
-        candidates.map((peerId) => this.#federationSync.fetch(path, peerId, this.#hopTimeoutMs, budget - 1).catch(() => null))
-      );
-      return results.find((quBit) => quBit != null) ?? null;
+      // RACE, NOT "WAIT FOR ALL": the first non-null answer wins immediately
+      // instead of this call sitting for up to `hopTimeoutMs` behind
+      // whichever candidate is slowest/unreachable, even after a fast peer
+      // already answered - `firstNonNull()` still lets every candidate's own
+      // `fetch()` run to completion in the background (never cancelled,
+      // harmless - `#persistDirectly`'s ts-guard makes a late answer for the
+      // same path a no-op), only the RESPONSE to this caller no longer waits
+      // on it.
+      return firstNonNull(candidates.map((peerId) => this.#federationSync.fetch(path, peerId, this.#hopTimeoutMs, budget - 1).catch(() => null)));
     }
 
     // 'prefix-request': fetchPrefix() persists matches straight into the
@@ -419,14 +452,15 @@ export class FederationManager {
     // SyncEngine instances over ONE shared `qu` - see relay.js), and
     // returns a merged COUNT, not the raw entries (see fetchPrefix()'s own
     // doc comment) - so answering is "pull into local storage, then
-    // re-read locally", not relaying entries hop-by-hop. Re-applies the
-    // SAME LOCAL_ONLY_PREFIX filter #handlePrefixRequest's own local read
-    // already applies - required here too, since this result REPLACES that
-    // filtered read rather than merging with it (see `#handlePrefixRequest`'s
-    // own call site).
-    await Promise.all(
-      candidates.map((peerId) => this.#federationSync.fetchPrefix(prefix, peerId, this.#hopTimeoutMs, budget - 1).catch(() => 0))
-    );
+    // re-read locally", not relaying entries hop-by-hop. Races to the first
+    // candidate that actually merged something (same reasoning as the
+    // `request` branch above - other candidates still run to completion in
+    // the background, they just don't block this response), then re-reads
+    // once. Re-applies the SAME LOCAL_ONLY_PREFIX filter
+    // #handlePrefixRequest's own local read already applies - required here
+    // too, since this result REPLACES that filtered read rather than
+    // merging with it (see `#handlePrefixRequest`'s own call site).
+    await firstPositive(candidates.map((peerId) => this.#federationSync.fetchPrefix(prefix, peerId, this.#hopTimeoutMs, budget - 1).catch(() => 0)));
     const raw = await this.#qu.getAllUnderMount(prefix);
     const entries = raw.filter(({ path: p }) => !p.startsWith(LOCAL_ONLY_PREFIX));
     return entries.length > 0 ? entries : null;
@@ -515,4 +549,62 @@ export class FederationManager {
   close() {
     this.#federationTransport.closeAll();
   }
+}
+
+/**
+ * Resolves as soon as ANY promise in `promises` yields a non-null value, or
+ * `null` once every one of them has settled without ever doing so -
+ * `Promise.all(...).find(...)`'s race-losing counterpart (see `#doForward()`'s
+ * own `kind: 'request'` branch for why this matters: a fast peer's answer
+ * must not sit behind a slow/unreachable one). Every input promise is
+ * expected to already be catch-guarded (never rejects) - true for every
+ * caller in this file, which always wraps a `fetch()`/`fetchPrefix()` call
+ * in its own `.catch(() => ...)` before this ever sees it.
+ * @param {Array<Promise<*>>} promises
+ * @returns {Promise<*|null>}
+ */
+function firstNonNull(promises) {
+  return new Promise((resolve) => {
+    let pending = promises.length;
+    if (pending === 0) {
+      resolve(null);
+      return;
+    }
+    for (const p of promises) {
+      p.then((value) => {
+        if (value != null) {
+          resolve(value);
+          return;
+        }
+        if (--pending === 0) resolve(null);
+      });
+    }
+  });
+}
+
+/**
+ * Same shape as `firstNonNull()`, for `fetchPrefix()`'s own numeric
+ * merged-count return value (see `#doForward()`'s `prefix-request` branch) -
+ * resolves as soon as any promise yields a count `> 0`, or `0` once every
+ * one of them has settled at `0`.
+ * @param {Array<Promise<number>>} promises
+ * @returns {Promise<number>}
+ */
+function firstPositive(promises) {
+  return new Promise((resolve) => {
+    let pending = promises.length;
+    if (pending === 0) {
+      resolve(0);
+      return;
+    }
+    for (const p of promises) {
+      p.then((count) => {
+        if (count > 0) {
+          resolve(count);
+          return;
+        }
+        if (--pending === 0) resolve(0);
+      });
+    }
+  });
 }
