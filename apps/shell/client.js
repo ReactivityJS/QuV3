@@ -258,6 +258,19 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
 
   const services = createClientServices(qu, identity, { syncFetch: fetchOne, getGeneration: () => sync?.getGeneration() ?? 0 });
 
+  // PRESENCE - ONE heartbeat for the whole session, started here (not by
+  // apps/chat's own room-view mount anymore - see PresenceService's own top
+  // doc comment on why presence is now user-centric, not room-centric).
+  // Runs unconditionally, independent of which app (if any) happens to be
+  // mounted or how many chat rooms are open - stopped (publishing 'offline'
+  // once, best-effort) alongside everything else this function's own
+  // returned cleanup already tears down below. A real browser tab close is
+  // still an ungraceful disconnect that skips this (same as it always did
+  // for the old per-room heartbeat) - readers fall back to
+  // `PresenceService.getUserPresence()`'s own staleness-based `online`
+  // computation either way.
+  const stopHeartbeat = services.presence.startHeartbeat();
+
   // Mirrors @qu/relay's own #bootInner() - a published profile is what
   // makes this identity's X25519 key resolvable by anyone else.
   const ownPub = await services.actors.whoAmI();
@@ -487,6 +500,7 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
     stopMountedApp?.();
     stopHeader?.();
     stopNotificationPopups?.();
+    stopHeartbeat?.().catch(() => {});
     chrome.stop();
     transport?.close();
   };

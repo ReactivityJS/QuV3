@@ -241,7 +241,8 @@ function here is a pure string-builder — no I/O. The Entity-API surface:
 | `threadReadMarkerPath(spaceId, threadId, actorPub)` | One actor's private last-read marker for a thread. |
 | `threadReactionPath`/`threadReactionsParentPath(spaceId, threadId, messageId[, actorPub])` | One message's reactions. |
 | `threadPinPath`/`threadPinsParentPath(spaceId, threadId[, messageId])` | A thread's pinned messages. |
-| `threadPresencePath(spaceId, threadId, actorPub)` | Presence heartbeat. |
+| `presencePath(actorPub)` | One actor's single, GLOBAL presence QuBit — see `PresenceService`. |
+| `presenceSettingsPath(actorPub)` | That actor's own private visibility preference (`'public'`\|`'contacts'`\|`'off'`). |
 | `threadReadReceiptPath(spaceId, threadId, actorPub)` | Read receipts (distinct from the private read *marker* above — a receipt is public, "X has seen up to ts Y"). |
 | `directoryEntryPath`/`directoryEntriesParentPath(actorPub)` | The public directory (`DirectoryService`). |
 | `notificationPrefsPath(actorPub)` | `NotificationPrefsService`'s public, signed prefs document. |
@@ -454,11 +455,20 @@ Service), `getReactions(spaceId, threadId, messageId)` → `Record<emoji, actorP
 
 ### `PresenceService`
 
-`new PresenceService(qu, identityEngine)`. `setPresence(spaceId, threadId, status, { asSpaceId } = {})`,
-`getPresence(spaceId, threadId, memberPubs, { staleAfterMs = 15_000 } = {})`,
-`startHeartbeat(spaceId, threadId, { intervalMs = 5_000, asSpaceId } = {})` (returns
-a stop function), `publishReadReceipt(spaceId, threadId, uptoTs, { asSpaceId } = {})`,
-`getReadReceipts(spaceId, threadId, memberPubs)`.
+`new PresenceService(qu, identityEngine, contactsService?, syncFetch?)`. Presence
+is GLOBAL and user-centric (one QuBit per actor, not one per room —
+`startHeartbeat()` is meant to run once per session, e.g. `apps/shell/client.js`'s
+own boot, not per open chat room): `setUserPresence(status)`,
+`getUserPresence(actorPub, { staleAfterMs = 15_000 } = {})`,
+`getUserPresences(actorPubs, { staleAfterMs } = {})` (batched), `startHeartbeat({
+intervalMs = 5_000 } = {})` (returns a stop function). Visibility is a private,
+per-identity preference: `getVisibility()`/`setVisibility(visibility)` where
+`visibility` is `'public'` (default, unencrypted/signed), `'contacts'`
+(encrypted for this identity's current `ContactsService.listContacts()`,
+requires `contactsService`), or `'off'` (`setUserPresence()` becomes a no-op).
+Read receipts stay thread-scoped, unchanged: `publishReadReceipt(spaceId,
+threadId, uptoTs, { asSpaceId } = {})`, `getReadReceipts(spaceId, threadId,
+memberPubs)`.
 
 ### `NotificationPrefsService`
 

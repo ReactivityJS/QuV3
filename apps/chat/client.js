@@ -95,10 +95,14 @@
  * other members - what powers the "read" tick on a SENDER's own messages)
  * is published whenever this identity views a room's newest message;
  * `MessageService.markRead()` (PRIVATE) drives this identity's OWN unread
- * dot in the room list. Presence (online/last-seen) is polled on a fixed
- * interval while a room view is mounted - `PresenceService.getPresence()`
- * is explicitly a STALENESS check, not a push mechanism (see its own doc
- * comment), so polling is the intended usage, not a shortcut.
+ * dot in the room list. Presence (online/last-seen) is GLOBAL and
+ * user-centric now, not room-centric (see `PresenceService`'s own top doc
+ * comment) - the heartbeat that publishes it runs ONCE PER SESSION in
+ * `apps/shell/client.js`'s own boot, not here anymore. This file only ever
+ * READS it, polled on a fixed interval while a room view is mounted -
+ * `PresenceService.getUserPresences()` is explicitly a STALENESS check, not
+ * a push mechanism (see its own doc comment), so polling is the intended
+ * usage, not a shortcut.
  *
  * Routes: `#/chat` (room list), `#/chat/<peerActorPub>` (1:1 room),
  * `#/chat/g/<groupId>` (group room), `#/chat/new-group` (create-group form),
@@ -2064,7 +2068,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   async function renderPresence() {
     if (stopped || !roomReady) return;
     const otherMembers = memberPubs.filter((p) => p !== myPub);
-    const presence = await services.presence.getPresence(SPACE_ID, roomId, otherMembers);
+    const presence = await services.presence.getUserPresences(otherMembers);
     if (stopped) return;
     if (target.kind === 'dm') {
       const p = presence[target.peerPub];
@@ -2074,8 +2078,6 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
       headerStatusEl.textContent = t('membersOnline', { count: memberPubs.length, online });
     }
   }
-
-  let stopHeartbeat = null;
 
   (async () => {
     myPub = await services.actors.whoAmI();
@@ -2164,7 +2166,6 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     await refreshHeaderMuted();
     if (stopped) return;
 
-    stopHeartbeat = services.presence.startHeartbeat(SPACE_ID, roomId);
     renderPresence();
     presenceTimer = setInterval(renderPresence, 5_000);
 
@@ -2217,7 +2218,6 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     clearMessageWatchers();
     offMessages();
     offReadReceipts();
-    stopHeartbeat?.();
     if (presenceTimer) clearInterval(presenceTimer);
     composer?.stop(); // may never have been constructed - e.g. a group that turned out not to exist (roomReady never became true)
     resizeObserver?.disconnect();

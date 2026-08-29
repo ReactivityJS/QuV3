@@ -62,17 +62,18 @@ async function freshEnv(alias) {
   const access = new AccessService(qu, identity);
   const messages = new MessageService(qu, identity, list, access);
   const flags = new FlagService(qu, identity, list);
+  const contacts = new ContactsService(flags, identity);
   const services = {
     actors: new ActorService(identity),
     profile: new ProfileService(qu, identity),
     messages,
     reactions: new ReactionService(qu, identity, list),
     pins: new PinService(qu, identity, list),
-    presence: new PresenceService(qu, identity),
+    presence: new PresenceService(qu, identity, contacts),
     chat: new ChatService(messages, identity),
     assets: new AssetService(qu, new AssetEngine(qu), identity),
     directory: new DirectoryService(qu, identity, list),
-    contacts: new ContactsService(flags, identity),
+    contacts,
     notificationPrefs: new NotificationPrefsService(qu, identity),
   };
   const myPub = await services.actors.whoAmI();

@@ -275,23 +275,42 @@ export function threadPinsParentPath(spaceId, threadId) {
 }
 
 /**
- * One actor's current presence slot in a thread - `PresenceService`. Not a
- * `ListService` shape at all (neither derived nor curated): a thread already
- * has a fixed, externally-known member list (see `THREAD_PRESETS.chat`), so
- * "who's online" only ever means reading ONE already-known path per member,
- * never discovering who exists - see `PresenceService.getPresence()`.
- * @param {string|number} spaceId @param {string} threadId @param {string} actorPub @returns {string}
+ * One actor's SINGLE, GLOBAL presence slot - `PresenceService`. Redesigned
+ * away from a per-(space,thread) path (every room a member had open used to
+ * get its own presence QuBit, heartbeat-written independently - O(N) writes
+ * per open room instead of O(1)): presence is a fact about the ACTOR, not
+ * about any one room, so there is exactly one path per actor for the whole
+ * of Quniverse, mirroring `directoryEntryPath()`'s own "global, not
+ * per-space" shape. A room reads it for each of its already-known members
+ * (`PresenceService.getUserPresences()`) the same "no derived-list
+ * enumeration needed, just known paths" way the old per-thread version did.
+ * @param {string} actorPub @returns {string}
  */
-export function threadPresencePath(spaceId, threadId, actorPub) {
-  return `/store/${spaceId}/threads/${threadId}/presence/${actorPub}`;
+export function presencePath(actorPub) {
+  return `/store/presence/${actorPub}`;
+}
+
+/**
+ * This identity's own PRIVATE presence-visibility preference
+ * ('public'|'contacts'|'off' - see `PresenceService.setVisibility()`) - only
+ * the owner ever needs to read this (it governs how THEIR OWN future
+ * `presencePath()` writes get encrypted, if at all), so it lives under the
+ * same `private/` convention `threadReadMarkerPath()` uses, not at a path
+ * anyone else would ever look up.
+ * @param {string} actorPub @returns {string}
+ */
+export function presenceSettingsPath(actorPub) {
+  return `/store/actors/~${actorPub}/private/presence-settings`;
 }
 
 /**
  * One actor's PUBLIC read receipt for a thread ("I've read up to timestamp
  * X") - VISIBLE TO OTHER MEMBERS, unlike `threadReadMarkerPath()` above.
- * Same fixed-member-list reasoning as `threadPresencePath()` - no derived-list
- * enumeration needed, `PresenceService.getReadReceipts()` just reads one
- * path per already-known member.
+ * Same fixed-member-list reasoning `presencePath()`'s own `getUserPresences()`
+ * has - no derived-list enumeration needed, `PresenceService.getReadReceipts()`
+ * just reads one path per already-known member. Stays thread-scoped, unlike
+ * presence (see `presencePath()`'s own doc comment for why): "read up to X"
+ * is inherently a fact about one thread's own history.
  * @param {string|number} spaceId @param {string} threadId @param {string} actorPub @returns {string}
  */
 export function threadReadReceiptPath(spaceId, threadId, actorPub) {
@@ -481,7 +500,7 @@ export function webrtcPairKey(pubA, pubB) {
 /**
  * One pair's SDP offer, written by whichever side is the deterministic
  * initiator - see `webrtcPairKey()`. Lives under the Thread's own namespace
- * (a sibling of `meta`/`msgs`, same convention `threadPresencePath()` uses)
+ * (a sibling of `meta`/`msgs`, same convention `threadReadReceiptPath()` uses)
  * so it inherits the existing relay-backed sync stack's offline-tolerant
  * delivery (outbox replay, reconnect catch-up) for free - no new relay
  * message type needed. NOT covered by `AccessEngine` (its thread-path regex

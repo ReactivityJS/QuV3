@@ -67,6 +67,7 @@ export function createClientServices(qu, identity, { syncFetch = null, getGenera
   // now an Entity (see `ChannelService`'s own "QUNIVERSE V4" doc comment).
   new EntityEngine(qu);
   const messages = new MessageService(qu, identity, list, access, syncFetch, getGeneration);
+  const contacts = new ContactsService(flags, identity);
   return {
     // The raw, generic Service `contacts`/`favorites`/`bookmarks` below each
     // narrow to one fixed flagType/entityKind pair - exposed directly too
@@ -75,7 +76,7 @@ export function createClientServices(qu, identity, { syncFetch = null, getGenera
     // flag shape those three named facades don't cover, without inventing a
     // fourth single-purpose wrapper Service per new use.
     flags,
-    contacts: new ContactsService(flags, identity),
+    contacts,
     favorites: new FavoritesService(flags),
     profile: new ProfileService(qu, identity, syncFetch, getGeneration),
     directory: new DirectoryService(qu, identity, list),
@@ -113,11 +114,15 @@ export function createClientServices(qu, identity, { syncFetch = null, getGenera
     // `bookmarks` below already has.
     entities: new EntityService(qu, identity),
     commentable: new CommentableService(messages),
-    // apps/chat's room presence (online/offline/last-seen) + public read
-    // receipts - shares no state with `messages` (see PresenceService's own
-    // doc comment on why it isn't a ListService shape at all), first real
-    // client caller.
-    presence: new PresenceService(qu, identity),
+    // Global, user-centric presence (online/offline/last-seen, ONE signal
+    // per actor, not per room - see PresenceService's own doc comment) +
+    // apps/chat's public read receipts - shares no state with `messages`.
+    // `contacts` is this SAME instance constructed just above (needed for
+    // `'contacts'`-visibility publishing); `syncFetch` backfills a contact's
+    // or a presence-envelope sender's profile on a local miss, same role it
+    // already plays for `messages`/`list` above. First real client caller:
+    // `apps/shell/client.js`'s own session-lifetime `startHeartbeat()` call.
+    presence: new PresenceService(qu, identity, contacts, syncFetch),
     // apps/chat's 1:1-room-id-derivation + group-invite mechanism, on top
     // of this SAME `messages` instance (a chat room is just another
     // MessageService thread, see ChatService's own doc comment).
