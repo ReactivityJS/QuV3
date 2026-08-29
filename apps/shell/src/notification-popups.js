@@ -37,6 +37,21 @@
  * navigation, the same safe default `'accept'` uses - deliberately NOT
  * calling into `content.notificationAction` for unknown ids, since that
  * point is scoped to "signal without navigating", not a general click hook.
+ *
+ * FOREGROUND SUPPRESSION: a toast for a message about the exact
+ * conversation the user is ALREADY looking at is pure noise - confirmed
+ * live as "a chat message pops its own toast while its own room is open on
+ * screen". `check()` below skips `show()` when BOTH hold: the tab is
+ * actually visible (`document.visibilityState === 'visible'` - a
+ * backgrounded/minimized tab still gets the toast queued for whenever it's
+ * looked at again) AND the current hash route already IS that
+ * conversation - compared via `roomKeyOf()`, which strips a trailing
+ * `/m/<messageId>` permalink suffix (both a notification's own `url` and
+ * `window.location.hash` may carry one) so a permalink deep link and its
+ * own room compare equal. Never suppresses based on `url`-less
+ * notifications (nothing to compare against - shown as before), and never
+ * touches the in-app feed/badge (`apps/notifications`) or Web Push - purely
+ * this session's own live popup.
  */
 import { watchChildren } from '@qu/reactive';
 import { paths } from '@qu/services';
@@ -48,6 +63,21 @@ const DICT = {
   de: { open: 'Öffnen' },
 };
 const { t } = createI18n(DICT);
+
+/**
+ * Strips a trailing `/m/<messageId>` permalink suffix, if present, so a
+ * deep link to a specific message and its own room's plain URL compare
+ * equal (this file's own top doc comment's "FOREGROUND SUPPRESSION"
+ * section) - mirrors `apps/chat/client.js`'s/`apps/forum/client.js`'s own
+ * permalink route shape (`#/chat/<peer>/m/<id>`, `#/forum/.../t/<id>/m/<id>`)
+ * without this file needing to know either app's own routing scheme beyond
+ * that one shared convention.
+ * @param {string} hash
+ * @returns {string}
+ */
+function roomKeyOf(hash) {
+  return (hash || '').replace(/\/m\/[^/]+$/, '');
+}
 
 /**
  * @param {{action: string, title: string, url: string}} action - the stored,
@@ -101,6 +131,10 @@ export function mountNotificationPopups(container, { qu, identity, services, app
         if (m.ts <= sessionStartTs) continue;
         if (seenIds.has(m.id)) continue;
         seenIds.add(m.id);
+        // See this file's own top doc comment's "FOREGROUND SUPPRESSION"
+        // section - a message ABOUT the room already on screen, while the
+        // tab is actually visible, needs no popup.
+        if (m.url && document.visibilityState === 'visible' && roomKeyOf(window.location.hash) === roomKeyOf(m.url)) continue;
         const actions = Array.isArray(m.actions) && m.actions.length > 0
           ? m.actions.map((a) => toToastAction(a, { qu, identity, apps, extensionPoints, iceServers }))
           : m.url ? [{ label: t('open'), href: m.url }] : [];

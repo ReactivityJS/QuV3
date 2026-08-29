@@ -150,6 +150,44 @@ test('visibility "contacts" with no resolvable contacts skips the write entirely
   assert.equal(await qu.get(presencePath(myPub)), null);
 });
 
+test('publishTyping(true)/getTypingMembers() - a just-published typing flag is reported', async () => {
+  const { presence, identity } = await freshSetup();
+  const myPub = QuCrypto.toBase64Url((await identity.getMainKey()).publicKey);
+  await presence.publishTyping('board', 'general', true);
+
+  const typing = await presence.getTypingMembers('board', 'general', [myPub]);
+  assert.deepEqual(typing, [myPub]);
+});
+
+test('publishTyping(false) is a real transition - clears a previously-true typing flag', async () => {
+  const { presence, identity } = await freshSetup();
+  const myPub = QuCrypto.toBase64Url((await identity.getMainKey()).publicKey);
+  await presence.publishTyping('board', 'general', true);
+  await presence.publishTyping('board', 'general', false);
+
+  assert.deepEqual(await presence.getTypingMembers('board', 'general', [myPub]), []);
+});
+
+test('getTypingMembers() never reports a STALE record, even if the stored flag itself is still true', async () => {
+  const { qu, presence, identity } = await freshSetup();
+  const myPub = QuCrypto.toBase64Url((await identity.getMainKey()).publicKey);
+  const path = `/store/board/threads/general/typing/${myPub}`;
+  // putSealed() as the SOLE write (not a qu.put() first) - the adapter's own
+  // ts-guard (MemoryStoreAdapter.put()) only rejects a strictly-older
+  // REWRITE of an existing entry, never a first write to an empty path, so
+  // this is the one way to get an already-stale `ts` into the store at all
+  // (qu.put() itself always stamps `ts: Date.now()`, never an explicit
+  // value).
+  await qu.putSealed(path, { path, val: { typing: true }, ts: Date.now() - 60_000, pub: null, sig: null });
+
+  assert.deepEqual(await presence.getTypingMembers('board', 'general', [myPub], { staleAfterMs: 10_000 }), [], 'a stale record must never report as typing, regardless of the raw stored flag');
+});
+
+test('getTypingMembers() for a member who never published omits them', async () => {
+  const { presence } = await freshSetup();
+  assert.deepEqual(await presence.getTypingMembers('board', 'general', ['never-typed']), []);
+});
+
 test('publishReadReceipt()/getReadReceipts() round-trip - unchanged, still per-thread', async () => {
   const { presence, identity } = await freshSetup();
   const myPub = QuCrypto.toBase64Url((await identity.getMainKey()).publicKey);

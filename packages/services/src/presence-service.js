@@ -1,18 +1,18 @@
 import { QuCrypto } from '@qu/core';
-import { presencePath, presenceSettingsPath, threadReadReceiptPath } from './paths.js';
+import { presencePath, presenceSettingsPath, threadReadReceiptPath, threadTypingPath } from './paths.js';
 import { putPrivate, getPrivate } from './private-storage.js';
 import { isEncryptedEnvelope, decryptEnvelope } from './crypto-envelope.js';
 
 /**
  * PRESENCE SERVICE — one of four focused services `ThreadService` (QuV2's
  * 778-line, five-concern monolith) split into, per
- * docs/v3-technical-concept.md §4.3. Bundles presence (online/offline) AND
- * PUBLIC read receipts, deliberately, though the concept doc names only
- * `PresenceService` (four services for five concerns) - compare
- * `MessageService.markRead()`/`getLastReadAt()` - the PRIVATE counterpart to
- * `publishReadReceipt()`/`getReadReceipts()` below, which stayed with
- * `MessageService` instead because it's about THIS identity's own read
- * position, not a signal published for others.
+ * docs/v3-technical-concept.md §4.3. Bundles presence (online/offline),
+ * the typing indicator, AND PUBLIC read receipts, deliberately, though the
+ * concept doc names only `PresenceService` (four services for five
+ * concerns) - compare `MessageService.markRead()`/`getLastReadAt()` - the
+ * PRIVATE counterpart to `publishReadReceipt()`/`getReadReceipts()` below,
+ * which stayed with `MessageService` instead because it's about THIS
+ * identity's own read position, not a signal published for others.
  *
  * PRESENCE IS USER-CENTRIC, NOT ROOM-CENTRIC (redesigned from an earlier,
  * per-(space,thread) shape): one signed QuBit per actor, GLOBALLY, at
@@ -60,6 +60,14 @@ import { isEncryptedEnvelope, decryptEnvelope } from './crypto-envelope.js';
  * reader - a heartbeat is best-effort, low-stakes, broadcast-shaped data;
  * one perpetually-unresolvable contact should never be able to silently
  * block every OTHER contact from ever seeing this identity's presence.
+ *
+ * TYPING is its OWN dedicated per-thread path (`threadTypingPath()` -
+ * `publishTyping()`/`getTypingMembers()` below), NOT piggybacked on the
+ * global presence QuBit the way an earlier iteration of the room-scoped
+ * presence shape once did: "is typing" is inherently a fact about ONE
+ * thread ("typing here, right now"), which a global-per-actor path has no
+ * room context to express - see `getUserPresences()`'s own doc comment for
+ * why online/offline, by contrast, genuinely IS a global, actor-level fact.
  *
  * NOT a `ListService` shape at all (neither derived nor curated): presence
  * is always read for an already-known set of actor pubs (room members,
@@ -212,6 +220,47 @@ export class PresenceService {
       clearInterval(timer);
       await this.setUserPresence('offline').catch(() => {});
     };
+  }
+
+  // ===== typing indicator (own dedicated path, thread-scoped) =============
+
+  /**
+   * Publishes "I am/am not currently typing" in one thread -
+   * `apps/chat/client.js`'s composer, on every keystroke and on
+   * send/clear-draft (immediately, not waiting out its own idle timeout).
+   * A DEDICATED path (`threadTypingPath()`), not the global presence QuBit
+   * `setUserPresence()` writes to: "is typing" is inherently a fact about
+   * ONE thread, unlike online/offline, which has no room context in this
+   * redesign - see this class's own top doc comment.
+   * @param {string|number} spaceId @param {string} threadId @param {boolean} typing
+   * @param {{asSpaceId?: string|number}} [options]
+   */
+  async publishTyping(spaceId, threadId, typing, { asSpaceId = null } = {}) {
+    const signKey = asSpaceId ? await this.identity.getSpaceKey(asSpaceId) : await this.identity.getMainKey();
+    const path = threadTypingPath(spaceId, threadId, QuCrypto.toBase64Url(signKey.publicKey));
+    await this.qu.put(path, { typing }, { signWith: signKey.privateKeyPkcs8, writerPub: signKey.publicKey });
+  }
+
+  /**
+   * @param {string|number} spaceId @param {string} threadId
+   * @param {string[]} memberPubs - Same fixed-member-list reasoning as `getUserPresences()`.
+   * @param {{staleAfterMs?: number}} [options] - Default 10s: a bit more
+   *   than the composer's own 3s idle-timeout (`TYPING_IDLE_MS`,
+   *   `apps/chat/client.js`) plus network slack - guards against a client
+   *   that vanished mid-typing-burst without ever publishing `false`, same
+   *   staleness reasoning `getUserPresence()` already has for online/offline.
+   *   Uses the QuBit's own signed write `ts`, not a second timestamp field.
+   * @returns {Promise<string[]>} The subset of `memberPubs` currently
+   *   (non-stale) typing.
+   */
+  async getTypingMembers(spaceId, threadId, memberPubs, { staleAfterMs = 10_000 } = {}) {
+    const now = Date.now();
+    const typing = [];
+    await Promise.all(memberPubs.map(async (pub) => {
+      const quBit = await this.qu.get(threadTypingPath(spaceId, threadId, pub));
+      if (quBit?.val?.typing && now - quBit.ts < staleAfterMs) typing.push(pub);
+    }));
+    return typing;
   }
 
   // ===== public read receipts (unchanged - still per-thread) ==============

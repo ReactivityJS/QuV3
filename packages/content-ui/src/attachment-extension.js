@@ -67,6 +67,13 @@ export function attachmentExtension({ assetService, spaceId, readerPubs, asSpace
       const uploadEl = document.createElement('qu-asset-upload');
       uploadEl.setAttribute('space-id', String(spaceId));
       uploadEl.setAttribute('hide-picker', '');
+      // A message's own attachments[] was already multi-value (repeated
+      // sequential picks already worked, see the class doc comment above) -
+      // this just lets ONE trip through the native file dialog pick several
+      // at once too. See <qu-asset-upload>'s own "multiple" doc comment
+      // (@qu/ui's asset-components.js) for why this is opt-in there, not
+      // the default.
+      uploadEl.setAttribute('multiple', '');
       uploadEl.assetService = assetService;
       if (readerPubs) uploadEl.readerPubs = readerPubs;
       if (asSpaceId) uploadEl.asSpaceId = asSpaceId;

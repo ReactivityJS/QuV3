@@ -32,6 +32,23 @@ export function documentPath(spaceId, docId) {
 }
 
 /**
+ * The PARENT path `ListService.listDerived()` (equivalently
+ * `QuStore.getChildren()`) enumerates to find every Entity in a space - one
+ * level above `entityPath()`. Not added alongside `entityPath()` itself
+ * originally (see that function's own doc comment: "enumerating 'every
+ * entity of type X' is an app-level query concern for a later phase") -
+ * added now for `apps/cms`, the first real caller that needs to list every
+ * page in a space. Lists EVERY entity regardless of `_type` (there is no
+ * per-type index) - a caller wanting only one type filters the resolved
+ * `quBit.val._type` client-side, same "cheap for a modest collection"
+ * tradeoff every other derived-list consumer in this codebase already makes.
+ * @param {string|number} spaceId @returns {string}
+ */
+export function entitiesParentPath(spaceId) {
+  return `/store/${spaceId}/entities`;
+}
+
+/**
  * One Entity's own document path (Quniverse V4, see docs/v4-concept.md
  * §3.1/§3.3) - `@qu/engines`' `EntityEngine` stamps `_id`/`_created` and
  * requires `_type` on writes here, same convention `documentPath()` and
@@ -336,6 +353,21 @@ export function threadReadReceiptsParentPath(spaceId, threadId) {
 }
 
 /**
+ * One actor's "is currently typing" flag for a thread - `PresenceService.
+ * publishTyping()`/`getTypingMembers()`. Deliberately its OWN dedicated
+ * path, not piggybacked on `presencePath()`: unlike online/offline (a fact
+ * about the ACTOR, see `presencePath()`'s own doc comment), "is typing" is
+ * inherently a fact about ONE thread ("typing here right now") - a global
+ * per-actor presence QuBit has no room context to attach it to. Same
+ * "sibling of `meta`/`msgs`/`presence`/`reads`, no ACL special-case" shape
+ * `threadReadReceiptPath()` already uses.
+ * @param {string|number} spaceId @param {string} threadId @param {string} actorPub @returns {string}
+ */
+export function threadTypingPath(spaceId, threadId, actorPub) {
+  return `/store/${spaceId}/threads/${threadId}/typing/${actorPub}`;
+}
+
+/**
  * One identity's own signed entry in the opt-in public directory -
  * `DirectoryService`. A DERIVED list (docs/v3-technical-concept.md §4.2):
  * each entry already lives at its own path under
@@ -397,6 +429,25 @@ export const NOTIFICATIONS_SPACE_PREFIX = 'notifications-';
 
 /** The fixed (single, per-identity) thread id under `notificationsSpaceId()` - see that function's own doc comment. */
 export const NOTIFICATIONS_THREAD_ID = 'notifications';
+
+/**
+ * One identity's own personal `apps/cms` space - "the current user's own
+ * space" the CMS app builds "my pages" on, same per-actor-derived-space
+ * convention `notificationsSpaceId()` already established (a real, separate
+ * space - not just a path prefix under `/store/actors/~<pub>/...` - because a
+ * page is a normal, independently-addressable Entity with its own ACL, not a
+ * private per-actor document). Deliberately NOT the app's own fixed manifest
+ * `spaceId` (that one is reserved for the GLOBAL, admin-writable space - see
+ * `apps/cms/manifest.quapp`) - every user gets their own, so two users' pages
+ * never collide and one user's ACL never has to enumerate every other user.
+ * @param {string} actorPub @returns {string}
+ */
+export function cmsUserSpaceId(actorPub) {
+  return `${CMS_USER_SPACE_PREFIX}${actorPub}`;
+}
+
+/** The fixed prefix every `cmsUserSpaceId()` starts with - exported for the same "never re-type the literal" reason `NOTIFICATIONS_SPACE_PREFIX` is. */
+export const CMS_USER_SPACE_PREFIX = 'cms-';
 
 /**
  * One of an actor's registered Web Push subscriptions (one per device/

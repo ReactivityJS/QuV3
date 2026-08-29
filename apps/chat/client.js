@@ -102,7 +102,11 @@
  * READS it, polled on a fixed interval while a room view is mounted -
  * `PresenceService.getUserPresences()` is explicitly a STALENESS check, not
  * a push mechanism (see its own doc comment), so polling is the intended
- * usage, not a shortcut.
+ * usage, not a shortcut. The typing indicator ("typing…" / "X typing…" in
+ * the header status line) rides alongside this same poll but is genuinely
+ * thread-scoped, unlike presence - `PresenceService.publishTyping()`/
+ * `getTypingMembers()`, their own dedicated per-thread path (see that
+ * class's own doc comment).
  *
  * Routes: `#/chat` (room list), `#/chat/<peerActorPub>` (1:1 room),
  * `#/chat/g/<groupId>` (group room), `#/chat/new-group` (create-group form),
@@ -258,6 +262,8 @@ const DICT = {
     online: 'online',
     lastSeen: 'last seen {time}',
     membersOnline: '{count} members, {online} online',
+    isTyping: 'typing…',
+    typingNames: '{names} typing…',
     composerPlaceholder: 'Message',
     send: 'Send',
     edit: 'Edit', save: 'Save', cancel: 'Cancel',
@@ -292,7 +298,9 @@ const DICT = {
     you: 'You',
     read: 'Read', sent: 'Sent',
     showAliasIn1to1: 'Show sender name in 1:1 chats',
+    showOwnNameAboveMessage: 'Show your own name above your messages',
     ownColor: 'Your message color',
+    compactMode: 'Compact view (tighter message list)',
     saved: 'Saved.',
     searchResultIn: 'in "{room}"',
     permalink: 'Link to this message',
@@ -309,6 +317,8 @@ const DICT = {
     online: 'online',
     lastSeen: 'zuletzt online {time}',
     membersOnline: '{count} Mitglieder, {online} online',
+    isTyping: 'tippt gerade …',
+    typingNames: '{names} tippt gerade …',
     composerPlaceholder: 'Nachricht',
     send: 'Senden',
     edit: 'Bearbeiten', save: 'Speichern', cancel: 'Abbrechen',
@@ -343,7 +353,9 @@ const DICT = {
     you: 'Du',
     read: 'Gelesen', sent: 'Gesendet',
     showAliasIn1to1: 'Absendername in 1:1-Chats anzeigen',
+    showOwnNameAboveMessage: 'Eigenen Namen über eigenen Nachrichten anzeigen',
     ownColor: 'Deine Nachrichtenfarbe',
+    compactMode: 'Kompakte Ansicht (dichtere Nachrichtenliste)',
     saved: 'Gespeichert.',
     searchResultIn: 'in „{room}“',
     permalink: 'Link zu dieser Nachricht',
@@ -368,6 +380,17 @@ const STYLE = `
   .qu-chat-room-ts { font-size: 0.75em; opacity: 0.6; flex-shrink: 0; }
   .qu-chat-room-preview { font-size: 0.85em; opacity: 0.7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .qu-chat-room-unread { display: inline-block; width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--qu-color-accent, #5b5bd6); flex-shrink: 0; }
+  /* ROOM-LIST THUMBNAIL - a small cover image next to the text preview when
+     the last message is a photo, same "📷 Photo" + tiny thumbnail combo
+     Telegram/WhatsApp both show (previewLabelFor() already provides the
+     text half; this is the image half). <qu-asset>'s own img rule
+     (asset-components.js's STYLE) caps thumbnails at max-height: 20rem,
+     sized for a message bubble - overridden here down to a small fixed
+     square via a MORE SPECIFIC selector (two classes, beats that rule's one
+     regardless of <style> injection order). */
+  .qu-chat-room-thumb { flex-shrink: 0; width: 2.6rem; height: 2.6rem; }
+  .qu-chat-room-thumb .qu-asset-image-wrap { display: block; width: 100%; height: 100%; }
+  .qu-chat-room-thumb .qu-asset img { width: 100%; height: 100%; max-width: none; max-height: none; object-fit: cover; border-radius: var(--qu-radius-sm, 0.3rem); cursor: default; }
   /* MESSAGE REQUESTS - see ChatService's own "1:1 DISCOVERY" doc comment.
      A visually separate block ABOVE the normal room list (not just another
      room row) - accepting/declining is a decision, not navigation, so it
@@ -419,9 +442,27 @@ const STYLE = `
   .qu-chat-scroll-bottom-btn:hover { filter: brightness(1.08); }
   .qu-chat-scroll-bottom-btn[hidden] { display: none; }
   .qu-chat-scroll-bottom-btn-unseen { background: var(--qu-color-danger, #d64545); }
-  .qu-chat-messages { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; max-width: 40rem; }
-  .qu-chat-bubble-row { display: flex; }
+  .qu-chat-messages { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; max-width: 40rem; }
+  /* MESSAGE GROUPING (renderMessage()'s own "grouped" param/doc comment) -
+     margin-top on every row but the first, not "gap" on the list, so a
+     grouped row can override it down to a tighter value below - "gap"
+     applies uniformly to every row in a flex container, with no per-item
+     override. */
+  .qu-chat-bubble-row { display: flex; margin-top: 0.5rem; position: relative; touch-action: pan-y; }
+  .qu-chat-bubble-row:first-child { margin-top: 0; }
+  .qu-chat-bubble-row-grouped { margin-top: 0.15rem; }
   .qu-chat-bubble-row-mine { justify-content: flex-end; }
+  /* SWIPE-TO-REPLY (mobile) - attachSwipeToReply()'s own doc comment.
+     touch-action: pan-y (above) tells the browser's own gesture recognizer
+     this row's DEFAULT touch behavior is vertical scrolling, so it doesn't
+     fight our own preventDefault() once a horizontal drag actually commits.
+     -swipe-reset only applies the snap-back transition on release, never
+     while actively dragging (would read as laggy, one frame behind the
+     finger) - touchmove sets "transform" directly with no transition. The
+     ↩️ hint is a ::before, not a real element - nothing else needs to
+     account for an extra child node inside every message row. */
+  .qu-chat-bubble-row-swipe-reset { transition: transform 0.2s ease; }
+  .qu-chat-bubble-row-swipe-armed::before { content: '↩️'; position: absolute; left: 0.25rem; top: 50%; transform: translateY(-50%); opacity: 0.8; font-size: 1.1em; }
   /* PERMALINKS - see this file's own top doc comment. Landing on
      #/chat/.../m/<id> scrollIntoView()s this row (block: 'center', so the
      target isn't glued to the very top edge, right under the fixed header)
@@ -438,7 +479,17 @@ const STYLE = `
      flat-colored text blocks. */
   .qu-chat-bubble { max-width: 75%; padding: 0.45rem 0.7rem; border-radius: var(--qu-radius-lg, 0.9rem) var(--qu-radius-lg, 0.9rem) var(--qu-radius-lg, 0.9rem) var(--qu-radius-sm, 0.25rem); background: var(--qu-color-surface, #8882); box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
   .qu-chat-bubble-mine { background: color-mix(in srgb, var(--qu-color-accent, #5b5bd6) 25%, transparent); border-radius: var(--qu-radius-lg, 0.9rem) var(--qu-radius-lg, 0.9rem) var(--qu-radius-sm, 0.25rem) var(--qu-radius-lg, 0.9rem); }
-  .qu-chat-bubble-author { font-size: 0.78em; font-weight: 600; opacity: 0.8; margin-bottom: 0.1rem; }
+  /* COMPACT MODE - renderChatSettings()'s own "compactMode" checkbox
+     (per-identity, applied via renderMessages()'s own ".qu-chat-compact"
+     toggle on "roomView"). Tightens exactly the vertical rhythm a
+     high-volume chatter feels most - scroll padding, row spacing, bubble
+     padding - never touching layout structure/max-width, so it's a pure
+     density knob, not a different visual design. */
+  .qu-chat-compact .qu-chat-messages-scroll { padding: 0.5rem; }
+  .qu-chat-compact .qu-chat-bubble-row { margin-top: 0.25rem; }
+  .qu-chat-compact .qu-chat-bubble-row-grouped { margin-top: 0.05rem; }
+  .qu-chat-compact .qu-chat-bubble { padding: 0.3rem 0.55rem; }
+  .qu-chat-bubble-author { display: flex; align-items: center; gap: 0.3rem; font-size: 0.78em; font-weight: 600; opacity: 0.8; margin-bottom: 0.1rem; }
   .qu-chat-bubble-reply { display: block; border-left: 2px solid var(--qu-color-accent, #5b5bd6); padding-left: 0.4rem; margin-bottom: 0.25rem; font-size: 0.82em; opacity: 0.75; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; text-decoration: none; cursor: pointer; }
   .qu-chat-bubble-reply:hover { opacity: 1; text-decoration: underline; }
   .qu-chat-bubble-text { overflow-wrap: anywhere; white-space: pre-wrap; }
@@ -473,6 +524,16 @@ const STYLE = `
   .qu-chat-bubble-tick-popover { position: absolute; z-index: 20; bottom: 100%; right: 0; margin-bottom: 0.3rem; padding: 0.3rem 0.6rem; border-radius: var(--qu-radius-sm, 0.3rem); background: var(--qu-color-surface, #ffffff); border: 1px solid var(--qu-color-border, #8884); box-shadow: 0 0.3rem 0.8rem rgba(0,0,0,0.2); font-size: 0.85em; white-space: nowrap; }
   .qu-chat-bubble-tick-popover-flip-up { bottom: 100%; }
   .qu-chat-bubble-attachment { margin-top: 0.4rem; max-width: 16rem; }
+  /* ALBUM GRID - renderMessageText()'s own "several images in one message"
+     doc comment. Fixed 2 columns/square tiles (object-fit: cover, via a
+     more-specific selector than <qu-asset>'s own STYLE in
+     asset-components.js - same override technique .qu-chat-room-thumb
+     already uses) - a 3rd/5th odd tile just leaves the last grid cell
+     half-empty rather than needing a special-cased layout, an acceptable
+     trade for how rarely message photo counts land on an even number. */
+  .qu-chat-bubble-attachment-grid { margin-top: 0.4rem; max-width: 16rem; display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.15rem; border-radius: var(--qu-radius-md, 0.4rem); overflow: hidden; }
+  .qu-chat-bubble-attachment-grid .qu-asset-image-wrap { display: block; width: 100%; height: 100%; }
+  .qu-chat-bubble-attachment-grid .qu-asset img { width: 100%; height: 100%; max-width: none; max-height: none; aspect-ratio: 1; object-fit: cover; border-radius: 0; }
   .qu-chat-edit-row { display: flex; flex-direction: column; gap: 0.3rem; position: relative; }
   .qu-chat-edit-row textarea { font: inherit; padding: 0.35rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); resize: vertical; }
   .qu-chat-edit-row-buttons { display: flex; gap: 0.4rem; }
@@ -536,7 +597,7 @@ function chatSettingsPath(myPub) {
   return `/store/actors/~${myPub}/private/chat-settings`;
 }
 
-const DEFAULT_CHAT_SETTINGS = { showAliasIn1to1: false, ownColor: '' };
+const DEFAULT_CHAT_SETTINGS = { showAliasIn1to1: false, showOwnNameAboveMessage: false, ownColor: '', compactMode: false };
 
 async function getChatSettings(qu, identity, myPub) {
   const stored = await getPrivate(qu, identity, chatSettingsPath(myPub));
@@ -574,25 +635,42 @@ export async function renderChatSettings(container, { myPub, services }) {
   aliasInput.checked = current.showAliasIn1to1;
   aliasLabel.append(aliasInput, document.createTextNode(t('showAliasIn1to1')));
 
+  const showOwnNameLabel = document.createElement('label');
+  const showOwnNameInput = document.createElement('input');
+  showOwnNameInput.type = 'checkbox';
+  showOwnNameInput.checked = current.showOwnNameAboveMessage;
+  showOwnNameLabel.append(showOwnNameInput, document.createTextNode(t('showOwnNameAboveMessage')));
+
   const colorLabel = document.createElement('label');
   const colorInput = document.createElement('input');
   colorInput.type = 'color';
   colorInput.value = current.ownColor || '#5b5bd6';
   colorLabel.append(document.createTextNode(t('ownColor')), colorInput);
 
+  const compactLabel = document.createElement('label');
+  const compactInput = document.createElement('input');
+  compactInput.type = 'checkbox';
+  compactInput.checked = current.compactMode;
+  compactLabel.append(compactInput, document.createTextNode(t('compactMode')));
+
   const status = document.createElement('div');
   status.className = 'qu-chat-settings-status';
   status.hidden = true;
 
-  form.append(aliasLabel, colorLabel, status);
+  form.append(aliasLabel, showOwnNameLabel, colorLabel, compactLabel, status);
 
   async function save() {
-    await setChatSettings(qu, identity, myPub, { showAliasIn1to1: aliasInput.checked, ownColor: colorInput.value });
+    await setChatSettings(qu, identity, myPub, {
+      showAliasIn1to1: aliasInput.checked, showOwnNameAboveMessage: showOwnNameInput.checked,
+      ownColor: colorInput.value, compactMode: compactInput.checked,
+    });
     status.textContent = t('saved');
     status.hidden = false;
   }
   aliasInput.addEventListener('change', save);
+  showOwnNameInput.addEventListener('change', save);
   colorInput.addEventListener('change', save);
+  compactInput.addEventListener('change', save);
 
   container.append(heading, form);
 }
@@ -881,6 +959,9 @@ function mountRoomListView(container, { qu, services, subscribe, syncFetch, SPAC
     main.append(nameRow, preview);
     a.appendChild(main);
 
+    const thumb = roomThumbFor(room.lastMessage);
+    if (thumb) a.appendChild(thumb);
+
     if (room.unread) {
       const dot = document.createElement('span');
       dot.className = 'qu-chat-room-unread';
@@ -888,6 +969,40 @@ function mountRoomListView(container, { qu, services, subscribe, syncFetch, SPAC
     }
     li.appendChild(a);
     return li;
+  }
+
+  /**
+   * A small cover-image thumbnail for the room list's last-message preview
+   * (see this file's own STYLE comment on `.qu-chat-room-thumb`) - `null`
+   * for anything that isn't a plain image attachment (text, voice,
+   * location, video, file: `previewLabelFor()`'s own text label already
+   * covers those, a thumbnail here would either not apply or need a
+   * player/icon this small preview isn't the place for).
+   * @param {object|null|undefined} message
+   * @returns {HTMLElement|null}
+   */
+  function roomThumbFor(message) {
+    const attachment = message?.attachments?.[0];
+    if (!attachment?.mime?.startsWith('image/')) return null;
+    const thumb = document.createElement('span');
+    thumb.className = 'qu-chat-room-thumb';
+    // <qu-asset>'s own image click opens a fullscreen lightbox (asset-
+    // components.js) - fine inside a message bubble, but this thumbnail
+    // sits inside the room row's <a>, so an uncontested click would BOTH
+    // pop the lightbox AND navigate to the room. A capture-phase listener
+    // here runs before that click ever reaches the <img> (capturing walks
+    // DOWN to the target before any target/bubble listener fires), so
+    // stopPropagation() here keeps it from reaching <qu-asset>'s handler at
+    // all - the row's own <a> still navigates normally either way, since
+    // that's the browser's default action, not something contingent on the
+    // event bubbling back up through a JS listener.
+    thumb.addEventListener('click', (e) => e.stopPropagation(), true);
+    const assetEl = document.createElement('qu-asset');
+    assetEl.setAttribute('space-id', SPACE_ID);
+    assetEl.setAttribute('asset-id', attachment.assetId);
+    assetEl.setAttribute('kind', 'image');
+    thumb.appendChild(assetEl);
+    return thumb;
   }
 
   /**
@@ -1244,6 +1359,27 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   composerErrorEl.hidden = true;
   let composer = null;
 
+  // TYPING INDICATOR - `PresenceService.publishTyping()`, its own dedicated
+  // per-thread path (see that method's doc comment for why it's separate
+  // from the global online/offline presence QuBit); renderPresence() (below)
+  // reads it back via the matching `getTypingMembers()`. `isTypingNow`
+  // guards against a redundant write on every keystroke (only the ACTUAL
+  // true<->false transition publishes); `typingStopTimer` is a plain
+  // client-side idle timeout, not the (much longer) staleness window
+  // `getTypingMembers()` itself applies - "stopped typing" must reach peers
+  // within a few seconds of a real pause, not only once the whole record
+  // ages out. Declared here (not inside the room-resolution IIFE below,
+  // where the composer itself is built) so the outer teardown function can
+  // clear the timer without it needing its own separate close-over-a-closure path.
+  let isTypingNow = false;
+  let typingStopTimer = null;
+  const TYPING_IDLE_MS = 3_000;
+  function publishTyping(typing) {
+    if (stopped || isTypingNow === typing) return;
+    isTypingNow = typing;
+    services.presence.publishTyping(SPACE_ID, roomId, typing).catch(() => {});
+  }
+
   composerWrap.append(replyBanner, composerErrorEl, composerRoot);
 
   roomView.append(heading, toolbarRoot, messagesScroll, composerWrap);
@@ -1479,6 +1615,19 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     replyBanner.append(label, cancelBtn);
   }
 
+  /**
+   * Starts replying to `message` - the ONE place both the context menu's
+   * "Reply" item and the swipe-to-reply gesture (renderMessage()'s own
+   * `attachSwipeToReply()`, below) trigger this, so the two entry points
+   * can never drift into two different notions of what "reply" does.
+   * @param {object} message @param {boolean} mine
+   */
+  async function startReplyTo(message, mine) {
+    const authorLabel = mine ? t('you') : formatActorLabel(message.author, await resolveAuthor(message.author));
+    setReplyingTo(message, authorLabel);
+    composer?.editor.focus();
+  }
+
   const profileCache = new Map();
   async function resolveAuthor(pub) {
     if (!profileCache.has(pub)) profileCache.set(pub, services.profile.getPublicProfile(pub).catch(() => null));
@@ -1532,6 +1681,22 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     return true;
   }
 
+  // MESSAGE GROUPING - Telegram/WhatsApp-style "consecutive messages from
+  // the same person collapse into one visual burst" (renderMessage()'s own
+  // `grouped` param): the SAME author, within this window of their own
+  // previous message, only gets the author-name label on the FIRST message
+  // of the run, and a tighter row-to-row margin (see STYLE's own
+  // `.qu-chat-bubble-row-grouped`) - a long back-and-forth doesn't repeat a
+  // name/avatar-height gap on every single line the way an ungrouped list
+  // would. 5 minutes, same "still one burst" cutoff Telegram/WhatsApp both
+  // use - long enough to cover a quick multi-message thought, short enough
+  // that a message sent minutes later reads as a new turn, not a
+  // continuation.
+  const GROUPED_WITHIN_MS = 5 * 60 * 1000;
+  function isGroupedWithPrevious(message, previous) {
+    return !!previous && previous.author === message.author && message.ts - previous.ts < GROUPED_WITHIN_MS;
+  }
+
   /**
    * NO SPURIOUS JUMPS: `messagesRoot.textContent = ''` (the full-rebuild
    * path below) collapses `messagesScroll`'s own `scrollHeight` to ~0 for
@@ -1570,6 +1735,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     myPub = await services.actors.whoAmI();
     chatSettings = await getChatSettings(qu, services.messages.identity, myPub);
     if (stopped || token !== renderToken) return;
+    roomView.classList.toggle('qu-chat-compact', chatSettings.compactMode); // see STYLE's own ".qu-chat-compact" rules - a per-identity setting (renderChatSettings()), re-applied on every render since chatSettings itself is re-fetched here every time (nothing pushes a change into an already-open room otherwise)
     // No pagination/windowing here - every message in the room renders into
     // the DOM, each with its own content.messageFooter/messageMenu slot
     // instances (same "fine at community scale, not designed to scale past
@@ -1612,11 +1778,13 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     if (!pendingScrollTarget && isSimpleAppend(lastRenderedSnapshot, currentSnapshot)) {
       const appended = messages.slice(lastRenderedSnapshot.length);
       const ul = messagesRoot.querySelector('.qu-chat-messages');
+      let previous = messages[lastRenderedSnapshot.length - 1] ?? null; // see isGroupedWithPrevious()'s own doc comment - the tail of what's ALREADY rendered, not just this batch
       for (const message of appended) {
         renderedMessagesById.set(message.id, message);
-        const li = await renderMessage(message, renderedMessagesById, readReceipts);
+        const li = await renderMessage(message, renderedMessagesById, readReceipts, isGroupedWithPrevious(message, previous));
         if (stopped || token !== renderToken) return;
         ul.appendChild(li);
+        previous = message;
       }
       lastRenderedSnapshot = currentSnapshot;
       hasRenderedOnce = true;
@@ -1641,10 +1809,12 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     if (messages.length > 0) {
       const ul = document.createElement('ul');
       ul.className = 'qu-chat-messages';
+      let previous = null;
       for (const message of messages) {
-        const li = await renderMessage(message, renderedMessagesById, readReceipts);
+        const li = await renderMessage(message, renderedMessagesById, readReceipts, isGroupedWithPrevious(message, previous));
         if (stopped || token !== renderToken) return;
         ul.appendChild(li);
+        previous = message;
       }
       messagesRoot.appendChild(ul);
     }
@@ -1823,10 +1993,17 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     }, 0);
   }
 
-  async function renderMessage(message, byId, readReceipts) {
+  /**
+   * @param {object} message @param {Map<string, object>} byId @param {Record<string, object>} readReceipts
+   * @param {boolean} [grouped] - See isGroupedWithPrevious()'s own doc
+   *   comment: true when this message directly continues the same author's
+   *   previous one - suppresses the repeated author-name label and tightens
+   *   the row's own top margin (STYLE's `.qu-chat-bubble-row-grouped`).
+   */
+  async function renderMessage(message, byId, readReceipts, grouped = false) {
     const mine = message.author === myPub;
     const row = document.createElement('li');
-    row.className = 'qu-chat-bubble-row' + (mine ? ' qu-chat-bubble-row-mine' : '');
+    row.className = 'qu-chat-bubble-row' + (mine ? ' qu-chat-bubble-row-mine' : '') + (grouped ? ' qu-chat-bubble-row-grouped' : '');
     // The permalink scroll target (see mountRoomView()'s own doc comment on
     // "PERMALINKS + scroll-follow") - `id` for a real, shareable DOM anchor,
     // `dataset` so renderMessages() can find this row by message id without
@@ -1837,12 +2014,29 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     bubble.className = 'qu-chat-bubble' + (mine ? ' qu-chat-bubble-mine' : '');
     if (mine && chatSettings.ownColor) bubble.style.background = chatSettings.ownColor;
 
-    const showAuthor = target.kind === 'group' || chatSettings.showAliasIn1to1;
-    if (showAuthor && !mine) {
+    // showOwnNameAboveMessage (renderChatSettings()'s own checkbox) is a
+    // SEPARATE, independent toggle from showAuthor below - "show me my own
+    // name too" is a distinct ask from "show senders' names at all", not
+    // implied by (or gated behind) the other.
+    const showAuthor = (target.kind === 'group' || chatSettings.showAliasIn1to1) && !grouped;
+    const showOwnName = mine && chatSettings.showOwnNameAboveMessage && !grouped;
+    if ((showAuthor && !mine) || showOwnName) {
       const profile = await resolveAuthor(message.author);
+      // "You"/"Du" for your own messages - reads more naturally on your
+      // own client than your own alias would, same convention the reply
+      // banner/context menu already use (mine ? t('you') : ...).
+      const label = mine ? t('you') : formatActorLabel(message.author, profile);
       const authorEl = document.createElement('div');
       authorEl.className = 'qu-chat-bubble-author';
-      authorEl.textContent = formatActorLabel(message.author, profile);
+      // Same renderAvatarOrAsset() the room list/header already use for
+      // this identity - a tiny avatar next to the name makes "who's
+      // talking" scannable at a glance in a group, the same first-message-
+      // of-a-run identity cue Telegram/WhatsApp/Signal all show, not just a
+      // plain text label.
+      authorEl.appendChild(renderAvatarOrAsset(message.author, label, profile?.avatar, { size: '1.1rem' }));
+      const nameEl = document.createElement('span');
+      nameEl.textContent = label;
+      authorEl.appendChild(nameEl);
       bubble.appendChild(authorEl);
     }
 
@@ -1874,7 +2068,84 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     bubble.appendChild(footer);
 
     row.appendChild(bubble);
+    attachSwipeToReply(row, message, mine);
     return row;
+  }
+
+  /**
+   * SWIPE-TO-REPLY (mobile) - a touch-drag of `row` to the right past
+   * `SWIPE_REPLY_THRESHOLD_PX` calls `startReplyTo()`, same as the context
+   * menu's own "Reply" item (see that helper's own doc comment) - a
+   * one-handed shortcut real chat apps (Telegram/WhatsApp/Signal) already
+   * offer, instead of "long-press -> find Reply in a menu" every time.
+   *
+   * Only commits to the gesture once a touch move is CLEARLY more
+   * horizontal than vertical (`isHorizontal` below) - anything else is left
+   * alone so the messages list's own vertical scroll keeps working exactly
+   * as before; `touchmove`'s listener is `{ passive: false }` ONLY so
+   * `preventDefault()` can suppress that scroll, but ONLY once already
+   * committed - never on the very first move, before direction is known.
+   * `row.style.transform` is reset (with a short transition for the
+   * snap-back) on `touchend`/`touchcancel` either way, whether or not the
+   * threshold was reached.
+   *
+   * TESTED VIA SYNTHETIC TouchEvents (this file's own test suite - jsdom
+   * happens to accept a plain `{clientX, clientY}` object as a Touch,
+   * unlike its lack of any real layout/rendering `<qu-asset>`'s own
+   * lightbox pan/zoom can't get around) - covers the horizontal-vs-
+   * vertical direction gate and the arm/reset threshold logic. What that
+   * CANNOT cover: how the drag actually FEELS on a real device (touch
+   * latency, the CSS transition timing, `touch-action: pan-y`'s real
+   * interaction with the browser's own native scroll gesture recognizer) -
+   * worth a real-device pass before calling this done.
+   * @param {HTMLElement} row @param {object} message @param {boolean} mine
+   */
+  function attachSwipeToReply(row, message, mine) {
+    const SWIPE_REPLY_THRESHOLD_PX = 56;
+    const SWIPE_MAX_PX = 72;
+    let startX = 0;
+    let startY = 0;
+    let dragging = false;
+    let resetTimer = null;
+
+    function reset() {
+      row.classList.add('qu-chat-bubble-row-swipe-reset');
+      row.style.transform = '';
+      row.classList.remove('qu-chat-bubble-row-swipe-armed');
+      clearTimeout(resetTimer);
+      resetTimer = setTimeout(() => row.classList.remove('qu-chat-bubble-row-swipe-reset'), 200);
+    }
+
+    row.addEventListener('touchstart', (e) => {
+      if (e.touches.length !== 1) return;
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+      dragging = false;
+      row.classList.remove('qu-chat-bubble-row-swipe-reset');
+    }, { passive: true });
+
+    row.addEventListener('touchmove', (e) => {
+      if (e.touches.length !== 1) return;
+      const dx = e.touches[0].clientX - startX;
+      const dy = e.touches[0].clientY - startY;
+      if (!dragging) {
+        const isHorizontal = Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy) * 1.5;
+        if (!isHorizontal) return; // could still be a vertical scroll - leave it alone
+        dragging = true;
+      }
+      e.preventDefault(); // committed to the swipe now, not a scroll
+      const clamped = Math.max(0, Math.min(SWIPE_MAX_PX, dx));
+      row.style.transform = `translateX(${clamped}px)`;
+      row.classList.toggle('qu-chat-bubble-row-swipe-armed', clamped >= SWIPE_REPLY_THRESHOLD_PX);
+    }, { passive: false });
+
+    row.addEventListener('touchend', () => {
+      const armed = row.classList.contains('qu-chat-bubble-row-swipe-armed');
+      reset();
+      if (dragging && armed) startReplyTo(message, mine);
+      dragging = false;
+    });
+    row.addEventListener('touchcancel', () => { reset(); dragging = false; });
   }
 
   /**
@@ -1904,14 +2175,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
             getItems: async () => {
               const nativeItems = [];
               if (mine) nativeItems.push({ id: 'edit', label: t('edit'), icon: '✏️', onClick: () => renderMessageEdit(textWrap, message) });
-              nativeItems.push({
-                id: 'reply', label: t('reply'), icon: '↩️',
-                onClick: async () => {
-                  const authorLabel = mine ? t('you') : formatActorLabel(message.author, await resolveAuthor(message.author));
-                  setReplyingTo(message, authorLabel);
-                  composer?.editor.focus();
-                },
-              });
+              nativeItems.push({ id: 'reply', label: t('reply'), icon: '↩️', onClick: () => startReplyTo(message, mine) });
               nativeItems.push({ id: 'copyText', label: t('copyText'), icon: '📋', onClick: () => copyToClipboard(message.body) });
               nativeItems.push({ id: 'copyLink', label: t('copyLink'), icon: '🔗', onClick: () => copyToClipboard(absoluteMessagePermalink(message)) });
               const pluginItems = extensionPoints ? await extensionPoints.collect('content.messageMenu', menuPayload) : [];
@@ -2006,12 +2270,33 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
       preview.setAttribute('url', firstLink.value);
       root.appendChild(preview);
     }
-    for (const attachment of attachments) {
-      const assetEl = document.createElement('qu-asset');
-      assetEl.className = 'qu-chat-bubble-attachment';
-      assetEl.setAttribute('space-id', SPACE_ID);
-      assetEl.setAttribute('asset-id', attachment.assetId);
-      root.appendChild(assetEl);
+    // ALBUM GRID - two or more attachments, all images (mixed with a
+    // video/audio/file stays the plain vertical stack below - a square
+    // video tile or a file-link squeezed into a grid cell reads wrong).
+    // Same "several photos posted together" case WhatsApp/Telegram both
+    // show as a grid rather than one full-width image after another -
+    // confirmed here as the more compact, scannable layout once there's
+    // more than one.
+    const isPhotoAlbum = attachments.length > 1 && attachments.every((a) => a.mime?.startsWith('image/'));
+    if (isPhotoAlbum) {
+      const grid = document.createElement('div');
+      grid.className = 'qu-chat-bubble-attachment-grid';
+      for (const attachment of attachments) {
+        const assetEl = document.createElement('qu-asset');
+        assetEl.setAttribute('space-id', SPACE_ID);
+        assetEl.setAttribute('asset-id', attachment.assetId);
+        assetEl.setAttribute('kind', 'image');
+        grid.appendChild(assetEl);
+      }
+      root.appendChild(grid);
+    } else {
+      for (const attachment of attachments) {
+        const assetEl = document.createElement('qu-asset');
+        assetEl.className = 'qu-chat-bubble-attachment';
+        assetEl.setAttribute('space-id', SPACE_ID);
+        assetEl.setAttribute('asset-id', attachment.assetId);
+        root.appendChild(assetEl);
+      }
     }
     if (message.location) {
       const { lat, lng } = message.location;
@@ -2064,18 +2349,36 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   }
 
   // ---- presence: polled, not pushed - see this file's own top doc comment ----
+  // TYPING INDICATOR: `PresenceService.publishTyping()`/`getTypingMembers()`
+  // - its own dedicated, thread-scoped path, separate from the global
+  // presence read below (see that class's own doc comment for why "is
+  // typing" can't live on the global per-actor presence QuBit). Below, the
+  // composer's own textarea 'input' listener drives `publishTyping()`; this
+  // render function only ever READS it back, alongside (not instead of)
+  // the online/last-seen status.
   let presenceTimer = null;
   async function renderPresence() {
     if (stopped || !roomReady) return;
     const otherMembers = memberPubs.filter((p) => p !== myPub);
-    const presence = await services.presence.getUserPresences(otherMembers);
+    const [presence, typingPubs] = await Promise.all([
+      services.presence.getUserPresences(otherMembers),
+      services.presence.getTypingMembers(SPACE_ID, roomId, otherMembers),
+    ]);
     if (stopped) return;
     if (target.kind === 'dm') {
       const p = presence[target.peerPub];
-      headerStatusEl.textContent = p?.online ? t('online') : (p ? t('lastSeen', { time: formatTs(p.lastSeen) }) : '');
+      headerStatusEl.textContent = typingPubs.includes(target.peerPub) ? t('isTyping')
+        : p?.online ? t('online')
+        : p ? t('lastSeen', { time: formatTs(p.lastSeen) }) : '';
     } else {
-      const online = Object.values(presence).filter((p) => p.online).length;
-      headerStatusEl.textContent = t('membersOnline', { count: memberPubs.length, online });
+      if (typingPubs.length > 0) {
+        const names = await Promise.all(typingPubs.map(async (pub) => formatActorLabel(pub, await resolveAuthor(pub))));
+        if (stopped) return;
+        headerStatusEl.textContent = t('typingNames', { names: names.join(', ') });
+      } else {
+        const online = Object.values(presence).filter((p) => p.online).length;
+        headerStatusEl.textContent = t('membersOnline', { count: memberPubs.length, online });
+      }
     }
   }
 
@@ -2131,6 +2434,8 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
       ],
       onSubmit: async (content) => {
         composerErrorEl.hidden = true;
+        clearTimeout(typingStopTimer);
+        publishTyping(false); // sending IS "done typing" - no reason to wait out the idle timer
         const extra = {};
         if (content.attachments.length) extra.attachments = content.attachments;
         if (content.location) extra.location = content.location;
@@ -2148,6 +2453,20 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
           composerErrorEl.hidden = false;
         }
       },
+    });
+    // See `publishTyping()`'s own doc comment - an empty box always means
+    // "not typing" immediately (clearing a draft is itself a real "stopped"
+    // signal, no reason to wait out the idle timer for it either), a
+    // non-empty one (re)starts/refreshes the idle timeout on every
+    // keystroke.
+    composer.editor.textarea.addEventListener('input', () => {
+      clearTimeout(typingStopTimer);
+      if (composer.editor.textarea.value.trim() === '') {
+        publishTyping(false);
+        return;
+      }
+      publishTyping(true);
+      typingStopTimer = setTimeout(() => publishTyping(false), TYPING_IDLE_MS);
     });
     // `content.topicToolbar` (Pins' own "📌 Pinned" bar) - `roomId` only
     // resolves here, not at `toolbarRoot`'s own creation site above, so this
@@ -2218,6 +2537,7 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     clearMessageWatchers();
     offMessages();
     offReadReceipts();
+    clearTimeout(typingStopTimer);
     if (presenceTimer) clearInterval(presenceTimer);
     composer?.stop(); // may never have been constructed - e.g. a group that turned out not to exist (roomReady never became true)
     resizeObserver?.disconnect();

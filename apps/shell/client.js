@@ -211,26 +211,6 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
     log.warn('realtime sync unavailable in this environment:', err.message);
   }
 
-  // MOBILE FOREGROUND CATCH-UP - see SyncEngine.refreshSubscriptions()'s own
-  // doc comment for the exact gap this closes: backgrounding a mobile
-  // browser/PWA does NOT reliably close the underlying WebSocket (the OS may
-  // keep it alive, or a flaky network may let it go silently stale without
-  // either side noticing), so a real transport 'reconnect' event - the thing
-  // that would normally trigger a catch-up - may simply never fire even
-  // though real time passed while suspended. Confirmed live: a chat room
-  // left mounted through a phone screen lock never picked up messages sent
-  // while it was locked, even after unlocking - only leaving and
-  // re-entering the room (a fresh mount, with its own one-time subscribe +
-  // catch-up) did. `visibilitychange` -> visible is the one reliable signal
-  // "this page is back in front of a user" a browser gives regardless of
-  // what the underlying connection actually did - treating it the same as a
-  // reconnect (which is literally what refreshSubscriptions() does) closes
-  // the gap for every mounted app's active subscriptions at once, no
-  // per-app code needed.
-  function onVisibilityChange() {
-    if (document.visibilityState === 'visible') sync?.refreshSubscriptions();
-  }
-  document.addEventListener('visibilitychange', onVisibilityChange);
   // Two DIFFERENT backfill shapes, both from the same `sync` - never
   // confuse them:
   //   - `fetchOne(path)` (-> SyncEngine.fetch()) - ONE document, what
@@ -260,16 +240,55 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
 
   // PRESENCE - ONE heartbeat for the whole session, started here (not by
   // apps/chat's own room-view mount anymore - see PresenceService's own top
-  // doc comment on why presence is now user-centric, not room-centric).
-  // Runs unconditionally, independent of which app (if any) happens to be
-  // mounted or how many chat rooms are open - stopped (publishing 'offline'
-  // once, best-effort) alongside everything else this function's own
-  // returned cleanup already tears down below. A real browser tab close is
-  // still an ungraceful disconnect that skips this (same as it always did
-  // for the old per-room heartbeat) - readers fall back to
-  // `PresenceService.getUserPresence()`'s own staleness-based `online`
-  // computation either way.
-  const stopHeartbeat = services.presence.startHeartbeat();
+  // doc comment on why presence is now user-centric, not room-centric),
+  // independent of which app (if any) happens to be mounted or how many
+  // chat rooms are open.
+  //
+  // PUSH ONLY WHILE ACTUALLY VISIBLE - gated by `document.visibilityState`,
+  // not unconditional: `PushDeliveryService` (packages/relay/src/
+  // push-delivery.js) skips sending a Web Push whenever `PresenceTracker.
+  // isRecentlyOnline()` sees this identity's traffic as fresh (that tracker
+  // is fed by `onPeerIdentified`, which fires on EVERY signed write this
+  // identity sends - see `packages/sync/src/sync-engine.js`'s own doc
+  // comment on that hook - so a heartbeat write is exactly the kind of
+  // traffic that keeps it "fresh"). An UNGATED heartbeat would therefore
+  // keep publishing 'online' - and so keep suppressing push - for as long
+  // as this tab stays open at all, backgrounded or not. Stopping the
+  // heartbeat the instant the tab backgrounds (`stopHeartbeat()` publishes
+  // 'offline' immediately, same as it always has) closes that gap with no
+  // new signal/protocol/relay change - the exact mechanism
+  // `apps/chat/client.js` used to run PER ROOM VIEW before presence became
+  // session-global; folded into the SAME `visibilitychange` listener the
+  // mobile-foreground sync catch-up below already needs, so there is only
+  // ever one such listener for the whole session.
+  let stopHeartbeat = null;
+  // MOBILE FOREGROUND CATCH-UP - see SyncEngine.refreshSubscriptions()'s own
+  // doc comment for the exact gap this closes: backgrounding a mobile
+  // browser/PWA does NOT reliably close the underlying WebSocket (the OS may
+  // keep it alive, or a flaky network may let it go silently stale without
+  // either side noticing), so a real transport 'reconnect' event - the thing
+  // that would normally trigger a catch-up - may simply never fire even
+  // though real time passed while suspended. Confirmed live: a chat room
+  // left mounted through a phone screen lock never picked up messages sent
+  // while it was locked, even after unlocking - only leaving and
+  // re-entering the room (a fresh mount, with its own one-time subscribe +
+  // catch-up) did. `visibilitychange` -> visible is the one reliable signal
+  // "this page is back in front of a user" a browser gives regardless of
+  // what the underlying connection actually did - treating it the same as a
+  // reconnect (which is literally what refreshSubscriptions() does) closes
+  // the gap for every mounted app's active subscriptions at once, no
+  // per-app code needed.
+  function onVisibilityChange() {
+    if (document.visibilityState === 'hidden') {
+      stopHeartbeat?.().catch(() => {});
+      stopHeartbeat = null;
+    } else {
+      sync?.refreshSubscriptions();
+      if (!stopHeartbeat) stopHeartbeat = services.presence.startHeartbeat();
+    }
+  }
+  onVisibilityChange(); // establish the initial heartbeat state - starts it now unless this tab is already backgrounded at boot
+  document.addEventListener('visibilitychange', onVisibilityChange);
 
   // Mirrors @qu/relay's own #bootInner() - a published profile is what
   // makes this identity's X25519 key resolvable by anyone else.

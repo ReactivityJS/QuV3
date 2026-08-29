@@ -80,6 +80,47 @@ test('<qu-asset-upload>: picking a file uploads it and fires qu-asset-uploaded w
   assert.equal(service.uploadCalls[0].file, file);
 });
 
+test('<qu-asset-upload multiple>: sets the underlying file input\'s own "multiple" property, off by default', async () => {
+  const service = fakeAssetService();
+  const container = makeContainer(service);
+  const plain = document.createElement('qu-asset-upload');
+  plain.setAttribute('space-id', 'gallery');
+  container.appendChild(plain);
+  assert.equal(plain.querySelector('input[type=file]').multiple, false);
+
+  const multi = document.createElement('qu-asset-upload');
+  multi.setAttribute('space-id', 'gallery');
+  multi.setAttribute('multiple', '');
+  container.appendChild(multi);
+  assert.equal(multi.querySelector('input[type=file]').multiple, true);
+});
+
+test('<qu-asset-upload multiple>: picking several files in ONE dialog trip uploads each in turn, firing one qu-asset-uploaded per file, in order', async () => {
+  const service = fakeAssetService();
+  const container = makeContainer(service);
+  const el = document.createElement('qu-asset-upload');
+  el.setAttribute('space-id', 'gallery');
+  el.setAttribute('multiple', '');
+  container.appendChild(el);
+
+  const details = [];
+  el.addEventListener('qu-asset-uploaded', (e) => details.push(e.detail));
+
+  const file1 = new File(['a'], 'photo1.png', { type: 'image/png' });
+  const file2 = new File(['b'], 'photo2.png', { type: 'image/png' });
+  const input = el.querySelector('input[type=file]');
+  Object.defineProperty(input, 'files', { value: [file1, file2], configurable: true });
+  input.dispatchEvent(new window.Event('change'));
+
+  await waitFor(() => details.length === 2);
+  // Sequential, not concurrent - see the change handler's own doc comment
+  // on why (a single shared progress element would garble under two
+  // in-flight uploads) - both calls landed, in pick order.
+  assert.equal(service.uploadCalls.length, 2);
+  assert.equal(service.uploadCalls[0].file, file1);
+  assert.equal(service.uploadCalls[1].file, file2);
+});
+
 test('<qu-asset-upload>: sync-out verification is deferred - picking a file alone never fires qu-asset-synced', async () => {
   const service = fakeAssetService();
   const container = makeContainer(service);
