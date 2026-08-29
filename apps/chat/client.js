@@ -272,6 +272,7 @@ const DICT = {
     roomMenu: 'Chat options',
     muteChat: 'Mute notifications',
     unmuteChat: 'Unmute notifications',
+    resyncChat: 'Reload messages',
     deleteChat: 'Delete chat',
     deleteChatConfirm: 'Delete this chat? It will be removed from your chat list on this device. The other {who} will keep their own copy.',
     deleteChatConfirmDm: 'the person',
@@ -327,6 +328,7 @@ const DICT = {
     roomMenu: 'Chat-Optionen',
     muteChat: 'Benachrichtigungen stummschalten',
     unmuteChat: 'Stummschaltung aufheben',
+    resyncChat: 'Nachrichten neu laden',
     deleteChat: 'Chat löschen',
     deleteChatConfirm: 'Diesen Chat löschen? Er wird von deiner Chat-Liste auf diesem Gerät entfernt. Die {who} behalten ihre eigene Kopie.',
     deleteChatConfirmDm: 'andere Person',
@@ -1282,6 +1284,26 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
               apps: { ...current.apps, chat: { ...chatPrefs, mutedThreads: [...mutedThreads] } },
             });
             headerMutedIcon.hidden = muted; // toggled, so the icon shows the NEW state - no need to re-fetch prefs
+          },
+        },
+        {
+          // Manual escape hatch alongside the automatic mechanisms
+          // (SyncEngine's own incremental resync + reconnect/foreground
+          // catch-up) - forces a full, unfiltered re-download of this
+          // room's WHOLE thread namespace (messages + meta + reactions +
+          // pins + read receipts + typing, one request via `threadPath()`,
+          // not just `msgs`) via the SAME `syncFetch` every other backfill
+          // in this app already uses. Safe to call anytime: merged entries
+          // go through the normal ts-guarded persist path (never regresses
+          // newer local data), and `watchChildren()` on
+          // `threadMessagesParentPath` already reacts to a `fetchPrefix()`
+          // merge exactly like a live push - no extra rendering needed
+          // here.
+          id: 'resync',
+          label: t('resyncChat'),
+          icon: '🔄',
+          onClick: () => {
+            syncFetch?.(paths.threadPath(SPACE_ID, roomId));
           },
         },
         {

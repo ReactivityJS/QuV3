@@ -171,6 +171,72 @@ test('navigating to a known route dynamically imports and mounts the target app 
   }
 });
 
+test('REGRESSION: a second navigation never re-fetches /apps.json - renderRoute() reads the already-fetched bootApps catalog, not a fresh network round-trip per navigation', async (t) => {
+  const qu = freshQu();
+  const identity = new QuIdentityEngine(qu);
+  await identity.importMnemonic(identity.generateMnemonic());
+  const clientMainUrl = dataUrlModule(`
+    export function mount(container) {
+      container.textContent = 'MOUNTED';
+      return () => {};
+    }
+  `);
+  const fetchMock = t.mock.method(globalThis, 'fetch', mockFetch({ apps: [{ name: 'testapp', clientMainUrl }] }));
+
+  const container = makeContainer();
+  const stop = await mount(container, { qu, identity });
+  try {
+    window.location.hash = '#/testapp';
+    window.dispatchEvent(new window.Event('hashchange'));
+    await waitFor(() => container.querySelector('.qu-apptpl-content')?.textContent === 'MOUNTED');
+
+    // Boot itself does TWO /apps.json fetches (the explicit awaited one, plus
+    // one from the synthetic initial onVisibilityChange() call that also
+    // establishes presence state - see that function's own doc comment for
+    // why this one-time redundancy is accepted, same as the EXISTING
+    // sync.refreshSubscriptions() call right next to it already has) - this
+    // test isn't about that count, only about whether NAVIGATION adds more.
+    const apppsJsonCallsBefore = fetchMock.mock.calls.filter((c) => c.arguments[0] === '/apps.json').length;
+
+    window.location.hash = '#/';
+    window.dispatchEvent(new window.Event('hashchange'));
+    window.location.hash = '#/testapp';
+    window.dispatchEvent(new window.Event('hashchange'));
+    await waitFor(() => container.querySelector('.qu-apptpl-content')?.textContent === 'MOUNTED');
+
+    const apppsJsonCallsAfter = fetchMock.mock.calls.filter((c) => c.arguments[0] === '/apps.json').length;
+    assert.equal(apppsJsonCallsAfter, apppsJsonCallsBefore, 'a later navigation must never call fetch(\'/apps.json\') again');
+  } finally {
+    stop();
+  }
+});
+
+test('REGRESSION: returning to the foreground (visibilitychange -> visible) refreshes the bootApps catalog in the background, exactly once per event, never blocking', async (t) => {
+  const qu = freshQu();
+  const identity = new QuIdentityEngine(qu);
+  await identity.importMnemonic(identity.generateMnemonic());
+  const fetchMock = t.mock.method(globalThis, 'fetch', mockFetch({ apps: [] }));
+
+  const container = makeContainer();
+  const stop = await mount(container, { qu, identity });
+  try {
+    // Boot itself already does TWO /apps.json fetches (see the previous
+    // test's own comment on why) - this test only cares about the delta a
+    // hidden->visible transition adds.
+    const callsBefore = fetchMock.mock.calls.filter((c) => c.arguments[0] === '/apps.json').length;
+
+    setDocumentVisibility('hidden');
+    setDocumentVisibility('visible');
+    await waitFor(() => fetchMock.mock.calls.filter((c) => c.arguments[0] === '/apps.json').length > callsBefore);
+
+    const callsAfter = fetchMock.mock.calls.filter((c) => c.arguments[0] === '/apps.json').length;
+    assert.equal(callsAfter, callsBefore + 1, 'exactly one background refresh per foreground-return event');
+  } finally {
+    stop();
+    setDocumentVisibility('visible');
+  }
+});
+
 test('navigating to a route an admin has disabled (enabled: false) shows "app not found" instead of mounting it', async (t) => {
   const qu = freshQu();
   const identity = new QuIdentityEngine(qu);

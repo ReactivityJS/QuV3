@@ -106,6 +106,20 @@ export function listPath(spaceId, listId) {
   return `/store/${spaceId}/lists/${listId}`;
 }
 
+/**
+ * A thread's own root - one level above `meta`/`msgs`/`reactions`/`pins`/
+ * `reads`/`typing`, every one of which lives under this SAME prefix. Not
+ * itself a document any Service reads/writes - it exists for a caller that
+ * needs to address the whole thread namespace at once, e.g.
+ * `SyncEngine.fetchPrefix()` forcing a full resync of a room (messages +
+ * meta + reactions + pins + read receipts + typing, in one request) - see
+ * `apps/chat/client.js`'s own "Reload messages" room-menu item.
+ * @param {string|number} spaceId @param {string} threadId @returns {string}
+ */
+export function threadPath(spaceId, threadId) {
+  return `/store/${spaceId}/threads/${threadId}`;
+}
+
 /** @param {string|number} spaceId @param {string} threadId @returns {string} */
 export function threadMetaPath(spaceId, threadId) {
   return `/store/${spaceId}/threads/${threadId}/meta`;

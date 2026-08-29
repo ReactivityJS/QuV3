@@ -399,19 +399,28 @@ export function mountHeader(container, { qu, services, adminPubs = [], subscribe
   let myPub = null;
   myPubPromise.then((pub) => { myPub = pub; });
 
-  /** Rebuilt from scratch on every open - favorites can have changed since the last time this was shown. */
+  /**
+   * Rebuilt from scratch on every open - favorites can have changed since
+   * the last time this was shown. Uses `mountHeader()`'s own `apps` param
+   * (the SAME boot-time catalog snapshot `shell.headerAction`/
+   * `shell.headerNavPoints` already build their `ExtensionPointHost` from
+   * above) for icon/label lookup - NOT a fresh `fetch('/apps.json')` per
+   * open. An earlier version of this function shadowed that outer `apps`
+   * with its own same-named local variable and re-fetched it over the
+   * network on every single menu open - a real, confirmed bug: the catalog
+   * was already sitting right here the whole time, so every open paid a
+   * synchronous network round-trip (menu visibly opening EMPTY until it
+   * resolved) for data that never needed fetching at all. Same accepted
+   * "off by a reload, not live" staleness this file's own "TWO HEADER
+   * EXTENSION POINTS" doc comment already documents for the exact same
+   * `apps` snapshot.
+   */
   async function renderMenu() {
     if (stopped) return;
     if (!myPub) myPub = await myPubPromise;
     if (stopped) return;
     menu.textContent = '';
 
-    let apps = [];
-    try {
-      const res = await fetch('/apps.json');
-      apps = res.ok ? await res.json() : [];
-    } catch { /* offline/unreachable - favorites just stay unresolved this open, the static links below are unaffected */ }
-    if (stopped) return;
     const byName = new Map(apps.map((a) => [a.name, a]));
 
     const favIds = await services.favorites.list();

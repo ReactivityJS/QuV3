@@ -187,12 +187,39 @@ test('shows the Relay Admin link only when this identity\'s pub is in adminPubs'
   }
 });
 
+test('REGRESSION: opening the main menu never calls fetch() at all - it reads mountHeader()\'s own already-passed-in apps param, not a fresh /apps.json round-trip per open', async (t) => {
+  const { qu, services } = await freshEnv();
+  await services.favorites.add('notes');
+  const fetchMock = t.mock.method(globalThis, 'fetch', mockAppsFetch([{ name: 'notes', label: 'Notes', icon: '📝' }]));
+  const container = makeContainer();
+  // Deliberately NOT passed via `apps:` here - if renderMenu() ever calls
+  // fetch() again, this fixture's mocked '/apps.json' response would let a
+  // regression slip back in unnoticed; leaving it unresolved keeps the
+  // assertion honest either way (see the fetch-call-count assertion below,
+  // the actual regression guard).
+  const stop = mountHeader(container, { qu, services, subscribe: noopSubscribe });
+  try {
+    await waitForOwnName(container);
+    const callsBeforeOpen = fetchMock.mock.calls.length;
+    container.querySelector('.qu-shell-user-btn').click();
+    await waitFor(() => container.querySelector('.qu-shell-menu') !== null && !container.querySelector('.qu-shell-menu').hidden);
+    assert.equal(fetchMock.mock.calls.length, callsBeforeOpen, 'opening the menu must never call fetch()');
+  } finally {
+    stop();
+  }
+});
+
 test('favorited apps appear as quick links in the menu, resolved against the apps catalog, before the divider', async (t) => {
   const { qu, services } = await freshEnv();
   await services.favorites.add('notes');
-  t.mock.method(globalThis, 'fetch', mockAppsFetch([{ name: 'notes', label: 'Notes', icon: '📝' }]));
+  // The catalog comes from mountHeader()'s own `apps` param (the SAME
+  // boot-time snapshot client.js already fetches once) - NOT a fresh
+  // fetch('/apps.json') per menu open (see renderMenu()'s own doc comment
+  // for the bug this fixed: an earlier version shadowed this param with a
+  // same-named local variable and re-fetched over the network every time).
+  t.mock.method(globalThis, 'fetch', mockAppsFetch());
   const container = makeContainer();
-  const stop = mountHeader(container, { qu, services, subscribe: noopSubscribe });
+  const stop = mountHeader(container, { qu, services, subscribe: noopSubscribe, apps: [{ name: 'notes', label: 'Notes', icon: '📝' }] });
   try {
     await waitForOwnName(container);
     container.querySelector('.qu-shell-user-btn').click();
