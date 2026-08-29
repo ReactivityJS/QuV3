@@ -36,6 +36,13 @@ Building something on top of Quniverse? Start here instead:
 [Status](#status) - skip it unless you want the "why" behind a specific
 piece; it's not needed to build an app.)
 
+**Experimental, separate from the above:** [`docs/v5-space-core-guide.md`](./docs/v5-space-core-guide.md)
+documents a from-scratch, Yjs-native PoC (`packages/space-core`/
+`space-storage`/`space-transport`) exploring a CRDT-based replacement for
+QuStore/QuBit's sync model - a different data model and API, evaluated
+alongside V3/V4, not (yet) replacing it. Includes a real WebSocket relay
+you can run standalone or via Docker.
+
 ## Development
 
 ```sh

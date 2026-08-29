@@ -74,11 +74,29 @@ export class Space {
     return node;
   }
 
-  /** Registers this Space's interest in an already-known Node id (e.g. one another peer created) - subsequent envelopes for it will be accepted and applied. */
+  /**
+   * Registers this Space's interest in an already-known Node id (e.g. one
+   * another peer created) - subsequent envelopes for it will be accepted
+   * and applied. Also sends a SIGNED `{type:'subscribe', nodeId}` request
+   * over the transport - a relay mirroring this Node (see
+   * @qu/space-transport's relay.js) answers it by replaying every
+   * envelope it has stored, so this Space catches up even if the Node's
+   * author is offline right now. Fire-and-forget, same as a local write's
+   * own seal/send (see `_handleLocalUpdate`): the returned Node is usable
+   * immediately either way, catch-up (if any) arrives asynchronously as
+   * ordinary incoming envelopes.
+   */
   subscribeNode(id, kindSchema) {
     if (this._nodes.has(id)) return this._nodes.get(id);
     const doc = new Y.Doc(); // meta/content arrive via sync, not stamped locally - this peer did not create this Node.
-    return this._attach(id, kindSchema, doc);
+    const node = this._attach(id, kindSchema, doc);
+    this._sendSubscribeRequest(id);
+    return node;
+  }
+
+  async _sendSubscribeRequest(nodeId) {
+    const sig = await QuCrypto.sign(new TextEncoder().encode(nodeId), this._identity.signingKey);
+    this._transport.send({ type: 'subscribe', nodeId, pub: this._identity.signingPub, sig });
   }
 
   /** Replays a Node's envelope history from storage (see @qu/space-storage) - the "durable persistence survives a reload" path. */
@@ -112,7 +130,8 @@ export class Space {
     this._transport.send({ nodeId, envelope });
   }
 
-  async _handleIncoming({ nodeId, envelope }) {
+  async _handleIncoming({ nodeId, envelope, type }) {
+    if (type === 'subscribe' || !envelope) return; // a subscribe REQUEST is relay-bound, not peer-bound (see _sendSubscribeRequest) - defensive no-op if one ever reaches here anyway.
     const node = this._nodes.get(nodeId);
     if (!node) return; // not subscribed to this Node - ignore, same as QuStore's watch() only reacting to watched paths.
     const isAuthorized = this._isAuthorizedWriter(node.kindSchema);
