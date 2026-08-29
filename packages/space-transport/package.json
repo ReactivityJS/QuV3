@@ -1,0 +1,18 @@
+{
+  "name": "@qu/space-transport",
+  "version": "0.1.0",
+  "description": "Qu V5 PoC: transport + relay for @qu/space-core. InProcessTransport/InProcessHub simulate client<->relay<->client delivery for tests without a real network. RelayForwarder verifies each envelope's write signature and forwards it - it never holds a decryption key, so it structurally cannot read content (see relay.js).",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "dependencies": {
+    "@qu/core": "^0.1.0",
+    "@qu/space-core": "^0.1.0"
+  },
+  "devDependencies": {
+    "@qu/space-storage": "^0.1.0"
+  },
+  "license": "MIT"
+}
