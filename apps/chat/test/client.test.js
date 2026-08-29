@@ -664,6 +664,31 @@ test('the room "⋮" menu\'s native "Mute notifications" item toggles this room\
   }
 });
 
+test('the room "⋮" menu\'s "Reload messages" item calls syncFetch() on the WHOLE thread namespace (threadPath), not just msgs - a manual escape hatch alongside the automatic incremental resync', async () => {
+  const alice = await freshEnv('Alice');
+  const bob = await freshEnv('Bob');
+  await mirrorProfileInto(bob, alice.qu);
+  const roomId = await ChatService.roomId([alice.myPub, bob.myPub]);
+
+  const syncFetchCalls = [];
+  const syncFetch = async (prefix) => { syncFetchCalls.push(prefix); };
+
+  const container = makeContainer();
+  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, syncFetch, segments: ['chat', bob.myPub] });
+  try {
+    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
+
+    const panel = await openRoomMenu(container);
+    assert.ok(menuItemButton(panel, 'Reload messages'));
+    syncFetchCalls.length = 0; // mounting the room view itself already calls syncFetch() for its own backfill-on-miss watches (messages, read receipts) - only the CLICK's own call matters here
+    menuItemButton(panel, 'Reload messages').click();
+
+    assert.deepEqual(syncFetchCalls, [paths.threadPath(CHAT_SPACE_ID, roomId)]);
+  } finally {
+    stop();
+  }
+});
+
 test('muting a room shows a crossed-out bell in the room header immediately, and in the room-list row on the next render - no reload/remount needed', async () => {
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');

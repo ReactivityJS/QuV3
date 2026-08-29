@@ -238,6 +238,36 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
 
   const services = createClientServices(qu, identity, { syncFetch: fetchOne, getGeneration: () => sync?.getGeneration() ?? 0 });
 
+  // The app catalog (`/apps.json`) - a boot-time snapshot `renderRoute()`
+  // (below) and `mountHeader()`'s own menu read SYNCHRONOUSLY, never a fresh
+  // `fetch()` on their own hot path (every navigation / every menu open).
+  // REGRESSION this replaced: both used to re-fetch this on their own -
+  // `renderRoute()` deliberately (see its own doc comment below), `header.js`'s
+  // `renderMenu()` by an actual same-named-variable shadowing bug - either
+  // way, a real network round-trip was blocking a hot, frequent UI path for
+  // data that's rarely more than a few seconds stale. `refreshBootApps()`
+  // keeps this reasonably fresh instead (an admin's app-list edit becomes
+  // visible after the next background refresh, not "stuck until reload") -
+  // called once here at boot (awaited, so `mountHeader()` below has a real
+  // catalog from the start) and again, fire-and-forget, from
+  // `onVisibilityChange()`'s own "back in the foreground" branch below -
+  // same cadence `sync.refreshSubscriptions()` already uses for the
+  // identical "catch up on whatever staleness accumulated" reason, no new
+  // trigger needed. `bootApps` itself is declared here (not down where the
+  // old inline fetch used to sit) so `onVisibilityChange()` - defined and
+  // immediately invoked once further down, purely to establish this
+  // session's initial heartbeat state - can safely reference it too; that
+  // first call ends up doing one harmless extra `/apps.json` fetch
+  // concurrently with the explicit boot-time one below, a one-time cost not
+  // worth adding a "was this the synthetic init call" flag to avoid.
+  let bootApps = [];
+  async function refreshBootApps() {
+    try {
+      const res = await fetch('/apps.json');
+      if (res.ok) bootApps = await res.json();
+    } catch { /* offline/transient - keep whatever catalog is already known, never worse than before this refresh attempt */ }
+  }
+
   // PRESENCE - ONE heartbeat for the whole session, started here (not by
   // apps/chat's own room-view mount anymore - see PresenceService's own top
   // doc comment on why presence is now user-centric, not room-centric),
@@ -284,6 +314,7 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
       stopHeartbeat = null;
     } else {
       sync?.refreshSubscriptions();
+      refreshBootApps(); // fire-and-forget - see this file's own doc comment on refreshBootApps() for why this is the trigger, not a per-navigation fetch
       if (!stopHeartbeat) stopHeartbeat = services.presence.startHeartbeat();
     }
   }
@@ -358,17 +389,12 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
   // already accept).
   const chrome = mountChrome(container, { qu, syncFetch, menuThreshold });
 
-  // A boot-time snapshot of the SAME catalog `renderRoute()` re-fetches on
-  // every navigation below - the header is mounted exactly once for the
-  // whole session (see its own "SEARCH SLOT" doc comment), so a snapshot
-  // this fresh is fine; an admin disabling/adding an app mid-session just
-  // isn't reflected in the header's own `shell.headerAction` contributors
-  // until next reload, same acceptable staleness `adminPubs` above already has.
-  let bootApps = [];
-  try {
-    const res = await fetch('/apps.json');
-    bootApps = res.ok ? await res.json() : [];
-  } catch { /* offline/unreachable - header renders no shell.headerAction contributors, everything else still works */ }
+  // The initial fetch of `bootApps` (declared further up, alongside
+  // `refreshBootApps()` - see that doc comment) - awaited here so both
+  // `mountHeader()` just below and `renderRoute()`'s own first call have a
+  // real catalog from the start, same "offline/unreachable degrades to an
+  // empty catalog, never a throw" behavior this always had.
+  await refreshBootApps();
   let stopHeader = null;
   try {
     stopHeader = mountHeader(headerRoot, { qu, services, adminPubs, subscribe, syncFetch, apps: bootApps, pwa, syncStats });
@@ -429,24 +455,27 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
   }
 
   /**
-   * The `hashchange` handler - has TWO `await` points (the `/apps.json`
-   * fetch, then the dynamic `import()`) before it ever touches `screen` or
-   * calls `mod.mount()`. Nothing stops a SECOND `hashchange` firing while a
-   * first call is still in either await (a fast double-navigation - e.g.
-   * clicking a link twice, or one nav triggering another) - without a guard,
-   * two concurrent calls race to build into the SAME `screen` node with no
-   * ordering guarantee between them, and whichever's async chain resolves
-   * LAST silently "wins" regardless of which one is actually current,
-   * potentially leaving the other's in-flight `mod.mount()` call's own
-   * returned stop function never captured/called. `navToken` (declared
-   * alongside `stopped`/`stopMountedApp` above) closes that: each call
-   * captures its own token at the very start, and bails out - without
-   * touching `screen`, calling `renderPlaceholder()`, or assigning
-   * `stopMountedApp` - the moment a NEWER call has since started. Same
-   * `token`/`stopped` guard idiom already used throughout this codebase
-   * (e.g. every app's own `renderToken` pattern, see
-   * `docs/building-an-app.md` §9) - applied here to the one place it was
-   * missing.
+   * The `hashchange` handler - has ONE `await` point (the dynamic
+   * `import()`) before it ever touches `screen` or calls `mod.mount()`.
+   * Reads `bootApps` SYNCHRONOUSLY (see that variable's own doc comment) -
+   * an earlier version of this function did `await fetch('/apps.json')`
+   * here too, a real network round-trip blocking EVERY navigation before
+   * the target app even started loading; removed, not just relocated -
+   * `bootApps` is already kept fresh in the background. Nothing stops a
+   * SECOND `hashchange` firing while a first call is still in its own
+   * import() await (a fast double-navigation - e.g. clicking a link twice,
+   * or one nav triggering another) - without a guard, two concurrent calls
+   * race to build into the SAME `screen` node with no ordering guarantee
+   * between them, and whichever's async chain resolves LAST silently "wins"
+   * regardless of which one is actually current, potentially leaving the
+   * other's in-flight `mod.mount()` call's own returned stop function never
+   * captured/called. `navToken` (declared alongside `stopped`/
+   * `stopMountedApp` above) closes that: each call captures its own token at
+   * the very start, and bails out - without touching `screen`, calling
+   * `renderPlaceholder()`, or assigning `stopMountedApp` - the moment a
+   * NEWER call has since started. Same `token`/`stopped` guard idiom already
+   * used throughout this codebase (e.g. every app's own `renderToken`
+   * pattern, see `docs/building-an-app.md` §9).
    */
   async function renderRoute() {
     const token = ++navToken;
@@ -473,12 +502,11 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
     // beyond this one prefix check.
     const catalogName = appId.startsWith('~') ? 'profile' : appId;
 
-    let apps = [];
-    try {
-      const res = await fetch('/apps.json');
-      apps = res.ok ? await res.json() : [];
-    } catch { /* transient fetch failure - treated the same as "app not found" below */ }
-    if (stopped || token !== navToken) return; // a newer navigation started while this fetch was in flight
+    // A snapshot of `bootApps` AT THIS EXACT NAVIGATION - not a live
+    // reference - so a background refresh landing mid-navigation (rare, but
+    // possible during the import() await below) can never make this one
+    // navigation's own `apps`/`app` values inconsistent with each other.
+    const apps = bootApps;
     const app = apps.find((a) => a.name === catalogName);
     // `enabled === false` (an admin's `disabledApps`, see relay-settings.js)
     // is treated exactly like "not found" - the real enforced gate is still
