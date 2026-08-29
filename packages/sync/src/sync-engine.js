@@ -132,7 +132,7 @@ export class SyncEngine {
   #onRelayHelloAck; // see constructor's own doc comment - relay federation handshake
   #onExternalPersist; // see constructor's own doc comment - relay federation cross-engine live bridge
   #recentBroadcasts = new Map(); // "path:ts" -> expiry ms - see #shouldSkipRebroadcast()
-  #prefixWatermarks = new Map(); // prefix -> highest ts THIS engine has itself persisted under it - see #bumpWatermarkIfSubscribed()/fetchPrefix()'s own `sinceTs` doc comment
+  #prefixWatermarks = new Map(); // prefix -> highest ts confirmed by a whole completed fetchPrefix() response batch for that prefix - see #bumpWatermark()/fetchPrefix()'s own `sinceTs` doc comment. NOT "highest ts ever persisted" - deliberately narrower, see #bumpWatermark()'s own doc comment for why.
   #fullSyncDone = new Set(); // "targetPeerId:prefix" keys (same shape as #mySubscriptions) for which a sinceTs:null full catch-up has completed at least once - see refreshSubscriptions()
 
   /**
@@ -402,8 +402,33 @@ export class SyncEngine {
       // with no prior full sync (fresh subscription, or a previous attempt
       // that never completed - see below) still gets `sinceTs: null`, i.e.
       // today's full-dump behavior, unchanged.
+      //
+      // CLOCK-SKEW MARGIN: `ts` is always a WRITER's own local clock (see
+      // `packages/core/src/qubit.js`'s `createQuBit()`) - there is no
+      // relay-authoritative timestamp anywhere in this codebase, so the
+      // stored watermark can only ever be as trustworthy as the clock of
+      // whichever peer happened to contribute the newest entry to the batch
+      // that set it (see `#bumpWatermark()`'s own doc comment for why it's
+      // now scoped to a whole confirmed batch, not a single write - that
+      // alone narrows but does not eliminate this). Subtracting
+      // `CLOCK_SKEW_MARGIN_MS` here, at the one place a stored watermark
+      // becomes a `sinceTs` REQUEST, re-asks for a small trailing window on
+      // every incremental catch-up rather than trusting the watermark's
+      // exact boundary - cheap (a handful of harmless re-merges, safely
+      // absorbed by `#persistDirectly()`'s own anti-regression ts-guard) and
+      // bounds the worst case to "some peer's clock is off by more than
+      // this margin" instead of "permanently missing" the way an unmargined
+      // boundary did. Applied HERE specifically, not inside `fetchPrefix()`
+      // itself (whose own doc comment already frames `sinceTs` as an exact,
+      // honest boundary other callers may rely on) and not server-side in
+      // `#handlePrefixRequest` (would double-apply for a client already
+      // margining its own request).
       const key = `${targetPeerId ?? ''}:${prefix}`;
-      const sinceTs = this.#fullSyncDone.has(key) ? (this.#prefixWatermarks.get(prefix) ?? null) : null;
+      let sinceTs = null;
+      if (this.#fullSyncDone.has(key)) {
+        const watermark = this.#prefixWatermarks.get(prefix);
+        if (watermark !== undefined) sinceTs = Math.max(0, watermark - CLOCK_SKEW_MARGIN_MS);
+      }
       this.fetchPrefix(prefix, targetPeerId, undefined, null, sinceTs)
         .then(() => this.#fullSyncDone.add(key)) // safe unconditionally: a no-op if `key` was already marked done, and correctly marks a first-ever full sync done once it actually completes - see this method's own call site reasoning above
         .catch((err) => {
@@ -703,15 +728,32 @@ export class SyncEngine {
       else this.#transport.send(message);
     });
 
-    return mapWithConcurrency(entries, FETCH_PREFIX_CONCURRENCY, async ({ path, quBit }) => {
+    // `batchMaxTs` feeds `#bumpWatermark()` below - the MAX ts across every
+    // entry in THIS response that actually validated (an entry that fails
+    // `#validateIncomingWrite()` - unsigned, forged, whatever - must never
+    // move the watermark forward: a single bad entry could otherwise let a
+    // misbehaving peer poison it arbitrarily far ahead and permanently
+    // starve every future incremental catch-up for this prefix, the exact
+    // failure mode `#persistDirectly()`'s own doc comment describes for an
+    // untrusted single write, just reachable a different way). Whether the
+    // entry actually turned out to be NEW information (`#persistDirectly()`
+    // returning `true` vs `false`) does not matter for this - the server's
+    // own guarantee ("this batch is everything currently newer than
+    // sinceTs") is about the returned SET, not about whether any one entry
+    // happened to be new to us.
+    let batchMaxTs;
+    const persistedCount = await mapWithConcurrency(entries, FETCH_PREFIX_CONCURRENCY, async ({ path, quBit }) => {
       try {
         await this.#validateIncomingWrite(path, quBit);
       } catch (err) {
         console.warn(`[SyncEngine] fetchPrefix(): skipping invalid entry for "${path}": ${err.message}`);
         return false;
       }
+      if (batchMaxTs === undefined || quBit.ts > batchMaxTs) batchMaxTs = quBit.ts;
       return this.#persistDirectly(path, quBit);
     });
+    if (batchMaxTs !== undefined) this.#bumpWatermark(prefix, batchMaxTs);
+    return persistedCount;
   }
 
   /**
@@ -782,25 +824,24 @@ export class SyncEngine {
   }
 
   /**
-   * Advances `#prefixWatermarks` for every subscribed prefix `path` falls
-   * under - see `fetchPrefix()`'s own `sinceTs` doc comment for what this
-   * feeds. Called ONLY from `#persistDirectly()`, never from a broader
-   * "value now exists" listener - that specificity matters: a write
-   * bridged in via `rebroadcastLocally()` (see that method's own doc
-   * comment) never calls `#persistDirectly()` (it only re-sends, per its
-   * own contract), so it can never advance a watermark for a `(prefix,
-   * targetPeerId)` pair this engine never actually fetched from - doing so
-   * would permanently under-ask that peer for anything older than a write
-   * this engine only ever received secondhand.
-   * @param {string} path @param {number} ts
+   * Advances `#prefixWatermarks[prefix]` to `ts` if `ts` is newer than
+   * whatever's already stored - called ONLY from `fetchPrefix()`'s own
+   * merge loop, with the MAX `ts` across one whole confirmed-valid response
+   * batch for that exact `prefix`, never from an individual write (see
+   * `#persistDirectly()`'s own doc comment for why: a single write's `ts`
+   * is only the sender's own unsynchronized local clock, not a "everything
+   * up to here is confirmed complete" checkpoint - only a batch the relay
+   * itself just confirmed is "everything currently newer than sinceTs" can
+   * honestly mean that). A write bridged in via `rebroadcastLocally()` (see
+   * that method's own doc comment) never reaches this at all - only
+   * `fetchPrefix()` calls it, and a bridge never calls `fetchPrefix()`
+   * either - so it can never advance a watermark for a `(prefix,
+   * targetPeerId)` pair this engine never actually fetched from.
+   * @param {string} prefix @param {number} ts
    */
-  #bumpWatermarkIfSubscribed(path, ts) {
-    if (typeof ts !== 'number') return;
-    for (const { prefix } of this.#mySubscriptions.values()) {
-      if (!path.startsWith(prefix)) continue;
-      const current = this.#prefixWatermarks.get(prefix);
-      if (current === undefined || ts > current) this.#prefixWatermarks.set(prefix, ts);
-    }
+  #bumpWatermark(prefix, ts) {
+    const current = this.#prefixWatermarks.get(prefix);
+    if (current === undefined || ts > current) this.#prefixWatermarks.set(prefix, ts);
   }
 
   #handleIncoming(message, peerId) {
@@ -1107,11 +1148,20 @@ export class SyncEngine {
    *   only calls that return `true` here. On a genuine new write, this is
    *   also the ONE choke point that fires `onExternalPersist` (see the
    *   constructor's own doc comment - relay federation's cross-engine live
-   *   bridge) and advances this engine's own `#prefixWatermarks` (see
-   *   `#bumpWatermarkIfSubscribed()` - incremental `fetchPrefix()`) -
-   *   `#handleSync`, `#handleResponse`, and `fetchPrefix()`'s own merge loop
-   *   all funnel through here, so neither side effect needs its own
-   *   special-casing per call site.
+   *   bridge). Deliberately does NOT touch `#prefixWatermarks` (unlike an
+   *   earlier version of this method) - see `#bumpWatermark()`'s and
+   *   `refreshSubscriptions()`'s own doc comments (the latter for
+   *   `CLOCK_SKEW_MARGIN_MS`) for why the watermark used for incremental
+   *   resync is advanced ONLY from `fetchPrefix()`'s own merge loop, from
+   *   a whole confirmed batch, never from one individual write (a live push
+   *   or a single `fetch()`) - a single write's own `ts` is just the
+   *   sender's own, unsynchronized local clock, and treating it as a
+   *   "confirmed complete up to here" checkpoint let one fast clock silently
+   *   and PERMANENTLY starve a different, slower-clocked peer's later,
+   *   genuinely-not-yet-seen write from ever being incrementally re-fetched
+   *   again (confirmed as a real bug, not a hypothetical - fixed by this
+   *   change; see the regression tests in sync-engine.test.js's own
+   *   "incremental resync watermark correctness" section).
    */
   async #persistDirectly(path, quBit) {
     try {
@@ -1121,7 +1171,6 @@ export class SyncEngine {
       }
       await this.#qu.putSealed(path, quBit);
       this.#onExternalPersist?.(path, quBit);
-      this.#bumpWatermarkIfSubscribed(path, quBit.ts);
       return true;
     } catch (err) {
       console.error(`[SyncEngine] failed to persist synced QuBit for "${path}":`, err);
@@ -1147,6 +1196,16 @@ function capCache(map, maxEntries = MAX_ACK_CACHE_ENTRIES) {
 
 const REBROADCAST_DEDUP_TTL_MS = 60_000; // see #shouldSkipRebroadcast() - long enough to absorb a mesh's own immediate re-delivery storm, short enough that a genuinely repeated write (same path, coincidentally same ts) is never suppressed for long
 const MAX_DEDUP_CACHE_ENTRIES = 4000; // see #shouldSkipRebroadcast() - same defensive capping approach as MAX_ACK_CACHE_ENTRIES above
+
+// see refreshSubscriptions()'s own "CLOCK-SKEW MARGIN" doc comment - 5
+// minutes is generous relative to realistic peer clock drift (a device
+// with any OS-level time sync is normally off by well under a second; this
+// covers a genuinely misconfigured/stalled-NTP device too) while keeping
+// the resulting "redundant re-fetch window" on every incremental catch-up
+// small and constant, not proportional to how long a subscription has
+// existed - the dominant real case (a short reconnect, almost everything
+// already present) still gets a small fetch, not a full re-download.
+const CLOCK_SKEW_MARGIN_MS = 5 * 60_000;
 
 const FETCH_PREFIX_CONCURRENCY = 8; // see fetchPrefix()'s own doc comment for why bounding (not unbounding) this is the right call
 

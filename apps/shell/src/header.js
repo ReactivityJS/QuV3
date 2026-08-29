@@ -133,22 +133,43 @@ const STYLE_ID = 'qu-shell-header-style';
 const STYLE = `
   body { padding-top: 3.25rem; }
   .qu-shell-header { position: fixed; top: 0; left: 0; right: 0; z-index: 500; display: flex; align-items: center; gap: 0.4rem; height: 3.25rem; padding: 0 0.75rem; background: canvas; border-bottom: 1px solid var(--qu-color-border, #8884); }
-  .qu-shell-home { display: flex; align-items: center; padding: 0.2rem; border-radius: var(--qu-radius-sm, 0.3rem); }
+  .qu-shell-home { display: flex; align-items: center; padding: 0.2rem; border-radius: var(--qu-radius-sm, 0.3rem); flex-shrink: 0; }
   .qu-shell-home:hover { background: var(--qu-color-surface, #8882); }
   .qu-shell-home img { width: 1.9rem; height: 1.9rem; display: block; }
-  .qu-shell-histbtn { background: none; border: none; cursor: pointer; font-size: 1.15em; line-height: 1; padding: 0.4rem 0.5rem; border-radius: var(--qu-radius-sm, 0.3rem); color: inherit; opacity: 0.75; }
+  .qu-shell-histbtn { background: none; border: none; cursor: pointer; font-size: 1.15em; line-height: 1; padding: 0.4rem 0.5rem; border-radius: var(--qu-radius-sm, 0.3rem); color: inherit; opacity: 0.75; flex-shrink: 0; }
   .qu-shell-histbtn:hover { background: var(--qu-color-surface, #8882); opacity: 1; }
-  .qu-shell-nav-slot { display: flex; align-items: center; }
+  /* SLOTS - 'shell.headerNavPoints'/'shell.headerAction' (see this file's own
+     "TWO HEADER EXTENSION POINTS" doc comment) render arbitrary, plugin-owned
+     content into these two elements - min-width: 0 + overflow: hidden
+     forces EVERY contributor (present or future) to yield to the row's
+     actually available width instead of being able to blow it out, same
+     structural guarantee regardless of how well-behaved any one contributor
+     happens to be. Without this, a contributor rendering unbounded
+     white-space: nowrap content (e.g. apps/debug's byte-rate badge) forces
+     this slot to its own full content width, which - combined with every
+     other item below ALSO having no flex-shrink: 0 before this fix - pushed
+     the excess overflow onto .qu-shell-user (the main menu) instead, right
+     off the edge of a narrow mobile viewport. Confirmed live: this is a
+     "must never happen" regression, not a cosmetic one - the main menu is
+     this app's only way to reach Settings/App List/Relay Admin. */
+  .qu-shell-nav-slot { display: flex; align-items: center; min-width: 0; overflow: hidden; }
   .qu-shell-header-spacer { flex: 1; }
-  .qu-shell-header-slot { display: flex; align-items: center; }
-  .qu-shell-update-btn { display: inline-flex; background: none; border: none; cursor: pointer; font-size: 1.1em; line-height: 1; padding: 0.35rem 0.5rem; border-radius: var(--qu-radius-sm, 0.3rem); color: inherit; }
+  .qu-shell-header-slot { display: flex; align-items: center; min-width: 0; overflow: hidden; }
+  .qu-shell-update-btn { display: inline-flex; background: none; border: none; cursor: pointer; font-size: 1.1em; line-height: 1; padding: 0.35rem 0.5rem; border-radius: var(--qu-radius-sm, 0.3rem); color: inherit; flex-shrink: 0; }
   .qu-shell-update-btn:hover { background: var(--qu-color-surface, #8882); }
   .qu-shell-update-btn[hidden] { display: none; }
   .qu-shell-update-btn:disabled { opacity: 0.6; cursor: default; }
-  .qu-shell-bell { position: relative; display: inline-flex; background: none; border: none; cursor: pointer; text-decoration: none; color: inherit; font-size: 1.2em; padding: 0.35rem 0.55rem; border-radius: var(--qu-radius-sm, 0.3rem); }
+  .qu-shell-bell { position: relative; display: inline-flex; background: none; border: none; cursor: pointer; text-decoration: none; color: inherit; font-size: 1.2em; padding: 0.35rem 0.55rem; border-radius: var(--qu-radius-sm, 0.3rem); flex-shrink: 0; }
   .qu-shell-bell:hover { background: var(--qu-color-surface, #8882); }
   .qu-shell-badge { position: absolute; top: 0.05rem; right: 0.05rem; min-width: 1rem; height: 1rem; padding: 0 0.2rem; border-radius: 999px; background: var(--qu-color-danger, #c00); color: #fff; font-size: 0.62rem; font-weight: 700; line-height: 1rem; text-align: center; }
-  .qu-shell-user { position: relative; min-width: 0; }
+  /* THE MAIN MENU - flex-shrink: 0 is the actual fix (see the slots' own
+     doc comment above): this must NEVER be the row's overflow valve, no
+     matter what a header-action/nav-point contributor renders. min-width: 0
+     alone (kept from before) only permits shrinking below content size - it
+     does not by itself protect against being the element that DOES shrink;
+     flex-shrink: 0 is what actually withholds this element from the
+     browser's flex-shrink distribution entirely. */
+  .qu-shell-user { position: relative; min-width: 0; flex-shrink: 0; }
   .qu-shell-user-btn { display: flex; align-items: center; gap: 0.4rem; max-width: 11rem; background: none; border: none; cursor: pointer; padding: 0.25rem 0.6rem 0.25rem 0.25rem; border-radius: 999px; color: inherit; font: inherit; }
   .qu-shell-user-btn:hover { background: var(--qu-color-surface, #8882); }
   .qu-shell-user-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.88em; }

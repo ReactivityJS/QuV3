@@ -55,7 +55,13 @@ const { t } = createI18n(DICT);
 
 const STYLE_ID = 'qu-debug-style';
 const STYLE = `
-  .qu-debug-header-badge { display: inline-flex; align-items: center; font-size: 0.78em; font-family: var(--qu-font-mono, monospace); opacity: 0.75; padding: 0 0.4rem; white-space: nowrap; }
+  /* Defense in depth on top of the shell header's own slot-level
+     min-width:0/overflow:hidden fix (apps/shell/src/header.js) - this
+     contributor should never rely solely on its host to keep it from
+     blowing out the header row on a narrow viewport. max-width + ellipsis
+     means the rate text clips gracefully instead of forcing the slot (and
+     so the whole row) to its full unclipped width. */
+  .qu-debug-header-badge { display: inline-flex; align-items: center; font-size: 0.78em; font-family: var(--qu-font-mono, monospace); opacity: 0.75; padding: 0 0.4rem; white-space: nowrap; max-width: 8rem; overflow: hidden; text-overflow: ellipsis; }
   .qu-debug-settings-hint { font-size: 0.8em; opacity: 0.7; margin: 0.2rem 0 0.5rem; }
   .qu-debug-stats { font-family: var(--qu-font-mono, monospace); font-size: 0.85em; opacity: 0.85; margin-top: 0.4rem; display: flex; flex-direction: column; gap: 0.15rem; }
 `;
