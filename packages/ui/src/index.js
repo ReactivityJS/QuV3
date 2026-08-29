@@ -10,6 +10,7 @@ export { injectStyle } from './style.js';
 export { renderFlagToggle } from './flag-toggle.js';
 export { createIconButton } from './icon-button.js';
 export { ensureTheme, DEFAULT_THEME, THEME_PRESETS, getStoredTheme, setStoredTheme } from './theme.js';
+export { isDebugMode, setDebugMode, formatBytes, formatRate } from './debug-mode.js';
 export { QuAssetUploadElement, QuAssetElement, findAssetService } from './asset-components.js';
 export { QuLinkPreviewElement } from './link-preview-components.js';
 export { mountActorPicker, looksLikeActorPub } from './actor-picker.js';

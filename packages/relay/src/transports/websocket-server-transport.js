@@ -3,6 +3,10 @@ import { Transport } from '@qu/sync';
 import { createLogger } from '@qu/log';
 
 const log = createLogger('WebSocketServerTransport');
+const textEncoder = new TextEncoder();
+// See getCurrentRateIn()/getCurrentRateOut() - same trailing-window design
+// as @qu/sync's WebSocketClientTransport (client-side counterpart).
+const RATE_WINDOW_MS = 5000;
 
 /**
  * WEBSOCKET SERVER TRANSPORT — the server side of `@qu/sync`'s `Transport`
@@ -19,6 +23,10 @@ export class WebSocketServerTransport extends Transport {
   #callbacks;
   #maxMessagesPerMinute;
   #messageCounts;
+  #bytesIn = 0;
+  #bytesOut = 0;
+  #inSamples = []; // {t, bytes}, chronological - see #currentRate()
+  #outSamples = [];
 
   /**
    * @param {import('ws').WebSocketServer} wss - Already listening.
@@ -45,6 +53,12 @@ export class WebSocketServerTransport extends Transport {
       log.debug(`${peerId} connected (${this.#peers.size} total)`);
 
       ws.on('message', (raw) => {
+        // Counted BEFORE the rate-limit check below - bytes genuinely
+        // arrived over the wire regardless of whether this peer is over its
+        // limit (see getBytesIn()'s own doc comment). `raw` is already a
+        // Buffer here, so `.length` is an exact byte count - no encoding
+        // step needed, unlike the outbound side below.
+        this.#recordIn(raw.length);
         if (this.#isRateLimited(peerId)) return; // silently dropped - a misbehaving/abusive peer gets no signal to adapt to, an honest one self-throttles from normal usage patterns anyway
         let data;
         try {
@@ -94,8 +108,12 @@ export class WebSocketServerTransport extends Transport {
   /** Broadcasts to every currently connected peer. */
   send(data) {
     const message = JSON.stringify(data);
+    const bytes = textEncoder.encode(message).length;
     for (const ws of this.#peers.values()) {
-      if (ws.readyState === ws.OPEN) ws.send(message);
+      if (ws.readyState === ws.OPEN) {
+        ws.send(message);
+        this.#recordOut(bytes); // once per ACTUAL send - N peers means N real writes to N sockets, not one shared count
+      }
     }
   }
 
@@ -103,7 +121,9 @@ export class WebSocketServerTransport extends Transport {
   sendTo(peerId, data) {
     const ws = this.#peers.get(peerId);
     if (!ws || ws.readyState !== ws.OPEN) return;
-    ws.send(JSON.stringify(data));
+    const message = JSON.stringify(data);
+    this.#recordOut(textEncoder.encode(message).length);
+    ws.send(message);
   }
 
   onMessage(callback) {
@@ -121,5 +141,68 @@ export class WebSocketServerTransport extends Transport {
   closeAllPeers() {
     for (const ws of this.#peers.values()) ws.terminate();
     this.#peers.clear();
+  }
+
+  /** @param {number} byteLength */
+  #recordIn(byteLength) {
+    this.#bytesIn += byteLength;
+    this.#pushSample(this.#inSamples, byteLength);
+  }
+
+  /** @param {number} byteLength */
+  #recordOut(byteLength) {
+    this.#bytesOut += byteLength;
+    this.#pushSample(this.#outSamples, byteLength);
+  }
+
+  /** @param {{t: number, bytes: number}[]} samples @param {number} byteLength */
+  #pushSample(samples, byteLength) {
+    samples.push({ t: Date.now(), bytes: byteLength });
+    this.#pruneSamples(samples);
+  }
+
+  /** @param {{t: number, bytes: number}[]} samples */
+  #pruneSamples(samples) {
+    const cutoff = Date.now() - RATE_WINDOW_MS;
+    while (samples.length && samples[0].t < cutoff) samples.shift();
+  }
+
+  /** @param {{t: number, bytes: number}[]} samples @returns {number} Average bytes/sec over the trailing `RATE_WINDOW_MS`, summed across ALL currently/recently connected peers - see `getCurrentRateIn()`'s own doc comment. */
+  #currentRate(samples) {
+    this.#pruneSamples(samples);
+    let sum = 0;
+    for (const s of samples) sum += s.bytes;
+    return sum / (RATE_WINDOW_MS / 1000);
+  }
+
+  /**
+   * TELEMETRY - aggregate byte counters across EVERY client (and, when this
+   * transport backs the relay's client-facing `SyncEngine`, every inbound
+   * federation-peer dial too - both land in the same `#peers` map, see this
+   * class's own top doc comment) this transport has ever served, not
+   * per-peer. See `@qu/relay`'s `traffic-stats.js` for where this is
+   * combined with `FederationTransport`'s own OUTBOUND-side counters into
+   * one relay-wide snapshot exposed to `apps/relay-admin`. Session-only (see
+   * `@qu/sync`'s `WebSocketClientTransport.getBytesIn()`'s identical doc
+   * comment on why this is never persisted).
+   * @returns {number}
+   */
+  getBytesIn() {
+    return this.#bytesIn;
+  }
+
+  /** @returns {number} See `getBytesIn()`'s own doc comment. */
+  getBytesOut() {
+    return this.#bytesOut;
+  }
+
+  /** @returns {number} Average inbound bytes/sec over the trailing `RATE_WINDOW_MS` (5s), summed across every peer. */
+  getCurrentRateIn() {
+    return this.#currentRate(this.#inSamples);
+  }
+
+  /** @returns {number} Average outbound bytes/sec over the trailing `RATE_WINDOW_MS` (5s), summed across every peer. */
+  getCurrentRateOut() {
+    return this.#currentRate(this.#outSamples);
   }
 }

@@ -469,7 +469,7 @@ test('booting with the REAL repo apps/ directory also loads app-list/user-list/p
   try {
     const relay = await new QuRelay({ storeDir: join(base, 'store'), blobDir: join(base, 'blob'), appsDir: REPO_APPS_DIR, port: 0 }).boot();
     try {
-      for (const name of ['app-list', 'user-list', 'profile', 'forum', 'bookmarks', 'notifications', 'reactions', 'pins', 'relay-admin', 'relay-federation', 'chat', 'search', 'calendar', 'geochase', 'todo', 'phone', 'cms', 'data-manager']) assert.equal(relay.loader.isLoaded(name), true);
+      for (const name of ['app-list', 'user-list', 'profile', 'forum', 'bookmarks', 'notifications', 'reactions', 'pins', 'relay-admin', 'relay-federation', 'chat', 'search', 'calendar', 'geochase', 'todo', 'phone', 'debug', 'cms', 'data-manager']) assert.equal(relay.loader.isLoaded(name), true);
 
       const res = await fetch(`http://localhost:${relay.port}/apps.json`);
       const catalog = await res.json();
@@ -507,6 +507,11 @@ test('booting with the REAL repo apps/ directory also loads app-list/user-list/p
       // (relay-settings.js's own hiddenFromAppList default) since it has no
       // reason to be browsed to directly, only reached via Settings or an
       // invite link, same reasoning apps/relay-admin already has.
+      // apps/debug is the newest addition: a UI-only sync-traffic telemetry
+      // plugin (shell.headerAction badge + userSettings.contributions
+      // section - see its own client.js top doc comment) - hidden from the
+      // app list (relay-settings.js's own hiddenFromAppList default) for the
+      // same reason as apps/relay-federation/apps/relay-admin above.
       // apps/data-manager is the newest addition: the resolved-data viewer +
       // filter + export/import app (own "My Data" tier for every identity,
       // plus an admin-only "Relay Data" tier over the already-existing
@@ -515,7 +520,7 @@ test('booting with the REAL repo apps/ directory also loads app-list/user-list/p
       // apps/cms is the newest addition alongside it: Admin-owned global
       // pages + each user's own page space (see its own manifest.quapp/
       // client.js doc comments).
-      assert.deepEqual(names, ['app-list', 'bookmarks', 'calendar', 'chat', 'cms', 'data-manager', 'forum', 'geochase', 'notifications', 'phone', 'pins', 'profile', 'reactions', 'relay-admin', 'relay-federation', 'search', 'todo', 'user-list']);
+      assert.deepEqual(names, ['app-list', 'bookmarks', 'calendar', 'chat', 'cms', 'data-manager', 'debug', 'forum', 'geochase', 'notifications', 'phone', 'pins', 'profile', 'reactions', 'relay-admin', 'relay-federation', 'search', 'todo', 'user-list']);
       for (const app of catalog) assert.equal(app.clientMainUrl, `/apps/${app.name}/dist/client.js`);
     } finally {
       await relay.close();

@@ -90,6 +90,15 @@
  * other example of yet, because no other section here has anything this
  * transient to show.
  *
+ * TRAFFIC SECTION: read-only, live-polled (`GET /admin/traffic-stats`, every
+ * 3s - `refreshTracks()`/`setInterval`/cleanup-on-unmount pattern borrowed
+ * from `apps/geochase/client.js`) sync byte/rate counters for this relay -
+ * see `packages/relay/src/traffic-stats.js`'s own doc comment for what it
+ * aggregates. Not part of `settings`/this form's Save at all (nothing here
+ * is persisted state), same "state isn't in settings, read it separately"
+ * reasoning the Federation section's own live connection-status readout
+ * above already documents.
+ *
  * LINK PREVIEWS SECTION: `settings.linkPreviews.enabled` is a plain on/off
  * kill switch for `@qu/relay`'s `link-preview.js`/its `/link-preview` route
  * - see that module's own doc comment for what it fetches and why (server-
@@ -102,7 +111,7 @@
 import { QuCrypto } from '@qu/core';
 import { createI18n } from '@qu/i18n';
 import { rankFor } from '@qu/foundation';
-import { injectStyle, ensureTheme } from '@qu/ui';
+import { injectStyle, ensureTheme, formatBytes, formatRate } from '@qu/ui';
 
 /**
  * The fixed catalog of extension points this UI can reorder - native item
@@ -219,6 +228,11 @@ const DICT = {
     federationReject: 'Reject',
     federationBlacklist: 'Blacklist',
     federationBlacklistHint: 'One URL or relayId per line. Never dialed, never accepted, never auto-learned, even with auto-learn on.',
+    traffic: 'Sync traffic',
+    trafficHint: 'Live byte counters for this relay\'s client connections and (if configured) its federation links - refreshes every few seconds. Read-only; not part of the settings saved by this form.',
+    trafficIn: 'In (total / rate): {total} / {rate}',
+    trafficOut: 'Out (total / rate): {total} / {rate}',
+    trafficUnavailable: 'Not available yet.',
     save: 'Save settings',
     saved: 'Saved.',
     saveFailed: 'Save failed: {error}',
@@ -297,6 +311,11 @@ const DICT = {
     federationReject: 'Ablehnen',
     federationBlacklist: 'Blacklist',
     federationBlacklistHint: 'Eine URL oder relayId pro Zeile. Wird nie angewählt, nie akzeptiert, nie automatisch gelernt - auch bei aktiviertem Auto-Learn.',
+    traffic: 'Sync-Traffic',
+    trafficHint: 'Live-Byte-Zähler für die Client-Verbindungen dieses Relays und (falls konfiguriert) seine Föderations-Links - aktualisiert sich alle paar Sekunden. Nur lesbar, nicht Teil der von diesem Formular gespeicherten Einstellungen.',
+    trafficIn: 'Rein (gesamt / Rate): {total} / {rate}',
+    trafficOut: 'Raus (gesamt / Rate): {total} / {rate}',
+    trafficUnavailable: 'Noch nicht verfügbar.',
     save: 'Einstellungen speichern',
     saved: 'Gespeichert.',
     saveFailed: 'Speichern fehlgeschlagen: {error}',
@@ -334,6 +353,7 @@ const STYLE = `
   .qu-relay-admin-federation-add { display: flex; gap: 0.4rem; margin-top: 0.3rem; }
   .qu-relay-admin-federation-add input[type="text"] { flex: 1; }
   .qu-relay-admin textarea { font: inherit; padding: 0.3rem 0.5rem; border: 1px solid var(--qu-color-border, #8884); border-radius: var(--qu-radius-md, 0.4rem); width: 100%; max-width: 28rem; box-sizing: border-box; }
+  .qu-relay-admin-traffic { font-family: monospace; font-size: 0.9em; display: flex; flex-direction: column; gap: 0.15rem; }
 `;
 
 /**
@@ -862,6 +882,37 @@ export async function mount(container, { identity, services, apps }) {
     blacklistLabel, blacklistHint, blacklistTextarea
   );
 
+  // ---- Traffic (read-only, live-polled - not part of the settings patch) ----
+  const trafficSection = document.createElement('section');
+  const trafficTitle = document.createElement('h2');
+  trafficTitle.textContent = t('traffic');
+  const trafficHint = document.createElement('p');
+  trafficHint.className = 'qu-relay-admin-hint';
+  trafficHint.textContent = t('trafficHint');
+  const trafficStats = document.createElement('div');
+  trafficStats.className = 'qu-relay-admin-traffic';
+  trafficStats.textContent = t('trafficUnavailable');
+  trafficSection.append(trafficTitle, trafficHint, trafficStats);
+
+  async function refreshTrafficStats() {
+    try {
+      const res = await fetch('/admin/traffic-stats');
+      if (!res.ok) { trafficStats.textContent = t('trafficUnavailable'); return; }
+      const { bytesIn, bytesOut, rateIn, rateOut } = await res.json();
+      if (stopped) return;
+      trafficStats.textContent = '';
+      const inLine = document.createElement('div');
+      inLine.textContent = t('trafficIn', { total: formatBytes(bytesIn), rate: formatRate(rateIn) });
+      const outLine = document.createElement('div');
+      outLine.textContent = t('trafficOut', { total: formatBytes(bytesOut), rate: formatRate(rateOut) });
+      trafficStats.append(inLine, outLine);
+    } catch {
+      if (!stopped) trafficStats.textContent = t('trafficUnavailable');
+    }
+  }
+  await refreshTrafficStats();
+  const trafficRefreshTimer = setInterval(refreshTrafficStats, 3000);
+
   // ---- Save ----
   const saveBtn = document.createElement('button');
   saveBtn.type = 'submit';
@@ -870,7 +921,7 @@ export async function mount(container, { identity, services, apps }) {
   status.className = 'qu-relay-admin-status';
   status.hidden = true;
 
-  form.append(generalSection, appsSection, channelsSection, chatSection, cmsSection, linkPreviewsSection, ...orderSections.map((o) => o.section), flagTypesSection, federationSection, saveBtn, status);
+  form.append(generalSection, appsSection, channelsSection, chatSection, cmsSection, linkPreviewsSection, ...orderSections.map((o) => o.section), flagTypesSection, federationSection, trafficSection, saveBtn, status);
 
   // Chrome Inversion (`apps/shell/src/chrome.js`) - none of
   // `navigation`/`views`/`primaryAction`/`settings` fit a single settings
@@ -943,5 +994,5 @@ export async function mount(container, { identity, services, apps }) {
     }
   });
 
-  return () => { stopped = true; };
+  return () => { stopped = true; clearInterval(trafficRefreshTimer); };
 }

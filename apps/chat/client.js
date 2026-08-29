@@ -95,10 +95,18 @@
  * other members - what powers the "read" tick on a SENDER's own messages)
  * is published whenever this identity views a room's newest message;
  * `MessageService.markRead()` (PRIVATE) drives this identity's OWN unread
- * dot in the room list. Presence (online/last-seen) is polled on a fixed
- * interval while a room view is mounted - `PresenceService.getPresence()`
- * is explicitly a STALENESS check, not a push mechanism (see its own doc
- * comment), so polling is the intended usage, not a shortcut.
+ * dot in the room list. Presence (online/last-seen) is GLOBAL and
+ * user-centric now, not room-centric (see `PresenceService`'s own top doc
+ * comment) - the heartbeat that publishes it runs ONCE PER SESSION in
+ * `apps/shell/client.js`'s own boot, not here anymore. This file only ever
+ * READS it, polled on a fixed interval while a room view is mounted -
+ * `PresenceService.getUserPresences()` is explicitly a STALENESS check, not
+ * a push mechanism (see its own doc comment), so polling is the intended
+ * usage, not a shortcut. The typing indicator ("typing…" / "X typing…" in
+ * the header status line) rides alongside this same poll but is genuinely
+ * thread-scoped, unlike presence - `PresenceService.publishTyping()`/
+ * `getTypingMembers()`, their own dedicated per-thread path (see that
+ * class's own doc comment).
  *
  * Routes: `#/chat` (room list), `#/chat/<peerActorPub>` (1:1 room),
  * `#/chat/g/<groupId>` (group room), `#/chat/new-group` (create-group form),
@@ -1351,24 +1359,25 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   composerErrorEl.hidden = true;
   let composer = null;
 
-  // TYPING INDICATOR - PresenceService.setPresence()'s own `typing` option
-  // (see that method's doc comment); renderPresence() (below) reads it back
-  // via the same getPresence() the online/last-seen status already uses.
-  // `isTypingNow` guards against a redundant write on every keystroke (only
-  // the ACTUAL true<->false transition publishes); `typingStopTimer` is a
-  // plain client-side idle timeout, not the (much longer) presence
-  // staleness window - "stopped typing" must reach peers within a few
-  // seconds of a real pause, not only once the whole presence record ages
-  // out. Declared here (not inside the room-resolution IIFE below, where
-  // the composer itself is built) so the outer teardown function can clear
-  // the timer without it needing its own separate close-over-a-closure path.
+  // TYPING INDICATOR - `PresenceService.publishTyping()`, its own dedicated
+  // per-thread path (see that method's doc comment for why it's separate
+  // from the global online/offline presence QuBit); renderPresence() (below)
+  // reads it back via the matching `getTypingMembers()`. `isTypingNow`
+  // guards against a redundant write on every keystroke (only the ACTUAL
+  // true<->false transition publishes); `typingStopTimer` is a plain
+  // client-side idle timeout, not the (much longer) staleness window
+  // `getTypingMembers()` itself applies - "stopped typing" must reach peers
+  // within a few seconds of a real pause, not only once the whole record
+  // ages out. Declared here (not inside the room-resolution IIFE below,
+  // where the composer itself is built) so the outer teardown function can
+  // clear the timer without it needing its own separate close-over-a-closure path.
   let isTypingNow = false;
   let typingStopTimer = null;
   const TYPING_IDLE_MS = 3_000;
   function publishTyping(typing) {
     if (stopped || isTypingNow === typing) return;
     isTypingNow = typing;
-    services.presence.setPresence(SPACE_ID, roomId, 'online', { typing }).catch(() => {});
+    services.presence.publishTyping(SPACE_ID, roomId, typing).catch(() => {});
   }
 
   composerWrap.append(replyBanner, composerErrorEl, composerRoot);
@@ -2340,24 +2349,28 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
   }
 
   // ---- presence: polled, not pushed - see this file's own top doc comment ----
-  // TYPING INDICATOR: PresenceService.setPresence()'s own `typing` option
-  // (see its doc comment) - one write path, no separate service/thread.
-  // Below, the composer's own textarea 'input' listener drives
-  // `publishTyping()`; this render function only ever READS it back via
-  // the same getPresence() call the online/last-seen status already uses.
+  // TYPING INDICATOR: `PresenceService.publishTyping()`/`getTypingMembers()`
+  // - its own dedicated, thread-scoped path, separate from the global
+  // presence read below (see that class's own doc comment for why "is
+  // typing" can't live on the global per-actor presence QuBit). Below, the
+  // composer's own textarea 'input' listener drives `publishTyping()`; this
+  // render function only ever READS it back, alongside (not instead of)
+  // the online/last-seen status.
   let presenceTimer = null;
   async function renderPresence() {
     if (stopped || !roomReady) return;
     const otherMembers = memberPubs.filter((p) => p !== myPub);
-    const presence = await services.presence.getPresence(SPACE_ID, roomId, otherMembers);
+    const [presence, typingPubs] = await Promise.all([
+      services.presence.getUserPresences(otherMembers),
+      services.presence.getTypingMembers(SPACE_ID, roomId, otherMembers),
+    ]);
     if (stopped) return;
     if (target.kind === 'dm') {
       const p = presence[target.peerPub];
-      headerStatusEl.textContent = p?.typing ? t('isTyping')
+      headerStatusEl.textContent = typingPubs.includes(target.peerPub) ? t('isTyping')
         : p?.online ? t('online')
         : p ? t('lastSeen', { time: formatTs(p.lastSeen) }) : '';
     } else {
-      const typingPubs = otherMembers.filter((pub) => presence[pub]?.typing);
       if (typingPubs.length > 0) {
         const names = await Promise.all(typingPubs.map(async (pub) => formatActorLabel(pub, await resolveAuthor(pub))));
         if (stopped) return;
@@ -2368,35 +2381,6 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
       }
     }
   }
-
-  let stopHeartbeat = null;
-
-  // PUSH ONLY WHILE ACTUALLY BACKGROUNDED/CLOSED - PushDeliveryService
-  // (packages/relay/src/push-delivery.js) already skips sending a Web Push
-  // whenever PresenceTracker.isRecentlyOnline() sees this identity's status
-  // as 'online' and fresh (see that file's own doc comment) - the ONLY gap
-  // was that the heartbeat above published 'online' unconditionally every
-  // 5s for as long as this room view stayed MOUNTED, backgrounded tab or
-  // not, so a merely-backgrounded (not closed) chat kept suppressing push
-  // indefinitely. Tying the heartbeat itself to document.visibilityState
-  // closes that gap with NO new signal/protocol/relay change at all -
-  // `stopHeartbeat()` already publishes 'offline' the instant it's called
-  // (startHeartbeat()'s own doc comment), which is now exactly what
-  // happens the moment the tab backgrounds, not just once this view
-  // unmounts entirely. Same mechanism `apps/shell/client.js`'s own
-  // visibilitychange listener already uses for its own, unrelated
-  // "refresh subscriptions on return" purpose - this one is scoped to
-  // just this room view (removed in the teardown below), not global.
-  function onVisibilityChange() {
-    if (stopped || !roomReady) return;
-    if (document.visibilityState === 'hidden') {
-      stopHeartbeat?.();
-      stopHeartbeat = null;
-    } else if (!stopHeartbeat) {
-      stopHeartbeat = services.presence.startHeartbeat(SPACE_ID, roomId);
-    }
-  }
-  document.addEventListener('visibilitychange', onVisibilityChange);
 
   (async () => {
     myPub = await services.actors.whoAmI();
@@ -2501,11 +2485,6 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     await refreshHeaderMuted();
     if (stopped) return;
 
-    // Not an unconditional startHeartbeat() call - onVisibilityChange()
-    // (above) only actually starts it while the tab is genuinely visible
-    // right now, same as it does for every LATER visibility flip too - see
-    // that function's own doc comment.
-    onVisibilityChange();
     renderPresence();
     presenceTimer = setInterval(renderPresence, 5_000);
 
@@ -2558,13 +2537,11 @@ function mountRoomView(container, { qu, services, subscribe, syncFetch, extensio
     clearMessageWatchers();
     offMessages();
     offReadReceipts();
-    stopHeartbeat?.();
     clearTimeout(typingStopTimer);
     if (presenceTimer) clearInterval(presenceTimer);
     composer?.stop(); // may never have been constructed - e.g. a group that turned out not to exist (roomReady never became true)
     resizeObserver?.disconnect();
     viewportResizeTarget.removeEventListener('resize', onViewportResize);
-    document.removeEventListener('visibilitychange', onVisibilityChange);
   };
 }
 

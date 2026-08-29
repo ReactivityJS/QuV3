@@ -167,7 +167,7 @@ const STYLE = `
 
 /**
  * @param {HTMLElement} container
- * @param {{qu: import('@qu/core').QuStore, services: object, adminPubs?: string[], subscribe?: (prefix: string) => void, syncFetch?: (prefix: string) => Promise<*>, apps?: object[], pwa?: {getUpdateAvailable?: () => boolean, onUpdateAvailable?: (cb: () => void) => void, applyUpdate?: () => void, getInstallable?: () => boolean, onInstallable?: (cb: () => void) => void, installApp?: () => Promise<boolean>}}} deps -
+ * @param {{qu: import('@qu/core').QuStore, services: object, adminPubs?: string[], subscribe?: (prefix: string) => void, syncFetch?: (prefix: string) => Promise<*>, apps?: object[], pwa?: {getUpdateAvailable?: () => boolean, onUpdateAvailable?: (cb: () => void) => void, applyUpdate?: () => void, getInstallable?: () => boolean, onInstallable?: (cb: () => void) => void, installApp?: () => Promise<boolean>}, syncStats?: {getStats: () => {bytesIn: number, bytesOut: number, rateIn: number, rateOut: number}}}} deps -
  *   `apps` is the SAME manifest catalog every routed app already receives as
  *   `ctx.apps` (see this file's own "TWO HEADER EXTENSION POINTS" doc
  *   comment) - defaults to `[]` so an existing caller that doesn't pass it
@@ -177,10 +177,13 @@ const STYLE = `
  *   state (see this file's own "PWA INSTALL/UPDATE" doc comment for why
  *   THAT file calls them, not this one) - every field defaults to an inert
  *   no-op/`false` so a caller that doesn't pass it (any existing test) just
- *   renders neither affordance, never throws.
+ *   renders neither affordance, never throws. `syncStats` is threaded
+ *   verbatim into the `shell.headerAction` payload below - see
+ *   `apps/shell/client.js`'s own doc comment on it (`apps/debug`'s header
+ *   badge contributor is the one consumer today).
  * @returns {() => void} A stop function.
  */
-export function mountHeader(container, { qu, services, adminPubs = [], subscribe, syncFetch, apps = [], pwa = {} }) {
+export function mountHeader(container, { qu, services, adminPubs = [], subscribe, syncFetch, apps = [], pwa = {}, syncStats }) {
   const {
     getUpdateAvailable = () => false,
     onUpdateAvailable = () => {},
@@ -307,7 +310,7 @@ export function mountHeader(container, { qu, services, adminPubs = [], subscribe
   // needs `services.flags` to find an editable calendar, Chat's "+ New
   // group" needs `services` for its own policy check. `apps/search`'s
   // existing contributor ignores the extra fields, so this is non-breaking.
-  extensionPoints.renderSlot('shell.headerAction', headerSlot, { getContext, onContextChange, services, qu, subscribe, syncFetch });
+  extensionPoints.renderSlot('shell.headerAction', headerSlot, { getContext, onContextChange, services, qu, subscribe, syncFetch, syncStats });
   // `shell.headerNavPoints` - a second, LEFT-aligned slot next to Back/Forward
   // (see this file's own "APP NAVIGATION POINTS SLOT" doc comment above).
   // Same mechanism, same payload shape as `shell.headerAction` above - a

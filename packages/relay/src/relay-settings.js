@@ -39,7 +39,7 @@ export const DEFAULT_RELAY_SETTINGS = Object.freeze({
   //     links), `app-list` (itself - listing itself inside itself is
   //     circular), `search` (the header's always-visible search icon),
   //     `relay-admin` (the avatar menu's own Relay Admin link, admin-only).
-  hiddenFromAppList: Object.freeze(['pins', 'reactions', 'notifications', 'profile', 'app-list', 'search', 'relay-admin', 'relay-federation']),
+  hiddenFromAppList: Object.freeze(['pins', 'reactions', 'notifications', 'profile', 'app-list', 'search', 'relay-admin', 'relay-federation', 'debug']),
   // Admin-editable Flag TYPE catalog - what a "flag" even IS is data, not
   // code, same reasoning as `disabledApps`. Shipped with a sane starter set
   // so liking/favoriting works out of the box with zero admin action; the

@@ -62,17 +62,18 @@ async function freshEnv(alias) {
   const access = new AccessService(qu, identity);
   const messages = new MessageService(qu, identity, list, access);
   const flags = new FlagService(qu, identity, list);
+  const contacts = new ContactsService(flags, identity);
   const services = {
     actors: new ActorService(identity),
     profile: new ProfileService(qu, identity),
     messages,
     reactions: new ReactionService(qu, identity, list),
     pins: new PinService(qu, identity, list),
-    presence: new PresenceService(qu, identity),
+    presence: new PresenceService(qu, identity, contacts),
     chat: new ChatService(messages, identity),
     assets: new AssetService(qu, new AssetEngine(qu), identity),
     directory: new DirectoryService(qu, identity, list),
-    contacts: new ContactsService(flags, identity),
+    contacts,
     notificationPrefs: new NotificationPrefsService(qu, identity),
   };
   const myPub = await services.actors.whoAmI();
@@ -102,12 +103,6 @@ function makeContainer() {
   const el = document.createElement('div');
   document.body.appendChild(el);
   return el;
-}
-
-/** jsdom's own document.visibilityState is a getter, not directly settable - see mountRoomView()'s own onVisibilityChange() doc comment for what this drives. */
-function setDocumentVisibility(state) {
-  Object.defineProperty(document, 'visibilityState', { value: state, configurable: true });
-  document.dispatchEvent(new window.Event('visibilitychange'));
 }
 
 /**
@@ -954,13 +949,16 @@ test('TYPING INDICATOR: a DM peer typing shows "typing…" instead of online/las
   await mirrorProfileInto(bob, alice.qu);
   const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
 
-  // Bob is typing, mirrored into Alice's store BEFORE her room view even
-  // mounts - same putSealed() technique the read-receipt tests above
-  // already use. See PresenceService.setPresence()'s own "typing" doc
-  // comment.
-  await bob.services.presence.setPresence(CHAT_SPACE_ID, roomId, 'online', { typing: true });
-  const presencePath = paths.threadPresencePath(CHAT_SPACE_ID, roomId, bob.myPub);
-  await alice.qu.putSealed(presencePath, await bob.qu.get(presencePath));
+  // Bob is online (global presence) AND typing (its own dedicated,
+  // thread-scoped path - see PresenceService's own doc comment on why the
+  // two are separate writes), both mirrored into Alice's store BEFORE her
+  // room view even mounts - same putSealed() technique the read-receipt
+  // tests above already use.
+  await bob.services.presence.setUserPresence('online');
+  await alice.qu.putSealed(paths.presencePath(bob.myPub), await bob.qu.get(paths.presencePath(bob.myPub)));
+  await bob.services.presence.publishTyping(CHAT_SPACE_ID, roomId, true);
+  const typingPath = paths.threadTypingPath(CHAT_SPACE_ID, roomId, bob.myPub);
+  await alice.qu.putSealed(typingPath, await bob.qu.get(typingPath));
 
   const container = makeContainer();
   const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
@@ -975,11 +973,10 @@ test('TYPING INDICATOR: a DM peer who is online but NOT typing still shows the p
   const alice = await freshEnv('Alice');
   const bob = await freshEnv('Bob');
   await mirrorProfileInto(bob, alice.qu);
-  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
+  await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
 
-  await bob.services.presence.setPresence(CHAT_SPACE_ID, roomId, 'online');
-  const presencePath = paths.threadPresencePath(CHAT_SPACE_ID, roomId, bob.myPub);
-  await alice.qu.putSealed(presencePath, await bob.qu.get(presencePath));
+  await bob.services.presence.setUserPresence('online');
+  await alice.qu.putSealed(paths.presencePath(bob.myPub), await bob.qu.get(paths.presencePath(bob.myPub)));
 
   const container = makeContainer();
   const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
@@ -997,9 +994,11 @@ test('TYPING INDICATOR: in a group, a typing member\'s name replaces the "N onli
   await mirrorProfileInto(alice, bob.qu);
   const { groupId } = await alice.services.chat.createGroup(CHAT_SPACE_ID, { name: 'Team Rocket', memberPubs: [bob.myPub] });
 
-  await bob.services.presence.setPresence(CHAT_SPACE_ID, groupId, 'online', { typing: true });
-  const presencePath = paths.threadPresencePath(CHAT_SPACE_ID, groupId, bob.myPub);
-  await alice.qu.putSealed(presencePath, await bob.qu.get(presencePath));
+  await bob.services.presence.setUserPresence('online');
+  await alice.qu.putSealed(paths.presencePath(bob.myPub), await bob.qu.get(paths.presencePath(bob.myPub)));
+  await bob.services.presence.publishTyping(CHAT_SPACE_ID, groupId, true);
+  const typingPath = paths.threadTypingPath(CHAT_SPACE_ID, groupId, bob.myPub);
+  await alice.qu.putSealed(typingPath, await bob.qu.get(typingPath));
 
   const container = makeContainer();
   const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', 'g', groupId] });
@@ -1015,7 +1014,7 @@ test('TYPING INDICATOR: typing in the composer publishes it; clearing the draft 
   const bob = await freshEnv('Bob');
   await mirrorProfileInto(bob, alice.qu);
   const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
-  const presencePath = paths.threadPresencePath(CHAT_SPACE_ID, roomId, alice.myPub);
+  const typingPath = paths.threadTypingPath(CHAT_SPACE_ID, roomId, alice.myPub);
 
   const container = makeContainer();
   const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
@@ -1025,56 +1024,13 @@ test('TYPING INDICATOR: typing in the composer publishes it; clearing the draft 
 
     textarea.value = 'hi bob';
     textarea.dispatchEvent(new window.Event('input', { bubbles: true }));
-    await waitFor(async () => (await alice.qu.get(presencePath))?.val?.typing === true);
+    await waitFor(async () => (await alice.qu.get(typingPath))?.val?.typing === true);
 
     textarea.value = '';
     textarea.dispatchEvent(new window.Event('input', { bubbles: true }));
-    await waitFor(async () => (await alice.qu.get(presencePath))?.val?.typing === false);
+    await waitFor(async () => (await alice.qu.get(typingPath))?.val?.typing === false);
   } finally {
     stop();
-  }
-});
-
-test('PUSH ONLY WHILE VISIBLE: backgrounding the tab immediately publishes "offline" (closes the gap PresenceTracker.isRecentlyOnline() otherwise leaves for a merely-backgrounded, not closed, chat - see mountRoomView()\'s own onVisibilityChange() doc comment); returning to the foreground resumes "online"', async () => {
-  const alice = await freshEnv('Alice');
-  const bob = await freshEnv('Bob');
-  await mirrorProfileInto(bob, alice.qu);
-  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
-
-  const container = makeContainer();
-  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
-  try {
-    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
-    await waitFor(async () => (await alice.services.presence.getPresence(CHAT_SPACE_ID, roomId, [alice.myPub]))[alice.myPub]?.status === 'online');
-
-    setDocumentVisibility('hidden');
-    await waitFor(async () => (await alice.services.presence.getPresence(CHAT_SPACE_ID, roomId, [alice.myPub]))[alice.myPub]?.status === 'offline');
-
-    setDocumentVisibility('visible');
-    await waitFor(async () => (await alice.services.presence.getPresence(CHAT_SPACE_ID, roomId, [alice.myPub]))[alice.myPub]?.status === 'online');
-  } finally {
-    stop();
-    setDocumentVisibility('visible');
-  }
-});
-
-test('PUSH ONLY WHILE VISIBLE: mounting a room view while the tab is ALREADY hidden never starts the heartbeat at all - no "online" is ever published', async () => {
-  const alice = await freshEnv('Alice');
-  const bob = await freshEnv('Bob');
-  await mirrorProfileInto(bob, alice.qu);
-  const roomId = await alice.services.chat.ensureRoom(CHAT_SPACE_ID, bob.myPub);
-
-  setDocumentVisibility('hidden');
-  const container = makeContainer();
-  const stop = mount(container, { qu: alice.qu, services: alice.services, apps: CHAT_APPS, subscribe: noopSubscribe, segments: ['chat', bob.myPub] });
-  try {
-    await waitFor(() => (container.querySelector('.qu-chat-header-name')?.textContent ?? '') !== '');
-    await new Promise((resolve) => setTimeout(resolve, 60));
-    const presence = await alice.services.presence.getPresence(CHAT_SPACE_ID, roomId, [alice.myPub]);
-    assert.equal(presence[alice.myPub], undefined);
-  } finally {
-    stop();
-    setDocumentVisibility('visible');
   }
 });
 

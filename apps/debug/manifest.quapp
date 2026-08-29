@@ -1,0 +1,12 @@
+{
+  "name": "debug",
+  "version": "1.0.0",
+  "kind": "app",
+  "main": "./index.js",
+  "clientMain": "./dist/client.js",
+  "requires": [],
+  "contributes": [
+    { "point": "shell.headerAction", "export": "renderHeaderBadge", "kind": "ui", "order": 10 },
+    { "point": "userSettings.contributions", "export": "renderDebugSettings", "kind": "ui" }
+  ]
+}

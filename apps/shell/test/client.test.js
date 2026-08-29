@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { QuStore, MemoryStoreAdapter, QuCrypto } from '@qu/core';
 import { QuIdentityEngine } from '@qu/identity';
-import { ProfileService } from '@qu/services';
+import { ProfileService, PresenceService } from '@qu/services';
 import { installDom, waitFor } from '@qu/ui/testing';
 import { getStoredLocale, setLocale } from '@qu/i18n';
 
@@ -55,6 +55,12 @@ function makeContainer() {
  */
 function dataUrlModule(source) {
   return `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
+}
+
+/** jsdom's own document.visibilityState is a getter, not directly settable - see client.js's own onVisibilityChange() doc comment for what this drives (the session-wide presence heartbeat, ported here from apps/chat's own former per-room-view version). */
+function setDocumentVisibility(state) {
+  Object.defineProperty(document, 'visibilityState', { value: state, configurable: true });
+  document.dispatchEvent(new window.Event('visibilitychange'));
 }
 
 function mockFetch({ relayPub = 'relay-pub-1', adminPubs = [], apps = [] } = {}) {
@@ -515,6 +521,50 @@ test('boot leaves the device-local mechanisms untouched when no preference was e
     assert.equal(getStoredTheme(), null);
   } finally {
     stop();
+  }
+});
+
+test('PUSH ONLY WHILE VISIBLE: backgrounding the tab immediately publishes "offline" (closes the gap PresenceTracker.isRecentlyOnline() otherwise leaves for a merely-backgrounded, not closed, session - see client.js\'s own onVisibilityChange() doc comment); returning to the foreground resumes "online" - ported from apps/chat\'s own former per-room-view test now that the heartbeat is session-wide', async (t) => {
+  const qu = freshQu();
+  const identity = new QuIdentityEngine(qu);
+  await identity.importMnemonic(identity.generateMnemonic());
+  const myPub = QuCrypto.toBase64Url((await identity.getMainKey()).publicKey);
+  t.mock.method(globalThis, 'fetch', mockFetch({ apps: [] }));
+  const presence = new PresenceService(qu, identity); // a separate instance reading the SAME store - same "fresh instance, same store" convention presence-service.test.js's own read-receipt test already uses
+
+  const container = makeContainer();
+  const stop = await mount(container, { qu, identity });
+  try {
+    await waitFor(async () => (await presence.getUserPresence(myPub))?.status === 'online');
+
+    setDocumentVisibility('hidden');
+    await waitFor(async () => (await presence.getUserPresence(myPub))?.status === 'offline');
+
+    setDocumentVisibility('visible');
+    await waitFor(async () => (await presence.getUserPresence(myPub))?.status === 'online');
+  } finally {
+    stop();
+    setDocumentVisibility('visible');
+  }
+});
+
+test('PUSH ONLY WHILE VISIBLE: booting while the tab is ALREADY hidden never starts the heartbeat at all - no "online" is ever published', async (t) => {
+  const qu = freshQu();
+  const identity = new QuIdentityEngine(qu);
+  await identity.importMnemonic(identity.generateMnemonic());
+  const myPub = QuCrypto.toBase64Url((await identity.getMainKey()).publicKey);
+  t.mock.method(globalThis, 'fetch', mockFetch({ apps: [] }));
+  const presence = new PresenceService(qu, identity);
+
+  setDocumentVisibility('hidden');
+  const container = makeContainer();
+  const stop = await mount(container, { qu, identity });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(await presence.getUserPresence(myPub), null);
+  } finally {
+    stop();
+    setDocumentVisibility('visible');
   }
 });
 

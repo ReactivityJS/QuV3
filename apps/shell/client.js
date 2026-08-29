@@ -211,6 +211,57 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
     log.warn('realtime sync unavailable in this environment:', err.message);
   }
 
+  // Two DIFFERENT backfill shapes, both from the same `sync` - never
+  // confuse them:
+  //   - `fetchOne(path)` (-> SyncEngine.fetch()) - ONE document, what
+  //     ListService/ProfileService's own `syncFetch` constructor params
+  //     already expect (see services.js's own doc comment for why THIS
+  //     round wires them for the first time).
+  //   - `syncFetch(prefix)` (-> SyncEngine.fetchPrefix()) - MANY sibling
+  //     documents under a prefix, what a DERIVED `<qu-list parent="...">`
+  //     needs (see that element's own `.syncFetch` doc comment) - passed
+  //     to every mounted app below.
+  const fetchOne = (path) => sync?.fetch(path) ?? Promise.resolve(null);
+  const syncFetch = (prefix) => sync?.fetchPrefix(prefix) ?? Promise.resolve();
+  // Passed to every mounted app as `subscribe` (see e.g. apps/user-list's
+  // own "defense in depth" use of it) - a no-op when sync never connected,
+  // never a throw.
+  const subscribe = (prefix) => sync?.subscribe(prefix);
+  // TELEMETRY - a getter, not the raw `sync`/`transport` themselves (neither
+  // is otherwise ever threaded into a mounted app's `ctx` - apps only ever
+  // get the narrow `subscribe`/`syncFetch` closures above), so `apps/debug`'s
+  // header badge and settings contribution can read live byte/rate counters
+  // without this file handing out its own SyncEngine reference wholesale.
+  // All-zero when sync never connected, same "no-op, never a throw" shape
+  // every other sync-derived closure here already has.
+  const syncStats = { getStats: () => sync?.getTransportStats() ?? { bytesIn: 0, bytesOut: 0, rateIn: 0, rateOut: 0 } };
+
+  const services = createClientServices(qu, identity, { syncFetch: fetchOne, getGeneration: () => sync?.getGeneration() ?? 0 });
+
+  // PRESENCE - ONE heartbeat for the whole session, started here (not by
+  // apps/chat's own room-view mount anymore - see PresenceService's own top
+  // doc comment on why presence is now user-centric, not room-centric),
+  // independent of which app (if any) happens to be mounted or how many
+  // chat rooms are open.
+  //
+  // PUSH ONLY WHILE ACTUALLY VISIBLE - gated by `document.visibilityState`,
+  // not unconditional: `PushDeliveryService` (packages/relay/src/
+  // push-delivery.js) skips sending a Web Push whenever `PresenceTracker.
+  // isRecentlyOnline()` sees this identity's traffic as fresh (that tracker
+  // is fed by `onPeerIdentified`, which fires on EVERY signed write this
+  // identity sends - see `packages/sync/src/sync-engine.js`'s own doc
+  // comment on that hook - so a heartbeat write is exactly the kind of
+  // traffic that keeps it "fresh"). An UNGATED heartbeat would therefore
+  // keep publishing 'online' - and so keep suppressing push - for as long
+  // as this tab stays open at all, backgrounded or not. Stopping the
+  // heartbeat the instant the tab backgrounds (`stopHeartbeat()` publishes
+  // 'offline' immediately, same as it always has) closes that gap with no
+  // new signal/protocol/relay change - the exact mechanism
+  // `apps/chat/client.js` used to run PER ROOM VIEW before presence became
+  // session-global; folded into the SAME `visibilitychange` listener the
+  // mobile-foreground sync catch-up below already needs, so there is only
+  // ever one such listener for the whole session.
+  let stopHeartbeat = null;
   // MOBILE FOREGROUND CATCH-UP - see SyncEngine.refreshSubscriptions()'s own
   // doc comment for the exact gap this closes: backgrounding a mobile
   // browser/PWA does NOT reliably close the underlying WebSocket (the OS may
@@ -228,27 +279,16 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
   // the gap for every mounted app's active subscriptions at once, no
   // per-app code needed.
   function onVisibilityChange() {
-    if (document.visibilityState === 'visible') sync?.refreshSubscriptions();
+    if (document.visibilityState === 'hidden') {
+      stopHeartbeat?.().catch(() => {});
+      stopHeartbeat = null;
+    } else {
+      sync?.refreshSubscriptions();
+      if (!stopHeartbeat) stopHeartbeat = services.presence.startHeartbeat();
+    }
   }
+  onVisibilityChange(); // establish the initial heartbeat state - starts it now unless this tab is already backgrounded at boot
   document.addEventListener('visibilitychange', onVisibilityChange);
-  // Two DIFFERENT backfill shapes, both from the same `sync` - never
-  // confuse them:
-  //   - `fetchOne(path)` (-> SyncEngine.fetch()) - ONE document, what
-  //     ListService/ProfileService's own `syncFetch` constructor params
-  //     already expect (see services.js's own doc comment for why THIS
-  //     round wires them for the first time).
-  //   - `syncFetch(prefix)` (-> SyncEngine.fetchPrefix()) - MANY sibling
-  //     documents under a prefix, what a DERIVED `<qu-list parent="...">`
-  //     needs (see that element's own `.syncFetch` doc comment) - passed
-  //     to every mounted app below.
-  const fetchOne = (path) => sync?.fetch(path) ?? Promise.resolve(null);
-  const syncFetch = (prefix) => sync?.fetchPrefix(prefix) ?? Promise.resolve();
-  // Passed to every mounted app as `subscribe` (see e.g. apps/user-list's
-  // own "defense in depth" use of it) - a no-op when sync never connected,
-  // never a throw.
-  const subscribe = (prefix) => sync?.subscribe(prefix);
-
-  const services = createClientServices(qu, identity, { syncFetch: fetchOne, getGeneration: () => sync?.getGeneration() ?? 0 });
 
   // Mirrors @qu/relay's own #bootInner() - a published profile is what
   // makes this identity's X25519 key resolvable by anyone else.
@@ -331,7 +371,7 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
   } catch { /* offline/unreachable - header renders no shell.headerAction contributors, everything else still works */ }
   let stopHeader = null;
   try {
-    stopHeader = mountHeader(headerRoot, { qu, services, adminPubs, subscribe, syncFetch, apps: bootApps, pwa });
+    stopHeader = mountHeader(headerRoot, { qu, services, adminPubs, subscribe, syncFetch, apps: bootApps, pwa, syncStats });
   } catch (err) {
     log.warn('shell header unavailable in this environment:', err.message);
   }
@@ -458,7 +498,7 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
     // placeholder rather than throwing on `mod.mount is not a function`.
     if (typeof mod.mount !== 'function') { renderPlaceholder(t('appNotFound')); return; }
     const extensionPoints = new ExtensionPointHost(apps, { extensionOrder });
-    const stopFn = (await mod.mount(chrome.contentSlot, { qu, identity, services, apps, segments, subscribe, syncFetch, extensionPoints, iceServers, goBack, chrome: chromeHandle })) ?? null;
+    const stopFn = (await mod.mount(chrome.contentSlot, { qu, identity, services, apps, segments, subscribe, syncFetch, extensionPoints, iceServers, goBack, chrome: chromeHandle, syncStats })) ?? null;
     if (stopped || token !== navToken) {
       // A newer navigation already won control of `chrome.contentSlot`
       // while this mount() call was itself in flight - never leave this one
@@ -479,6 +519,7 @@ export async function mount(container, { qu = createDefaultQu(), identity = new 
     stopMountedApp?.();
     stopHeader?.();
     stopNotificationPopups?.();
+    stopHeartbeat?.().catch(() => {});
     chrome.stop();
     transport?.close();
   };

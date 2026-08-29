@@ -26,7 +26,7 @@ export class HttpRouter {
    *   fresh on every request via `loader.listManifests()`, so apps loaded
    *   partway through `boot()` (see `relay.js`) show up the moment they're
    *   actually loaded, not just after `boot()` fully completes.
-   * @param {{adminPubs: string[], appsDir: string, serveShell: boolean, shellDir: string, state: {transport: object|null, vapidKeys: {publicKey: string}|null, federationManager?: import('./federation-manager.js').FederationManager|null}, iceServers?: Array<object>, getLinkPreviewImpl?: typeof getLinkPreview}} options -
+   * @param {{adminPubs: string[], appsDir: string, serveShell: boolean, shellDir: string, state: {transport: object|null, vapidKeys: {publicKey: string}|null, federationManager?: import('./federation-manager.js').FederationManager|null, trafficStats?: import('./traffic-stats.js').TrafficStats|null}, iceServers?: Array<object>, getLinkPreviewImpl?: typeof getLinkPreview}} options -
    *   `state` is a mutable, shared reference the caller keeps populating as
    *   the relay boots (`transport`/`vapidKeys` aren't known until partway
    *   through `boot()` - see `relay.js`) - read fresh on every request
@@ -63,6 +63,26 @@ export class HttpRouter {
       // the problem is in front of the relay, not in it.
       if (req.url === '/healthz') {
         res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'ok', peerId: this.state.transport?.getPeerId() ?? null }));
+        return;
+      }
+
+      // TELEMETRY - relay-wide byte/rate counters (see traffic-stats.js's
+      // own doc comment). Deliberately public/unauthenticated, same
+      // reasoning `/config.json` just below already documents for its own
+      // fields: aggregate connection byte counts carry no secret content,
+      // and requiring a signed admin request on every poll tick (this is
+      // meant to be polled every few seconds for a live-updating display,
+      // see `apps/relay-admin/client.js`) would be needless crypto overhead
+      // for something this low-sensitivity - the actual privileged admin
+      // actions (`POST /admin/settings`, etc.) stay independently gated.
+      // 404s (not a zero-valued 200) when telemetry isn't wired up yet (a
+      // request landing before `boot()`'s own construction of it completes).
+      if (req.url === '/admin/traffic-stats') {
+        if (!this.state.trafficStats) {
+          res.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'traffic stats not available yet' }));
+          return;
+        }
+        res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(this.state.trafficStats.getSnapshot()));
         return;
       }
 

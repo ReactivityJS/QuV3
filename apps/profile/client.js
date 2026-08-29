@@ -595,7 +595,7 @@ async function subscribeToPush(services) {
   return subscription;
 }
 
-export function mount(container, { qu, identity, services, segments = [], extensionPoints, chrome = { set() {} } }) {
+export function mount(container, { qu, identity, services, segments = [], extensionPoints, chrome = { set() {} }, syncStats }) {
   ensureTheme();
   injectStyle(STYLE_ID, STYLE);
   let stopped = false;
@@ -693,8 +693,11 @@ export function mount(container, { qu, identity, services, segments = [], extens
         // sign something (e.g. `apps/relay-federation`'s "suggest a relay"
         // field, which POSTs a signed payload to the relay) doesn't have to
         // re-derive it - this app never reads or depends on what a
-        // contributor does with it.
-        if (extensionPoints) await extensionPoints.renderSlot('userSettings.contributions', extRoot, { myPub, services, identity });
+        // contributor does with it. `syncStats` (same passthrough
+        // reasoning, forwarded verbatim from this file's own `mount()` ctx)
+        // is what `apps/debug`'s own settings contribution reads to show
+        // cumulative sync byte counters.
+        if (extensionPoints) await extensionPoints.renderSlot('userSettings.contributions', extRoot, { myPub, services, identity, syncStats });
         return;
       }
       if (isOwn) {

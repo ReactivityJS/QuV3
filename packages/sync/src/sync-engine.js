@@ -130,7 +130,10 @@ export class SyncEngine {
   #onLocalMiss; // see constructor's own doc comment - relay federation on-demand forwarding
   #onRelayHello; // see constructor's own doc comment - relay federation handshake
   #onRelayHelloAck; // see constructor's own doc comment - relay federation handshake
+  #onExternalPersist; // see constructor's own doc comment - relay federation cross-engine live bridge
   #recentBroadcasts = new Map(); // "path:ts" -> expiry ms - see #shouldSkipRebroadcast()
+  #prefixWatermarks = new Map(); // prefix -> highest ts THIS engine has itself persisted under it - see #bumpWatermarkIfSubscribed()/fetchPrefix()'s own `sinceTs` doc comment
+  #fullSyncDone = new Set(); // "targetPeerId:prefix" keys (same shape as #mySubscriptions) for which a sinceTs:null full catch-up has completed at least once - see refreshSubscriptions()
 
   /**
    * @param {import('@qu/core').QuStore} qu
@@ -188,8 +191,28 @@ export class SyncEngine {
    *   to either one itself; it has no relay identity/signing key of its own
    *   to do so with. Left unset (the default) means these message types are
    *   simply ignored, same as any other unknown `type` used to be.
+   *   `onExternalPersist(path, quBit)`: called every time `#persistDirectly()`
+   *   actually writes a NEW value (from `#handleSync`, `#handleResponse`/
+   *   `fetch()`, or `fetchPrefix()`'s merge loop - all three funnel through
+   *   that one method), regardless of which of the three triggered it. A
+   *   relay running TWO independent `SyncEngine` instances over the SAME
+   *   `QuStore` (`this.sync` for local browser clients, `federationSync`
+   *   for outbound federation peer links - see `@qu/relay`'s `relay.js`)
+   *   needs this to bridge the two: each engine's own `#subscriptions` map
+   *   only ever holds ITS OWN peers, so a write persisted by ONE engine is
+   *   otherwise invisible to the OTHER engine's subscribers - the
+   *   `origin==='sync'` check on this class's own `onStorageChange`
+   *   listener (below) exists specifically to stop an engine re-broadcasting
+   *   a write IT ITSELF already handled via `#handleSync`'s own explicit
+   *   broadcast, which means it also (as an unavoidable side effect of using
+   *   the same flag) hides a write handled by a DIFFERENT engine sharing
+   *   this `qu`. `relay.js` wires each engine's `onExternalPersist` to call
+   *   the OTHER engine's `rebroadcastLocally()` (see that method's own doc
+   *   comment for why this is cycle-safe). Left unset (the default) for any
+   *   SyncEngine with no sibling engine to bridge to (a plain client, or a
+   *   relay before federation is wired in) - a no-op.
    */
-  constructor(qu, transport, { publishAllTo = null, outbox = null, onPeerIdentified = null, onLocalMiss = null, onRelayHello = null, onRelayHelloAck = null } = {}) {
+  constructor(qu, transport, { publishAllTo = null, outbox = null, onPeerIdentified = null, onLocalMiss = null, onRelayHello = null, onRelayHelloAck = null, onExternalPersist = null } = {}) {
     this.#qu = qu;
     this.#transport = transport;
     this.#publishAllTo = publishAllTo;
@@ -198,6 +221,7 @@ export class SyncEngine {
     this.#onLocalMiss = onLocalMiss;
     this.#onRelayHello = onRelayHello;
     this.#onRelayHelloAck = onRelayHelloAck;
+    this.#onExternalPersist = onExternalPersist;
 
     this.#unsubscribeLocalWrites = this.#qu.onStorageChange(async ({ path, quBit, origin }) => {
       // `origin === 'sync'` means this notify came from QuStore.putSealed()
@@ -367,9 +391,24 @@ export class SyncEngine {
       // this closes the "subscribe only delivers FUTURE writes" gap for
       // whatever this side missed. Fire-and-forget (never awaited by a
       // caller): a slow or failing catch-up must never block anything else.
-      this.fetchPrefix(prefix, targetPeerId).catch((err) => {
-        console.warn(`[SyncEngine] refreshSubscriptions(): catch-up for "${prefix}" failed:`, err);
-      });
+      //
+      // INCREMENTAL CATCH-UP (see fetchPrefix()'s own `sinceTs` doc comment):
+      // once a FULL catch-up for this exact (prefix, targetPeerId) pair has
+      // completed at least once (`#fullSyncDone`), every SUBSEQUENT
+      // reconnect/foreground-triggered catch-up only asks for what's newer
+      // than this engine's own watermark for `prefix` - the dominant real
+      // case (a short-lived drop, almost everything already present) no
+      // longer re-downloads the whole prefix on every reconnect. A caller
+      // with no prior full sync (fresh subscription, or a previous attempt
+      // that never completed - see below) still gets `sinceTs: null`, i.e.
+      // today's full-dump behavior, unchanged.
+      const key = `${targetPeerId ?? ''}:${prefix}`;
+      const sinceTs = this.#fullSyncDone.has(key) ? (this.#prefixWatermarks.get(prefix) ?? null) : null;
+      this.fetchPrefix(prefix, targetPeerId, undefined, null, sinceTs)
+        .then(() => this.#fullSyncDone.add(key)) // safe unconditionally: a no-op if `key` was already marked done, and correctly marks a first-ever full sync done once it actually completes - see this method's own call site reasoning above
+        .catch((err) => {
+          console.warn(`[SyncEngine] refreshSubscriptions(): catch-up for "${prefix}" failed:`, err);
+        });
     }
   }
 
@@ -414,6 +453,26 @@ export class SyncEngine {
       const idx = this.#reconnectCallbacks.indexOf(callback);
       if (idx !== -1) this.#reconnectCallbacks.splice(idx, 1);
     };
+  }
+
+  /**
+   * TELEMETRY - a thin passthrough to the underlying transport's own byte/
+   * rate counters (see `WebSocketClientTransport`'s own `getBytesIn()` doc
+   * comment), so app code holding a `SyncEngine` - never the raw transport,
+   * which isn't threaded into a mounted app's `ctx`, see
+   * `apps/shell/client.js` - can read them without reaching past this class.
+   * Duck-typed, same pattern as the constructor's own `onReconnect` check:
+   * a transport that doesn't implement these (e.g. a relay's
+   * `WebSocketServerTransport`, which aggregates across MANY peer
+   * connections differently - see `@qu/relay`'s own traffic-stats module,
+   * not a single connection's own count) yields all-zero stats rather than
+   * throwing.
+   * @returns {{bytesIn: number, bytesOut: number, rateIn: number, rateOut: number}}
+   */
+  getTransportStats() {
+    const t = this.#transport;
+    if (typeof t.getBytesIn !== 'function') return { bytesIn: 0, bytesOut: 0, rateIn: 0, rateOut: 0 };
+    return { bytesIn: t.getBytesIn(), bytesOut: t.getBytesOut(), rateIn: t.getCurrentRateIn(), rateOut: t.getCurrentRateOut() };
   }
 
   /**
@@ -601,6 +660,20 @@ export class SyncEngine {
    * @param {number|null} [hops=null] - See `fetch()`'s own identical
    *   parameter and `#handleRequest`'s doc comment for the full `null` vs
    *   `0` vs positive-number contract.
+   * @param {number|null} [sinceTs=null] - INCREMENTAL SYNC: when given, the
+   *   peer answers with only the entries under `prefix` whose OWN `ts` is
+   *   STRICTLY GREATER than `sinceTs` (see `#handlePrefixRequest`'s server
+   *   side) - `null` (the default) means "send everything", today's
+   *   unchanged full-dump behavior, so every existing caller of
+   *   `fetchPrefix()` is unaffected by this parameter's addition.
+   *   Deliberately a simple "anything newer than X" filter, not a precise
+   *   diff: an entry this side never actually received in the past, but
+   *   whose `ts` happens to be OLDER than `sinceTs`, is NOT re-sent by this
+   *   mechanism - a conscious trade-off (see `refreshSubscriptions()`'s own
+   *   call site) that trades perfect completeness-after-a-gap for cutting
+   *   the dominant "short reconnect, almost everything already present"
+   *   case down to just what's new, with no per-entry watermark bookkeeping
+   *   on either side.
    * @returns {Promise<number>} How many QuBits actually passed validation
    *   (see `#validateIncomingWrite()`) AND were persisted - not merely how
    *   many entries the peer sent back. An entry that fails validation is
@@ -608,14 +681,14 @@ export class SyncEngine {
    *   anti-regression ts-guard, or one whose persistence itself failed, is
    *   not counted either.
    */
-  async fetchPrefix(prefix, targetPeerId = null, timeoutMs = 15000, hops = null) {
+  async fetchPrefix(prefix, targetPeerId = null, timeoutMs = 15000, hops = null, sinceTs = null) {
     const requestId = `${Date.now()}-${this.#requestCounter++}`;
     const entries = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.#pendingPrefixRequests.delete(requestId);
         reject(new Error(`SyncEngine.fetchPrefix: timed out waiting for "${prefix}"`));
       }, timeoutMs);
-      const message = { type: 'prefix-request', requestId, prefix, requester: this.#transport.getPeerId(), hops };
+      const message = { type: 'prefix-request', requestId, prefix, requester: this.#transport.getPeerId(), hops, sinceTs };
       // See fetch()'s own identical comment - #replayPendingRequests() needs
       // `message`/`targetPeerId` to re-send this exact request after a
       // mid-flight reconnect instead of losing it to its own timeout. This
@@ -675,6 +748,59 @@ export class SyncEngine {
     this.#recentBroadcasts.set(key, now + REBROADCAST_DEDUP_TTL_MS);
     capCache(this.#recentBroadcasts, MAX_DEDUP_CACHE_ENTRIES);
     return false;
+  }
+
+  /**
+   * Re-broadcasts an ALREADY-persisted, already-validated QuBit to THIS
+   * engine's own subscribers - never persists, never re-validates (the
+   * caller's own `#persistDirectly()` call already did that). See the
+   * constructor's own `onExternalPersist` doc comment for why this exists:
+   * a relay running two independent `SyncEngine` instances over one shared
+   * `QuStore` needs a way for a write persisted by ONE engine to reach the
+   * OTHER engine's own, otherwise-disjoint `#subscriptions` map.
+   *
+   * Gated by the SAME `#shouldSkipRebroadcast()` TTL dedup `#handleSync`
+   * itself already uses - checked here on THIS (the receiving) engine's own
+   * cache, not the calling engine's. This is what actually makes
+   * cross-engine bridging safe in an N-relay mesh, not `excludePeerId`:
+   * `excludePeerId` only ever excludes ONE immediate sender on ONE engine's
+   * own broadcast, which was sufficient for a single engine's hub
+   * re-broadcast but not once two independent engines (each with their own
+   * federation links) are bridged together - a redundant resend of the same
+   * `path:ts` arriving via a peer several hops away, invisible to any
+   * `excludePeerId`, would otherwise re-trigger the bridge on every
+   * duplicate delivery. Reusing the existing per-engine dedup cache closes
+   * that with no new mechanism.
+   *
+   * @param {string} path
+   * @param {object} quBit
+   * @param {{excludePeerId?: string|null}} [options]
+   */
+  rebroadcastLocally(path, quBit, { excludePeerId = null } = {}) {
+    if (this.#shouldSkipRebroadcast(path, quBit.ts)) return;
+    this.#broadcastToSubscribers(path, { type: 'sync', path, quBit }, excludePeerId);
+  }
+
+  /**
+   * Advances `#prefixWatermarks` for every subscribed prefix `path` falls
+   * under - see `fetchPrefix()`'s own `sinceTs` doc comment for what this
+   * feeds. Called ONLY from `#persistDirectly()`, never from a broader
+   * "value now exists" listener - that specificity matters: a write
+   * bridged in via `rebroadcastLocally()` (see that method's own doc
+   * comment) never calls `#persistDirectly()` (it only re-sends, per its
+   * own contract), so it can never advance a watermark for a `(prefix,
+   * targetPeerId)` pair this engine never actually fetched from - doing so
+   * would permanently under-ask that peer for anything older than a write
+   * this engine only ever received secondhand.
+   * @param {string} path @param {number} ts
+   */
+  #bumpWatermarkIfSubscribed(path, ts) {
+    if (typeof ts !== 'number') return;
+    for (const { prefix } of this.#mySubscriptions.values()) {
+      if (!path.startsWith(prefix)) continue;
+      const current = this.#prefixWatermarks.get(prefix);
+      if (current === undefined || ts > current) this.#prefixWatermarks.set(prefix, ts);
+    }
   }
 
   #handleIncoming(message, peerId) {
@@ -867,8 +993,8 @@ export class SyncEngine {
     pending.resolve(quBit);
   }
 
-  /** @param {{requestId: string, prefix: string, hops?: number|null}} message - `hops` see `#handleRequest`'s own doc comment for the full contract. @param {string} peerId - see fetchPrefix() */
-  async #handlePrefixRequest({ requestId, prefix, hops = null }, peerId) {
+  /** @param {{requestId: string, prefix: string, hops?: number|null, sinceTs?: number|null}} message - `hops` see `#handleRequest`'s own doc comment; `sinceTs` see `fetchPrefix()`'s own doc comment - both full contracts. @param {string} peerId - see fetchPrefix() */
+  async #handlePrefixRequest({ requestId, prefix, hops = null, sinceTs = null }, peerId) {
     try {
       const raw = await this.#qu.getAllUnderMount(prefix);
       // Same hard rail as #handleRequest()'s single-path fetch() - a peer
@@ -877,12 +1003,20 @@ export class SyncEngine {
       let entries = raw.filter(({ path }) => !path.startsWith(LOCAL_ONLY_PREFIX));
       // RELAY FEDERATION ON-DEMAND ROUTING - see #handleRequest()'s
       // identical `hops` contract. Only attempted on a genuine LOCAL miss
-      // (nothing under this prefix at all) - a prefix this peer partially
-      // has is answered from what it has, never merged with a forwarded
-      // result.
+      // (nothing under this prefix at ALL, checked BEFORE the `sinceTs`
+      // filter below) - a prefix this peer partially has, even if every
+      // entry happens to be older than `sinceTs` (a fully-up-to-date
+      // incremental answer, not a miss), is answered from what it has,
+      // never merged with a forwarded result.
       if (entries.length === 0 && hops !== 0 && this.#onLocalMiss) {
         const forwarded = await this.#onLocalMiss({ kind: 'prefix-request', prefix, hops, excludePeerId: peerId }).catch(() => null);
         if (Array.isArray(forwarded)) entries = forwarded;
+      }
+      // INCREMENTAL SYNC (see fetchPrefix()'s own `sinceTs` doc comment) -
+      // applied AFTER the miss/forwarding decision above, so a forwarded
+      // result is filtered exactly like a local one.
+      if (sinceTs != null) {
+        entries = entries.filter(({ quBit }) => typeof quBit?.ts === 'number' && quBit.ts > sinceTs);
       }
       this.#transport.sendTo(peerId, { type: 'prefix-response', requestId, entries });
     } catch (err) {
@@ -970,7 +1104,14 @@ export class SyncEngine {
    *   value - `false` if skipped by the anti-regression ts-guard below, or
    *   if persistence itself threw (caught and logged here, never thrown to
    *   the caller). `fetchPrefix()`'s own merged-count return value counts
-   *   only calls that return `true` here.
+   *   only calls that return `true` here. On a genuine new write, this is
+   *   also the ONE choke point that fires `onExternalPersist` (see the
+   *   constructor's own doc comment - relay federation's cross-engine live
+   *   bridge) and advances this engine's own `#prefixWatermarks` (see
+   *   `#bumpWatermarkIfSubscribed()` - incremental `fetchPrefix()`) -
+   *   `#handleSync`, `#handleResponse`, and `fetchPrefix()`'s own merge loop
+   *   all funnel through here, so neither side effect needs its own
+   *   special-casing per call site.
    */
   async #persistDirectly(path, quBit) {
     try {
@@ -979,6 +1120,8 @@ export class SyncEngine {
         return false; // local data is already newer than this incoming write - never regress
       }
       await this.#qu.putSealed(path, quBit);
+      this.#onExternalPersist?.(path, quBit);
+      this.#bumpWatermarkIfSubscribed(path, quBit.ts);
       return true;
     } catch (err) {
       console.error(`[SyncEngine] failed to persist synced QuBit for "${path}":`, err);

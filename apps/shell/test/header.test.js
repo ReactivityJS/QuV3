@@ -351,7 +351,7 @@ test('shell.headerAction: no apps catalog (default []) renders no contribution, 
 
 const PAYLOAD_PLUGIN_URL = new URL('./fixtures/header-payload-plugin.js', import.meta.url).href;
 
-test('shell.headerAction: the payload carries getContext/onContextChange/services/qu/subscribe/syncFetch (a CONDITIONAL contributor, e.g. Calendar\'s "+ New event", needs services to resolve its own data)', async (t) => {
+test('shell.headerAction: the payload carries getContext/onContextChange/services/qu/subscribe/syncFetch/syncStats (a CONDITIONAL contributor, e.g. Calendar\'s "+ New event", needs services to resolve its own data)', async (t) => {
   const { qu, services } = await freshEnv();
   t.mock.method(globalThis, 'fetch', mockAppsFetch());
   const apps = [{ name: 'probe', clientMainUrl: PAYLOAD_PLUGIN_URL, contributes: [{ point: 'shell.headerAction', export: 'renderHeaderPayloadProbe' }] }];
@@ -362,7 +362,7 @@ test('shell.headerAction: the payload carries getContext/onContextChange/service
     await waitFor(() => container.querySelector('[data-test-payload-probe]') !== null);
     assert.equal(
       container.querySelector('[data-test-payload-probe]').textContent,
-      'getContext,onContextChange,qu,services,subscribe,syncFetch',
+      'getContext,onContextChange,qu,services,subscribe,syncFetch,syncStats',
     );
   } finally {
     stop();

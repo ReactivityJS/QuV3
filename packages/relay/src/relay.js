@@ -13,6 +13,7 @@ import { createLogger } from '@qu/log';
 
 import { WebSocketServerTransport } from './transports/websocket-server-transport.js';
 import { FederationManager } from './federation-manager.js';
+import { TrafficStats } from './traffic-stats.js';
 import { PresenceTracker } from './presence-tracker.js';
 import { setupVapidKeys } from './vapid-key-store.js';
 import { PushDeliveryService, createManifestNotificationResolver } from './push-delivery.js';
@@ -168,7 +169,7 @@ export class QuRelay {
     // partway through `boot()` (see below), and by construction time here
     // neither module's factory has run yet either (RuntimeContainer
     // factories are lazy).
-    this._state = { transport: null, vapidKeys: null, relayPub: null, federationManager: null };
+    this._state = { transport: null, vapidKeys: null, relayPub: null, federationManager: null, trafficStats: null };
 
     this.runtime.register('presence', () => new PresenceTracker());
     this.runtime.register('adminHttp', () => new AdminHttp(this.qu, { adminPubs: this.options.adminPubs, storeDir: this.options.storeDir, blobDir: this.options.blobDir, identity: this.identity, loader: this.loader }, this._state));
@@ -334,12 +335,25 @@ export class QuRelay {
       onLocalMiss: (req) => federationManager.forward(req),
       onRelayHello: (message, peerId) => federationManager.handleRelayHello(message, peerId, this.transport),
       onRelayHelloAck: (message, peerId) => federationManager.handleRelayHelloAck(message, peerId),
+      // CROSS-ENGINE LIVE BRIDGE - see SyncEngine's own `onExternalPersist`
+      // constructor doc comment for why this is needed at all: a write this
+      // engine persists via `federationSync` (a peer push, or that engine's
+      // own fetchPrefix() backfill) would otherwise never reach THIS
+      // engine's own local browser-client subscribers. `this.federationSync`
+      // is assigned two statements below - the `?.` covers the brief window
+      // before that assignment runs; nothing can call this hook before then
+      // since nothing has connected yet.
+      onExternalPersist: (path, quBit) => this.federationSync?.rebroadcastLocally(path, quBit),
     });
 
     this.federationSync = new SyncEngine(this.qu, federationManager.transport, {
       onLocalMiss: (req) => federationManager.forward(req),
       onRelayHello: (message, peerId) => federationManager.handleRelayHello(message, peerId, federationManager.transport),
       onRelayHelloAck: (message, peerId) => federationManager.handleRelayHelloAck(message, peerId),
+      // Symmetric counterpart - a write THIS relay's own local clients make
+      // (arriving on `this.sync`) needs to reach federation peer subscribers
+      // (on `federationSync`'s own #subscriptions) the same live way.
+      onExternalPersist: (path, quBit) => this.sync.rebroadcastLocally(path, quBit),
     });
     federationManager.attachSyncEngine(this.federationSync);
     // Dials every already-configured peer (federation.peers[]) right away -
@@ -348,6 +362,14 @@ export class QuRelay {
     // restarts with peers already configured reconnects to them
     // immediately, not only after the next admin settings save.
     await federationManager.reconcile(settings.federation);
+
+    // TELEMETRY - see traffic-stats.js's own doc comment. Both transports it
+    // reads from already exist by this point (this.transport a few lines up,
+    // federationManager.transport inside the FederationManager constructed
+    // above) - constructed here, once, and exposed via `_state` the same way
+    // `federationManager` itself is, for `GET /admin/traffic-stats` (see
+    // http-router.js) to read on every poll without re-deriving anything.
+    this._state.trafficStats = new TrafficStats({ clientTransport: this.transport, federationTransport: federationManager.transport });
 
     // Push delivery fires for EVERY thread message write this relay ever
     // sees, whether authored locally (rare - the relay itself is never a

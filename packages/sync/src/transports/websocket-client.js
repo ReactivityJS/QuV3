@@ -2,6 +2,12 @@ import { Transport } from '../transport.js';
 import { createLogger } from '@qu/log';
 
 const log = createLogger('WebSocketClientTransport');
+const textEncoder = new TextEncoder();
+
+// See getCurrentRateIn()/getCurrentRateOut() - a trailing window average,
+// same fixed-window simplicity as WebSocketServerTransport's own per-peer
+// message-count rate limiter (packages/relay/src/transports/websocket-server-transport.js).
+const RATE_WINDOW_MS = 5000;
 
 /**
  * WEBSOCKET CLIENT TRANSPORT — connects to a single remote peer (typically a
@@ -51,6 +57,10 @@ export class WebSocketClientTransport extends Transport {
   #manuallyClosed = false;
   #reconnectAttempt = 0;
   #reconnectTimer = null;
+  #bytesIn = 0;
+  #bytesOut = 0;
+  #inSamples = []; // {t, bytes}, chronological - see #currentRate()
+  #outSamples = [];
 
   /**
    * @param {string} url - e.g. "ws://localhost:8080".
@@ -104,8 +114,13 @@ export class WebSocketClientTransport extends Transport {
         }
       });
       ws.addEventListener('message', (event) => {
+        const raw = typeof event.data === 'string' ? event.data : event.data.toString();
+        // Counted BEFORE the parse attempt below - bytes genuinely arrived
+        // over the wire regardless of whether they turn out to be valid
+        // JSON (see getBytesIn()'s own doc comment).
+        this.#recordIn(textEncoder.encode(raw).length);
         try {
-          const data = JSON.parse(typeof event.data === 'string' ? event.data : event.data.toString());
+          const data = JSON.parse(raw);
           for (const cb of this.#callbacks) cb({ data, peerId: 'relay' });
         } catch (err) {
           log.error('invalid message:', err);
@@ -143,15 +158,22 @@ export class WebSocketClientTransport extends Transport {
   }
 
   #flushQueue() {
-    for (const data of this.#sendQueue) this.#ws.send(JSON.stringify(data));
+    for (const data of this.#sendQueue) this.#sendNow(data);
     this.#sendQueue = [];
+  }
+
+  /** Serializes, counts, and actually sends over an OPEN socket - the one choke point both `send()` and `#flushQueue()` funnel through, so outbound byte counting (see `getBytesOut()`) never needs its own call site per caller. */
+  #sendNow(data) {
+    const json = JSON.stringify(data);
+    this.#recordOut(textEncoder.encode(json).length);
+    this.#ws.send(json);
   }
 
   send(data) {
     if (this.#ws && this.#ws.readyState === this.#ws.OPEN) {
-      this.#ws.send(JSON.stringify(data));
+      this.#sendNow(data);
     } else {
-      this.#sendQueue.push(data);
+      this.#sendQueue.push(data); // counted later, in #flushQueue(), once actually transmitted - never here, or a queued-then-flushed message would be counted twice
     }
   }
 
@@ -203,5 +225,70 @@ export class WebSocketClientTransport extends Transport {
     if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer);
     this.#sendQueue = [];
     this.#ws?.close();
+  }
+
+  /** @param {number} byteLength */
+  #recordIn(byteLength) {
+    this.#bytesIn += byteLength;
+    this.#pushSample(this.#inSamples, byteLength);
+  }
+
+  /** @param {number} byteLength */
+  #recordOut(byteLength) {
+    this.#bytesOut += byteLength;
+    this.#pushSample(this.#outSamples, byteLength);
+  }
+
+  /** @param {{t: number, bytes: number}[]} samples @param {number} byteLength */
+  #pushSample(samples, byteLength) {
+    samples.push({ t: Date.now(), bytes: byteLength });
+    this.#pruneSamples(samples);
+  }
+
+  /** Drops every sample older than `RATE_WINDOW_MS` - `samples` is always chronological (pushed in time order), so this only ever needs to trim from the front. @param {{t: number, bytes: number}[]} samples */
+  #pruneSamples(samples) {
+    const cutoff = Date.now() - RATE_WINDOW_MS;
+    while (samples.length && samples[0].t < cutoff) samples.shift();
+  }
+
+  /** @param {{t: number, bytes: number}[]} samples @returns {number} Average bytes/sec over the trailing `RATE_WINDOW_MS` - re-prunes at READ time too (not just on write), so an idle connection's rate correctly decays toward 0 rather than showing a stale burst forever. */
+  #currentRate(samples) {
+    this.#pruneSamples(samples);
+    let sum = 0;
+    for (const s of samples) sum += s.bytes;
+    return sum / (RATE_WINDOW_MS / 1000);
+  }
+
+  /**
+   * TELEMETRY - see `apps/relay-federation`'s sibling `apps/debug` UI (or
+   * any debug-mode-gated display) for what consumes these. Byte counts are
+   * UTF-8 byte length of the JSON wire payload (`TextEncoder`-measured, not
+   * `.length`, which is UTF-16 code units and would undercount for
+   * non-ASCII content like emoji in chat messages) - the same unit both
+   * `send()`'s outbound path and the inbound `message` listener measure in,
+   * so `getBytesIn()`/`getBytesOut()` are directly comparable. Session-only
+   * (in-memory, never persisted) - resets to 0 on every fresh page load /
+   * new transport instance, by design (see `packages/ui`'s debug-mode doc
+   * comment on why this is treated as transient diagnostic state, not
+   * history).
+   * @returns {number} Total bytes received since this transport was constructed.
+   */
+  getBytesIn() {
+    return this.#bytesIn;
+  }
+
+  /** @returns {number} Total bytes sent since this transport was constructed. See `getBytesIn()`'s own doc comment. */
+  getBytesOut() {
+    return this.#bytesOut;
+  }
+
+  /** @returns {number} Average inbound bytes/sec over the trailing `RATE_WINDOW_MS` (5s) - 0 if nothing arrived that recently. */
+  getCurrentRateIn() {
+    return this.#currentRate(this.#inSamples);
+  }
+
+  /** @returns {number} Average outbound bytes/sec over the trailing `RATE_WINDOW_MS` (5s) - 0 if nothing was sent that recently. */
+  getCurrentRateOut() {
+    return this.#currentRate(this.#outSamples);
   }
 }

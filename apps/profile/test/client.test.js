@@ -696,7 +696,7 @@ test('#/~<pub>/settings renders the userSettings.contributions extension point i
   const stop = mount(container, { qu, identity, services, segments: [`~${myPub}`, 'settings'], extensionPoints });
   try {
     await waitFor(() => container.querySelector('.contributed-marker') !== null);
-    assert.deepEqual(calls, [{ point: 'userSettings.contributions', payload: { myPub, services, identity } }]);
+    assert.deepEqual(calls, [{ point: 'userSettings.contributions', payload: { myPub, services, identity, syncStats: undefined } }]);
     // Rendered inside profile's own `.qu-profile-ext-settings` mount point, after every one of its own settings sections.
     const extRoot = container.querySelector('.qu-profile-ext-settings');
     assert.ok(extRoot.contains(container.querySelector('.contributed-marker')));
