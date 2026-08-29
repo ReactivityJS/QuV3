@@ -658,6 +658,102 @@ test('refreshSubscriptions() does NOT fire onReconnect() app-level callbacks - i
   assert.equal(calls, 0);
 });
 
+// ===== incremental resync watermark correctness =====================================
+// `ts` is always a WRITER's own local clock (createQuBit(), packages/core/
+// src/qubit.js) - there is no relay-authoritative timestamp anywhere in this
+// codebase. The two tests below lock in a real, confirmed bug (not a
+// hypothetical): an incremental `fetchPrefix()` catch-up's own `sinceTs`
+// watermark used to be able to get permanently inflated by a single
+// clock-skewed write, silently and PERMANENTLY hiding a different, later,
+// genuinely-new write whose own (accurate) `ts` happened to be lower - see
+// #bumpWatermark()'s and refreshSubscriptions()'s own doc comments for the
+// full fix (watermark advances only from a whole confirmed fetchPrefix()
+// batch, plus a CLOCK_SKEW_MARGIN_MS trailing margin applied when that
+// watermark becomes a `sinceTs` request).
+
+test('REGRESSION: a live push with an inflated (clock-skewed) ts must never permanently hide a later, genuinely-new write with a lower ts from the NEXT incremental catch-up', async () => {
+  const network = new TestNetwork();
+  const relayQu = freshQu();
+  const prefix = '/store/space/threads/general/msgs';
+  const T0 = Date.now();
+  await relayQu.putSealed(`${prefix}/seed`, { path: `${prefix}/seed`, val: { body: 'seed' }, ts: T0, pub: null, sig: null });
+  new SyncEngine(relayQu, new RelayTransport(network));
+
+  const clientQu = freshQu();
+  const clientTransport = new ClientTransport('client-a', network);
+  const client = new SyncEngine(clientQu, clientTransport);
+  client.subscribe(prefix);
+
+  // First catch-up - a FULL sync (no #fullSyncDone entry yet): watermark
+  // becomes T0, from the one seed entry in this batch.
+  client.refreshSubscriptions();
+  await waitUntil(async () => (await clientQu.get(`${prefix}/seed`))?.val?.body === 'seed');
+
+  // A LIVE push arrives (as if the relay had just forwarded it from a
+  // different, clock-skewed device) with ts 5 minutes AHEAD - delivered
+  // directly to this client's transport, exactly the shape #handleSync
+  // receives for any live write, regardless of this client's own
+  // subscriptions (subscription bookkeeping is the SENDER's concern, not a
+  // receive-side filter - see #validateIncomingWrite()'s own doc comment).
+  const fromA = { path: `${prefix}/from-a`, val: { body: 'from a (skewed clock)' }, ts: T0 + 5 * 60_000, pub: null, sig: null };
+  network.fromRelayToClient('client-a', { type: 'sync', path: fromA.path, quBit: fromA });
+  await waitUntil(async () => (await clientQu.get(fromA.path))?.val?.body === 'from a (skewed clock)');
+
+  // While this client is "briefly disconnected", a genuinely new message
+  // from a DIFFERENT, accurate-clock device lands directly on the relay -
+  // its ts is LOWER than A's skewed one above, but it is real, new
+  // information this client has never seen.
+  const fromB = { path: `${prefix}/from-b`, val: { body: 'from b (accurate clock)' }, ts: T0 + 2000, pub: null, sig: null };
+  await relayQu.putSealed(fromB.path, fromB);
+
+  // Reconnect catch-up - must still retrieve B's message. Before the fix,
+  // the live push above would have bumped the watermark to T0+5min,
+  // `sinceTs` would exclude B's ts=T0+2000 write, and it would never be
+  // returned again.
+  client.refreshSubscriptions();
+  await waitUntil(async () => (await clientQu.get(fromB.path))?.val?.body === 'from b (accurate clock)');
+});
+
+test('REGRESSION: an inflated ts that legitimately enters a fetchPrefix() BATCH (not a live push) must not permanently hide a later, lower-ts write either - closed by CLOCK_SKEW_MARGIN_MS, not by batch-scoping alone', async () => {
+  const network = new TestNetwork();
+  const relayQu = freshQu();
+  const prefix = '/store/space/threads/general/msgs';
+  const T0 = Date.now();
+  await relayQu.putSealed(`${prefix}/seed`, { path: `${prefix}/seed`, val: { body: 'seed' }, ts: T0, pub: null, sig: null });
+  new SyncEngine(relayQu, new RelayTransport(network));
+
+  const clientQu = freshQu();
+  const clientTransport = new ClientTransport('client-a', network);
+  const client = new SyncEngine(clientQu, clientTransport);
+  client.subscribe(prefix);
+
+  client.refreshSubscriptions(); // first full sync - watermark = T0
+  await waitUntil(async () => (await clientQu.get(`${prefix}/seed`))?.val?.body === 'seed');
+
+  // NOT a live push this time - the inflated entry reaches the RELAY's own
+  // store directly, standing in for "device A's skewed write landed on the
+  // relay while this client wasn't even connected to receive it live".
+  const fromA = { path: `${prefix}/from-a`, val: { body: 'from a (skewed clock)' }, ts: T0 + 5 * 60_000, pub: null, sig: null };
+  await relayQu.putSealed(fromA.path, fromA);
+
+  // Second catch-up - a REAL fetchPrefix() batch legitimately includes A's
+  // inflated entry, so per the fix's own rule (batch-scoped, not per-write)
+  // the watermark correctly - for that rule - advances to T0+5min anyway.
+  client.refreshSubscriptions();
+  await waitUntil(async () => (await clientQu.get(fromA.path))?.val?.body === 'from a (skewed clock)');
+
+  // A genuine, lower-ts message from an accurate-clock device lands during
+  // the NEXT offline gap.
+  const fromB = { path: `${prefix}/from-b`, val: { body: 'from b (accurate clock)' }, ts: T0 + 2000, pub: null, sig: null };
+  await relayQu.putSealed(fromB.path, fromB);
+
+  // Third catch-up - only passes WITH the clock-skew margin in place;
+  // without it, sinceTs = T0+5min would exclude B's message exactly like
+  // the original bug, just entered via a batch instead of a live push.
+  client.refreshSubscriptions();
+  await waitUntil(async () => (await clientQu.get(fromB.path))?.val?.body === 'from b (accurate clock)');
+});
+
 test('onReconnect() app-level callback fires on a reconnect, and its unsubscribe function stops future calls', async () => {
   const network = new TestNetwork();
   new SyncEngine(freshQu(), new RelayTransport(network));
